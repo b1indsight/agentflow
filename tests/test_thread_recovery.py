@@ -5,14 +5,15 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask
-from app.contracts.result_models import EffectState, ResolveEffect, ResultPending
+from app.contracts.protocol import RevisionTask
+from app.contracts.result_models import EffectState, LabelEffect, ResolveEffect, ResultPending
 from app.controler.workflow.service import ControlService
 from app.domain.models import (
     AddressedComment,
     DeferredComment,
     DeliveryState,
     FlowState,
+    JobKind,
     JobState,
     ReviewItemKind,
 )
@@ -37,6 +38,7 @@ from tests.test_review_resolution import human, snapshot
 from tests.test_revision_delivery import revision_output, verified_result
 from tests.test_revision_recovery import RevisionGitHub, accept
 from tests.test_revision_recovery import revision_resources as revision_resources  # noqa: PLC0414
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 class ThreadGitHub(RevisionGitHub):
@@ -112,6 +114,11 @@ async def thread_revision(store, request, thread_resources):
     store.flows.update_attempt(attempt)
     flow.current_attempt_id = attempt.id
     store.flows.update_flow(flow)
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
+    initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    assert store.workers.assign_job("worker-a", "initial", "epoch") is not None
+    assert store.workers.finish_assignment(initial.id, "worker-a", "initial", JobState.DONE, "epoch")
+    report_settled(store, initial.id, epoch="epoch")
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
     delivery.head_sha, delivery.base_branch = "baseline", "main"
@@ -131,7 +138,6 @@ async def thread_revision(store, request, thread_resources):
     if mode == "incomplete":
         github.thread = github.thread.model_copy(update={"complete": False})
     settle(store)
-    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
     job = store.workers.assign_job("worker-a", "token", "epoch")
     subject = coordinator(store, github)
     task = await subject.prepare(job)
@@ -241,7 +247,7 @@ async def test_racing_input_survives_ack_and_prevents_rereview(store, thread_rev
         pending = store.reviews.pending(flow.id)
         assert len(pending) == 1
         assert pending[0].github_id == (1 if change == "edited" else 2)
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
 
 
 @pytest.mark.parametrize("operation", ["reply_review_thread", "resolve_review_thread"])
@@ -362,6 +368,33 @@ async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread
     assert batch_for(store, queued[0]).feedback[0].body == "Latest"
 
 
+async def test_missing_status_label_does_not_suppress_revision_or_reviewers(
+    store,
+    thread_revision,
+    monkeypatch,
+):
+    # A display failure is not unresolved review feedback and must not suppress re-review.
+    flow, job, github, subject = thread_revision
+
+    async def missing(issue, label):
+        raise GitHubError(
+            GitHubErrorKind.NOT_FOUND, "add_label", status_code=404, request_rejected=True
+        )
+
+    monkeypatch.setattr(Issue, "add_label", missing)
+    assert await subject.results.apply(job.id) is JobState.DONE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
+    assert store.deliveries.get_delivery(flow.id).head_sha == "revision"
+    assert store.reviews.pending(flow.id) == []
+    record = next(
+        r for r in store.results.list_effects(job.id) if isinstance(r.payload, LabelEffect)
+    )
+    assert record.state is EffectState.SKIPPED and record.receipt is None
+    assert github.review_requests == [["carol"]]
+    assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
+    assert github.review_requests == [["carol"]]
+
+
 @pytest.mark.parametrize("query,write", [("fetch_labels", "labels"), ("fetch_reviewers", "review_requests")])
 async def test_new_feedback_during_notification_query_fences_dispatch(
     store, thread_revision, monkeypatch, query, write,
@@ -429,6 +462,7 @@ async def test_next_revision_combines_valid_historical_coverage_on_the_same_pr(
 ):
     flow, first, github, subject = thread_revision
     await subject.results.apply(first.id)
+    report_settled(store, first.id, epoch="epoch")
     assert github.resolves == []
     new = human(3, reply_to_id=1, body="Decision made; finish the remaining change")
     github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(*github.thread.comments.items, new))})

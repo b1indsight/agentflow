@@ -12,6 +12,7 @@ from app.worker.transport import mcp
 
 async def test_worker_mcp_http_open_pr_and_lifecycle(tmp_path, monkeypatch):
     outcome = VcsOutcome(backend=VcsKind.GIT, branch="flow/test", commit_sha="abc", remote_sha="abc")
+    deliveries = []
 
     async def verify(context):
         return outcome
@@ -19,6 +20,7 @@ async def test_worker_mcp_http_open_pr_and_lifecycle(tmp_path, monkeypatch):
     class Caller:
         async def call_tool(self, name, arguments, *, call_id, vcs_outcome):
             assert name == "flow.open_pr" and vcs_outcome == outcome and call_id
+            deliveries.append(call_id)
             return PreparedDelivery(head_sha="abc", delivery_version=1)
 
     monkeypatch.setattr(mcp, "verify_pushed_outcome", verify)
@@ -46,6 +48,14 @@ async def test_worker_mcp_http_open_pr_and_lifecycle(tmp_path, monkeypatch):
         })).json()
         assert called["result"]["structuredContent"]["status"] == "prepared"
         assert server.last_result == PreparedDelivery(head_sha="abc", delivery_version=1)
+        # Correction turns share this endpoint; even concurrent repeats must keep the first receipt.
+        repeats = await asyncio.gather(*(client.post(server.url, headers=headers, json={
+            "jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+            "params": {"name": "open_pr", "arguments": {"title": "Changed", "body": "Again"}},
+        }) for request_id in (3, 4)))
+        assert all(response.json()["result"]["isError"] for response in repeats)
+        assert len(deliveries) == 1 and server.last_call_id == deliveries[0]
+        assert server.last_vcs_outcome == outcome
     async with httpx.AsyncClient(trust_env=False) as client:
         with pytest.raises(httpx.ConnectError):
             await client.post(server.url, json=request)

@@ -1,220 +1,289 @@
 """A slow result must leave capacity for other Flows and local scheduling sweeps."""
 
 import asyncio
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
 
 import pytest
 from pydantic import ValidationError
 
-from app.contracts.protocol import InitialTaskResult, Succeeded
+from app.contracts.protocol import AssignmentArguments, Failed
 from app.contracts.result_models import ResultPending
 from app.controler.config import ServerSettings
-from app.controler.runtime import ServerRuntime
-from app.domain.models import JobKind, JobState
-from tests.test_gateway import RecordingCoordinator, RecordingStore
-from tests.worker_fakes import result_application
+from app.controler.workflow.service import ControlService
+from app.domain.models import FlowState, JobState
+from app.persistence.records import required
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator, prepare_initial
+from tests.workspace_fixtures import register_worker
+
+pytestmark = pytest.mark.usefixtures("recording_resources")
 
 
-class Inbox(RecordingStore):
-    def __init__(self, count):
-        super().__init__()
-        self.job_records = {}
-        self.pages = []
-        for i in range(1, count + 1):
-            message = Succeeded(job_id=i, assignment_token="token", connection_epoch="epoch",
-                result=InitialTaskResult(session_id="session", last_message="done", exit_code=0))
-            self.job_records[i] = self.job.model_copy(update={
-                "id": i, "flow_id": i, "state": JobState.RUNNING,
-                "result_payload": message.model_dump(mode="json"),
-            })
+async def pending_results(store, count):
+    """Persist real assigned/started worker failures, leaving application to the caller."""
+    github = RecordingGitHub()
+    github.refs = {}
+    subject = coordinator(store, github)
+    jobs = []
+    for _ in range(count):
+        issue = len(store.flows.list_flows()) + 1
+        flow = required(ControlService(database=store.database).create_flow("owner/repo", issue, 42))
+        worker = f"worker-{flow.id}"
+        register_worker(store, worker, repo=flow.repo, epoch="epoch")
+        job = required(store.workers.assign_job(worker, f"token-{flow.id}", "epoch"))
+        await prepare_initial(subject, job)
+        task = await subject.prepare_for_assignment(job, worker, job.assignment_token, "epoch")
+        assert isinstance(task, AssignmentArguments)
+        assert store.workers.start_assignment(job.id, task.task.attempt_id, worker,
+                                              job.assignment_token, "epoch")
+        subject.mark_started(job, task.task, worker)
+        terminal = Failed(job_id=job.id, assignment_token=job.assignment_token, error="agent failed")
+        assert store.workers.record_assignment_result(
+            job.id, worker, job.assignment_token, "epoch", terminal,
+        ) == "pending"
+        jobs.append(required(store.jobs.get_job(job.id)))
+    return subject.results, jobs
 
-    def get_job(self, job_id):
-        return self.job_records.get(job_id)
 
-    def unapplied_result_ceiling(self):
-        return max((j.id for j in self.job_records.values() if j.result_applied_at is None), default=0)
-
-    def list_unapplied_results(self, *, after_id=0, through_id=None, limit=64):
-        self.pages.append((after_id, limit))
-        return [j for j in self.job_records.values()
-                if j.id > after_id and (through_id is None or j.id <= through_id)
-                and j.result_applied_at is None][:limit]
-
-
-async def test_slow_result_does_not_block_another_flow():
+async def test_slow_result_does_not_block_another_flow(store, monkeypatch):
+    processor, jobs = await pending_results(store, 2)
     blocked, release, advanced = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    apply = processor._apply
 
-    class Coordinator(RecordingCoordinator):
-        async def _commit_result(self, job_id):
-            if job_id == 1:
-                blocked.set()
-                await release.wait()
-            else:
-                advanced.set()
-            return await super()._commit_result(job_id)
+    async def commit(job_id):
+        if job_id == jobs[0].id:
+            blocked.set()
+            await release.wait()
+        result = await apply(job_id)
+        if job_id == jobs[1].id:
+            advanced.set()
+        return result
 
-    inbox = Inbox(2)
-    processor = result_application(inbox, Coordinator(inbox)._commit_result)
+    monkeypatch.setattr(processor, "_apply", commit)
     recovery = asyncio.create_task(processor.recover_pending_results())
     try:
-        await asyncio.wait_for(blocked.wait(), 1)
-        await asyncio.wait_for(advanced.wait(), 1)
+        await asyncio.wait_for(blocked.wait(), 2)
+        await asyncio.wait_for(advanced.wait(), 2)
         assert not recovery.done()
+        assert required(store.jobs.get_job(jobs[0].id)).result_applied_at is None
+        assert required(store.jobs.get_job(jobs[1].id)).state is JobState.FAILED
     finally:
         release.set()
         await recovery
 
 
-async def test_recovery_pool_is_bounded_and_cancellation_joins_all_tasks():
+async def test_recovery_pool_is_bounded_and_cancellation_joins_all_tasks(store, monkeypatch):
+    processor, jobs = await pending_results(store, 20)
     started, release = asyncio.Event(), asyncio.Event()
     active = set()
+    apply = processor._apply
 
-    class Coordinator(RecordingCoordinator):
-        async def _commit_result(self, job_id):
-            active.add(job_id)
-            if len(active) == 2:
-                started.set()
-            try:
-                await release.wait()
-            finally:
-                active.remove(job_id)
-            return await super()._commit_result(job_id)
+    async def commit(job_id):
+        active.add(job_id)
+        if len(active) == 2:
+            started.set()
+        try:
+            await release.wait()
+        finally:
+            active.remove(job_id)
+        return await apply(job_id)
 
-    inbox = Inbox(20)
-    processor = result_application(inbox, Coordinator(inbox)._commit_result)
+    monkeypatch.setattr(processor, "_apply", commit)
     recovery = asyncio.create_task(processor.recover_pending_results(concurrency=2))
     try:
-        await asyncio.wait_for(started.wait(), 1)
-        assert active == {1, 2}
+        await asyncio.wait_for(started.wait(), 2)
+        assert active == {job.id for job in jobs[:2]}
     finally:
         recovery.cancel()
         with pytest.raises(asyncio.CancelledError):
             await recovery
     assert active == set()
+    assert len(store.jobs.list_unapplied_results()) == 20
 
 
-async def test_bounded_batches_advance_past_a_persistently_pending_result():
+async def test_bounded_batches_advance_past_a_persistently_pending_result(store, monkeypatch):
+    processor, jobs = await pending_results(store, 5)
     calls = []
+    apply = processor._apply
 
-    class Coordinator(RecordingCoordinator):
-        async def _commit_result(self, job_id):
-            calls.append(job_id)
-            if job_id == 1:
-                raise ResultPending("waiting for a receipt")
-            return await super()._commit_result(job_id)
+    async def commit(job_id):
+        calls.append(job_id)
+        if job_id == jobs[0].id:
+            raise ResultPending("waiting for a receipt")
+        return await apply(job_id)
 
-    inbox = Inbox(5)
-    processor = result_application(inbox, Coordinator(inbox)._commit_result)
+    monkeypatch.setattr(processor, "_apply", commit)
     for _ in range(4):
         await processor.recover_pending_results(batch_size=2)
-    assert calls == [1, 2, 3, 4, 5, 1]
-    assert all(limit == 2 for _, limit in inbox.pages)
+    assert calls == [*(job.id for job in jobs), jobs[0].id]
+    assert [job.id for job in store.jobs.list_unapplied_results()] == [jobs[0].id]
 
 
-async def test_live_result_holds_the_same_job_lock_as_recovery():
+async def test_live_application_and_duplicate_sweeps_share_result_lock(store, monkeypatch):
+    processor, jobs = await pending_results(store, 2)
     entered, release, advanced = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    apply = processor._apply
+    calls = []
 
-    class Coordinator(RecordingCoordinator):
-        async def _commit_result(self, job_id):
-            if job_id == 1:
-                entered.set()
-                await release.wait()
-            else:
-                advanced.set()
-            return await super()._commit_result(job_id)
+    async def commit(job_id):
+        calls.append(job_id)
+        if job_id == jobs[0].id:
+            entered.set()
+            await release.wait()
+        result = await apply(job_id)
+        if job_id == jobs[1].id:
+            advanced.set()
+        return result
 
-    inbox = Inbox(2)
-    coordinator = Coordinator(inbox)
-    processor = result_application(inbox, coordinator._commit_result)
-    # Live transport and recovery can observe the same accepted inbox payload.
-    # Hold the real application, so removing the shared lock duplicates its commit.
-    live = asyncio.create_task(processor.apply(1))
-    await asyncio.wait_for(entered.wait(), 1)
+    monkeypatch.setattr(processor, "_apply", commit)
+    # Live transport and recovery can observe the same durable inbox. Blocking the
+    # actual application detects duplicate application if its shared lock is removed.
+    live = asyncio.create_task(processor.apply(jobs[0].id))
+    await asyncio.wait_for(entered.wait(), 2)
     recovery = asyncio.create_task(processor.recover_pending_results())
-    duplicate_sweep = asyncio.create_task(processor.recover_pending_results())
+    duplicate = asyncio.create_task(processor.recover_pending_results())
     try:
-        await asyncio.wait_for(advanced.wait(), 1)
+        await asyncio.wait_for(advanced.wait(), 2)
         assert not live.done()
     finally:
         release.set()
-        await asyncio.gather(live, recovery, duplicate_sweep)
-    assert len(coordinator.received_results) == 2
+        await asyncio.gather(live, recovery, duplicate)
+    assert calls == [job.id for job in jobs]
+    assert store.jobs.list_unapplied_results() == []
+    assert all(required(store.flows.get_flow(job.flow_id)).state is FlowState.BLOCKED for job in jobs)
 
 
-async def test_new_arrivals_cannot_extend_a_recovery_cycle_forever():
+async def test_new_arrivals_cannot_extend_a_recovery_cycle_forever(store, monkeypatch):
+    processor, jobs = await pending_results(store, 2)
     calls = []
 
-    class Coordinator(RecordingCoordinator):
-        async def _commit_result(self, job_id):
-            calls.append(job_id)
-            raise ResultPending("still waiting")
+    async def pending(job_id):
+        calls.append(job_id)
+        raise ResultPending("still waiting")
 
-    inbox = Inbox(2)
-    processor = result_application(inbox, Coordinator(inbox)._commit_result)
+    monkeypatch.setattr(processor, "_apply", pending)
     await processor.recover_pending_results(batch_size=1)
-    # A busy service keeps producing new IDs; the initial scan must still end at ID 2.
-    inbox.job_records[3] = Inbox(3).job_records[3]
+    # New IDs are real accepted inboxes; the existing scan must still end at its original ceiling.
+    await pending_results(store, 1)
     await processor.recover_pending_results(batch_size=1)
-    inbox.job_records[4] = Inbox(4).job_records[4]
+    await pending_results(store, 1)
     await processor.recover_pending_results(batch_size=1)
-    assert calls == [1, 2, 1]
+    assert calls == [jobs[0].id, jobs[1].id, jobs[0].id]
 
 
-async def test_runtime_sweeps_continue_while_result_recovery_waits():
+async def test_recovery_continues_after_one_broken_result(store, monkeypatch):
+    processor, jobs = await pending_results(store, 2)
+    apply = processor._apply
+
+    async def broken(job_id):
+        if job_id == jobs[0].id:
+            raise RuntimeError("broken local result")
+        return await apply(job_id)
+
+    monkeypatch.setattr(processor, "_apply", broken)
+    await processor.recover_pending_results()
+    assert required(store.jobs.get_job(jobs[0].id)).result_applied_at is None
+    assert required(store.jobs.get_job(jobs[1].id)).result_applied_at is not None
+
+
+async def test_runtime_sweeps_continue_while_result_recovery_waits(store, monkeypatch, server_runtime):
+    await pending_results(store, 1)
+    runtime = server_runtime(settings={"worker_sweep_interval": 0.001})
+    processor = runtime.results
     entered, release, exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
     lease, settled = asyncio.Event(), asyncio.Event()
+    apply = processor._apply
 
-    async def recover(**options):
+    async def commit(job_id):
         entered.set()
         try:
             await release.wait()
+            return await apply(job_id)
         finally:
             exited.set()
 
-    runtime = ServerRuntime.__new__(ServerRuntime)
-    runtime._triage_task = None
-    runtime.coordinator = SimpleNamespace(triage=AsyncMock())
-    runtime.judge = Mock()
-    runtime.settings = SimpleNamespace(worker_sweep_interval=0, result_recovery_concurrency=4, result_recovery_batch_size=64)
-    runtime.reviews = SimpleNamespace(claim_due=Mock(side_effect=lambda: (settled.set() or True)),
-                                     pending_triage=Mock(return_value=[]))
-    runtime.workers = SimpleNamespace(sweep_expired_assignments=Mock(side_effect=lambda: (lease.set() or 0, 0)))
-    runtime.database = SimpleNamespace(close=Mock())
-    runtime.access = SimpleNamespace(close=AsyncMock())
-    runtime.results = SimpleNamespace(recover_pending_results=AsyncMock(side_effect=recover))
-    runtime.gateway = SimpleNamespace(notify_jobs=Mock())
-    runtime.reconciler = SimpleNamespace(stop=Mock())
+    monkeypatch.setattr(processor, "_apply", commit)
+    claim, sweep = runtime.reviews.claim_due, runtime.workers.sweep_expired_assignments
+
+    def claim_due():
+        result = claim()
+        settled.set()
+        return result
+
+    def sweep_expired():
+        result = sweep()
+        lease.set()
+        return result
+
+    monkeypatch.setattr(runtime.reviews, "claim_due", claim_due)
+    monkeypatch.setattr(runtime.workers, "sweep_expired_assignments", sweep_expired)
     loops = [runtime._sweep_results, runtime._sweep_assignments, runtime._sweep_reviews]
     runtime._tasks = [asyncio.create_task(loop()) for loop in loops]
     try:
-        await asyncio.wait_for(entered.wait(), 1)
-        await asyncio.wait_for(lease.wait(), 1)
-        await asyncio.wait_for(settled.wait(), 1)
+        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(lease.wait(), 2)
+        await asyncio.wait_for(settled.wait(), 2)
         assert not exited.is_set()
     finally:
         await runtime.shutdown()
     assert exited.is_set() and all(task.done() for task in runtime._tasks)
-    runtime.access.close.assert_awaited_once()
-    runtime.database.close.assert_called_once()
+    assert runtime.access.client.is_closed
 
 
-def test_store_pages_only_unapplied_results_in_stable_job_order(store):
-    jobs = []
-    for i in range(5):
-        flow = store.flows.create_flow("owner/repo", i + 1, 42)
-        job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
-        jobs.append(job)
-        with store.connection() as conn:
-            conn.execute("UPDATE jobs SET state='running', result_received_at=%s WHERE id=%s",
-                         (store.now(), job.id))
+@pytest.mark.parametrize("failure", ["communication", "access"])
+async def test_shutdown_releases_resources_even_when_connection_cleanup_fails(failure, server_runtime, monkeypatch):
+    # These are resource-close fault injections, not alternate persistence behavior.
+    runtime = server_runtime()
+    order = []
+    seal, stop = runtime.gateway.seal, runtime.reconciler.stop
+    close_gateway, close_access = runtime.gateway.close, runtime.access.close
+    close_database = runtime.database.close
+
+    def seal_gateway():
+        order.append("seal")
+        seal()
+
+    def stop_sweeps():
+        order.append("sweeps")
+        stop()
+
+    async def close_communication(code):
+        assert code == 1012
+        order.append("communication")
+        await close_gateway(code)
+        if failure == "communication":
+            raise OSError("communication failed")
+
+    async def close_owner_access():
+        order.append("access")
+        await close_access()
+        if failure == "access":
+            raise OSError("access failed")
+
+    def close_pool():
+        order.append("database")
+        close_database()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime.gateway, "seal", seal_gateway)
+        patch.setattr(runtime.reconciler, "stop", stop_sweeps)
+        patch.setattr(runtime.gateway, "close", close_communication)
+        patch.setattr(runtime.access, "close", close_owner_access)
+        patch.setattr(runtime.database, "close", close_pool)
+        with pytest.raises(OSError, match=failure):
+            await runtime.shutdown()
+    # Gateway.close seals again itself before joining its owned connections.
+    assert order == ["seal", "sweeps", "communication", "seal", "access", "database"]
+
+
+async def test_store_pages_only_unapplied_results_in_stable_job_order(store):
+    processor, jobs = await pending_results(store, 5)
     first = store.jobs.list_unapplied_results(limit=2)
     assert store.jobs.unapplied_result_ceiling() == jobs[-1].id
     assert [j.id for j in store.jobs.list_unapplied_results(through_id=jobs[1].id)] == [
         j.id for j in jobs[:2]
     ]
     assert [j.id for j in first] == [j.id for j in jobs[:2]]
-    store.jobs.complete_persisted_result(jobs[2].id, JobState.DONE)
+    await processor.apply(jobs[2].id)
     assert [j.id for j in store.jobs.list_unapplied_results(after_id=first[-1].id, limit=2)] == [
         jobs[3].id, jobs[4].id,
     ]
@@ -222,5 +291,7 @@ def test_store_pages_only_unapplied_results_in_stable_job_order(store):
 
 def test_recovery_limits_are_validated():
     with pytest.raises(ValidationError):
-        ServerSettings(_env_file=None, database_url="postgresql://localhost/test",
-                      worker_tokens={"worker": "secret"}, result_recovery_concurrency=0)
+        ServerSettings(
+            _env_file=None, database_url="postgresql://localhost/test",
+            worker_tokens={"worker": "secret"}, result_recovery_concurrency=0,
+        )

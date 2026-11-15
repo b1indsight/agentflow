@@ -37,7 +37,7 @@ class _EmbeddedServer(uvicorn.Server):
 
 
 class WorkerMCP:
-    """Serve only open_pr for one coding invocation; revoke access when it finishes."""
+    """Serve open_pr through one execution and its corrections; revoke access on exit."""
 
     def __init__(self, caller: FlowToolCaller, vcs_context: VcsExecutionContext) -> None:
         self.caller = caller
@@ -47,6 +47,7 @@ class WorkerMCP:
         self.last_call_id: str | None = None
         self.last_result: DeliveryReceipt | None = None
         self.last_vcs_outcome: VcsOutcome | None = None
+        self._delivery_lock = asyncio.Lock()
         app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
         app.add_api_route("/mcp", self._handle, methods=["POST", "GET", "DELETE"])
         self._server = _EmbeddedServer(uvicorn.Config(
@@ -140,10 +141,13 @@ class WorkerMCP:
                 or any(not isinstance(value, str) for value in arguments.values())):
             raise ValueError("open_pr requires title and body strings")
         try:
-            outcome = await verify_pushed_outcome(self.vcs_context)
-            call_id = uuid4().hex
-            result = await self.caller.call_tool("flow.open_pr", arguments, call_id=call_id, vcs_outcome=outcome)
-            self.last_call_id, self.last_result, self.last_vcs_outcome = call_id, result, outcome
+            async with self._delivery_lock:
+                if self.last_result is not None:
+                    raise ValueError("flow.open_pr already completed; preserve the confirmed delivery")
+                outcome = await verify_pushed_outcome(self.vcs_context)
+                call_id = uuid4().hex
+                result = await self.caller.call_tool("flow.open_pr", arguments, call_id=call_id, vcs_outcome=outcome)
+                self.last_call_id, self.last_result, self.last_vcs_outcome = call_id, result, outcome
             payload = result.model_dump(mode="json")
             return {"content": [{"type": "text", "text": json.dumps(payload)}], "structuredContent": payload}
         except (RuntimeError, ValueError) as exc:

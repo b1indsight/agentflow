@@ -237,17 +237,25 @@ class SmokeSession:
                 if flow is None:
                     raise SmokeError("Flow disappeared during observation")
                 evidence.flow = flow.id
-                if flow.state in {FlowState.FAILED, FlowState.CANCELLED}:
-                    raise SmokeError("Flow failed or was cancelled; inspect flow show privately")
+                if flow.state is FlowState.BLOCKED or flow.archive_reason == "abandoned":
+                    raise SmokeError("Flow blocked or was abandoned; inspect flow show privately")
                 delivery = deliveries_tx.get_delivery(flow.id)
                 attempts = flows_tx.list_attempts(flow.id)
                 evidence.revisions = sum(attempt.revision_cycles for attempt in attempts)
                 binding = workers_tx.get_flow_execution(flow.id)
                 job_records = jobs_tx.list_jobs(flow.id)
-                evidence.archived = (flow.state == FlowState.SUCCEEDED and binding is not None
-                                     and binding.released_at is not None and any(
-                                         j.kind == JobKind.ARCHIVE and j.state == JobState.DONE
-                                         and j.result_applied_at is not None for j in job_records))
+                evidence.archived = (
+                    flow.state == FlowState.ARCHIVED
+                    and flow.archive_reason == "succeeded"
+                    and binding is not None
+                    and binding.released_at is not None
+                    and any(
+                        j.kind == JobKind.ARCHIVE
+                        and j.state == JobState.DONE
+                        and j.result_applied_at is not None
+                        for j in job_records
+                    )
+                )
             else:
                 delivery = None
         # No network call holds the database transaction open.

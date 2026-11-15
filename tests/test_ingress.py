@@ -11,19 +11,20 @@ import pytest_asyncio
 from psycopg import OperationalError
 from pydantic import SecretStr
 
-from app.contracts.protocol import PROTOCOL_VERSION
+from app.communication.gateway import Gateway
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationService
-from app.controler.workers.gateway import WorkerGateway
 from app.controler.workflow.service import ControlService
 from app.domain.models import Flow, FlowState, JobKind
 from app.persistence.store import Store
 from app.plugins import get_plugin_manager
 from app.telemetry.metrics import Metrics
+from tests.github import RecordingGitHub
+from tests.workspace_fixtures import register_worker
 
 
 class WebhookRuntime(ServerRuntime):
@@ -38,13 +39,15 @@ class WebhookRuntime(ServerRuntime):
         self.settings.host, self.settings.port = "test", 0
         self.metrics = Metrics()
         self.router = router
-        self.gateway = Mock(spec=WorkerGateway)
+        self.gateway = Mock(spec=Gateway)
+        self.worker_tokens = {"worker-1": "worker-secret"}
         self.conversations = Mock(spec=ConversationService)
         self.tasks: list[asyncio.Task[None]] = []
         self.webhooks = Mock(spec=WebhookConsumer)
         if store is not None:
             self.webhooks = WebhookConsumer(
                 self.settings,
+                RecordingGitHub(),
                 database=store.database,
                 plugins=get_plugin_manager(),
                 jobs_available=lambda: None,
@@ -72,21 +75,15 @@ class WebhookRuntime(ServerRuntime):
 
 class RoutingService(ControlService):
     def __init__(self, store: Store) -> None:
-        self.flows = store.flows
-        self.jobs = store.jobs
+        super().__init__(database=store.database)
 
-    def on_trigger(self, repo: str, issue_number: int, installation_id: int | None) -> Flow:
-        flow = self.flows.create_flow(repo, issue_number, installation_id)
+    def create_flow(
+        self, repo: str, issue_number: int | None, installation_id: int | None,
+        *, task_content: str | None = None,
+    ) -> Flow:
+        flow = self.flows.create_flow(repo, issue_number, installation_id, task_content=task_content)
         self.jobs.enqueue_job(flow.id, JobKind.INITIAL)
         return flow
-
-    def cancel(self, flow: Flow) -> None:
-        flow.state = FlowState.CANCELLED
-        self.flows.update_flow(flow)
-
-    def on_merged(self, flow: Flow, delivery_id: str, payload: dict) -> None:
-        flow.state = FlowState.SUCCEEDED
-        self.flows.update_flow(flow)
 
     def notify_jobs(self) -> None:
         pass
@@ -125,7 +122,6 @@ async def test_valid_signature_dispatches_webhook(
         database_url="postgresql://localhost/test",
         worker_tokens={"worker-1": SecretStr("worker-secret")},
         allowlist=["alice"],
-        bot_login="flowtool[bot]",
         github_webhook_secret="webhook-secret",
         host="test",
         port=0,
@@ -137,6 +133,7 @@ async def test_valid_signature_dispatches_webhook(
         EventRouter(
             RoutingService(store),
             settings,
+            bot_login="flowtool[bot]",
             database=store.database,
         ),
         settings,
@@ -175,8 +172,8 @@ async def test_valid_signature_dispatches_webhook(
     assert response.status_code == 202
     flow = store.flows.get_active_flow("owner/repo", 7)
     assert flow is not None
-    assert flow.state is FlowState.ACTIVE
-    store.workers.worker_connected("worker-1", protocol_version=PROTOCOL_VERSION)
+    assert flow.state is FlowState.QUEUED
+    register_worker(store, "worker-1", repo=flow.repo)
     assert store.workers.assign_job("worker-1", "assignment-1") is not None
 
 

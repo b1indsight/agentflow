@@ -20,15 +20,16 @@ from app.contracts.conversation import (
     ConversationPage,
     SessionHistory,
 )
-from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workers.conversation import ConversationService
-from app.domain.models import JobKind
+from app.controler.workflow.service import ControlService
+from app.domain.models import DeliveryState, JobKind
 from app.github import GitHubApp
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.console_sync import ConsoleSyncStore, SyncClaim
 from app.persistence.store import Store
+from tests.workspace_fixtures import register_worker
 
 
 def only_worker(database):
@@ -36,16 +37,53 @@ def only_worker(database):
         connection.execute("UPDATE console_sync SET pending=(source='worker')")
 
 
-async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(store):
+async def test_direct_task_registers_only_real_remote_sources_and_still_reads_worker(store):
+    # Before PR creation there is no GitHub target; local state and worker history are independent.
+    flow = store.flows.create_flow("owner/repo", None, 42, task_content="Direct")
+    conversations = Mock(spec=ConversationService)
+    conversations.read = AsyncMock(return_value=ConversationPage(flow_id=flow.id, unavailable_reason="no_worker"))
+    github = Mock(spec=GitHubApp)
+    sync = ConsoleSynchronizer(github, conversations, database=store.database)
+    remote = sync.store.claim()
+    assert remote and remote.source == "github" and remote.issue_number is None
+    await sync.sync(remote)
+    worker = sync.store.claim()
+    assert worker and worker.source == "worker" and worker.issue_number is None
+    await sync.sync(worker)
+    conversations.read.assert_awaited_once_with(flow.id, None, 50)
+    assert sync.store.claim() is None
+    assert ActivityStore(store.database).history(flow.id, 1)
+    with store.connection() as connection:
+        names = {row["source"] for row in connection.execute("SELECT source FROM console_sync").fetchall()}
+    assert names == {"github", "worker"}
+
+    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
+    store.deliveries.update_delivery(delivery)
+    remote = sync.store.claim()
+    assert remote and remote.source == "github" and remote.pr_number == 17
+    await sync.sync(remote)
+    with store.connection() as connection:
+        names = {row["source"] for row in connection.execute("SELECT source FROM console_sync").fetchall()}
+    assert "pr.comments" in names and "pr.review_threads" in names
+    assert not any(name.startswith("issue.") for name in names)
+    github.installation.assert_not_called()
+
+
+@pytest.mark.parametrize("resume_during_read", [False, True])
+async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(
+    store, resume_during_read, monkeypatch
+):
     flow = store.flows.create_flow("owner/repo", 7, 42)
+    attempt = store.flows.create_attempt(flow.id)
     only_worker(store._db)
     conversations = Mock(spec=ConversationService)
     item = ConversationItem(
         id="record-1",
-        attempt_id=1,
+        attempt_id=attempt.id,
         session_id="12345678-1234-1234-1234-123456789abc",
         session_generation=0,
-        timestamp=flow.created_at.isoformat(),
+        timestamp=(flow.created_at + timedelta(days=1)).isoformat(),
         role="assistant",
         kind="message",
         # A binary/tool-derived character must not poison this page's checkpoint.
@@ -65,12 +103,21 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(st
     )
     sync = ConsoleSynchronizer(Mock(spec=GitHubApp), conversations, database=store._db)
     claim = sync.store.claim()
-    assert claim and claim.source == "worker"
+    assert claim and claim.source == "worker" and claim.round_no == 1
+    if resume_during_read:
+        # A late page belongs to its Attempt, even when its timestamp is in the new round.
+        control = ControlService(database=store.database)
+        control.cancel(flow)
+        flow = control.resume(flow, expected_round_no=1)
+        assert flow.current_round_no == 2
     await sync.sync(claim)
     conversations.read.assert_awaited_once_with(flow.id, None, 50)
     archive = ActivityStore(store._db)
     first = archive.page(flow.id)
     message = next(i for i in first.items if i.source == "worker" and i.kind == "message")
+    assert message.key == f"worker:{attempt.id}:0:record-1"
+    assert message.round_no == message.model_dump()["round_no"] == attempt.round_no == 1
+    assert archive.versions(flow.id, message.key).items[0].round_no == 1
     assert message.body == "worker display body\\u0000"
     assert message.metadata["unsupported_characters_escaped"] is True
     summary = next(i for i in first.items if i.kind == "tool_call")
@@ -79,8 +126,13 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(st
     assert summary.metadata["summary_truncated"] and summary.metadata["query"] == "conversation"
     ConsoleStore(store._db).request_sync(flow.id)
     only_worker(store._db)
+    if resume_during_read:
+        # Resume dirtied the in-flight source; its repeat retains the 100ms backoff.
+        due = store.now() + timedelta(milliseconds=100)
+        monkeypatch.setattr(store.database, "_clock", lambda: due)
     again = sync.store.claim()
     assert again and again.cursor == "eof-checkpoint"
+    assert again.round_no == flow.current_round_no
     await sync.sync(again)
     assert archive.page(flow.id).snapshot == first.snapshot
 
@@ -89,7 +141,7 @@ def test_reconnect_and_publication_use_the_same_lock_order(store):
     # Reconnecting a bound worker enqueues sources before refreshing its execution.
     # Hold publication first, then finish while the reconnect waits on that lock.
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    store.workers.worker_connected("w", PROTOCOL_VERSION, "old")
+    register_worker(store, "w", repo=flow.repo, epoch="old")
     store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("w", "token", "old") is not None
     only_worker(store._db)
@@ -102,7 +154,7 @@ def test_reconnect_and_publication_use_the_same_lock_order(store):
         with store.transaction() as tx, tx.connection() as connection:
             connection.execute("SET LOCAL statement_timeout='5s'")
             backend.put(connection.info.backend_pid)
-            tx.workers.worker_connected("w", PROTOCOL_VERSION, "new")
+            register_worker(tx, "w", repo=flow.repo, epoch="new")
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         with store._db.transaction() as tx, tx.connection() as connection:

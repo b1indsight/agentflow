@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import sys
+from collections import deque
 from typing import TYPE_CHECKING, TextIO
 
 from loguru import logger
@@ -14,8 +15,10 @@ if TYPE_CHECKING:
     from loguru import Message, Record
 
 EVENTS = {'job_failed', 'job_started', 'job_result', 'webhook_received', 'webhook_applied',
-          'worker_connected', 'worker_disconnected', 'snapshot_failed', 'application_log'}
-REASONS = {'ok', 'execution_failed', 'database_unavailable', 'connection_lost', 'unspecified'}
+          'worker_connected', 'worker_disconnected', 'snapshot_failed', 'application_log',
+          'workspace_provision_failed'}
+REASONS = {'ok', 'execution_failed', 'database_unavailable', 'connection_lost', 'unspecified',
+           'invalid_repository', 'workspace_conflict', 'filesystem_error', 'timeout', 'invalid_response'}
 
 
 def configure_logging(role: str, output_format: str, output: TextIO | None = None) -> None:
@@ -40,9 +43,28 @@ def configure_logging(role: str, output_format: str, output: TextIO | None = Non
             value = extra.get(key)
             if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,200}', value):
                 row[key] = value
+        repository = extra.get('repository')
+        if isinstance(repository, str) and re.fullmatch(
+            r'[A-Za-z0-9][A-Za-z0-9_.-]{0,199}/[A-Za-z0-9][A-Za-z0-9_.-]{0,199}', repository
+        ):
+            row['repository'] = repository
         exception = record['exception']
         if exception and exception.type:
             row['exception_type'] = exception.type.__name__
+            frames: deque[str] = deque(maxlen=16)
+            traceback = exception.traceback
+            while traceback is not None:
+                # Code identities only: formatted tracebacks also expose source and exception text.
+                module = traceback.tb_frame.f_globals.get('__name__')
+                function = traceback.tb_frame.f_code.co_name
+                if not isinstance(module, str) or not re.fullmatch(r'[A-Za-z0-9_.]{1,200}', module):
+                    module = 'unknown'
+                if not re.fullmatch(r'[A-Za-z0-9_.<>]{1,200}', function):
+                    function = 'unknown'
+                frames.append(f'{module}:{function}:{traceback.tb_lineno}')
+                traceback = traceback.tb_next
+            if frames:
+                row['exception_trace'] = '|'.join(frames)
         if output_format == 'json':
             rendered = json.dumps(row, ensure_ascii=True)
         else:

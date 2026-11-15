@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from queue import Queue
 from threading import Event
 from time import monotonic
@@ -16,15 +16,19 @@ from psycopg import OperationalError
 from app.controler.events.webhooks import WebhookConsumer
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState
+from app.github import GitHubApp, GitHubError, GitHubErrorKind
 from app.persistence.store import Store
 from app.persistence.webhooks import WebhookStore
 from app.plugins import get_plugin_manager
 from app.plugins.hookspecs import hookimpl
+from tests.github import RecordingGitHub
+from tests.test_github_client import app_client, response
+from tests.test_github_client import settings as app_settings
 
 
 def settings():
     return SimpleNamespace(
-        allowlist=["alice"], bot_login="flowtool[bot]", trigger_label="flow",
+        allowlist=["alice"], trigger_label="flow",
         settle_seconds=75, submit_grace_seconds=15,
     )
 
@@ -43,6 +47,7 @@ def receive(inbox, delivery="one", body=None):
 def consumer(store):
     return WebhookConsumer(
         settings(),
+        RecordingGitHub(),
         database=store.database,
         plugins=get_plugin_manager(),
         jobs_available=lambda: None,
@@ -63,21 +68,94 @@ def test_received_delivery_survives_new_consumer_and_duplicate(store):
     assert inbox.list()[0].state == "done"
 
 
+@pytest.mark.parametrize("kind,retry_after,delay,cancel", [
+    (GitHubErrorKind.TRANSIENT, None, 2, False),
+    (GitHubErrorKind.RATE_LIMITED, "600", 600, False),
+    (GitHubErrorKind.RATE_LIMITED, "Fri, 13 Nov 2026 12:10:00 GMT", 600, False),
+    (GitHubErrorKind.RATE_LIMITED, "600", 600, True),
+])
+async def test_bot_lookup_retries_without_claiming_receipts(
+    store, tmp_path, monkeypatch, kind, retry_after, delay, cancel,
+):
+    # Cold-start throttling must survive webhook wakeups without consuming durable receipts.
+    receive(store.webhooks)
+    worker = consumer(store)
+    worker.github = GitHubApp(app_settings(tmp_path))
+    applied = asyncio.Event()
+    worker.jobs_available = applied.set
+    sleeping, release = asyncio.Event(), asyncio.Event()
+    attempts = 0
+
+    async def sleep(seconds):
+        assert seconds == delay
+        sleeping.set()
+        await release.wait()
+
+    # Replace this consumer's asyncio binding, not the shared module used by the test loop.
+    monkeypatch.setattr("app.controler.events.webhooks.asyncio", SimpleNamespace(
+        **(vars(asyncio) | {"sleep": sleep}),
+    ))
+    now = datetime(2026, 11, 13, 12, tzinfo=UTC)
+    monkeypatch.setattr("app.controler.events.webhooks.datetime", SimpleNamespace(
+        now=lambda _: now,
+    ), raising=False)
+
+    async def get_app():
+        nonlocal attempts
+        attempts += 1
+        receipt = store.webhooks.list()[0]
+        assert receipt.state == "pending" and receipt.attempts == 0
+        if attempts == 1:
+            worker.wakeup.set()
+            raise GitHubError(kind, "get_app", retry_after=retry_after)
+        return response(SimpleNamespace(id=123, slug="flowtool-bot"))
+
+    app_client(monkeypatch, lambda **kwargs: SimpleNamespace(
+        rest=SimpleNamespace(apps=SimpleNamespace(async_get_authenticated=get_app)),
+    ))
+    with pytest.raises(RuntimeError):
+        worker.sweep()
+    assert store.webhooks.list()[0].attempts == 0
+    task = asyncio.create_task(worker.run())
+    try:
+        await asyncio.wait_for(sleeping.wait(), 1)
+        for _ in range(3):
+            worker.wakeup.set()
+            await asyncio.sleep(0)
+            receipt = store.webhooks.list()[0]
+            assert attempts == 1 and receipt.state == "pending" and receipt.attempts == 0
+        if not cancel:
+            release.set()
+            await asyncio.wait_for(applied.wait(), 5)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+    if cancel:
+        receipt = store.webhooks.list()[0]
+        assert attempts == 1 and receipt.state == "pending" and receipt.attempts == 0
+        assert store.flows.get_active_flow("owner/repo", 7) is None
+    else:
+        assert attempts == 2 and worker.github.bot_login == "flowtool-bot[bot]"
+        assert store.webhooks.list()[0].state == "done"
+        assert store.flows.get_active_flow("owner/repo", 7) is not None
+
+
 def test_failure_after_event_reservation_rolls_back_business_and_replays(store, monkeypatch):
     inbox = store.webhooks
     receive(inbox)
-    trigger = ControlService.on_trigger
+    trigger = ControlService.create_flow
 
     def fail_after_trigger(self, *args):
         trigger(self, *args)
         raise RuntimeError("sensitive error must not persist")
 
-    monkeypatch.setattr(ControlService, "on_trigger", fail_after_trigger)
+    monkeypatch.setattr(ControlService, "create_flow", fail_after_trigger)
     consumer(store).sweep()
     assert not store.webhooks.event_seen("one")
     assert store.flows.get_active_flow("owner/repo", 7) is None
     assert inbox.list()[0].error_code == "RuntimeError"
-    monkeypatch.setattr(ControlService, "on_trigger", trigger)
+    monkeypatch.setattr(ControlService, "create_flow", trigger)
     with store.connection() as conn:
         conn.execute("UPDATE webhook_inbox SET next_at=%s", (store.now(),))
     consumer(store).sweep()
@@ -111,14 +189,14 @@ def test_expired_claim_is_replayed_but_old_ack_cannot_complete_it(store, monkeyp
 
 
 def test_poison_delivery_does_not_block_following_event_and_can_retry(store, monkeypatch):
-    trigger = ControlService.on_trigger
+    trigger = ControlService.create_flow
 
     def unavailable(self, repo, number, installation):
         if repo == "owner/repo":
             raise OperationalError("write unavailable")
         return trigger(self, repo, number, installation)
 
-    monkeypatch.setattr(ControlService, "on_trigger", unavailable)
+    monkeypatch.setattr(ControlService, "create_flow", unavailable)
     inbox = store.webhooks
     receive(inbox, "bad")
     receive(inbox, "later", payload(9))
@@ -135,7 +213,7 @@ def test_poison_delivery_does_not_block_following_event_and_can_retry(store, mon
     assert rows["good"].state == "done"
     assert store.flows.get_active_flow("owner/other", 8) is not None
     assert store.flows.get_active_flow("owner/repo", 9) is None
-    monkeypatch.setattr(ControlService, "on_trigger", trigger)
+    monkeypatch.setattr(ControlService, "create_flow", trigger)
     assert inbox.retry("bad")
     assert not inbox.retry("good")
     assert consumer(store).sweep() == 2
@@ -158,6 +236,7 @@ def test_failed_completion_rolls_back_business_and_notifications(store, monkeypa
     monkeypatch.setattr(WebhookStore, "complete", unavailable)
     WebhookConsumer(
         settings(),
+        RecordingGitHub(),
         database=store.database,
         plugins=service.plugins,
         jobs_available=service.notify_jobs,
@@ -176,6 +255,7 @@ def test_webhook_transaction_does_not_rebind_the_root_service(store):
     )
     worker = WebhookConsumer(
         settings(),
+        RecordingGitHub(),
         database=store.database,
         plugins=service.plugins,
         jobs_available=service.notify_jobs,
@@ -183,7 +263,7 @@ def test_webhook_transaction_does_not_rebind_the_root_service(store):
     receive(store.webhooks)
     assert worker.sweep() == 1
     assert notifications == [True]
-    flow = service.on_trigger("owner/repo", 8, 42)
+    flow = service.create_flow("owner/repo", 8, 42)
     assert flow is not None and store.flows.get_flow(flow.id) is not None
     assert notifications == [True, True]
 
@@ -285,6 +365,7 @@ def test_all_business_routes_rollback_with_receipt(store, monkeypatch, event, ac
     plugins.register(MergeObserver())
     worker = WebhookConsumer(
         settings(),
+        RecordingGitHub(),
         database=store.database,
         plugins=plugins,
         jobs_available=lambda: None,
@@ -297,7 +378,7 @@ def test_all_business_routes_rollback_with_receipt(store, monkeypatch, event, ac
         patch.setattr(WebhookStore, "complete", unavailable)
         worker.sweep()
     assert not store.webhooks.event_seen("route")
-    assert store.flows.get_flow(flow.id).state == FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state == FlowState.QUEUED
     assert store.deliveries.get_delivery(flow.id).state == DeliveryState.OPEN
     assert not store.reviews.pending(flow.id)
     assert observed == []
@@ -331,18 +412,18 @@ async def test_consumer_shutdown_waits_for_db_transaction_without_blocking_loop(
 
 def test_retry_cannot_be_overtaken_by_cancellation(store, monkeypatch):
     inbox = store.webhooks
-    trigger = ControlService.on_trigger
+    trigger = ControlService.create_flow
     receive(inbox, 'trigger')
     def fail(*args):
         raise RuntimeError('transient failure')
-    monkeypatch.setattr(ControlService, 'on_trigger', fail)
+    monkeypatch.setattr(ControlService, 'create_flow', fail)
     consumer(store).sweep()
     cancelled = payload()
     cancelled['action'] = 'unlabeled'
     receive(inbox, 'cancel', cancelled)
     # Cancellation must wait for the older accepted trigger, including its backoff.
     assert consumer(store).sweep() == 0
-    monkeypatch.setattr(ControlService, 'on_trigger', trigger)
+    monkeypatch.setattr(ControlService, 'create_flow', trigger)
     with store.connection() as conn:
         conn.execute("UPDATE webhook_inbox SET next_at=%s", (store.now(),))
     assert consumer(store).sweep() == 2

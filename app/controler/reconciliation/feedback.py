@@ -7,7 +7,7 @@ import asyncio
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from app.domain.models import DeliveryState, FlowState, ReviewItemKind
+from app.domain.models import DeliveryState, JobKind, ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
 from app.github import (
     Batch,
@@ -60,7 +60,6 @@ class FeedbackReconciler:
         github: GitHubApp,
         *,
         settle_seconds: float,
-        bot_login: str = "flowtool[bot]",
         interval: float = 300,
         batch_size: int = 64,
         concurrency: int = 4,
@@ -71,7 +70,7 @@ class FeedbackReconciler:
         self.reconcile_store = ReconcileStore(database)
         self.reviews = ReviewStore(database)
         self.github = github
-        self.settle_seconds, self.bot_login = settle_seconds, bot_login.casefold()
+        self.settle_seconds = settle_seconds
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency
         self._sweep_lock = asyncio.Lock()
 
@@ -109,23 +108,33 @@ class FeedbackReconciler:
                 reviews_tx = self.reviews.using(tx)
                 flow = tx.lock_workflow(check.flow_id)
                 delivery = deliveries_tx.get_delivery(check.flow_id)
-                if (flow is None or flow.state is not FlowState.ACTIVE or flow.current_attempt_id is None
-                        or delivery is None or delivery.state is not DeliveryState.OPEN
-                        or delivery.pr_number is None):
+                if (
+                    flow is None
+                    or not flow.accepts(JobKind.REVISION)
+                    or flow.current_attempt_id is None
+                    or delivery is None
+                    or delivery.state is not DeliveryState.OPEN
+                    or delivery.pr_number is None
+                ):
+                    return
+                if check.source == "issue_comments" and flow.issue_number is None:
                     return
                 if flow.installation_id is None:
                     raise ValueError("missing installation")
                 boundary = reviews_tx.observation_boundary()
+            bot_login = (await self.github.resolve_bot_login()).casefold()
             number = flow.issue_number if check.source == "issue_comments" else delivery.pr_number
+            assert number is not None
             repo = self.github.installation(flow.installation_id).repository(flow.repo)
             threads, diagnostic = None, None
+            page: Batch[RemoteFeedback] | None = None
             updates: list[FeedbackUpdate] = []
             if check.source == "threads":
                 threads, following = await self._scan_threads(PullRequest(repo, number), check.cursor)
                 threads = threads.model_copy(update={"threads": tuple(thread.model_copy(update={
                     "comments": thread.comments.model_copy(update={"items": tuple(
                         comment.model_copy(update={"is_bot": comment.is_bot
-                        or comment.author.casefold() == self.bot_login}) for comment in thread.comments.items),
+                        or comment.author.casefold() == bot_login}) for comment in thread.comments.items),
                     }),
                 }) for thread in threads.threads)})
                 diagnostic = "; ".join(threads.limitations) or (
@@ -147,12 +156,27 @@ class FeedbackReconciler:
                 reviews_tx = self.reviews.using(tx)
                 fresh = tx.lock_workflow(flow.id)
                 current = deliveries_tx.get_delivery(flow.id)
-                if (fresh is None or current is None or fresh.state is not FlowState.ACTIVE
-                        or fresh.current_attempt_id != flow.current_attempt_id
-                        or fresh.installation_id != flow.installation_id
-                        or current != delivery):
+                if (
+                    fresh is None
+                    or current is None
+                    or not fresh.accepts(JobKind.REVISION)
+                    or fresh.current_attempt_id != flow.current_attempt_id
+                    or fresh.installation_id != flow.installation_id
+                    or current != delivery
+                ):
                     reconcile_store_tx.feedback_failed(check, 5, "Flow changed during observation")
                     return
+                if check.source == "issue_comments":
+                    assert page is not None
+                    cutoff = reviews_tx.issue_comment_cutoff(fresh)
+                    if cutoff is not None:
+                        current_ids = {
+                            item.github_id for item in page.items
+                            if item.created_at is not None and item.created_at >= cutoff
+                        }
+                        if len(current_ids) < len(page.items):
+                            diagnostic = "historical or undated Issue comments ignored"
+                        updates = [item for item in updates if item.github_id in current_ids]
                 if threads is None:
                     reviews_tx.observe_feedback(flow.id, flow.current_attempt_id, updates, boundary, self.settle_seconds)
                 else:
@@ -214,7 +238,7 @@ class FeedbackReconciler:
     ) -> tuple[list[FeedbackUpdate], str | None]:
         updates, diagnostic = [], None
         for item in page.items:
-            if (item.author is None or item.is_bot or item.author.casefold() == self.bot_login
+            if (item.author is None or item.is_bot or item.author.casefold() == self.github.bot_login.casefold()
                     or item.state == "pending"):
                 continue
             inert = item.body.strip().startswith("/flow")

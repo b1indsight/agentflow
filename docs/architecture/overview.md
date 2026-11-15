@@ -42,11 +42,12 @@ M0 已验收基础设施切片；M1–M4 功能及 M5 部署、接收、运维�
 │ 独立循环：租约 / 结果恢复 / 反馈合批 / PR与反馈对账    │
 │           Projects 同步 / 指标采集                    │
 │ 各服务自建仓储，共享 Database                        │
+│ ServerCallbacks / Broker + Gateway / Session × worker│
 └──────────────┬───────────────────┬───────────────────┘
                │                   │ 认证 WebSocket
                ▼                   ▼
 ┌────────────────────┐  ┌──────────────────────────────┐
-│ PostgreSQL         │  │ Worker Client + Session       │
+│ PostgreSQL         │  │ Runtime + Gateway + Session  │
 │ 状态、结果、回执   │  │ journal / 历史查询 / 停止握手 │
 │ 批次、对账进度     │  │ Executor → Codex / repo / VCS │
 └────────────────────┘  └──────────────────────────────┘
@@ -62,6 +63,16 @@ M0 已验收基础设施切片；M1–M4 功能及 M5 部署、接收、运维�
   Git/jj，worker 只验证事实。
 
 Runtime 创建并关闭共享 Database，装配共享的结果应用、effects、工具和 conversation broker。
+两端 Runtime 持有相同的 Gateway / Session：server 管多 worker，worker 至多登记一个 server。
+Gateway 驱动统一的 Session 事件入口；Dispatcher 按 `package.method` 精确路由请求，普通回复按
+`reply_to` 找原调用，经过可选 `on_reply` 再交付。所有 payload 与拒收均走 FIFO，无 history 旁路。
+server 每连接挂载 ServerCallbacks；worker 平级挂载 WorkerStateCallbacks / WorkerBusinessCallbacks。
+状态类管理连接和执行状态协议；业务类注册 worker.history，通过 before_wait 管理工具观察，
+通过 Dispatcher 接收回复与已授权的拒收。两类互不持有或调用，在同一 driver 串行处理。
+Broker 持有查询 Future 与限额，从 Registration 取得配对的 Session/Dispatcher；慢业务回调与 history 互相等待。
+server 接入函数只负责认证与首条 message，WorkerRuntime 直接负责主动拨号、重连与连接任务回收；
+wire v17 双端协调升级。
+执行 Task、durable 工具 Future 和停止清理由 WorkerExecution 长期持有，journal 由 ExecutionState 保存。
 服务自行创建所需仓储；Webhook 每条 receipt 在事务内创建 ControlService/EventRouter，
 事务外执行提交后通知。聚合 Store 只用于 CLI 运维、live smoke 和测试。
 依据：[运行时装配](../../app/controler/runtime.py)、[事件消费](../../app/controler/events/webhooks.py)、
