@@ -1989,6 +1989,9 @@ pre code {
   display: flow-root;
   min-width: 0;
 }
+.body-sentinel {
+  height: 1px;
+}
 .file-viewer {
   min-width: 0;
 }

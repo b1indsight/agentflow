@@ -44,6 +44,7 @@ import {
   TEXT_CHARS,
   SavedDetails,
   TextWindow,
+  WindowList,
   textEnd,
   useReadingState,
 } from "./windowing";
@@ -217,7 +218,124 @@ export function ActivityMarkdown({
   );
 }
 
-/** Keep only one immutable body segment in memory; API offsets count Unicode code points. */
+/** Mounted pages own their text so virtualization releases old bodies, not just their DOM. */
+function BodyPage({
+  entry,
+  flowId,
+  offset,
+  initial,
+  more,
+  append,
+  showName,
+}: {
+  entry: ActivityItem;
+  flowId: number;
+  offset: number;
+  initial: string;
+  more: boolean;
+  append: () => void;
+  showName: boolean;
+}) {
+  const openFile = useContext(OpenWorkerFile);
+  const tool = isToolActivity(entry);
+  const [text, setText] = useState<string | null>(
+    offset === 0 ? initial : null,
+  );
+  const [error, setError] = useState("");
+  const request = useRef<AbortController | null>(null);
+  const sentinel = useRef<HTMLDivElement>(null);
+  const read = async () => {
+    if (request.current && !request.current.signal.aborted) return;
+    const c = new AbortController();
+    request.current = c;
+    setError("");
+    try {
+      const p = await getContent(
+        flowId,
+        entry.key,
+        entry.version,
+        offset,
+        tool ? CODE_CHARS : TEXT_CHARS,
+        c.signal,
+      );
+      if (!c.signal.aborted) setText(p.text);
+    } catch (e) {
+      if (!c.signal.aborted)
+        setError(e instanceof Error ? e.message : "正文读取失败");
+    } finally {
+      if (request.current === c) request.current = null;
+    }
+  };
+  useEffect(() => {
+    if (offset > 0) void read();
+    return () => request.current?.abort();
+  }, [offset]);
+  useEffect(() => {
+    const node = sentinel.current;
+    if (!node || text === null || !more) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) append();
+      },
+      { root: node.closest("[data-scroll-root]") },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [text, more, append]);
+  const chunks = [];
+  if (text !== null) {
+    let start = 0;
+    do {
+      const end = textEnd(text, start, tool);
+      const part = text.slice(start, end);
+      chunks.push(
+        tool ? (
+          <pre key={start} tabIndex={0} aria-label="工具摘要">
+            <code>
+              {showName && start === 0 && (
+                <span className="tool-call-name">{entry.title || "调用"} </span>
+              )}
+              <span>{part}</span>
+            </code>
+          </pre>
+        ) : (
+          <ActivityMarkdown
+            key={start}
+            text={part}
+            url={entry.url}
+            onFileOpen={
+              entry.source === "worker" ? (openFile ?? undefined) : undefined
+            }
+          />
+        ),
+      );
+      start = end;
+    } while (start < text.length);
+  }
+  return (
+    <div className="body-page" aria-busy={text === null && !error}>
+      {chunks}
+      {error && (
+        <p role="alert">
+          正文读取失败：{error}{" "}
+          <button
+            type="button"
+            className="btn ghost"
+            aria-label="重试正文读取"
+            title="重试正文读取"
+            onClick={() => void read()}
+          >
+            <RefreshCw aria-hidden="true" />
+          </button>
+        </p>
+      )}
+      {text === null && !error && <p role="status">正在读取正文…</p>}
+      {more && <div ref={sentinel} className="body-sentinel" />}
+    </div>
+  );
+}
+
+/** Append immutable pages at the reading boundary; offsets count Unicode code points. */
 function ActivityBody({
   entry,
   flowId,
@@ -227,143 +345,35 @@ function ActivityBody({
   flowId: number;
   framed?: boolean;
 }) {
-  const openFile = useContext(OpenWorkerFile);
   const tool = isToolActivity(entry);
   const budget = tool ? CODE_CHARS : TEXT_CHARS;
-  const [savedStart, saveStart] = useReadingState(
-    `${flowId}-${entry.key}-${entry.version}-body-offset`,
-    0,
-  );
-  const initialStart = useRef(savedStart).current;
-  const [segment, setSegment] = useState(() => ({
-    text: entry.body.slice(0, textEnd(entry.body, 0, tool)),
-    start: 0,
-  }));
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  const request = useRef<AbortController | null>(null);
-  const failedRead = useRef<{ offset: number; before?: number }>({
-    offset: initialStart,
-  });
-  const read = async (offset: number, before?: number) => {
-    if (request.current && !request.current.signal.aborted) return;
-    const c = new AbortController();
-    request.current = c;
-    failedRead.current = { offset, before };
-    setBusy(true);
-    setError("");
-    try {
-      const p = await getContent(
-        flowId,
-        entry.key,
-        entry.version,
-        offset,
-        before === undefined ? budget : before - offset,
-        c.signal,
-      );
-      if (!c.signal.aborted) {
-        // For backwards navigation, show the last bounded window before the current one.
-        let start = 0;
-        if (before !== undefined) {
-          for (
-            let end = textEnd(p.text, 0, tool);
-            end < p.text.length;
-            end = textEnd(p.text, start, tool)
-          )
-            start = end;
-        }
-        const nextStart = offset + Array.from(p.text.slice(0, start)).length;
-        setSegment({
-          text: p.text.slice(start, textEnd(p.text, start, tool)),
-          start: nextStart,
-        });
-        saveStart(nextStart);
-      }
-    } catch (e) {
-      if (!c.signal.aborted)
-        setError(e instanceof Error ? e.message : "正文读取失败");
-    } finally {
-      if (request.current === c) request.current = null;
-      if (!c.signal.aborted) setBusy(false);
-    }
-  };
-  // Virtualized rows can unmount; restore only the selected immutable segment.
-  useEffect(() => {
-    if (initialStart > 0) void read(initialStart);
-    return () => request.current?.abort();
-  }, [initialStart]);
-  const end = segment.start + Array.from(segment.text).length;
-  const body = tool ? (
-    <pre tabIndex={0} aria-label="工具摘要">
-      <code>
-        {!framed && entry.kind === "tool_call" && (
-          <span className="tool-call-name">{entry.title || "调用"} </span>
-        )}
-        <span>{segment.text}</span>
-      </code>
-    </pre>
-  ) : (
-    <ActivityMarkdown
-      text={segment.text}
-      url={entry.url}
-      onFileOpen={
-        entry.source === "worker" ? (openFile ?? undefined) : undefined
-      }
-    />
+  const initial = entry.body.slice(0, textEnd(entry.body, 0, tool));
+  const firstEnd = Array.from(initial).length;
+  const [count, saveCount] = useReadingState(
+    `${flowId}-${entry.key}-${entry.version}-body-pages`,
+    1,
   );
   const content = (
-    <>
-      {body}
-      {(segment.start > 0 || end < entry.body_length) && (
-        <div
-          className="text-window-controls"
-          role="group"
-          aria-label="正文分段浏览"
-          aria-busy={busy}
-        >
-          <button
-            type="button"
-            aria-label="上一段"
-            title="上一段"
-            disabled={busy || segment.start === 0}
-            onClick={() =>
-              void read(Math.max(0, segment.start - budget), segment.start)
-            }
-          >
-            <ArrowLeft aria-hidden="true" />
-          </button>
-          <span>
-            字符 {segment.start + 1}–{end} / {entry.body_length}
-          </span>
-          <button
-            type="button"
-            aria-label="下一段"
-            title="下一段"
-            disabled={busy || end >= entry.body_length}
-            onClick={() => void read(end)}
-          >
-            <ArrowRight aria-hidden="true" />
-          </button>
-        </div>
+    <WindowList
+      count={count}
+      label="正文片段"
+      itemKey={(index) => index}
+      estimate={400}
+    >
+      {(index) => (
+        <BodyPage
+          entry={entry}
+          flowId={flowId}
+          offset={index === 0 ? 0 : firstEnd + (index - 1) * budget}
+          initial={initial}
+          more={
+            index === count - 1 && firstEnd + index * budget < entry.body_length
+          }
+          append={() => saveCount(count + 1)}
+          showName={!framed && entry.kind === "tool_call" && index === 0}
+        />
       )}
-      {error && (
-        <p role="alert">
-          正文读取失败：{error}{" "}
-          <button
-            type="button"
-            className="btn ghost"
-            aria-label="重试正文读取"
-            title="重试正文读取"
-            disabled={busy}
-            onClick={() =>
-              void read(failedRead.current.offset, failedRead.current.before)
-            }
-          >
-            <RefreshCw aria-hidden="true" />
-          </button>
-        </p>
-      )}
-    </>
+    </WindowList>
   );
   return tool && framed ? (
     <SavedDetails
