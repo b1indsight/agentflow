@@ -12,6 +12,7 @@ from app.controler.workflow.preparation import PreparationStale
 from app.domain.models import JobKind, JobState
 from app.github import GitHubError, GitHubErrorKind, Repository
 from app.persistence.workers import WorkerStore
+from tests.flow_fixtures import enqueue_job
 from tests.test_revision_recovery import (
     pending_revision as pending_revision,  # noqa: PLC0414 - fixture re-export
 )
@@ -245,7 +246,7 @@ def test_another_worker_can_progress_while_original_binding_waits(store, pending
     assert store.workers.defer_preparation(job.id, "worker-a", "token", "epoch",
         GitHubError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900) is JobState.QUEUED
     other = store.flows.create_flow("owner/other", 8, 42)
-    store.jobs.enqueue_job(other.id, JobKind.INITIAL)
+    enqueue_job(store, other.id, JobKind.INITIAL)
     register_worker(store, "worker-b", repo=other.repo, epoch="other-epoch")
     assigned = store.workers.assign_job("worker-b", "other-token", "other-epoch")
     assert assigned.flow_id == other.id

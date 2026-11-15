@@ -225,3 +225,11 @@ sweep 仍先锁全体 worker，再按 Flow id 锁相关 Flow，最后读取/锁�
 
 - **触发与实际变更：** 用户请求推送并创建 PR 时，远端 main 已合入仅涉及 console 前端的 #170。将本项完整工作变更无冲突重放到 [aaf1c272](https://github.com/b1indsight/agentflow/commit/aaf1c2729a487558cf29955c58aec226697830c7)，状态机、锁及结果恢复实现未另作修改，default workspace 的工作副本保持不动。
 - **验证与发布边界：** 发布前复验及仓库要求的功能/安全、复杂度双项只读审查结果保存在[线程验证附件](https://ampcode.com/artifacts/flow-42a79e9c-57a4-40b5-a113-123c02376cdf)；只将门禁返回的精确提交设为同名 bookmark 并推送。CI 由 PR 正常触发，不手动触发部署或合并。
+
+### 2026-11-16：入队改用单一 Flow 入参
+
+- **触发与决策：** 用户要求去掉 `flow_id` 与可选 `locked_flow` 的双重入参，并更新同一 PR。已采用 `enqueue_job(flow: Flow, kind, payload, ...)`，取代初始计划“领取、入队和批量回收保留原有取锁方式”中的可选参数及独立入队自动加锁方案；其他事件、锁和恢复边界保持不变。
+- **实际实现：** 删除入队内部自动加锁与递归调用。service 的 create/resume/retry、coordinator 的 triage、review claim 和 merge notice 均传入同一事务中的最新 Flow；新建 Flow 可直接使用同事务创建的对象。入队只负责 job INSERT 和状态事件，保留原 round 子查询、source-key 幂等性、时间戳及 ARCHIVE 不发送入队事件的行为。
+- **合同与代价：** 调用方负责先取得 workflow 锁并使用锁后事实；事务 guard 只拒绝未绑定事务的调用，不声称能证明 Flow 对象的锁归属或新鲜度。不新增锁凭证、缓存或布尔开关。同一事务重取已持有的行锁本身不构成死锁；保持既有 worker → Flow → job 顺序，是为了避免不同事务相互等待尚未持有的锁。
+- **调用迁移：** 测试准备统一复用 `tests/flow_fixtures.py` 中的真实 `flows.locked()` 上下文，smoke 与测试服务也显式绑定该事务；未改变原有业务断言或引入运行期兼容包装器。
+- **验证与简化：** 未绑定事务的 INITIAL/ARCHIVE 合同先失败后通过；既有入队回滚、创建/resume/retry、review、合并和并发领取回归通过。此次移除双模式及递归，没有新增实质机制，因此无需新增 ablation；最终全量回归、静态检查、构建与本轮审查结果见[线程验证附件](https://ampcode.com/artifacts/flow-42a79e9c-57a4-40b5-a113-123c02376cdf)。

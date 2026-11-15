@@ -41,6 +41,7 @@ from app.inference.local import serve_local_inference
 from app.persistence.records import required
 from app.worker.config import WorkerSettings
 from app.worker.runtime import WorkerRuntime
+from tests.flow_fixtures import enqueue_job
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_remote_e2e import remote_flow as remote_flow  # noqa: PLC0414
 from tests.worker_fixtures import NamingInference, inventory, run_worker
@@ -267,7 +268,7 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
                                          payload=[answer(first_call)]).model_dump_json())
         await settled(store, first, JobState.DONE)
 
-        coding = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+        coding = enqueue_job(store, flow.id, JobKind.INITIAL)
         server.gateway.wake_all()
         title_call = await next_call(InferenceRequest)
         assert title_call.job_id == store.flows.get_flow(flow.id).title_job_id

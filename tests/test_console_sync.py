@@ -29,6 +29,7 @@ from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.console_sync import ConsoleSyncStore, SyncClaim
 from app.persistence.store import Store
+from tests.flow_fixtures import enqueue_job
 from tests.workspace_fixtures import register_worker
 
 
@@ -142,7 +143,7 @@ def test_reconnect_and_publication_use_the_same_lock_order(store):
     # Hold publication first, then finish while the reconnect waits on that lock.
     flow = store.flows.create_flow("owner/repo", 7, 42)
     register_worker(store, "w", repo=flow.repo, epoch="old")
-    store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("w", "token", "old") is not None
     only_worker(store._db)
     sync = ConsoleSyncStore(store._db)

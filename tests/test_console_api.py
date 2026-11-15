@@ -22,7 +22,7 @@ from app.persistence.console import ConsoleStore
 from app.persistence.console_sync import ConsoleSyncStore
 from app.telemetry.metrics import Metrics
 from tests.access import AccessIssuer
-from tests.flow_fixtures import apply_flow_event
+from tests.flow_fixtures import apply_flow_event, enqueue_job
 from tests.test_cancel_drain import running
 from tests.test_merge import route_merge
 from tests.test_workflow_transactions import accepted_coding
@@ -530,7 +530,7 @@ def test_archive_request_reports_finalizing_until_stop_is_confirmed(console_runt
 def test_retry_commits_before_waking_workers_on_the_event_loop(console_runtime, store):
     # A blocked retry requeues work within this round and notifies only after commit.
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    original = store.jobs.enqueue_job(flow.id, JobKind.INITIAL, payload={"issue_number": 7})
+    original = enqueue_job(store, flow.id, JobKind.INITIAL, payload={"issue_number": 7})
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET state='failed' WHERE id=%s", (original.id,))
     flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
@@ -645,7 +645,7 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
     kind = JobKind.ARCHIVE if scenario.startswith("archive_") else JobKind.INITIAL
     if scenario == "revision":
         kind = JobKind.REVISION
-    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    job = enqueue_job(store, flow.id, JobKind.INITIAL)
     if scenario != "queued":
         register_worker(store, "worker-safe", repo=flow.repo, epoch="epoch-safe")
         assert store.workers.assign_job("worker-safe", "private-assignment", "epoch-safe")
@@ -700,7 +700,7 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
                 (job.id, now),
             )
     if scenario == "older_result":
-        store.jobs.enqueue_job(flow.id, JobKind.REVISION)
+        enqueue_job(store, flow.id, JobKind.REVISION)
     with store.flows.locked(flow.id) as context:
         flow = context.flow
         if kind is JobKind.ARCHIVE or state is FlowState.FINALIZING:

@@ -119,26 +119,23 @@ class JobStore(Repository):
 
     def enqueue_job(
         self,
-        flow_id: int,
+        flow: Flow,
         kind: JobKind,
         payload: dict | None = None,
         *,
         source_job_id: int | None = None,
         source_key: str | None = None,
-        locked_flow: Flow | None = None,
     ) -> Job:
-        """Queue atomically with the Flow projection; reuse caller-held locks when supplied."""
+        """Queue with fresh Flow facts in the caller's workflow transaction.
+
+        The caller locks the workflow before any job writes, or supplies a Flow
+        created in the same transaction. This method never reacquires those locks.
+        """
         if kind is JobKind.INFERENCE:
             raise ValueError("use enqueue_inference to freeze an inference call")
         if (source_job_id is None) != (source_key is None):
             raise ValueError("derived jobs require both source job and purpose")
-        if locked_flow is None:
-            with FlowStore(self._db).locked(flow_id) as context:
-                return self.using(context.database).enqueue_job(
-                    flow_id, kind, payload, source_job_id=source_job_id, source_key=source_key,
-                    locked_flow=required(context.flow),
-                )
-        if self._db._bound_connection is None or locked_flow.id != flow_id:
+        if self._db._bound_connection is None:
             raise ValueError("enqueue requires the current Flow in its workflow transaction")
         now = self._db.now()
         with (
@@ -153,8 +150,8 @@ class JobStore(Repository):
                 " WHERE jobs.flow_id=excluded.flow_id AND jobs.kind=excluded.kind"
                 " AND jobs.payload IS NOT DISTINCT FROM excluded.payload RETURNING *",
                 (
-                    flow_id,
-                    flow_id,
+                    flow.id,
+                    flow.id,
                     kind,
                     JobState.QUEUED,
                     0,
@@ -166,7 +163,7 @@ class JobStore(Repository):
                 ),
             ).fetchone()
             if kind is not JobKind.ARCHIVE:
-                FlowStore(self._db).transition(locked_flow, FlowEvent.JOB_ENQUEUED, now=now)
+                FlowStore(self._db).transition(flow, FlowEvent.JOB_ENQUEUED, now=now)
         return required(row)
 
     def record_merge_notice(self, flow: Flow, delivery: FlowDelivery) -> Job:
@@ -174,7 +171,7 @@ class JobStore(Repository):
         if (delivery.flow_id != flow.id or delivery.pr_number is None
                 or delivery.merged_at is None or delivery.merge_commit_sha is None):
             raise ValueError("merge notice requires the current delivery's complete merge facts")
-        job = self.enqueue_job(flow.id, JobKind.ARCHIVE, locked_flow=flow)
+        job = self.enqueue_job(flow, JobKind.ARCHIVE)
         notice = MergeArchiveNotice(
             job_id=job.id, flow_id=flow.id, round_no=flow.current_round_no, repo=flow.repo,
             pr_number=delivery.pr_number, merged_at=delivery.merged_at,

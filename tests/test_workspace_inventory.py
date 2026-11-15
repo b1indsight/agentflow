@@ -29,6 +29,7 @@ from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import VcsVerificationError
 from app.worker.execution.workspaces import RepositoryWorkspaces, WorkspaceBinding
 from app.worker.state.execution import ExecutionState, ExecutionStateError
+from tests.flow_fixtures import enqueue_job
 from tests.test_worker_executor import RecordingAgent, RecordingToolCaller, assignment_secret
 from tests.test_worker_session import _previous_journal
 from tests.test_worker_workspaces import managed_seed
@@ -519,7 +520,7 @@ def test_only_local_merge_notice_is_independent_of_resource_settlement(store, mi
         tx.lock_workflow(job.flow_id)
         tx.stops.request(job.flow_id)
     flow = merged_business(store, job.flow_id)
-    notice = store.jobs.enqueue_job(flow.id, JobKind.ARCHIVE)
+    notice = enqueue_job(store, flow.id, JobKind.ARCHIVE)
     payload = {"version": 2, "source": "control", "terminal": {
         "type": "merge_archive", "job_id": notice.id, "flow_id": flow.id, "round_no": 1,
         "repo": flow.repo, "pr_number": 17, "merged_at": store.now().isoformat(),

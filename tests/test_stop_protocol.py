@@ -50,6 +50,7 @@ from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.execution.vcs import _run
 from app.worker.runtime import WorkerRuntime
 from app.worker.state.execution import ExecutionState
+from tests.flow_fixtures import enqueue_job
 from tests.github import RecordingGitHub
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_vcs import _git
@@ -337,7 +338,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
         for item in pool.inventory():
             assert store.workers.report_workspace("worker-1", "setup", item)
         other = store.flows.create_flow("owner/repo", 999, 1)
-        other_job = store.jobs.enqueue_job(other.id, JobKind.INITIAL)
+        other_job = enqueue_job(store, other.id, JobKind.INITIAL)
         claimed = store.workers.assign_job("worker-1", "unrelated", "setup")
         assert claimed.id == other_job.id
         unrelated = await pool.claim("owner/repo", other.id, claimed.workspace, claimed.generation,
@@ -360,7 +361,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
                 flow.current_attempt_id = attempt.id
                 store.flows.update_flow_metadata(flow)
                 session = ExecutionState(root, flow.id)
-                store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+                enqueue_job(store, flow.id, JobKind.INITIAL)
                 started.clear()
                 handler.gateway.wake_all()
                 while not started.is_set():
@@ -559,7 +560,7 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
         flow.current_attempt_id = attempt.id
         store.flows.update_flow_metadata(flow)
         flows.append(flow)
-        jobs.append(store.jobs.enqueue_job(flow.id, JobKind.INITIAL))
+        jobs.append(enqueue_job(store, flow.id, JobKind.INITIAL))
     started, successor_dispatched = asyncio.Event(), asyncio.Event()
     executed = []
 

@@ -35,6 +35,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import FeedbackUpdate
 from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteRef, Repository
+from tests.flow_fixtures import enqueue_job
 from tests.github import RecordingGitHub, record_call
 from tests.review_memory import judge_decision
 from tests.test_coordinator import coordinator
@@ -82,7 +83,7 @@ async def pending_revision(store, revision_resources, request):
     flow.current_attempt_id = attempt.id
     store.flows.update_flow_metadata(flow)
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
-    initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    initial = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker-a", "initial", "epoch") is not None
     assert store.workers.finish_assignment(initial.id, "worker-a", "initial", JobState.DONE, "epoch")
     report_settled(store, initial.id, epoch="epoch")

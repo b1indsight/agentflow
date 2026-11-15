@@ -29,6 +29,7 @@ from app.persistence.activity import ActivityStore
 from app.persistence.metrics import read_snapshot
 from app.telemetry.logging import configure_logging
 from app.telemetry.metrics import Metrics
+from tests.flow_fixtures import enqueue_job
 from tests.workspace_fixtures import register_worker
 
 
@@ -161,7 +162,7 @@ async def test_snapshot_runs_off_event_loop_and_scrape_never_reads_database(monk
 
 def test_repeated_snapshots_do_not_count_execution_receipt_twice(store, postgresql_url):
     flow = store.flows.create_flow('private/repository', 1, 1)
-    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    job = enqueue_job(store, flow.id, JobKind.INITIAL)
     register_worker(store, 'w', repo=flow.repo, epoch='epoch')
     assert store.workers.assign_job('w', 'token', 'epoch')
     result = Succeeded(job_id=job.id, assignment_token='token',

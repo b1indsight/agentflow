@@ -16,6 +16,7 @@ from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, VcsKind
 from app.github import GitHubError, GitHubErrorKind, RemoteRef, Repository
 from app.persistence.deliveries import DeliveryStore
+from tests.flow_fixtures import enqueue_job
 from tests.github import RecordingGitHub
 from tests.test_merge import route_merge
 from tests.workspace_fixtures import register_worker
@@ -91,7 +92,7 @@ async def test_open_pr_prepares_and_replays_without_remote_delivery(
 async def test_open_pr_after_merge_cannot_restore_opening_delivery(store, completed_open_initial):
     # A still-running execution can emit a tool call after the merge webhook retires coding.
     flow, subject, github, request, _ = completed_open_initial
-    job = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
+    job = enqueue_job(store, flow.id, JobKind.REVISION)
     replacement = store.workers.assign_job("worker-a", "later-token", "epoch")
     assert replacement is not None and replacement.id == job.id
     assert store.workers.start_assignment(
@@ -300,7 +301,7 @@ async def test_tool_ledger_keeps_business_arguments_and_rejects_call_id_reuse_by
     )
     assert call.arguments == invocation.arguments.arguments
     assert call.response == result.delivery_receipt
-    job = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
+    job = enqueue_job(store, flow.id, JobKind.REVISION)
     replacement = store.workers.assign_job("worker-a", "token-b", "epoch")
     assert replacement is not None and replacement.id == job.id
     # A later execution cannot claim an old call_id, even with identical business arguments.

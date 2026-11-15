@@ -12,7 +12,7 @@ from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, 
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
-from tests.flow_fixtures import apply_flow_event
+from tests.flow_fixtures import apply_flow_event, enqueue_job
 from tests.test_cancel_drain import running
 
 
@@ -209,7 +209,7 @@ def test_real_archive_filters_and_rebuild_preserve_business_outcome(store, reaso
 
 def test_resume_starts_new_round_without_overwriting_archive_or_conversation(store):
     flow = store.flows.create_flow("octo/repo", 7, 1)
-    original_job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    original_job = enqueue_job(store, flow.id, JobKind.INITIAL)
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.pr_number, delivery.state = 17, DeliveryState.CLOSED
     store.deliveries.update_delivery(delivery)

@@ -10,6 +10,7 @@ import pytest
 from app.contracts.protocol import ExecutionStopped, Failed
 from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState
+from tests.flow_fixtures import enqueue_job
 from tests.workspace_fixtures import register_worker, report_settled
 
 NOW = datetime(2026, 9, 29, tzinfo=UTC)
@@ -22,7 +23,7 @@ def expiring(store, *, started=False):
     flow.current_attempt_id = attempt.id
     store.flows.update_flow_metadata(flow)
     register_worker(store, "w", repo=flow.repo, epoch="epoch")
-    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    job = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("w", "token", "epoch").id == job.id
     if started:
         assert store.workers.start_assignment(job.id, attempt.id, "w", "token", "epoch")

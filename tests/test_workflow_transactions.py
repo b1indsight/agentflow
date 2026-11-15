@@ -23,7 +23,7 @@ from app.domain.review_models import FeedbackUpdate
 from app.persistence.database import Database
 from app.persistence.jobs import JobStore
 from app.persistence.store import Store
-from tests.flow_fixtures import apply_flow_event
+from tests.flow_fixtures import apply_flow_event, enqueue_job
 from tests.github import RecordingGitHub
 from tests.review_memory import review_context
 from tests.test_coordinator import coordinator
@@ -199,7 +199,7 @@ def test_retry_rolls_back_with_real_database(store: Store, monkeypatch, command)
     flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
     service = ControlService(database=store.database)
     if command == "resume":
-        store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+        enqueue_job(store, flow.id, JobKind.INITIAL)
         delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
         delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
         store.deliveries.update_delivery(delivery)
@@ -294,7 +294,7 @@ def bound_review_flow(store: Store):
     delivery.state, delivery.base_branch, delivery.pr_number = DeliveryState.OPEN, "trunk", 17
     delivery.head_sha = "abc123"
     store.deliveries.update_delivery(delivery)
-    initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    initial = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker-a", "initial-token", "epoch-a") is not None
     # The fixture supplies the delivery directly; no INITIAL process was dispatched.
     # Starting this job would require a real terminal receipt before any later archive.

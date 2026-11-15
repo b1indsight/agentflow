@@ -40,6 +40,7 @@ from app.github import (
 )
 from app.persistence.activity import ActivityStore
 from app.persistence.store import Store
+from tests.flow_fixtures import enqueue_job
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_github_client import settings
@@ -308,7 +309,7 @@ async def test_unbound_initial_is_todo_then_bound_work_is_in_progress(store, pro
     delivery = store.deliveries.get_delivery(flow.id)
     delivery.state, delivery.pr_number = DeliveryState.NONE, None
     store.deliveries.update_delivery(delivery)
-    store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    enqueue_job(store, flow.id, JobKind.INITIAL)
     await converge(sync)
     assert state(store).desired_status is ProjectStatus.TODO
     register_worker(store, "project-worker", repo=flow.repo, epoch="epoch")

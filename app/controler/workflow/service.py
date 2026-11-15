@@ -99,9 +99,8 @@ class ControlService:
                 return None
             flow = flows_tx.create_flow(repo, issue_number, installation_id, task_content=task_content)
             jobs_tx.enqueue_job(
-                flow.id, JobKind.INITIAL,
+                flow, JobKind.INITIAL,
                 payload={"issue_number": issue_number} if issue_number is not None else {},
-                locked_flow=flow,
             )
         self._jobs_available()
         logger.info("flow {} created (queued) for {}", flow.id, repo)
@@ -194,10 +193,9 @@ class ControlService:
                 )
             flows.select_owner(resumed)
             self.jobs.using(tx).enqueue_job(
-                resumed.id, JobKind.INITIAL,
+                resumed, JobKind.INITIAL,
                 payload={"issue_number": resumed.issue_number}
                 if resumed.issue_number is not None else {},
-                locked_flow=resumed,
             )
         self._jobs_available()
         return resumed
@@ -382,13 +380,12 @@ class ControlService:
                     )
                 flows_tx.transition(fresh, FlowEvent.RETRY_REQUESTED)
                 replacement = jobs_tx.enqueue_job(
-                    fresh.id,
+                    fresh,
                     kind,
                     payload=failed_job.payload
                     if failed_job
                     else ({"issue_number": fresh.issue_number}
                           if fresh.issue_number is not None else {}),
-                    locked_flow=fresh,
                 )
                 if failed_job is not None and kind is JobKind.REVISION:
                     reviews_tx.retry(failed_job, replacement)

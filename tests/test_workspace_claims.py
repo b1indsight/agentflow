@@ -19,6 +19,7 @@ from app.domain.inference_models import (
 from app.domain.models import FlowState, Job, JobKind, JobState, WorkspaceInventory
 from app.persistence.records import required
 from app.persistence.store import Store
+from tests.flow_fixtures import enqueue_job
 
 
 def identity(name: str) -> str:
@@ -53,7 +54,7 @@ def queued(store: Store, issue: int = 1, repo: str = "owner/repo") -> Job:
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
     store.flows.update_flow_metadata(flow)
-    return store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    return enqueue_job(store, flow.id, JobKind.INITIAL)
 
 
 def claim(store: Store, worker: str = "a", token: str = "token", epoch: str = "epoch") -> Job:
@@ -130,7 +131,7 @@ def test_lowered_limit_retains_bound_work_without_filling_old_idle_slots(store: 
         queued(store, issue)
     first = claim(store)
     finish(store, first)
-    revision = store.jobs.enqueue_job(first.required_flow_id, JobKind.REVISION)
+    revision = enqueue_job(store, first.required_flow_id, JobKind.REVISION)
     connect(store, "a", 1, epoch="new")
     for item in items:
         if item.workspace == first.workspace:
@@ -145,7 +146,7 @@ def test_competing_claims_cannot_overlap_flow_or_workspace(store: Store) -> None
     for index in range(3):
         provision(store, "a", index)
     first = queued(store)
-    store.jobs.enqueue_job(first.required_flow_id, JobKind.REVISION)
+    enqueue_job(store, first.required_flow_id, JobKind.REVISION)
     second = queued(store, 2)
     barrier = Barrier(4)
 
@@ -169,7 +170,7 @@ def test_late_inventory_and_reconnect_cannot_erase_claim(store: Store) -> None:
     assert current.current_job_id == job.id
     assert not store.workers.report_workspace("a", "epoch", item.model_copy(update={"generation": 2}))
     finish(store, job)
-    revision = store.jobs.enqueue_job(job.required_flow_id, JobKind.REVISION)
+    revision = enqueue_job(store, job.required_flow_id, JobKind.REVISION)
     connect(store, "a", epoch="new")
     assert not store.workers.report_workspace("a", "epoch", item)
     assert store.workers.assign_job("a", "new", "new") is None
@@ -203,7 +204,7 @@ def test_terminal_commit_reuses_binding_without_ack_and_preserves_drain(store: S
     item = provision(store, "a")
     queued(store)
     job = claim(store)
-    next_job = store.jobs.enqueue_job(job.required_flow_id, JobKind.REVISION)
+    next_job = enqueue_job(store, job.required_flow_id, JobKind.REVISION)
     assert store.workers.assign_job("a", "too-soon", "epoch") is None
     finish(store, job)
     queued(store, 2)
@@ -300,7 +301,7 @@ def test_started_control_failure_retains_unknown_writer_claim(store: Store) -> N
     assert store.workers.start_assignment(job.id, attempt, "a", "token", "epoch")
     store.jobs.record_control_result(job.id, Failed(job_id=job.id, assignment_token="token", error="lost"), "lost")
     assert store.jobs.complete_persisted_result(job.id, JobState.FAILED)
-    store.jobs.enqueue_job(job.required_flow_id, JobKind.REVISION)
+    enqueue_job(store, job.required_flow_id, JobKind.REVISION)
     assert not store.workers.release_flow_execution(job.required_flow_id)
     assert store.workers.assign_job("a", "unsafe", "epoch") is None
     assert next(w for w in store.workers.list_workspaces("a") if w.workspace == job.workspace).current_job_id == job.id

@@ -18,7 +18,7 @@ from app.domain.review_models import BatchState
 from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteRef, Repository
 from app.persistence.activity import ActivityStore
 from app.persistence.jobs import JobStore
-from tests.flow_fixtures import apply_flow_event
+from tests.flow_fixtures import apply_flow_event, enqueue_job
 from tests.github import RecordingGitHub, record_call
 from tests.test_coordinator import coordinator
 from tests.test_review_batches import batch_for, feedback, ingest, settle
@@ -91,7 +91,7 @@ async def test_closed_binding_waits_for_started_executor_stop_before_archive(
 ):
     flow, clock = lifecycle_flow
     register_worker(store, "worker", repo=flow.repo, epoch="old-epoch")
-    store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    enqueue_job(store, flow.id, JobKind.INITIAL)
     job = store.workers.assign_job("worker", "token", "old-epoch")
     if started:
         assert store.workers.start_assignment(job.id, flow.current_attempt_id, "worker", "token", "old-epoch")
@@ -163,7 +163,7 @@ async def test_closed_missing_journal_preserves_late_result_and_reopen(store, pe
 async def test_reopen_retires_unstarted_jobs_requeued_after_pause(store, lifecycle_flow, recovery, lifecycle_resources):
     flow, clock = lifecycle_flow
     register_worker(store, "worker", repo=flow.repo, epoch="epoch")
-    initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    initial = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker", "initial", "epoch") is not None
     assert store.workers.finish_assignment(initial.id, "worker", "initial", JobState.DONE, "epoch")
     report_settled(store, initial.id, epoch="epoch")
@@ -214,13 +214,13 @@ async def test_lifecycle_hint_during_query_schedules_a_fresh_observation(store, 
 
 async def test_close_retires_queued_work_and_keeps_running_executor_slot(store, lifecycle_flow, lifecycle_resources):
     flow, _ = lifecycle_flow
-    store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    enqueue_job(store, flow.id, JobKind.INITIAL)
     register_worker(store, "worker", repo=flow.repo, epoch="epoch")
     running = store.workers.assign_job("worker", "token", "epoch")
     assert store.workers.start_assignment(
         running.id, flow.current_attempt_id, "worker", "token", "epoch"
     )
-    queued = store.jobs.enqueue_job(flow.id, JobKind.REVISION)
+    queued = enqueue_job(store, flow.id, JobKind.REVISION)
     github = GitHub(flow)
     await check(store, flow, github)
     version = store.deliveries.get_delivery(flow.id).version
@@ -294,7 +294,7 @@ async def test_reopen_does_not_refreeze_feedback_from_an_abandoned_round(
 
 async def test_reopen_waits_for_old_executor_and_pending_result(store, lifecycle_flow, lifecycle_resources):
     flow, _ = lifecycle_flow
-    store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    enqueue_job(store, flow.id, JobKind.INITIAL)
     register_worker(store, "worker", repo=flow.repo, epoch="epoch")
     job = store.workers.assign_job("worker", "token", "epoch")
     assert store.workers.start_assignment(
@@ -514,7 +514,7 @@ async def test_initial_close_before_final_commit_keeps_identity_without_authoriz
 
 def test_close_and_queued_retirement_roll_back_together(store, lifecycle_flow, monkeypatch):
     flow, _ = lifecycle_flow
-    queued = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    queued = enqueue_job(store, flow.id, JobKind.INITIAL)
 
     def fail(*args, **kwargs):
         raise RuntimeError("before commit")

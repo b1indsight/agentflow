@@ -128,9 +128,9 @@ class JobCoordinator:
                 return
             reviews_tx.record_decision(batch, decision.model_copy(update={"verdict": verdict}))
             if verdict.verdict in {Verdict.ANSWER, Verdict.REVISE}:
-                job = jobs_tx.enqueue_job(flow.id, JobKind.REVISION,
+                job = jobs_tx.enqueue_job(locked.flow, JobKind.REVISION,
                     {"batch_id": batch.id, "instruction": verdict.instruction,
-                     "purpose": verdict.verdict.value}, locked_flow=locked.flow)
+                     "purpose": verdict.verdict.value})
                 reviews_tx.advance(batch.id, job)
             else:
                 reviews_tx.complete(batch.id,

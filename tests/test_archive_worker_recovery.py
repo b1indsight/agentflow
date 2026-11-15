@@ -21,6 +21,7 @@ from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.runtime import WorkerRootLock
 from app.worker.state.execution import ExecutionState
+from tests.flow_fixtures import enqueue_job
 from tests.github import RecordingGitHub
 from tests.test_merge import route_merge
 from tests.test_remote_e2e import QueueConnection, QueueSocket
@@ -46,7 +47,7 @@ async def matching_pool(store, root, flow, monkeypatch):
     for item in pool.inventory():
         assert store.workers.report_workspace("worker-a", "epoch-a", item)
     other = store.flows.create_flow(flow.repo, 9000, 42)
-    queued = store.jobs.enqueue_job(other.id, JobKind.INITIAL)
+    queued = enqueue_job(store, other.id, JobKind.INITIAL)
     claimed = store.workers.assign_job("worker-a", "other-token", "epoch-a")
     assert claimed.id == queued.id and claimed.workspace == other_id
     other_binding = await pool.claim(flow.repo, other.id, claimed.workspace, claimed.generation,
@@ -198,7 +199,7 @@ async def test_modern_merge_stops_original_worker_before_reusing_only_its_genera
         assert managed_seed.exists() and other_repo.exists()
         # No inventory release or recovery clock: the exact stop already enabled reuse.
         successor = store.flows.create_flow(flow.repo, 999, 42)
-        queued = store.jobs.enqueue_job(successor.id, JobKind.INITIAL)
+        queued = enqueue_job(store, successor.id, JobKind.INITIAL)
         epoch = store.workers.list_workers()[0].connection_epoch
         replacement = store.workers.assign_job("worker-a", "next-generation", epoch)
         assert replacement.id == queued.id and replacement.workspace == binding.slot_id

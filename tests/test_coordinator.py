@@ -31,6 +31,7 @@ from app.domain.models import DeliveryState, FlowState, Job, JobKind, JobState
 from app.github import GitHubApp
 from app.persistence.store import Store
 from app.plugins import get_plugin_manager
+from tests.flow_fixtures import enqueue_job
 from tests.github import RecordingGitHub
 from tests.workspace_fixtures import register_worker
 
@@ -464,7 +465,7 @@ async def test_initial_failure_keeps_diagnostics_local(store, prepared_initial, 
 async def test_recovery_applies_unassigned_control_failure_without_rewriting_inbox(store, version):
     # Preparation can fail before assignment; only a control failure may use the sentinel token.
     flow = store.flows.create_flow("owner/control", 1, 42)
-    job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    job = enqueue_job(store, flow.id, JobKind.INITIAL)
     terminal = Failed(job_id=job.id, assignment_token="control", error="preparation failed")
     with store.transaction() as tx:
         tx.lock_workflow(flow.id)
