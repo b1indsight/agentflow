@@ -779,6 +779,12 @@ svg {
 .rail-group {
   margin-bottom: 16px;
 }
+.inbox-note {
+  margin: 4px 10px 10px;
+  color: var(--muted);
+  font-size: var(--text-small);
+  overflow-wrap: anywhere;
+}
 .rail-group summary {
   display: flex;
   align-items: center;

@@ -14,6 +14,7 @@ import {
   Check,
   ChevronDown,
   FileText,
+  Inbox,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
@@ -86,6 +87,22 @@ const blank = (): Record<Phase, Column> => ({
   blocked: column(),
   archived: column(),
 });
+const sidebarGroups: {
+  key: string;
+  label: string;
+  members: (readonly [Phase, string])[];
+}[] = [
+  {
+    key: "inbox",
+    label: "Inbox",
+    members: phases.filter(([p]) => p === "blocked" || p === "review"),
+  },
+  ...phases.map((phase) => ({
+    key: phase[0],
+    label: phase[1],
+    members: [phase],
+  })),
+];
 const flowTabs = [
   { value: "overview", label: "概览" },
   { value: "conversation", label: "会话" },
@@ -238,7 +255,7 @@ function Board({
 function Detail({
   id,
   tab,
-  all,
+  columns,
   counts,
   load,
   refresh,
@@ -247,7 +264,7 @@ function Detail({
 }: {
   id: number;
   tab: Tab;
-  all: FlowSummary[];
+  columns: Record<Phase, Column>;
   counts: Record<Phase, number>;
   load: (p: Phase) => void;
   refresh: number;
@@ -484,7 +501,9 @@ function Detail({
           prior && prior.state_version > value.state_version ? prior : value,
         );
         // Revalidate changed summaries without resetting unchanged list pages.
-        const summary = all.find((item) => item.id === value.id);
+        const summary = columns[value.phase].items.find(
+          (item) => item.id === value.id,
+        );
         if (!summary || summary.state_version < value.state_version)
           onChanged();
       })
@@ -593,48 +612,93 @@ function Detail({
           </button>
         </div>
         <nav className="rail-scroll" data-scroll-root>
-          {phases.map(([p, l]) => {
-            const group = all.filter((f) => f.phase === p);
+          {sidebarGroups.map(({ key, label, members }) => {
+            const group = members.flatMap(([p]) => columns[p].items);
+            const inbox = key === "inbox";
             return (
               <SavedDetails
                 open
-                key={p}
-                stateKey={`rail-group-${p}`}
-                className={`rail-group phase-${p}`}
+                key={key}
+                stateKey={`rail-group-${key}`}
+                className={`rail-group${inbox ? " rail-inbox" : ` phase-${key}`}`}
               >
                 <summary>
-                  {l}
-                  <span className="count">{counts[p]}</span>
+                  {inbox && <Inbox aria-hidden="true" />}
+                  {label}
+                  <span className="count">
+                    {members.reduce((total, [p]) => total + counts[p], 0)}
+                  </span>
                 </summary>
                 <WindowList
                   count={group.length}
-                  label={`侧栏-${p}`}
+                  label={`侧栏-${key}`}
                   itemKey={(i) => group[i].id}
                   estimate={78}
                 >
                   {(i) => (
                     <button
-                      className={`flow-tab${group[i].id === id ? " active" : ""}`}
+                      className={`flow-tab phase-${group[i].phase}${group[i].id === id ? " active" : ""}`}
+                      aria-current={group[i].id === id ? "page" : undefined}
                       onClick={() => {
                         setNav(false);
                         location.hash = `flow/${group[i].id}/${tab}`;
                       }}
                     >
                       <i className="dot" />
-                      <span className="name">{name(group[i])}</span>
+                      <span className="name">
+                        {name(group[i])}
+                        {inbox && (
+                          <span className="meta">
+                            {group[i].repo} · {ref(group[i])}
+                          </span>
+                        )}
+                      </span>
                     </button>
                   )}
                 </WindowList>
-                {group.length < counts[p] && (
-                  <button
-                    className="btn"
-                    aria-label={`更多${l}任务`}
-                    title={`更多${l}任务`}
-                    onClick={() => load(p)}
-                  >
-                    <ArrowDown aria-hidden="true" />
-                  </button>
-                )}
+                {inbox &&
+                  !group.length &&
+                  members.every(
+                    ([p]) =>
+                      !columns[p].busy && !columns[p].error && !columns[p].more,
+                  ) && (
+                    <p className="inbox-note">当前筛选下暂无待人工处理的任务</p>
+                  )}
+                {members.map(([p, phaseLabel]) => {
+                  const c = columns[p];
+                  const label = c.error
+                    ? `重试读取${phaseLabel}任务`
+                    : `更多${phaseLabel}任务`;
+                  return (
+                    <div key={p}>
+                      {c.busy && (
+                        <p className="inbox-note" role="status">
+                          正在加载{phaseLabel}任务…
+                        </p>
+                      )}
+                      {c.error && (
+                        <p className="inbox-note" role="alert">
+                          {phaseLabel}读取失败：{c.error}
+                        </p>
+                      )}
+                      {(c.more || c.error) && (
+                        <button
+                          className="btn"
+                          aria-label={label}
+                          title={label}
+                          disabled={c.busy}
+                          onClick={() => load(p)}
+                        >
+                          {c.error ? (
+                            <RefreshCw aria-hidden="true" />
+                          ) : (
+                            <ArrowDown aria-hidden="true" />
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </SavedDetails>
             );
           })}
@@ -1472,7 +1536,6 @@ export default function App() {
     history.replaceState(null, "", url);
     setQuery(value);
   };
-  const all = phases.flatMap(([p]) => columns[p].items);
   return (
     <>
       <header className="workspace-bar">
@@ -1537,8 +1600,10 @@ export default function App() {
             title="刷新当前视图"
             onClick={() => {
               if (current.settings) setSettingsRefresh((x) => x + 1);
-              else if (current.id) setRefresh((x) => x + 1);
-              else phases.forEach(([p]) => load(p, true));
+              else {
+                if (current.id) setRefresh((x) => x + 1);
+                phases.forEach(([p]) => load(p, true));
+              }
             }}
           >
             <RefreshCw />
@@ -1555,7 +1620,7 @@ export default function App() {
           key={current.id}
           id={current.id}
           tab={current.tab}
-          all={all}
+          columns={columns}
           counts={counts}
           load={load}
           refresh={refresh}
