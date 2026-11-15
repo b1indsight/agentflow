@@ -11,9 +11,20 @@ from app.domain.models import CodingExecutionContext, GitHubCapability, SessionU
 from app.worker.execution.codex import CodexAgent, _codex_environment, _start_args
 
 
-async def test_adapter_returns_raw_output_without_interpreting_business_schema(monkeypatch, tmp_path):
+def pipe(data=b""):
+    reader = asyncio.StreamReader()
+    reader.feed_data(data)
+    reader.feed_eof()
+    return reader
+
+
+@pytest.mark.parametrize("model,effort", [
+    (None, None), ("custom-codex-model", None), (None, "high"), ("custom-codex-model", "ultra"),
+])
+async def test_adapter_returns_raw_output_without_interpreting_business_schema(monkeypatch, tmp_path, model, effort):
     # A caller-owned schema need not contain INITIAL/REVISION fields. The adapter
     # must forward the CLI output; only the task executor knows its business type.
+    monkeypatch.setenv("EXAMPLE_MCP_TOKEN", "custom-mcp-token")
     schema = tmp_path / "schema.json"
     schema.write_text('{"type":"object"}')
     raw = '{"caller_owned":"result"}'
@@ -21,21 +32,29 @@ async def test_adapter_returns_raw_output_without_interpreting_business_schema(m
     class Process:
         pid = 999999999
         returncode = 0
-
-        async def communicate(self):
-            return b'{"type":"thread.started","thread_id":"session-1"}\n', b""
+        stdout = pipe(b'{"type":"thread.started","thread_id":"session-1"}\n')
+        stderr = pipe()
 
         async def wait(self):
             return self.returncode
 
     async def spawn(*args, **kwargs):
         assert kwargs["cwd"] == tmp_path
+        assert kwargs["env"]["EXAMPLE_MCP_TOKEN"] == "custom-mcp-token"
         assert args[args.index("--output-schema") + 1] == str(schema)
+        if model is None:
+            assert "--model" not in args
+        else:
+            assert args[args.index("--model") + 1] == model
+        overrides = [args[index + 1] for index, item in enumerate(args) if item == "-c"]
+        assert [item for item in overrides if item.startswith("model_reasoning_effort=")] == (
+            [f'model_reasoning_effort="{effort}"'] if effort is not None else []
+        )
         Path(args[args.index("-o") + 1]).write_text(raw)
         return Process()
 
     monkeypatch.setattr("app.worker.execution.codex.asyncio.create_subprocess_exec", spawn)
-    run = await CodexAgent(trusted_host=True).start("task", tmp_path, output_schema=schema)
+    run = await CodexAgent(trusted_host=True).start("task", tmp_path, output_schema=schema, model=model, effort=effort)
     assert (run.session_id, run.last_message, run.exit_code) == ("session-1", raw, 0)
 
 
@@ -67,6 +86,13 @@ def test_codex_environment_removes_worker_and_github_credentials() -> None:
             "FLOWTOOL_DATABASE_URL": "database-secret",
             "GH_TOKEN": "github-secret",
             "GITHUB_TOKEN": "github-secret",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": "personal-helper",
+            "GIT_DIR": "/parent/repo/.git",
+            "SSH_ASKPASS": "/personal/askpass",
+            "CODEX_THREAD_ID": "parent-thread",
+            "EXAMPLE_MCP_TOKEN": "custom-mcp-token",
         }
     )
 
@@ -77,13 +103,14 @@ def test_codex_environment_removes_worker_and_github_credentials() -> None:
         "OPENAI_API_KEY": "codex-secret",
         "HTTPS_PROXY": "https://proxy.example",
         "SSL_CERT_FILE": "/etc/ssl/corp.pem",
+        "EXAMPLE_MCP_TOKEN": "custom-mcp-token",
     }
 
 
 def test_run_context_injects_only_scoped_push_and_mcp_capabilities() -> None:
     context = CodingExecutionContext(
         github=GitHubCapability(SecretStr("push-secret"), "owner/repo",
-                                datetime.now(UTC) + timedelta(minutes=5)),
+                                datetime.now(UTC) + timedelta(minutes=5), "flowtool[bot]", 7654321),
         mcp_url="http://127.0.0.1:12345/mcp",
         mcp_token=SecretStr("mcp-secret"),
     )
@@ -117,7 +144,7 @@ async def test_resume_also_requires_explicit_trusted_host_mode() -> None:
 async def test_resume_uses_current_directory_and_disables_saved_broker(monkeypatch, tmp_path):
     # A recovered session can retain another directory and an expired INITIAL broker.
     process = AsyncMock(returncode=0, pid=999999999)
-    process.communicate.return_value = (b"", b"")
+    process.stdout, process.stderr = pipe(), pipe()
     spawn = AsyncMock(return_value=process)
     monkeypatch.setattr("app.worker.execution.codex.asyncio.create_subprocess_exec", spawn)
 
@@ -125,6 +152,7 @@ async def test_resume_uses_current_directory_and_disables_saved_broker(monkeypat
 
     args, kwargs = spawn.call_args
     assert kwargs["cwd"] == tmp_path
+    assert "--model" not in args and "-m" not in args
     assert f'cwd="{tmp_path}"' in args
     assert 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}' in args
 
@@ -143,9 +171,8 @@ async def test_cli_session_rejection_is_classified_only_before_any_events(
     class Process:
         pid = 999999999
         returncode = 1
-
-        async def communicate(self):
-            return events, error.encode()
+        stdout = pipe(events)
+        stderr = pipe(error.encode())
 
         async def wait(self):
             return self.returncode
@@ -163,17 +190,21 @@ async def test_cli_session_rejection_is_classified_only_before_any_events(
         assert run.exit_code == 1
 
 
-async def test_revision_deadline_cancels_the_whole_codex_process_group(monkeypatch, tmp_path):
+async def test_cancellation_reaps_codex_group_before_removing_config(monkeypatch, tmp_path):
+    existing = asyncio.all_tasks()
     entered = asyncio.Event()
     stopped = []
     files = []
 
+    async def read(_size):
+        entered.set()
+        await asyncio.Future()
+
     class Process:
         pid = 12345
-
-        async def communicate(self):
-            entered.set()
-            await asyncio.Future()
+        stdout = AsyncMock()
+        stdout.read.side_effect = read
+        stderr = pipe()
 
         async def wait(self):
             stopped.append("waited")
@@ -192,17 +223,17 @@ async def test_revision_deadline_cancels_the_whole_codex_process_group(monkeypat
     running.cancel()
     with pytest.raises(asyncio.CancelledError):
         await running
-    assert stopped == [(12345, signal.SIGKILL), "waited"]
+    assert stopped[-2:] == [(12345, signal.SIGKILL), "waited"]
     assert not files[0].exists()
+    assert not asyncio.all_tasks() - existing
 
 
 async def test_mcp_token_is_redacted_before_results_leave_driver(monkeypatch, tmp_path):
     class Process:
         pid = 999999999
         returncode = 1
-
-        async def communicate(self):
-            return b"", b"failed with mcp-secret"
+        stdout = pipe()
+        stderr = pipe(b"failed with mcp-secret")
 
         async def wait(self):
             return self.returncode
