@@ -12,11 +12,11 @@
 
 用户已说明当前没有未结清的 Flow，本项取消中间状态查询、等待旧版恢复或排空、迁移与相应验证要求。下方 Initial plan 保留原文；其中相关条款由 [001 修订](#001--2026-11-15--无未结清-flow不迁移中间状态) 取代。
 
-已删除三条执行路径及 `answer_dispatched` 的模型字段、专用授权方法和新建表列，保留已完成历史的读取和正常任务回归。旧库物理列暂留，不新增启动迁移，生产删列仍须另行授权。DEMO 已改为在不同进程中运行实际基线和当前实现，不再临时改写业务函数。
+已删除三条执行路径及 `answer_dispatched` 的模型字段、专用授权方法和新建表列，保留已完成历史的读取和正常任务回归。旧库物理列暂留，不新增启动迁移，生产删列仍须另行授权。前后对比已完成；临时 DEMO 脚本按用户后续要求删除，历史验证记录保留。
 
 ## 最小执行前后对比
 
-以下为[可运行 DEMO](../../scripts/smoke/control_legacy_demo.py)实测的删减前后行为。GitHub 使用记录替身，数据库为隔离 PostgreSQL，不涉及实际 Flow 迁移。
+以下为临时 DEMO 实测的删减前后行为。GitHub 使用记录替身，数据库为隔离 PostgreSQL，不涉及实际 Flow 迁移。脚本已删除，不再提供运行入口。
 
 | 场景 | 执行前（基线） | 执行后（本次实现） |
 | --- | --- | --- |
@@ -25,12 +25,6 @@
 | 标题 | 结构化命名与普通文本回写两条路径 | 只允许结构化命名更新标题；通用文本推理仍可用 |
 
 当前实现保留正常任务、历史记录读取和通用结果对账：[答复入队](../../app/controler/workflow/coordinator.py#L88-L143)、[通用副作用](../../app/controler/workflow/effects.py#L89-L155)、[结构化标题应用](../../app/controler/workflow/results.py#L131-L175)。下方初始计划中的源码行号对应规划时的版本。
-
-将 `FLOWTOOL_TEST_DATABASE_URL` 指向可丢弃的本地测试库后，运行：
-
-```sh
-uv run python scripts/smoke/control_legacy_demo.py --before 847f03cbcae8bca97f366e872ced9b43e1c43644
-```
 
 ## 1. 初始计划
 
@@ -110,7 +104,7 @@ uv run python scripts/smoke/control_legacy_demo.py --before 847f03cbcae8bca97f36
 ### 002 — 2026-11-15 — 可运行的隔离前后对比 DEMO
 
 - **需求与边界：** 用户要求可运行的最小执行前后对比 DEMO。本轮新增独立演示，不将该请求扩大为完整业务删减、生产操作或中间状态迁移授权。
-- **实际改动：** 新增 [`scripts/smoke/control_legacy_demo.py`](../../scripts/smoke/control_legacy_demo.py)，复用现有数据库 fixture、结果接收及应用入口。before 直接运行当前代码；after 仅在测试进程内移除 triage 旧答复分支、failure 评论抑制和纯文本标题回写，并移除旧答复方法；每个场景使用独立 schema，未改应用源文件。
+- **实际改动：** 新增 `scripts/smoke/control_legacy_demo.py`，复用现有数据库 fixture、结果接收及应用入口。before 直接运行当前代码；after 仅在测试进程内移除 triage 旧答复分支、failure 评论抑制和纯文本标题回写，并移除旧答复方法；每个场景使用独立 schema，未改应用源文件。
 - **观察结果：** 新答复在两侧均只入队一个 REVISION 且不直接评论，after 不再具有旧直接答复入口；人工构造的旧 failure effect 从 skipped 变为 succeeded，并只向 GitHub 替身记录评论；普通文本结果仍成功保存，但 after 不再写标题；结构化命名两侧都正常写入标题。演示旧 key 的差异不表示迁移任何实际记录。
 - **执行证据：** 在临时本地 PostgreSQL 上执行 `uv run pytest -q -s scripts/smoke/control_legacy_demo.py` 全部通过。故意额外清掉结构化标题时，同一 DEMO 正确断言失败；移除该故障后重跑通过。Ruff 和差异空白检查通过；`git diff --exit-code -- app tests` 确认产品与正式回归文件未改。测试日志保存在本地 `.amp/in/artifacts/control-legacy-demo.log` 与 `control-legacy-demo-negative-control.log`，不加入版本控制。
 - **环境与限制：** 本机 PostgreSQL 最初因 locale 初始化失败，设置 `LC_ALL=C` 后运行成功。GitHub 使用既有记录替身，未连接真实 worker 或模型，因此这是组件集成演示，不能作为完整功能或生产端到端验收。临时数据库及进程已清理；业务源代码、schema 和完整回归仍待后续实施验证。
@@ -124,3 +118,8 @@ uv run python scripts/smoke/control_legacy_demo.py --before 847f03cbcae8bca97f36
 - **回归证据：** 新断言先在未改业务代码时失败，实际标题为 `Local answer`，无 Flow 的对照通过；正式实现后同一场景通过。定向与完整 `uv run pytest -q` PostgreSQL 回归、`uv run ruff check app tests scripts/smoke/control_legacy_demo.py`、`uv run mypy app tests`、`uv build --no-sources` 和 `git diff --check` 均通过；环境跳过项与既有 Starlette 弃用警告随本线程结果说明。日志保存在本地 `.amp/in/artifacts/control-legacy-*.log`，不纳入版本控制。
 - **DEMO 取舍：** 取代 002 的进程内删源码方案：`--before` 指定 Git 基线，脚本导出临时源码副本，将同一组场景分别交给独立 pytest 进程执行；after 直接运行当前源码。临时副本自动清理，不切换调用者的分支、不改写业务函数。实测新答复保持入队、合成 failure 评论取消特殊跳过、普通文本不改标题、结构化命名保持正常。真实 worker、模型和 GitHub 服务未接入该 DEMO。
 - **复杂度与交付：** 产品代码仅删除机制，没有新增需要做消融对照的设计。使用同一 bookmark/PR 交付，保留原工作区其他 change；用户授权包括推送与创建 PR，不包含部署、合并或生产物理删列。
+
+### 004 — 2026-11-15 — 删除临时 DEMO 脚本
+
+- **需求与改动：** 用户要求删除 `scripts/smoke/control_legacy_demo.py`。移除该文件及当前说明中的运行命令、文件链接和新增 DEMO 的发布说明，不再维护独立演示入口。
+- **保持不变：** 产品代码与正式回归测试不变，前后行为对照表及已执行的验证记录保留。002、003 中的脚本路径和命令仅作为历史记录，不再是当前复现步骤。
