@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`control-legacy-cleanup.md`](control-legacy-cleanup.md) — 删除旧冻结答复、failure 评论抑制与纯文本标题回写，保留当前任务与历史 JSON 读取；提供真实 Git 基线与当前实现的可运行 DEMO。无未结清 Flow，不迁移中间状态，旧库物理列暂留。
+
 - [`code-agent-model-settings.md`](code-agent-model-settings.md) — 新增全局设置页，按 Codex / Amp 类型下拉选择新编码会话默认模型与推理强度；实施、验证与固定 CLI 的支持边界见记录。
 
 - [`worker-file-links.md`](worker-file-links.md) — worker 本地文件登记与 owner 文件 API：路径留在 worker，通过持久随机句柄和认证 Session 按需读取；PR #146 合并适配与验证见记录。

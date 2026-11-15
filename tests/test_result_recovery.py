@@ -1,7 +1,6 @@
 """Failure injection at the remote-write and final-commit boundaries without network."""
 
 import asyncio
-import hashlib
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -21,7 +20,6 @@ from app.contracts.result_models import (
     EffectState,
     LabelEffect,
     ResultPending,
-    ResultPlan,
 )
 from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import OpenedDelivery
@@ -34,7 +32,7 @@ from app.domain.models import (
 )
 from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, Repository
 from app.persistence.jobs import JobStore
-from tests.test_coordinator import accept_result, apply_result, coordinator
+from tests.test_coordinator import apply_result, coordinator
 from tests.test_merge import route_merge
 from tests.test_revision_delivery import revision_control as revision_control  # noqa: PLC0414
 from tests.test_revision_delivery import revision_feedback as revision_feedback  # noqa: PLC0414
@@ -287,41 +285,6 @@ async def test_closed_pr_after_lost_creation_response_finishes_without_new_write
     assert store.workers.get_flow_execution(job.flow_id).released_at is None
     assert len(github.opened) == 1
     assert github.labels == github.review_requests == []
-
-
-@pytest.mark.parametrize("prior", ["pending", "rejected", "accepted", "unknown"])
-async def test_legacy_failure_comment_is_never_sent_on_recovery(scenario, prior):
-    # A frozen pre-upgrade warning must not be sent; an uncertain old POST remains auditable.
-    store, github, job, result = scenario
-    result = result.model_copy(update={"exit_code": 65, "output": None})
-    accept_result(coordinator(store, github), job, result)
-    accepted = store.jobs.get_job(job.id)
-    reason = "unregistered workspace unexpectedly exists"
-    plan = ResultPlan(job_id=job.id, flow_id=job.flow_id, digest=accepted.result_digest,
-                      attempt_id=store.flows.get_flow(job.flow_id).current_attempt_id, state=JobState.FAILED,
-                      flow_state=FlowState.BLOCKED, error=reason,
-                      effects=[CommentEffect(key="failure", installation_id=42, repo="owner/repo",
-                                             number=17, body=f"⚠️ {reason}")])
-    store.results.prepare(plan)
-    if prior != "pending":
-        record = store.results.claim(job.id, "old-process")
-        store.results.mark_dispatched(record)
-        if prior == "accepted":
-            digest = hashlib.sha256(f"{job.id}:{plan.digest}:failure".encode()).hexdigest()
-            github.comment_bodies.append(f"⚠️ {reason}\n\n<!-- flowtool:effect:{digest} -->")
-        store.results.finish(record, EffectState.RETRY if prior == "rejected" else EffectState.UNCERTAIN,
-                             definitely_unsent=prior == "rejected")
-    subject = coordinator(store, github)
-    if prior == "unknown":
-        with pytest.raises(ResultPending):
-            await subject.results.apply(job.id)
-        assert store.jobs.get_job(job.id).result_applied_at is None
-        assert store.results.list_effects(job.id)[0].dispatched_at is not None
-    else:
-        assert await subject.results.apply(job.id) is JobState.FAILED
-        assert store.jobs.get_job(job.id).last_error == reason
-        assert store.flows.get_flow(job.flow_id).state is FlowState.BLOCKED
-    assert github.comments == []
 
 
 async def test_remote_comment_is_recovered_after_response_loss(scenario, result_clock, monkeypatch) -> None:

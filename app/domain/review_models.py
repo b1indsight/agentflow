@@ -61,7 +61,6 @@ class ReviewBatch(BaseModel):
     context: ReviewContext | None = None
     threads: ReviewThreads | None = None
     decision: JudgeDecision | None = None
-    answer_dispatched: bool = False
 
     @property
     def discussion(self) -> str:

@@ -20,7 +20,6 @@ from app.contracts.protocol import (
 )
 from app.controler.config import ServerSettings
 from app.controler.review.context import build_review_context
-from app.controler.review.resolution import feedback_link
 from app.controler.workflow.archive import archive_task
 from app.controler.workflow.preparation import (
     PreparationReadFailure,
@@ -28,10 +27,8 @@ from app.controler.workflow.preparation import (
     PreparationState,
 )
 from app.controler.workflow.results import BRANCH_SLUG_PATTERN, ResultApplication
-from app.domain.context_models import ReviewContext
 from app.domain.inference_models import InferenceMessage, InferenceTask
 from app.domain.json import strict_json
-from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
     DeliveryState,
     Flow,
@@ -117,11 +114,6 @@ class JobCoordinator:
         elif verdict.verdict is Verdict.REVISE and verdict.confidence < self.settings.confidence_threshold:
             verdict = TriageVerdict(verdict=Verdict.WAIT, confidence=verdict.confidence,
                 reason=f"low-confidence: {verdict.reason}"[:2000], open_points=verdict.open_points)
-        if verdict.verdict is Verdict.ANSWER and batch.decision is not None and verdict.answer:
-            # Recover only already frozen pre-wire22 publications through their original marker.
-            if await self._answer(flow, batch, context, decision.model_copy(update={"verdict": verdict})):
-                emit_hook(self.plugins, "on_review", flow=flow)
-            return
         # Remote reads can outlive close/merge or a changed PR baseline.
         remote = (await repo.fetch_pull_request(context.pr_number)
                   if verdict.verdict in {Verdict.ANSWER, Verdict.REVISE} else None)
@@ -149,53 +141,6 @@ class JobCoordinator:
                     verdict.open_points or ([verdict.reason or "Awaiting more discussion."]
                         if verdict.verdict is Verdict.WAIT else []))
         emit_hook(self.plugins, "on_review", flow=flow)
-
-    async def _answer(
-        self, flow: Flow, batch: ReviewBatch, context: ReviewContext, decision: JudgeDecision,
-    ) -> bool:
-        """Recover a frozen answer, authorizing its POST only after a fresh PR observation."""
-        installation = flow.installation_id
-        assert installation is not None
-        repo = self.github.installation(installation).repository(flow.repo)
-        pr = PullRequest(repo, context.pr_number)
-        marker = f"<!-- agentflow:batch:{batch.id}:answer -->"
-        authorized = False
-
-        found = await pr.find_comment(marker)
-        if found is None:
-            if batch.answer_dispatched:
-                return False
-            # Like result comments, an uncertain POST needs its marker before any retry.
-            remote = await pr.refetch()
-            with self.database.transaction() as tx:
-                reviews_tx = self.reviews.using(tx)
-                tx.lock_workflow(flow.id)
-                if not reviews_tx.current(batch):
-                    return False
-                if (context.pull_request is None or remote.state != "open" or remote.merged
-                        or remote.head_sha != context.pull_request.head_sha
-                        or remote.base_sha != context.pull_request.base_sha):
-                    reviews_tx.invalidate_context(batch, context)
-                else:
-                    reviews_tx.record_decision(batch, decision)
-                    authorized = reviews_tx.authorize_answer(batch, context.digest)
-            if not authorized:
-                return False
-            sources = ", ".join(f"[{f.kind.value} {f.github_id}]({feedback_link(flow.repo,
-                context.pr_number, f.kind, f.github_id)})" for f in batch.feedback)
-            try:
-                await pr.comment(f'{decision.verdict.answer}\n\n来源：{sources}\n\n{marker}')
-            except GitHubError as error:
-                if error.definitely_rejected:
-                    self.reviews.reject_answer(batch, context.digest)
-                raise
-        with self.database.transaction() as tx:
-            reviews_tx = self.reviews.using(tx)
-            tx.lock_workflow(flow.id)
-            if not reviews_tx.current(batch):
-                return False
-            reviews_tx.complete(batch.id, BatchState.COMPLETED, list(batch.feedback), [])
-        return authorized
 
     async def prepare_for_assignment(
         self,

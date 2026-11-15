@@ -135,7 +135,10 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, r
             coding_release.set()
 
 
-async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(store, tmp_path, server_runtime):
+@pytest.mark.parametrize("flow_bound", [False, True])
+async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
+    store, tmp_path, server_runtime, flow_bound,
+):
     entered, release = asyncio.Event(), asyncio.Event()
 
     class Local:
@@ -162,7 +165,9 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(store,
     workspace = tmp_path / "local-default"
     workspace.mkdir()
     mini = asyncio.create_task(serve_local_inference(server.serve_worker_session, Local(), workspace))
-    caller = JobInference(store.database, server.gateway.wake_all)
+    flow = store.flows.create_flow("owner/repo", 7, 42) if flow_bound else None
+    flow_id = flow.id if flow is not None else None
+    caller = JobInference(store.database, server.gateway.wake_all, flow_id=flow_id)
     local_task, remote_task = request(), request()
     try:
         async with connected(server, worker):
@@ -174,6 +179,10 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(store,
             local = store.jobs.get_job(pending.value.job_id)
             await asyncio.wait_for(entered.wait(), 3)
             assert store.jobs.get_job(local.id).assigned_worker_id == LOCAL_BUB_WORKER_ID
+            if flow is not None:
+                # A text call referenced as the title job must still have no naming side effect.
+                with store.connection() as connection:
+                    connection.execute("UPDATE flows SET title_job_id=%s WHERE id=%s", (local.id, flow.id))
             with pytest.raises(InferencePending) as pending:
                 await caller.infer(remote_task)
             remote = store.jobs.get_job(pending.value.job_id)
@@ -181,7 +190,7 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(store,
             assert store.jobs.get_job(remote.id).assigned_worker_id == "worker-1"
             release.set()
             await settled(store, local, JobState.DONE)
-            assert local.flow_id is None and remote.flow_id is None
+            assert local.flow_id == remote.flow_id == flow_id
             with store.database.connection() as connection:
                 assert connection.execute("SELECT count(*) AS n FROM flow_executions").fetchone()["n"] == 0
             assert not next(w for w in store.workers.list_workers() if w.worker_id == LOCAL_BUB_WORKER_ID).execute
@@ -189,10 +198,12 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(store,
         mini.cancel()
         await asyncio.gather(mini, return_exceptions=True)
     # A recreated caller reads saved answers with both workers gone, without a new attempt.
-    recovered = JobInference(store.database, server.gateway.wake_all)
+    recovered = JobInference(store.database, server.gateway.wake_all, flow_id=flow_id)
     assert (await recovered.infer(local_task)).text == "Local answer"
     assert (await recovered.infer(remote_task)).text == "Remote answer"
     assert store.jobs.get_job(local.id).attempt == store.jobs.get_job(remote.id).attempt == 1
+    if flow is not None:
+        assert store.flows.get_flow(flow.id).title is None
 
 
 async def test_network_worker_cannot_claim_local_priority_even_with_a_configured_token():
