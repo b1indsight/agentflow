@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`job-retirement-simplification.md`](job-retirement-simplification.md) — 共用 job 作废与 effects 计划归属规则，保留派发、恢复、提交及归档通知的阶段差异；本地实现与验证记录、发布基线、独立 PR 及 CI 状态见功能记录，未部署。
+
 - [`control-legacy-cleanup.md`](control-legacy-cleanup.md) — 删除旧冻结答复、failure 评论抑制与纯文本标题回写，保留当前任务与历史 JSON 读取。无未结清 Flow，不迁移中间状态，旧库物理列暂留。
 
 - [`code-agent-model-settings.md`](code-agent-model-settings.md) — 新增全局设置页，按 Codex / Amp 类型下拉选择新编码会话默认模型与推理强度；实施、验证与固定 CLI 的支持边界见记录。

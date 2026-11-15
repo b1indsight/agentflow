@@ -150,6 +150,14 @@ class Flow(BaseModel):
             return self.state is FlowState.FINALIZING
         return self.state in WORKING_STATES and self.archive_reason is None
 
+    def retires(self, job: Job, delivery: FlowDelivery | None) -> bool:
+        """Check superseded intent; callers retain stage, attempt and dispatch fences."""
+        return (
+            job.round_no != self.current_round_no
+            or (self.archive_reason is not None and job.kind is not JobKind.ARCHIVE)
+            or (delivery is not None and delivery.supersedes(job.kind))
+        )
+
 
 class Attempt(BaseModel):
     """One execution/recovery/retry fact within a stable Flow binding."""
