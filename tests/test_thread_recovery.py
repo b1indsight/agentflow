@@ -113,7 +113,7 @@ async def thread_revision(store, request, thread_resources):
     attempt.codex_session_id = "old-session"
     store.flows.update_attempt(attempt)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("worker-a", "initial", "epoch") is not None

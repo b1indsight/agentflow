@@ -12,11 +12,13 @@ from app.controler.reconciliation.pull_requests import Reconciler
 from app.controler.workflow.lifecycle import pause_delivery
 from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import PreparedDelivery
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState, VcsKind
 from app.domain.review_models import BatchState
 from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteRef, Repository
 from app.persistence.activity import ActivityStore
 from app.persistence.jobs import JobStore
+from tests.flow_fixtures import apply_flow_event
 from tests.github import RecordingGitHub, record_call
 from tests.test_coordinator import coordinator
 from tests.test_review_batches import batch_for, feedback, ingest, settle
@@ -338,8 +340,7 @@ async def test_reopen_never_reactivates_blocked_or_archived_flow(
         await check(store, flow, GitHub(flow))
         assert ActivityStore(store.database).archived(flow.id, 1) is not None
     else:
-        flow.state = state
-        store.flows.update_flow(flow)
+        flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
         delivery = store.deliveries.get_delivery(flow.id)
         pause_delivery(delivery, deliveries=store.deliveries, jobs=store.jobs)
     await check(store, flow, GitHub(flow, "open"))
@@ -476,7 +477,7 @@ async def test_initial_close_before_final_commit_keeps_identity_without_authoriz
     job = store.workers.assign_job("worker", "token", "epoch")
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.state, delivery.head_sha, delivery.base_branch = DeliveryState.OPENING, "abc123", "trunk"
     delivery.title, delivery.body = "Title", "Body\n\nCloses #8"

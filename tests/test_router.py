@@ -124,7 +124,7 @@ async def test_review_comment_is_stored_for_current_attempt(
     flow = store.flows.create_flow("owner/repo", 7, installation_id=42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.pr_number = 17
     delivery.state = DeliveryState.OPEN

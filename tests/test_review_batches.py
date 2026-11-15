@@ -10,6 +10,7 @@ import pytest
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
 from app.domain.context_models import ReviewContext
+from app.domain.flow_policy import FlowEvent
 from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
     DeliveryState,
@@ -25,6 +26,7 @@ from app.github import PullRequest
 from app.persistence.jobs import JobStore
 from app.persistence.reviews import ReviewStore
 from app.persistence.store import Store
+from tests.flow_fixtures import apply_flow_event
 from tests.github import RecordingGitHub
 from tests.review_memory import feedback_threads, judge_decision, review_context
 from tests.test_coordinator import coordinator
@@ -37,8 +39,8 @@ def review_flow(store, monkeypatch):
     flow = store.flows.create_flow("owner/repo", 7, 42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    flow.state = FlowState.REVIEW
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
+    flow = apply_flow_event(store, flow, FlowEvent.DELIVERY_APPLIED)
     delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
     store.deliveries.update_delivery(delivery)
@@ -394,9 +396,7 @@ def test_blocked_batch_retry_preserves_frozen_feedback_without_dispatching(store
     ingest(store, flow, feedback(clock, signal="request_changes"))
     job = claim(store, clock)[0]
     with store.transaction() as tx:
-        tx.lock_workflow(flow.id)
-        flow.state = FlowState.BLOCKED
-        tx.flows.update_flow(flow)
+        flow = apply_flow_event(tx, flow, FlowEvent.RESULT_FAILED)
         assert tx.reviews.get_batch(batch_for(tx, job).id).state is BatchState.READY
         tx.jobs.cancel_jobs(flow.id)
     assert store.reviews.get_batch(batch_for(store, job).id).state is BatchState.CANCELLED
@@ -514,8 +514,7 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     service = ControlService(
         database=store.database,
     )
-    flow.state = FlowState.BLOCKED
-    store.flows.update_flow(flow)
+    flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
     store.jobs.cancel_jobs(flow.id)
     service.retry(flow)
     replacement = store.jobs.list_jobs(flow.id)[-1]

@@ -14,6 +14,7 @@ from app.controler.workflow.lifecycle import (
     record_reopen,
 )
 from app.controler.workflow.service import ControlService
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequestMerge, retry_delay
 from app.persistence.database import Database
@@ -67,8 +68,8 @@ class Reconciler:
         async with self._sweep_lock:
             for flow_id in self.reconcile_store.merged_backlog(self.batch_size):
                 try:
-                    with self.database.transaction() as tx:
-                        flow = tx.lock_workflow(flow_id)
+                    with self.flows.locked(flow_id) as context:
+                        tx, flow = context.database, context.flow
                         delivery = self.deliveries.using(tx).get_delivery(flow_id)
                         if (flow is None or flow.state is FlowState.ARCHIVED
                                 or delivery is None or delivery.state is not DeliveryState.MERGED):
@@ -106,10 +107,11 @@ class Reconciler:
 
     async def _check(self, check: ReconcileState) -> None:
         try:
-            with self.database.transaction() as tx:
+            with self.flows.locked(check.flow_id) as context:
+                tx = context.database
                 deliveries_tx = self.deliveries.using(tx)
                 jobs_tx = self.jobs.using(tx)
-                flow = tx.lock_workflow(check.flow_id)
+                flow = context.flow
                 delivery = deliveries_tx.get_delivery(check.flow_id)
                 if (
                     flow is None
@@ -147,19 +149,20 @@ class Reconciler:
                         flows=self.flows,
                     )
             merged = False
-            with self.database.transaction() as tx:
+            with self.flows.locked(flow.id) as context:
+                tx = context.database
                 deliveries_tx = self.deliveries.using(tx)
                 flows_tx = self.flows.using(tx)
                 jobs_tx = self.jobs.using(tx)
                 reconcile_store_tx = self.reconcile_store.using(tx)
                 stops_tx = self.stops.using(tx)
-                fresh = tx.lock_workflow(flow.id)
+                fresh = context.flow
                 current = deliveries_tx.get_delivery(flow.id)
                 if (
                     fresh is None
                     or current is None
-                    or fresh.current_round_no != flow.current_round_no
-                    or fresh.current_attempt_id != flow.current_attempt_id
+                    or not context.matches(round_no=flow.current_round_no,
+                                           attempt_id=flow.current_attempt_id)
                     or fresh.state != flow.state
                     or fresh.installation_id != flow.installation_id
                     or current.version != delivery.version
@@ -215,8 +218,7 @@ class Reconciler:
                             diagnostic = "in-flight coding delivery awaits its original result verification"
                         else:
                             pause_delivery(current, deliveries=deliveries_tx, jobs=jobs_tx)
-                            fresh.state = FlowState.BLOCKED
-                            flows_tx.update_flow(fresh)
+                            flows_tx.transition(fresh, FlowEvent.DELIVERY_BASELINE_REJECTED)
                             diagnostic = "PR source branch changed; verified delivery is unchanged"
                 delay = max(1800.0, self.interval) if fresh.state in TERMINAL_STATES else self.interval
                 reconcile_store_tx.succeeded(flow.id, delay, diagnostic, hint_version=check.hint_version)

@@ -20,7 +20,7 @@ def expiring(store, *, started=False):
     flow = store.flows.create_flow("owner/recovery", 1, 1)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
     assert store.workers.assign_job("w", "token", "epoch").id == job.id

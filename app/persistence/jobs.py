@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 
 from app.contracts.protocol import ArchiveTask, Failed, terminal_digest
 from app.contracts.receipts import MergeArchiveNotice, ResultInbox, merge_notice_digest
+from app.domain.flow_policy import FlowEvent
 from app.domain.inference_models import InferenceFailure, InferenceJob, InferenceTask
 from app.domain.models import (
     Flow,
@@ -20,6 +21,7 @@ from app.domain.models import (
     JobState,
     WorkerStatus,
 )
+from app.persistence.flows import FlowStore
 from app.persistence.records import required
 from app.persistence.repository import Repository
 from app.persistence.results import RESOURCE_JOB_SQL
@@ -30,7 +32,7 @@ class JobStore(Repository):
 
     def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None:
         """Retire queued/never-dispatched preparation; actual execution requires stop proof."""
-        # Like FlowStore.update_flow, cancellation reuses reviews without an import cycle.
+        # Cancellation reuses reviews without an import cycle.
         from app.persistence.reviews import ReviewStore
         from app.persistence.workers import WorkerStore
 
@@ -123,11 +125,21 @@ class JobStore(Repository):
         *,
         source_job_id: int | None = None,
         source_key: str | None = None,
+        locked_flow: Flow | None = None,
     ) -> Job:
+        """Queue atomically with the Flow projection; reuse caller-held locks when supplied."""
         if kind is JobKind.INFERENCE:
             raise ValueError("use enqueue_inference to freeze an inference call")
         if (source_job_id is None) != (source_key is None):
             raise ValueError("derived jobs require both source job and purpose")
+        if locked_flow is None:
+            with FlowStore(self._db).locked(flow_id) as context:
+                return self.using(context.database).enqueue_job(
+                    flow_id, kind, payload, source_job_id=source_job_id, source_key=source_key,
+                    locked_flow=required(context.flow),
+                )
+        if self._db._bound_connection is None or locked_flow.id != flow_id:
+            raise ValueError("enqueue requires the current Flow in its workflow transaction")
         now = self._db.now()
         with (
             self._db.connection() as connection,
@@ -154,11 +166,7 @@ class JobStore(Repository):
                 ),
             ).fetchone()
             if kind is not JobKind.ARCHIVE:
-                connection.execute(
-                    "UPDATE flows SET state='queued',updated_at=%s WHERE id=%s AND state='review'"
-                    " AND archive_reason IS NULL",
-                    (now, flow_id),
-                )
+                FlowStore(self._db).transition(locked_flow, FlowEvent.JOB_ENQUEUED, now=now)
         return required(row)
 
     def record_merge_notice(self, flow: Flow, delivery: FlowDelivery) -> Job:
@@ -166,7 +174,7 @@ class JobStore(Repository):
         if (delivery.flow_id != flow.id or delivery.pr_number is None
                 or delivery.merged_at is None or delivery.merge_commit_sha is None):
             raise ValueError("merge notice requires the current delivery's complete merge facts")
-        job = self.enqueue_job(flow.id, JobKind.ARCHIVE)
+        job = self.enqueue_job(flow.id, JobKind.ARCHIVE, locked_flow=flow)
         notice = MergeArchiveNotice(
             job_id=job.id, flow_id=flow.id, round_no=flow.current_round_no, repo=flow.repo,
             pr_number=delivery.pr_number, merged_at=delivery.merged_at,

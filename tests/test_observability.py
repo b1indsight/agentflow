@@ -22,6 +22,7 @@ from app.contracts.protocol import InitialTaskResult, Succeeded
 from app.controler.api import create_app
 from app.controler.config import ServerSettings
 from app.controler.workflow.service import ControlService
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
 from app.persistence import metrics as database_metrics
 from app.persistence.activity import ActivityStore
@@ -269,11 +270,15 @@ def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
         if state is FlowState.ARCHIVED:
             ControlService(database=store.database).cancel(flow)
             assert ActivityStore(store.database).archived(flow.id, 1) is not None
-        else:
-            flow.state = state
-            if state is FlowState.FINALIZING:
-                flow.archive_reason = ArchiveReason.SUCCEEDED
-            store.flows.update_flow(flow)
+        elif state is not FlowState.QUEUED:
+            with store.flows.locked(flow.id) as context:
+                flow = context.flow
+                if state is FlowState.FINALIZING:
+                    flow.archive_reason = ArchiveReason.SUCCEEDED
+                store.flows.using(context.database).transition(
+                    flow, FlowEvent.FINALIZATION_REQUESTED if state is FlowState.FINALIZING
+                    else FlowEvent.DELIVERY_APPLIED,
+                )
         store.reconcile.hint(flow.id)
         with store.connection() as conn:
             conn.execute("UPDATE flow_reconcile SET next_at=now()-(%s * interval '1 second') WHERE flow_id=%s",

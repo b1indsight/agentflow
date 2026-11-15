@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.controler.reconciliation.feedback import FeedbackReconciler
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import (
     DeliveryState,
     FlowState,
@@ -25,6 +26,7 @@ from app.github import (
 )
 from app.persistence.reconciliation import ReconcileStore
 from app.persistence.store import Store
+from tests.flow_fixtures import apply_flow_event
 from tests.github import RecordingGitHub, record_call
 from tests.test_github_client import AsyncEndpoint, app_client, response
 from tests.test_review_batches import batch_for, claim, feedback, ingest, run_triage, settle
@@ -106,8 +108,9 @@ async def test_direct_feedback_skips_issue_seed_and_stale_issue_check_but_keeps_
     # A stale or manually inserted Issue scan must also be inert, not just absent from new seeds.
     flow = store.flows.create_flow("owner/repo", None, 42, task_content="Direct")
     attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id, flow.state = attempt.id, FlowState.REVIEW
-    store.flows.update_flow(flow)
+    flow.current_attempt_id = attempt.id
+    store.flows.update_flow_metadata(flow)
+    flow = apply_flow_event(store, flow, FlowEvent.DELIVERY_APPLIED)
     delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
     store.deliveries.update_delivery(delivery)
@@ -450,8 +453,8 @@ async def test_resumed_round_rejects_old_issue_comments_even_if_first_seen_or_ed
     clock.now += timedelta(seconds=10)
     store.jobs.cancel_jobs(flow.id)
     resumed.current_attempt_id = store.flows.create_attempt(flow.id).id
-    resumed.state = FlowState.REVIEW
-    store.flows.update_flow(resumed)
+    store.flows.update_flow_metadata(resumed)
+    resumed = apply_flow_event(store, resumed, FlowEvent.DELIVERY_APPLIED)
     delivery = store.deliveries.get_delivery(flow.id)
     if delivery is None:
         delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}-round-2")

@@ -52,7 +52,7 @@ def queued(store: Store, issue: int = 1, repo: str = "owner/repo") -> Job:
     flow = store.flows.create_flow(repo, issue, None)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     return store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
 
 

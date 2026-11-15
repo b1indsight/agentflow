@@ -23,6 +23,7 @@ from app.contracts.result_models import (
 )
 from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import OpenedDelivery
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import (
     ArchiveReason,
     DeliveryState,
@@ -71,8 +72,9 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     service = ControlService(
         database=store.database,
     )
-    flow.state = FlowState.BLOCKED
-    store.flows.update_flow(flow)
+    from tests.flow_fixtures import apply_flow_event
+
+    flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
     assert store.workers.release_flow_execution(flow.id)
     service.retry(flow)
     # Fresh worker-b starts from seed A, then checks out existing H where H descends A and H != A.

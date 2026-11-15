@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`flow-state-transitions.md`](flow-state-transitions.md) — 已实现领域事件决策、FlowStore 单写入口及公共锁定上下文；保留结果恢复、业务归档和批量领取/回收边界。验证、简化对照及发布基线见功能记录，PR 与 CI 的最新状态见其链接线程。
+
 - [`job-retirement-simplification.md`](job-retirement-simplification.md) — 共用 job 作废与 effects 计划归属规则，保留派发、恢复、提交及归档通知的阶段差异；本地实现与验证记录、发布基线、独立 PR 及 CI 状态见功能记录，未部署。
 
 - [`control-legacy-cleanup.md`](control-legacy-cleanup.md) — 删除旧冻结答复、failure 评论抑制与纯文本标题回写，保留当前任务与历史 JSON 读取。无未结清 Flow，不迁移中间状态，旧库物理列暂留。

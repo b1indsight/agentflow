@@ -9,6 +9,107 @@ from app.domain.models import DeliveryState, FlowState, ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
 
 
+@pytest.mark.parametrize("event,reason,targets", [
+    ("created", None, ("!", "!", "!", "!", "!", "!")),
+    ("job_enqueued", None, (None, None, "queued", None, None, None)),
+    ("job_claimed", None, ("running", None, "running", None, None, None)),
+    ("assignment_requeued", None, (None, "queued", None, None, None, None)),
+    ("execution_uncertain", None, ("blocked", "blocked", "blocked", "blocked", "blocked", None)),
+    ("result_failed", None, ("blocked", "blocked", "blocked", "blocked", "blocked", "!")),
+    ("delivery_baseline_rejected", None, ("blocked", "blocked", "blocked", "blocked", "!", "!")),
+    ("delivery_applied", None, ("review", "review", "review", "review", "!", "!")),
+    ("finalization_requested", "abandoned", ("finalizing",) * 5 + ("!",)),
+    ("cleanup_applied", "succeeded", ("!", "!", "!", "finalizing", "finalizing", "!")),
+    ("retry_requested", None, ("!", "!", "!", "queued", "!", "!")),
+    ("retry_requested", "abandoned", ("!", "!", "!", "finalizing", "!", "!")),
+    ("round_archived", "succeeded", ("!", "!", "!", "!", "archived", "!")),
+    ("round_resumed", "abandoned", ("!", "!", "!", "!", "!", "queued")),
+    ("job_enqueued", "abandoned", (None,) * 6),
+    ("job_claimed", "succeeded", (None,) * 6),
+    ("assignment_requeued", "abandoned", (None,) * 6),
+    ("delivery_applied", "succeeded", ("!",) * 6),
+    ("delivery_baseline_rejected", "abandoned", ("!",) * 6),
+    ("finalization_requested", None, ("!",) * 6),
+    ("cleanup_applied", None, ("!",) * 6),
+    ("round_archived", None, ("!",) * 6),
+])
+def test_flow_events_define_transitions_noops_and_rejections(event, reason, targets):
+    # In particular, blocked results can recover while blocked work cannot dispatch;
+    # the independent expected matrix must not be generated from the policy's table.
+    from app.domain.flow_policy import FlowEvent, decide_flow_state
+    from app.domain.models import ArchiveReason
+
+    for state, target in zip(FlowState, targets, strict=True):
+        if target == "!":
+            with pytest.raises(ValueError):
+                decide_flow_state(state, FlowEvent(event),
+                                  archive_reason=ArchiveReason(reason) if reason else None)
+        else:
+            assert decide_flow_state(
+                state, FlowEvent(event), archive_reason=ArchiveReason(reason) if reason else None,
+            ) == target
+
+
+def test_only_creation_accepts_an_absent_source_state():
+    from app.domain.flow_policy import FlowEvent, decide_flow_state
+    from app.domain.models import ArchiveReason
+
+    assert decide_flow_state(None, FlowEvent.CREATED, archive_reason=None) is FlowState.QUEUED
+    with pytest.raises(ValueError):
+        decide_flow_state(None, FlowEvent.CREATED, archive_reason=ArchiveReason.ABANDONED)
+    for event in FlowEvent:
+        if event is not FlowEvent.CREATED:
+            with pytest.raises(ValueError):
+                decide_flow_state(None, event, archive_reason=None)
+
+
+def test_flow_transition_preserves_noop_and_same_state_write_semantics(store):
+    from app.domain.flow_policy import FlowEvent
+
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    with store.flows.locked(flow.id) as context:
+        fresh = context.flow
+        assert fresh is not None
+        assert context.matches(round_no=1, attempt_id=None)
+        assert not context.matches(round_no=2, attempt_id=None)
+        assert not context.matches(round_no=1, attempt_id=17)
+        flows = store.flows.using(context.database)
+        later = flow.updated_at + timedelta(seconds=10)
+        flows.transition(fresh, FlowEvent.JOB_CLAIMED, now=later)
+        flows.transition(fresh, FlowEvent.JOB_CLAIMED, now=later + timedelta(seconds=1))
+        assert flows.get_flow(flow.id).updated_at == later
+        flows.transition(fresh, FlowEvent.RESULT_FAILED, now=later + timedelta(seconds=2))
+        flows.transition(fresh, FlowEvent.RESULT_FAILED, now=later + timedelta(seconds=3))
+    blocked = store.flows.get_flow(flow.id)
+    assert blocked.state is FlowState.BLOCKED
+    assert blocked.updated_at == later + timedelta(seconds=3)
+    # A previously read queued snapshot must not write across a newer blocked state.
+    with pytest.raises(ValueError, match="no longer current"), store.flows.locked(flow.id) as context:
+        store.flows.using(context.database).transition(flow, FlowEvent.JOB_CLAIMED)
+    assert store.flows.get_flow(flow.id) == blocked
+    # Metadata may carry an older snapshot, but must never overwrite its business state.
+    flow.installation_id = 99
+    store.flows.update_flow_metadata(flow)
+    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
+    assert store.flows.get_flow(flow.id).installation_id == 99
+
+
+def test_illegal_flow_transition_rolls_back_its_transaction(store):
+    from app.domain.flow_policy import FlowEvent
+
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    with pytest.raises(RuntimeError, match="transaction"):
+        store.flows.transition(flow, FlowEvent.RESULT_FAILED)
+    with pytest.raises(ValueError), store.flows.locked(flow.id) as context:
+        fresh = context.flow
+        assert fresh is not None
+        flows = store.flows.using(context.database)
+        fresh.installation_id = 99
+        flows.update_flow_metadata(fresh)
+        flows.transition(fresh, FlowEvent.ROUND_RESUMED)
+    assert store.flows.get_flow(flow.id) == flow
+
+
 @pytest.mark.parametrize("branch,round_no,expected_branch", [
     ("feat/remove-login", 1, "feat/remove-login-round-2"),
     ("feat/remove-login-round-3", 3, "feat/remove-login-round-4"),
@@ -25,7 +126,7 @@ def test_resume_does_not_replay_prior_round_feedback_or_cursors(store, branch, r
         flow = service.resume(flow, expected_round_no=previous_round)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.update_flow_metadata(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, branch)
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
     store.deliveries.update_delivery(delivery)
@@ -53,7 +154,7 @@ def test_resume_does_not_replay_prior_round_feedback_or_cursors(store, branch, r
     resumed = service.resume(flow, expected_round_no=round_no)
     assert store.deliveries.get_delivery(flow.id).branch == expected_branch
     resumed.current_attempt_id = store.flows.create_attempt(flow.id).id
-    store.flows.update_flow(resumed)
+    store.flows.update_flow_metadata(resumed)
     assert store.reviews.pending(flow.id) == []
     assert store.reviews.claim_due() == []
     assert store.reconcile.feedback_get(flow.id, "reviews") is None

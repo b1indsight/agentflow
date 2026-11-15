@@ -41,6 +41,7 @@ from app.controler.workflow.revisions import (
     verify_answer_remote,
     verify_revision_remote,
 )
+from app.domain.flow_policy import FlowEvent
 from app.domain.inference_models import InferenceError, InferenceFailure
 from app.domain.json import strict_json
 from app.domain.models import (
@@ -209,9 +210,10 @@ class ResultApplication:
         if job is None:
             raise ValueError(f"job {job_id} disappeared")
         revision_error = await self._check_revision(job)
-        with self.database.transaction() as tx:
+        with self.flows.locked(job.required_flow_id) as context:
+            tx = context.database
             result_store_tx = self.result_store.using(tx)
-            flow = tx.lock_workflow(job.required_flow_id)
+            flow = context.flow
             current = tx.lock_job(job_id)
             if current is None or flow is None:
                 raise ValueError("result workflow disappeared")
@@ -234,10 +236,11 @@ class ResultApplication:
         if failure and (plan.revision is not None or plan.archive is not None):
             # Code delivery or cleanup already happened. Preserve its receipts so
             # explicit retry repairs only GitHub without another worker run.
-            with self.database.transaction() as tx:
+            with self.flows.locked(plan.flow_id) as context:
+                tx = context.database
                 deliveries_tx = self.deliveries.using(tx)
                 jobs_tx = self.jobs.using(tx)
-                flow = tx.lock_workflow(plan.flow_id)
+                flow = context.flow
                 current = tx.lock_job(job_id)
                 pending = (
                     flow is not None and current is not None
@@ -252,15 +255,15 @@ class ResultApplication:
                 if pending:
                     jobs_tx.set_job_error(job_id, failure)
                     assert flow is not None
-                    flow.state = FlowState.BLOCKED
-                    self.flows.using(tx).update_flow(flow)
+                    self.flows.using(tx).transition(flow, FlowEvent.RESULT_FAILED)
             if pending:
                 raise ResultPending(failure)
-        with self.database.transaction() as tx:
+        with self.flows.locked(plan.flow_id) as context:
+            tx = context.database
             deliveries_tx = self.deliveries.using(tx)
             jobs_tx = self.jobs.using(tx)
             result_store_tx = self.result_store.using(tx)
-            flow = tx.lock_workflow(plan.flow_id)
+            flow = context.flow
             current = tx.lock_job(job_id)
             if flow is None or current is None:
                 raise ValueError("result workflow disappeared before commit")
@@ -625,8 +628,7 @@ class ResultApplication:
             return
         if job.kind is JobKind.ARCHIVE:
             if failure or plan.state is JobState.FAILED:
-                flow.state = FlowState.BLOCKED
-                flows_tx.update_flow(flow)
+                flows_tx.transition(flow, FlowEvent.RESULT_FAILED)
                 return
             assert plan.archive is not None
             try:
@@ -644,11 +646,11 @@ class ResultApplication:
         if state is FlowState.ARCHIVED:
             # Archive and ownership release happen after this result's completion
             # marker, in the same transaction, through the settled-round guard.
-            flow.state = FlowState.FINALIZING
-            flows_tx.update_flow(flow)
+            flows_tx.transition(flow, FlowEvent.CLEANUP_APPLIED)
+        elif state is FlowState.BLOCKED:
+            flows_tx.transition(flow, FlowEvent.RESULT_FAILED)
         elif state is not None:
-            flow.state = state
-            flows_tx.update_flow(flow)
+            raise ValueError(f"unsupported result Flow outcome: {state}")
         if failure or plan.state is JobState.FAILED:
             return
         if plan.delivery is not None:
@@ -665,8 +667,7 @@ class ResultApplication:
                 self._commit_initial_delivery(
                     job, current, flow, deliveries=deliveries_tx, result_store=result_store_tx
                 )
-            flow.state = FlowState.REVIEW
-            flows_tx.update_flow(flow)
+            flows_tx.transition(flow, FlowEvent.DELIVERY_APPLIED)
         if plan.batch_id is not None and plan.batch_state is not None:
             consumed = plan.consumed
             batch_state, open_points = plan.batch_state, list(plan.open_points)

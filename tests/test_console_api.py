@@ -14,6 +14,7 @@ from app.contracts.console import ArchiveRequest, ResumeRequest
 from app.controler.api import create_app
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workflow.service import ControlService
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
@@ -21,6 +22,7 @@ from app.persistence.console import ConsoleStore
 from app.persistence.console_sync import ConsoleSyncStore
 from app.telemetry.metrics import Metrics
 from tests.access import AccessIssuer
+from tests.flow_fixtures import apply_flow_event
 from tests.test_cancel_drain import running
 from tests.test_merge import route_merge
 from tests.test_workflow_transactions import accepted_coding
@@ -331,8 +333,7 @@ def test_console_commands_require_owner_json_and_same_origin(
     if command == "resume":
         ControlService(database=store.database).cancel(flow)
     elif command == "retry":
-        flow.state = FlowState.BLOCKED
-        store.flows.update_flow(flow)
+        flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
     payload = {
         "archive": {"reason": "succeeded", "summary": "调查完成", "expected_round_no": 1},
         "resume": {"expected_round_no": 1},
@@ -532,8 +533,7 @@ def test_retry_commits_before_waking_workers_on_the_event_loop(console_runtime, 
     original = store.jobs.enqueue_job(flow.id, JobKind.INITIAL, payload={"issue_number": 7})
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET state='failed' WHERE id=%s", (original.id,))
-    flow.state = FlowState.BLOCKED
-    store.flows.update_flow(flow)
+    flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
     notifications = []
 
     def notified():
@@ -571,8 +571,7 @@ def test_concurrent_browser_commands_enqueue_only_once(console_runtime, store, c
     if command == "resume":
         ControlService(database=store.database).cancel(flow)
     else:
-        flow.state = FlowState.BLOCKED
-        store.flows.update_flow(flow)
+        flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
     payload = {"expected_round_no": 1} if command == "resume" else {}
     barrier = Barrier(2)
     headers = console_runtime.issuer.headers()
@@ -597,8 +596,7 @@ def test_concurrent_browser_commands_enqueue_only_once(console_runtime, store, c
 def test_browser_retry_reports_business_refusal_without_changes(console_runtime, store):
     # The API translates canonical refusals; individual safety rules have service-level coverage.
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    flow.state = FlowState.BLOCKED
-    store.flows.update_flow(flow)
+    flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.state = DeliveryState.CLOSED
     store.deliveries.update_delivery(delivery)
@@ -703,14 +701,20 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
             )
     if scenario == "older_result":
         store.jobs.enqueue_job(flow.id, JobKind.REVISION)
-    flow = store.flows.get_flow(flow.id)
-    flow.state = state
-    if kind is JobKind.ARCHIVE or state is FlowState.FINALIZING:
-        flow.archive_reason = (
-            ArchiveReason.SUCCEEDED if kind is JobKind.ARCHIVE else ArchiveReason.ABANDONED
-        )
-        flow.archive_summary = "Requested round completion"
-    store.flows.update_flow(flow)
+    with store.flows.locked(flow.id) as context:
+        flow = context.flow
+        if kind is JobKind.ARCHIVE or state is FlowState.FINALIZING:
+            flow.archive_reason = (
+                ArchiveReason.SUCCEEDED if kind is JobKind.ARCHIVE else ArchiveReason.ABANDONED
+            )
+            flow.archive_summary = "Requested round completion"
+        if state is not FlowState.QUEUED:
+            store.flows.using(context.database).transition(flow, {
+                FlowState.RUNNING: FlowEvent.JOB_CLAIMED,
+                FlowState.REVIEW: FlowEvent.DELIVERY_APPLIED,
+                FlowState.BLOCKED: FlowEvent.RESULT_FAILED,
+                FlowState.FINALIZING: FlowEvent.FINALIZATION_REQUESTED,
+            }[state])
     with TestClient(create_app(console_runtime)) as client:
         response = client.get(f"/api/flows/{flow.id}", headers=console_runtime.issuer.headers())
     assert response.status_code == 200
@@ -737,11 +741,17 @@ def test_explicit_refresh_retries_stopped_sources_in_every_lifecycle(console_run
     flow = store.flows.create_flow("owner/repo", 7, 42)
     if state is FlowState.ARCHIVED:
         ControlService(database=store.database).cancel(flow)
-    else:
-        flow.state = state
-        if state is FlowState.FINALIZING:
-            flow.archive_reason = ArchiveReason.ABANDONED
-        store.flows.update_flow(flow)
+    elif state is not FlowState.QUEUED:
+        with store.flows.locked(flow.id) as context:
+            flow = context.flow
+            if state is FlowState.FINALIZING:
+                flow.archive_reason = ArchiveReason.ABANDONED
+            store.flows.using(context.database).transition(flow, {
+                FlowState.RUNNING: FlowEvent.JOB_CLAIMED,
+                FlowState.REVIEW: FlowEvent.DELIVERY_APPLIED,
+                FlowState.BLOCKED: FlowEvent.RESULT_FAILED,
+                FlowState.FINALIZING: FlowEvent.FINALIZATION_REQUESTED,
+            }[state])
     sync = ConsoleSyncStore(store._db)
 
     def stopped_sources():
@@ -808,8 +818,7 @@ def test_conversation_excludes_flow_audit_from_items_pagination_and_changes(cons
         ).json()
         assert first["total"] == 2 and first["has_more"]
         assert first["changes"] == {"new": 2}
-        flow.state = FlowState.BLOCKED
-        store.flows.update_flow(flow)
+        flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
         second = client.get(
             path, headers=headers, params={"limit": 1, "cursor": first["next_cursor"]}
         ).json()

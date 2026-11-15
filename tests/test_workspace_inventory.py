@@ -14,6 +14,7 @@ from app.contracts.protocol import (
     ExecutionStopped,
     InitialTask,
 )
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import (
     ArchiveReason,
     CodingExecutionResult,
@@ -23,7 +24,6 @@ from app.domain.models import (
     JobState,
     WorkspaceInventory,
 )
-from app.persistence.activity import ActivityStore
 from app.persistence.workers import WorkerStore
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import VcsVerificationError
@@ -423,14 +423,12 @@ def merged_business(store, flow_id):
     delivery.state, delivery.pr_number = DeliveryState.MERGED, 17
     delivery.merged_at, delivery.merge_commit_sha = store.now(), "a" * 40
     store.deliveries.update_delivery(delivery)
-    flow.state = FlowState.ARCHIVED
-    flow.archive_reason = ArchiveReason.SUCCEEDED
-    flow.archived_at = store.now()
-    ActivityStore(store.database).append_flow(
-        flow.id, flow.current_round_no, "archive", occurred_at=flow.archived_at,
-        metadata={"archive_reason": "succeeded"},
-    )
-    store.flows.update_flow(flow)
+    with store.flows.locked(flow.id) as context:
+        flow = context.flow
+        flow.archive_reason = ArchiveReason.SUCCEEDED
+        flows = store.flows.using(context.database)
+        flows.transition(flow, FlowEvent.FINALIZATION_REQUESTED)
+        flows.archive_round(flow, delivery)
     return flow
 
 

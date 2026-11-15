@@ -16,6 +16,7 @@ from app.controler.workflow.revisions import (
     frozen_revision,
     revision_mismatch,
 )
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import (
     ArchiveReason,
     DeliveryState,
@@ -79,12 +80,13 @@ def adopt_created_pull_request(
     plugins: PluginManager,
 ) -> None:
     """Bind a verified creation receipt and apply its lifecycle under the unchanged intent."""
-    with database.transaction() as tx:
+    with flows.using(database).locked(expected.flow_id) as context:
+        tx = context.database
         deliveries_tx = deliveries.using(tx)
         flows_tx = flows.using(tx)
         jobs_tx = jobs.using(tx)
         stops_tx = stops.using(tx)
-        flow = tx.lock_workflow(expected.flow_id)
+        flow = context.flow
         current = deliveries_tx.get_delivery(expected.flow_id)
         if (flow is None or current is None or flow.current_attempt_id != attempt_id
                 or current.version != expected.version or current.head_sha != expected.head_sha
@@ -163,8 +165,7 @@ def close_delivery(
     if flow.archive_reason is None:
         flow.archive_reason = ArchiveReason.ABANDONED
         flow.archive_summary = "Current PR closed without merge"
-        flow.state = FlowState.FINALIZING
-        flows.update_flow(flow)
+        flows.transition(flow, FlowEvent.FINALIZATION_REQUESTED)
     stops.request(flow.id)
     jobs.cancel_jobs(flow.id)
     flows.try_archive(flow.id)
@@ -285,8 +286,7 @@ def record_merge(
         delivery.version += 1
         deliveries.update_delivery(delivery)
     flow.archive_reason = ArchiveReason.SUCCEEDED
-    flow.state = FlowState.FINALIZING
-    flows.update_flow(flow)
+    flows.transition(flow, FlowEvent.FINALIZATION_REQUESTED)
     stops.request(flow.id)
     jobs.cancel_jobs(flow.id, reason="PR merged; queued work retired")
     jobs.record_merge_notice(flow, delivery)

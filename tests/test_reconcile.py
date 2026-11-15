@@ -10,6 +10,7 @@ from githubkit import GitHub as SDK
 
 from app.controler.reconciliation.pull_requests import Reconciler
 from app.controler.workflow.service import ControlService
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState
 from app.github import (
     GitHubApp,
@@ -22,6 +23,7 @@ from app.github import (
 from app.persistence.activity import ActivityStore
 from app.persistence.jobs import JobStore
 from app.persistence.store import Store
+from tests.flow_fixtures import apply_flow_event
 from tests.github import RecordingGitHub, record_call
 from tests.test_github_client import AsyncEndpoint, settings
 from tests.test_merge import (
@@ -94,14 +96,15 @@ async def test_persisted_merged_backlog_archives_without_new_webhook_or_binding(
 ):
     # Flow-4-like records are excluded from ordinary PR polling. Recover only complete
     # current merge facts; an open execution failure and incomplete merge stay unchanged.
-    merge_flow.state = FlowState.BLOCKED
-    store.flows.update_flow(merge_flow)
+    merge_flow = apply_flow_event(store, merge_flow, FlowEvent.RESULT_FAILED)
     running, _ = accepted_coding(store)
     released = store.flows.get_flow(running.flow_id)
     assert store.jobs.complete_persisted_result(running.id, JobState.DONE)
     assert store.workers.release_flow_execution(released.id)
-    released.state, released.archive_reason = FlowState.FINALIZING, ArchiveReason.SUCCEEDED
-    store.flows.update_flow(released)
+    with store.flows.locked(released.id) as context:
+        released = context.flow
+        released.archive_reason = ArchiveReason.SUCCEEDED
+        store.flows.using(context.database).transition(released, FlowEvent.FINALIZATION_REQUESTED)
     delivery = store.deliveries.get_delivery(released.id)
     delivery.state = DeliveryState.MERGED
     delivery.merged_at = datetime(2026, 9, 8, 8, tzinfo=UTC)
@@ -112,13 +115,16 @@ async def test_persisted_merged_backlog_archives_without_new_webhook_or_binding(
     missing = store.flows.create_flow("owner/repo", 501, 42)
     incomplete = store.flows.create_flow("owner/repo", 502, 42)
     for flow in (missing, incomplete):
-        flow.state, flow.archive_reason = FlowState.BLOCKED, ArchiveReason.SUCCEEDED
-        store.flows.update_flow(flow)
+        with store.flows.locked(flow.id) as context:
+            flow = context.flow
+            flow.archive_reason = ArchiveReason.SUCCEEDED
+            store.flows.using(context.database).transition(flow, FlowEvent.RESULT_FAILED)
         delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
         delivery.pr_number, delivery.state = flow.issue_number, DeliveryState.MERGED
         delivery.merged_at = datetime(2026, 9, 8, 8, tzinfo=UTC)
         delivery.merge_commit_sha = "a" * 40 if flow.id == missing.id else None
         store.deliveries.update_delivery(delivery)
+    incomplete = store.flows.get_flow(incomplete.id)
     github = GitHub(status(merge_flow, state="open", merged=False))
     poller = subject(store, github, batch_size=1)
     await poller._sweep()
@@ -210,7 +216,7 @@ async def test_read_errors_do_not_invent_pr_lifecycle_facts(store, merge_flow, p
     assert GitHubErrorKind.NOT_FOUND.value in store.reconcile.get(merge_flow.id).last_error
 
 
-@pytest.mark.parametrize("change", ["version", "merged"])
+@pytest.mark.parametrize("change", ["version", "merged", "attempt"])
 async def test_late_query_cannot_overwrite_a_changed_workflow(store, merge_flow, change, polling_resources):
     github = GitHub(status(merge_flow, merged=change != "merged"))
 
@@ -223,6 +229,10 @@ async def test_late_query_cannot_overwrite_a_changed_workflow(store, merge_flow,
             delivery = store.deliveries.get_delivery(merge_flow.id)
             delivery.version += 1
             store.deliveries.update_delivery(delivery)
+        elif change == "attempt":
+            fresh = store.flows.get_flow(merge_flow.id)
+            fresh.current_attempt_id = store.flows.create_attempt(fresh.id).id
+            store.flows.update_flow_metadata(fresh)
 
     github.before_return = mutate
     await subject(store, github)._sweep()
