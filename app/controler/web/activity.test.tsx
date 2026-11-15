@@ -7,6 +7,7 @@ import {
   ActivityView,
   buildConversationRows,
   conversationProvenanceRange,
+  OpenWorkerFile,
   sameActivityGroup,
 } from "./activity";
 import type { ActivityItem, ActivityPage } from "./types";
@@ -730,6 +731,53 @@ test("Markdown destinations use the message source, never the console origin", (
     assert.match(withoutSource, /相关/);
     assert.match(withoutSource, /图片：相对图片/);
   }
+});
+
+test("only original worker file destinations become detail actions before relative URL resolution", (t) => {
+  mockActivity(t, () => assert.fail("rendering must not fetch a file"));
+  const id = "0123456789abcdef0123456789abcdef";
+  const path = `/api/files/${id}`;
+  const body = [
+    `[文件](${path})`,
+    `![图片](https://console.example.test${path})`,
+    `[规范化路径](/other/..${path})`,
+    "[普通相对](../guide.md)",
+  ].join("\n\n");
+  const render = (source: string, url: string | null) =>
+    renderToStaticMarkup(
+      <OpenWorkerFile value={() => assert.fail("rendering activated a link")}>
+        <ActivityView
+          entry={record("files", { kind: "message", body, source, url })}
+        />
+      </OpenWorkerFile>,
+    );
+  for (const url of [
+    null,
+    "https://console.example.test/messages/1",
+    "https://github.com/owner/repo/issues/1",
+  ]) {
+    const html = render("worker", url);
+    const anchors = html.match(/<a\b[^>]*>[^<]*<\/a>/g) ?? [];
+    for (const label of ["文件", "图片：图片"]) {
+      const anchor = anchors.find((anchor) => anchor.endsWith(`>${label}</a>`));
+      assert.ok(anchor, label);
+      assert.doesNotMatch(anchor, /target=/);
+    }
+    const normalized = anchors.find((anchor) =>
+      anchor.endsWith(">规范化路径</a>"),
+    );
+    assert.match(normalized ?? "", /target="_blank"/);
+    assert.doesNotMatch(html, /<img/);
+  }
+  const github = render(
+    "pr.comments",
+    "https://github.com/owner/repo/issues/1",
+  );
+  assert.match(
+    github,
+    new RegExp(`href="https://github.com${path}" target="_blank"`),
+  );
+  assert.match(github, /href="https:\/\/github.com\/owner\/repo\/guide.md"/);
 });
 
 test("CI checks show workflow, job and status beside the app without hiding summaries", () => {

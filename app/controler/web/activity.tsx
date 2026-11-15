@@ -1,4 +1,13 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  type ComponentProps,
+  useContext,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -9,10 +18,15 @@ import {
   Terminal,
 } from "lucide-react";
 import type { Nodes, Root } from "mdast";
-import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
+import Markdown, {
+  defaultUrlTransform,
+  type Components,
+  type ExtraProps,
+} from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getContent, getDiff, getThread } from "./api";
 import { DiffWindow } from "./DiffWindow";
+import { workerFileLink, type WorkerFile } from "./files";
 import type {
   ActivityIdentity,
   ActivityItem,
@@ -34,13 +48,41 @@ import {
   useReadingState,
 } from "./windowing";
 
+export const OpenWorkerFile = createContext<
+  ((file: WorkerFile) => void) | null
+>(null);
+
+function MarkdownLink({
+  node,
+  onFileOpen,
+  ...props
+}: ComponentProps<"a"> &
+  ExtraProps & { onFileOpen?: (file: WorkerFile) => void }) {
+  const linkId = node?.properties["data-worker-file-id"];
+  const name = node?.properties["data-worker-file-name"];
+  if (onFileOpen && typeof linkId === "string")
+    return (
+      <a
+        {...props}
+        onClick={(event) => {
+          event.preventDefault();
+          onFileOpen({
+            id: linkId,
+            name:
+              typeof name === "string"
+                ? name
+                : typeof props.children === "string"
+                  ? props.children
+                  : null,
+          });
+        }}
+        onAuxClick={(event) => event.preventDefault()}
+      />
+    );
+  return <a {...props} target="_blank" rel="noopener noreferrer" />;
+}
+
 const markdownComponents: Components = {
-  // Archived content must not make automatic requests to repository-supplied image URLs.
-  img: ({ src, alt }) => (
-    <a href={src} target="_blank" rel="noopener noreferrer">
-      图片：{alt || "查看图片"}
-    </a>
-  ),
   pre: ({ children }) => <pre tabIndex={0}>{children}</pre>,
   table: ({ children }) => (
     <div className="markdown-table" tabIndex={0} aria-label="Markdown 表格">
@@ -73,9 +115,11 @@ function numberFootnoteIdentifiers() {
 export function ActivityMarkdown({
   text,
   url: sourceUrl,
+  onFileOpen,
 }: {
   text: string;
   url: string | null;
+  onFileOpen?: (file: WorkerFile) => void;
 }) {
   const id = useId();
   const body = useRef<HTMLDivElement>(null);
@@ -84,6 +128,12 @@ export function ActivityMarkdown({
   const components = useMemo<Components>(
     () => ({
       ...markdownComponents,
+      // Archived images remain links; only an explicit activation can fetch a worker file.
+      img: ({ node, src, alt }) => (
+        <MarkdownLink node={node} href={src} onFileOpen={onFileOpen}>
+          图片：{alt || "查看图片"}
+        </MarkdownLink>
+      ),
       h2: ({ node: _node, id: headingId, ...props }) => (
         <h2
           {...props}
@@ -115,11 +165,16 @@ export function ActivityMarkdown({
             />
           );
         return (
-          <a {...props} href={href} target="_blank" rel="noopener noreferrer" />
+          <MarkdownLink
+            {...props}
+            node={node}
+            href={href}
+            onFileOpen={onFileOpen}
+          />
         );
       },
     }),
-    [footnoteLabel],
+    [footnoteLabel, onFileOpen],
   );
   return (
     <div ref={body} className="message-body markdown-body">
@@ -134,6 +189,15 @@ export function ActivityMarkdown({
             node.properties.dataFootnoteBackref !== undefined
           )
             return safe;
+          const file = onFileOpen
+            ? workerFileLink(safe, location.origin)
+            : null;
+          if (file) {
+            // Remember the original match, not a later normalized/source-relative lookalike.
+            node.properties["data-worker-file-id"] = file.id;
+            if (file.name) node.properties["data-worker-file-name"] = file.name;
+            return safe;
+          }
           if (/^[a-z][a-z\d+.-]*:/i.test(safe)) return safe;
           try {
             return (
@@ -163,6 +227,7 @@ function ActivityBody({
   flowId: number;
   framed?: boolean;
 }) {
+  const openFile = useContext(OpenWorkerFile);
   const tool = isToolActivity(entry);
   const budget = tool ? CODE_CHARS : TEXT_CHARS;
   const [savedStart, saveStart] = useReadingState(
@@ -238,7 +303,13 @@ function ActivityBody({
       </code>
     </pre>
   ) : (
-    <ActivityMarkdown text={segment.text} url={entry.url} />
+    <ActivityMarkdown
+      text={segment.text}
+      url={entry.url}
+      onFileOpen={
+        entry.source === "worker" ? (openFile ?? undefined) : undefined
+      }
+    />
   );
   const content = (
     <>

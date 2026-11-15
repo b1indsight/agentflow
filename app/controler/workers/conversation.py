@@ -148,10 +148,12 @@ class ConversationService:
             )
         fingerprint = hashlib.sha256(
             json.dumps(
-                [flow_id, [[a.id, a.codex_session_id, a.session_generation] for a in attempts]]
+                ["file-links-v2-names", flow_id,
+                 [[a.id, a.codex_session_id, a.session_generation] for a in attempts]]
             ).encode()
         ).hexdigest()
-        # The outer cursor binds session order/generation; worker sees only its inner cursor.
+        # Invalidate pre-link archive checkpoints once, using the existing bounded
+        # cursor-invalid recovery. The worker's native cursor/digest never changes.
         index, inner_cursor = 0, None
         if cursor is not None:
             try:

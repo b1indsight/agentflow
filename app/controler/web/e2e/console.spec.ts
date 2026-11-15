@@ -5229,3 +5229,615 @@ test("direct Flow cards use Flow IDs for null titles and preserve PR and Issue i
     });
   }
 });
+
+for (const width of [1440, 390]) {
+  test(`worker files open named editor tabs safely at ${width}px`, async ({
+    page,
+  }) => {
+    // Rewritten worker links must win over source-relative resolution, without auto-fetching images.
+    await page.setViewportSize({ width, height: 900 });
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    const ids = Array.from({ length: 7 }, (_, i) => String(i + 1).repeat(32));
+    const paths = ids.map((id) => `/api/files/${id}`);
+    const names = [
+      "报告 (100%#).html",
+      "preview.png",
+      "data.bin",
+      "damaged.png",
+      "offline.md",
+      "large.log",
+      "private.txt",
+    ];
+    const links = paths.map(
+      (path, i) => `${path}#name=${encodeURIComponent(names[i])}`,
+    );
+    const body = [
+      `[源码](${links[0]})`,
+      `![位图](${links[1]}) [二进制](${links[2]}) [伪装图片](${links[3]})`,
+      `[离线](${links[4]}) [超限](${links[5]}) [登录](${links[6]})`,
+      `[外部](https://example.test/guide) [跨域文件](https://other.test${paths[0]})`,
+      "[普通相对](../guide.md)",
+      "脚注[^a]。\n\n[^a]: 本地脚注。",
+    ].join("\n\n");
+    const items: ActivityItem[] = Array.from({ length: 18 }, (_, i) => ({
+      ...activity,
+      key: `file-message-${i}`,
+      source: "worker",
+      kind: "message",
+      author: i % 2 ? "assistant" : "user",
+      title: "message",
+      body: i === 4 ? body : `阅读位置 ${i}：前后的普通会话。\n\n第二段。`,
+      body_length: 0,
+      previous_version: null,
+      url: null,
+    }));
+    items.forEach((item) => (item.body_length = Array.from(item.body).length));
+    const githubBody = `[GitHub文件路径](${paths[0]}) [GitHub相对](../pull/87)`;
+    items[5] = {
+      ...items[5],
+      source: "pr.comments",
+      kind: "comment",
+      url: "https://github.com/owner/agentflow/issues/85",
+      body: githubBody,
+      body_length: Array.from(githubBody).length,
+    };
+    await page.route("**/api/flows/42/activity?**", (route) =>
+      route.fulfill({ json: activityPage(items, 0, items.length) }),
+    );
+    let png = Buffer.alloc(0);
+    let offline = true;
+    const reads: string[] = [];
+    const source =
+      '<script>window.fileExecuted=true</script>\n<svg onload="alert(1)"/>\n# 源码\n' +
+      "长代码".repeat(5000);
+    await page.route("**/api/files/*", (route) => {
+      const path = new URL(route.request().url()).pathname;
+      reads.push(path);
+      if (path === paths[4] && offline)
+        return route.fulfill({
+          status: 503,
+          json: { detail: "worker_unavailable" },
+        });
+      if (path === paths[5])
+        return route.fulfill({
+          status: 413,
+          json: { detail: "file_too_large" },
+        });
+      if (path === paths[6])
+        return route.fulfill({
+          status: 401,
+          json: { detail: "access_required" },
+        });
+      return route.fulfill({
+        contentType: "application/octet-stream",
+        headers: {
+          "Content-Disposition": "attachment",
+          "Cache-Control": "no-store",
+        },
+        body:
+          path === paths[1]
+            ? png
+            : path === paths[2]
+              ? Buffer.from([0, 255, 128])
+              : path === paths[3]
+                ? Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0])
+                : source,
+      });
+    });
+    await page.goto("/console/#flow/42/conversation");
+    await page.evaluate(() => {
+      // Vite removes the production CSP for HMR; retain its image restriction in this regression.
+      const policy = document.createElement("meta");
+      policy.httpEquiv = "Content-Security-Policy";
+      policy.content = "img-src 'self' data:";
+      document.head.append(policy);
+    });
+    await expect(
+      page.getByRole("tab", { name: "文件", exact: true }),
+    ).toHaveCount(0);
+    const fileTab = page.getByRole("tab", { name: names[0], exact: true });
+    png = Buffer.from(
+      await page.evaluate(() => {
+        const canvas = document.createElement("canvas");
+        canvas.width = 640;
+        canvas.height = 240;
+        const context = canvas.getContext("2d")!;
+        context.fillStyle = "#edf6f1";
+        context.fillRect(0, 0, 640, 240);
+        context.fillStyle = "#147657";
+        context.font = "28px sans-serif";
+        context.fillText("Worker image preview", 32, 125);
+        return canvas.toDataURL("image/png").split(",")[1];
+      }),
+      "base64",
+    );
+    const message = page.locator('[data-entry="file-message-4"]');
+    await message
+      .getByRole("link", { name: "源码", exact: true })
+      .scrollIntoViewIfNeeded();
+    await expect(
+      message.getByText("普通相对", { exact: true }),
+    ).not.toHaveAttribute("href");
+    await expect(
+      message.getByRole("link", { name: "外部", exact: true }),
+    ).toHaveAttribute("target", "_blank");
+    await expect(
+      message.getByRole("link", { name: "跨域文件" }),
+    ).toHaveAttribute("href", `https://other.test${paths[0]}`);
+    const github = page.locator('[data-entry="file-message-5"]');
+    await expect(
+      github.getByRole("link", { name: "GitHub文件路径" }),
+    ).toHaveAttribute("href", `https://github.com${paths[0]}`);
+    await expect(
+      github.getByRole("link", { name: "GitHub相对" }),
+    ).toHaveAttribute("href", "https://github.com/owner/agentflow/pull/87");
+    await message.locator("a[data-footnote-ref]").press("Enter");
+    await expect(message.locator("section[data-footnotes] li")).toBeFocused();
+    await expect(page).toHaveURL(/#flow\/42\/conversation$/);
+    await message
+      .getByRole("link", { name: "源码", exact: true })
+      .click({ button: "middle" });
+    expect(reads).toEqual([]);
+    await message.getByRole("link", { name: "源码", exact: true }).focus();
+    const root = page.locator(".detail-body");
+    const noOverflow = async () => {
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+      ).toBe(true);
+      expect(
+        await root.evaluate((node) => node.scrollWidth <= node.clientWidth),
+      ).toBe(true);
+    };
+    const before = await sampleReadingFrames(
+      root,
+      '[data-entry="file-message-4"]',
+    );
+    await message
+      .getByRole("link", { name: "源码", exact: true })
+      .press("Enter");
+    await expect(fileTab).toHaveAttribute("aria-selected", "true");
+    await expect(fileTab).toBeFocused();
+    await expect(
+      page.getByRole("button", { name: `关闭 ${names[0]}`, exact: true }),
+    ).toBeInViewport({ ratio: 1 });
+    await expect(page).toHaveURL(new RegExp(`#flow/42/file-${ids[0]}$`));
+    const panel = page.getByRole("tabpanel");
+    await expect(panel).toHaveAccessibleName(names[0]);
+    await expect(panel.getByRole("heading")).toHaveCount(0);
+    await expect(page.getByLabel("文件源码", { exact: true })).toContainText(
+      "<script>window.fileExecuted=true</script>",
+    );
+    // Inspect untrusted source, excluding the pager's own trusted SVG button icons.
+    await expect(
+      page
+        .getByLabel("文件源码", { exact: true })
+        .locator("script, svg, iframe, img"),
+    ).toHaveCount(0);
+    expect(await page.evaluate(() => "fileExecuted" in window)).toBe(false);
+    expect(
+      await page.getByLabel("文件源码", { exact: true }).textContent(),
+    ).toHaveLength(8192);
+    const numbers = panel.locator("[data-line-number]");
+    await expect(numbers).toHaveCount(4);
+    await expect(numbers.last()).toHaveAttribute("data-line-number", "4");
+    await noOverflow();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/numbered-file-long-${width}.png`,
+    });
+    await page.getByRole("button", { name: "下一段", exact: true }).click();
+    await expect(page.getByLabel("文件源码分段浏览")).toContainText("8193");
+    // A character-budget split continues the same physical line, including when it wraps.
+    await expect(numbers).toHaveCount(1);
+    await expect(numbers.first()).toHaveAttribute("data-line-number", "4");
+    const expand = page.getByRole("button", { name: "展开详情标题" });
+    if (width === 390) {
+      await expect(expand).toBeVisible();
+      await expand.click();
+    }
+    await page.getByRole("tab", { name: "会话", exact: true }).click();
+    await expect(message).toBeVisible();
+    const after = await sampleReadingFrames(
+      root,
+      '[data-entry="file-message-4"]',
+    );
+    expect(
+      Math.abs(after.offsets.at(-1)! - before.offsets.at(-1)!),
+      JSON.stringify({ before, after }),
+    ).toBeLessThan(4);
+
+    const open = async (label: string, index: number) => {
+      await message.getByRole("link", { name: label, exact: true }).click();
+      await expect(
+        page.getByRole("tab", { name: names[index], exact: true }),
+      ).toHaveAttribute("aria-selected", "true");
+      await expect(
+        page.getByRole("tab", { name: names[index], exact: true }),
+      ).toHaveCount(1);
+    };
+    const conversation = async () => {
+      const expand = page.getByRole("button", { name: "展开详情标题" });
+      if (await expand.isVisible()) await expand.click();
+      await page.getByRole("tab", { name: "会话", exact: true }).click();
+    };
+    await open("源码", 0);
+    await expect(page.getByRole("tab")).toHaveCount(4);
+    await conversation();
+    await open("图片：位图", 1);
+    const image = panel.getByRole("img", { name: "文件图片预览" });
+    await expect(image).toBeVisible();
+    await expect(image).toHaveJSProperty("naturalWidth", 640);
+    await noOverflow();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/editor-file-image-${width}.png`,
+    });
+    if (width === 1440) {
+      // Exercise actual browser decoders, not just signature classification, for every allowed format.
+      for (const mime of ["image/jpeg", "image/webp"]) {
+        png = Buffer.from(
+          await image.evaluate((node: HTMLImageElement, mime) => {
+            const canvas = document.createElement("canvas");
+            canvas.width = node.naturalWidth;
+            canvas.height = node.naturalHeight;
+            canvas.getContext("2d")!.drawImage(node, 0, 0);
+            return canvas.toDataURL(mime).split(",")[1];
+          }, mime),
+          "base64",
+        );
+        await panel.getByRole("button", { name: "重新读取" }).click();
+        await expect(image).toHaveAttribute(
+          "src",
+          new RegExp(`^data:${mime};base64,`),
+        );
+        await expect(image).toHaveJSProperty("naturalWidth", 640);
+      }
+      png = Buffer.from(
+        "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+        "base64",
+      );
+      await panel.getByRole("button", { name: "重新读取" }).click();
+      await expect(image).toHaveAttribute("src", /^data:image\/gif;base64,/);
+      await expect(image).toHaveJSProperty("naturalWidth", 1);
+      png = Buffer.alloc(0);
+      await panel.getByRole("button", { name: "重新读取" }).click();
+      await expect(panel).toContainText("空文件");
+    }
+    await conversation();
+    await open("二进制", 2);
+    await expect(panel).toContainText("此二进制格式不支持预览");
+    await expect(
+      panel.getByRole("link", { name: "下载原文件" }),
+    ).toHaveAttribute("href", paths[2]);
+    await expect(
+      panel.getByRole("link", { name: "下载原文件" }),
+    ).toHaveAttribute("download", names[2]);
+    await noOverflow();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/editor-file-binary-${width}.png`,
+    });
+    await conversation();
+    await open("伪装图片", 3);
+    await expect(panel).toContainText("此二进制格式不支持预览");
+    await expect(panel.locator("img")).toHaveCount(0);
+    await conversation();
+    await open("离线", 4);
+    await expect(panel.getByRole("alert")).toContainText("Worker 离线");
+    await expect(panel.getByRole("link", { name: "下载原文件" })).toHaveCount(
+      0,
+    );
+    await noOverflow();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/editor-file-error-${width}.png`,
+    });
+    offline = false;
+    await panel.getByRole("button", { name: "重试读取" }).click();
+    await expect(page.getByLabel("文件源码", { exact: true })).toBeVisible();
+    await conversation();
+    await open("超限", 5);
+    await expect(panel.getByRole("alert")).toContainText("512 KiB");
+    await expect(panel.getByRole("link", { name: "下载原文件" })).toHaveCount(
+      0,
+    );
+    await conversation();
+    await open("登录", 6);
+    await expect(panel.getByRole("alert")).toContainText("登录已失效");
+    await expect(
+      panel.getByRole("link", { name: "重新登录 / 刷新页面" }),
+    ).toBeVisible();
+    await noOverflow();
+    const readCount = reads.length;
+    await page.reload();
+    await expect(
+      page.getByRole("tab", { name: "会话", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(/#flow\/42\/conversation$/);
+    expect(reads).toHaveLength(readCount);
+    expect(page.context().pages()).toHaveLength(1);
+    expect(errors).toEqual([]);
+  });
+}
+
+for (const width of [1440, 390]) {
+  test(`worker file source keeps original line numbers and copy text at ${width}px`, async ({
+    page,
+    context,
+  }) => {
+    // CRLF, empty lines and wrapped source must not shift numbering across the line budget.
+    await page.setViewportSize({ width, height: 900 });
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const id = "d".repeat(32);
+    const body = `[查看代码](/api/files/${id}#name=example.ts)`;
+    const lines = Array.from({ length: 235 }, (_, i) =>
+      i === 0
+        ? 'const message = "带行号的只读代码预览";'
+        : i === 1
+          ? ""
+          : i === 2
+            ? '\tconst description = "长行自动换行，仍然只显示一个原文件行号。";'
+            : `// 原文件第 ${i + 1} 行`,
+    );
+    const source = lines.join("\r\n") + "\r\n";
+    const first = lines.slice(0, 200).join("\r\n") + "\r\n";
+    let content = source;
+    await page.route("**/api/flows/42/activity?**", (route) =>
+      route.fulfill({
+        json: activityPage(
+          [
+            {
+              ...activity,
+              source: "worker",
+              kind: "message",
+              body,
+              body_length: body.length,
+              previous_version: null,
+            },
+          ],
+          0,
+          1,
+        ),
+      }),
+    );
+    await page.route(`**/api/files/${id}`, (route) =>
+      route.fulfill({ body: content }),
+    );
+    await page.goto("/console/#flow/42/conversation");
+    await page.getByRole("link", { name: "查看代码" }).click();
+    const preview = page.getByLabel("文件源码", { exact: true });
+    const numbers = preview.locator("[data-line-number]");
+    await expect(numbers).toHaveCount(200);
+    await expect(numbers.first()).toHaveAttribute("data-line-number", "1");
+    await expect(numbers.last()).toHaveAttribute("data-line-number", "200");
+    expect(await preview.textContent()).toBe(first);
+    expect(
+      await numbers
+        .first()
+        .evaluate((node) => getComputedStyle(node, "::before").content),
+    ).toBe('"1"');
+    await preview.evaluate((node) => {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const selection = window.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press("ControlOrMeta+c");
+    // Native <pre> selection omits its final rendered line break, but preserves inner CRLF.
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+      first.slice(0, -2),
+    );
+    await page.evaluate(() => window.getSelection()?.removeAllRanges());
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/numbered-file-code-${width}.png`,
+    });
+    await page.getByRole("button", { name: "下一段", exact: true }).click();
+    await expect(numbers).toHaveCount(35);
+    await expect(numbers.first()).toHaveAttribute("data-line-number", "201");
+    await expect(numbers.last()).toHaveAttribute("data-line-number", "235");
+    expect(await preview.textContent()).toBe(source.slice(first.length));
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    expect(
+      await page
+        .locator(".detail-body")
+        .evaluate((node) => node.scrollWidth <= node.clientWidth),
+    ).toBe(true);
+    await page.locator(".detail-body").evaluate((node) => (node.scrollTop = 0));
+    await expect(numbers.first()).toBeInViewport();
+    await expect(page.getByRole("tab", { name: "example.ts" })).toBeVisible();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/numbered-file-next-${width}.png`,
+    });
+    await page.getByRole("button", { name: "上一段", exact: true }).click();
+    expect(await preview.textContent()).toBe(first);
+    await expect(numbers.first()).toHaveAttribute("data-line-number", "1");
+    content = "";
+    await page.getByRole("button", { name: "重新读取", exact: true }).click();
+    await expect(page.getByText("空文件", { exact: true })).toBeVisible();
+    await expect(numbers).toHaveCount(1);
+    await expect(numbers.first()).toHaveAttribute("data-line-number", "1");
+    expect(await preview.textContent()).toBe("");
+  });
+}
+
+for (const width of [1440, 390]) {
+  test(`editor file tabs switch, deduplicate and close with keyboard focus at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const ids = ["a".repeat(32), "b".repeat(32), "c".repeat(32)];
+    const names = [
+      "README.md",
+      "README.md",
+      "一段很长的文件名称用来验证页签截断与局部滚动的行为.tsx",
+    ];
+    const body = ids
+      .map(
+        (id, i) =>
+          `[打开${i}](/api/files/${id}#name=${encodeURIComponent(names[i])})`,
+      )
+      .join("\n\n");
+    await page.route("**/api/flows/42/activity?**", (route) =>
+      route.fulfill({
+        json: activityPage(
+          [
+            {
+              ...activity,
+              source: "worker",
+              kind: "message",
+              body,
+              body_length: body.length,
+              previous_version: null,
+            },
+          ],
+          0,
+          1,
+        ),
+      }),
+    );
+    await page.route("**/api/files/*", (route) =>
+      route.fulfill({ body: `source ${route.request().url().slice(-32)}` }),
+    );
+    await page.goto("/console/#flow/42/conversation");
+    const conversation = page.getByRole("tab", { name: "会话", exact: true });
+    const panel = page.getByRole("tabpanel");
+    for (let i = 0; i < ids.length; i++) {
+      await conversation.click();
+      await page.getByRole("link", { name: `打开${i}`, exact: true }).click();
+      await expect(panel).toContainText(`source ${ids[i]}`);
+    }
+    await expect(page.getByRole("tab")).toHaveCount(6);
+    await expect(
+      page.getByRole("tab", { name: names[2], exact: true }),
+    ).toHaveAttribute("title", names[2]);
+    await expect(
+      page.getByRole("button", { name: `关闭 ${names[2]}`, exact: true }),
+    ).toBeInViewport({ ratio: 1 });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/editor-file-tabs-${width}.png`,
+    });
+    await conversation.click();
+    await page.getByRole("link", { name: "打开0", exact: true }).click();
+    await expect(page.getByRole("tab")).toHaveCount(6);
+    const first = page.getByRole("tab", {
+      name: "README.md aaaaaa",
+      exact: true,
+    });
+    const second = page.getByRole("tab", {
+      name: "README.md bbbbbb",
+      exact: true,
+    });
+    await expect(first).toBeFocused();
+    await first.press("ArrowRight");
+    await expect(second).toBeFocused();
+    await expect(panel).toContainText(`source ${ids[1]}`);
+    await page.goBack();
+    await expect(first).toHaveAttribute("aria-selected", "true");
+    await page.goForward();
+    await expect(second).toHaveAttribute("aria-selected", "true");
+    // Closing the first file selects its right neighbour without reopening a duplicate.
+    await first.click();
+    await first.press("Delete");
+    await expect(
+      page.getByRole("tab", { name: "README.md", exact: true }),
+    ).toBeFocused();
+    await expect(panel).toContainText(`source ${ids[1]}`);
+    await conversation.click();
+    await page.getByRole("link", { name: "打开0", exact: true }).click();
+    await expect(page.getByRole("tab")).toHaveCount(6);
+    await second.click();
+    // Closing an inactive file must not switch the current document.
+    await page
+      .getByRole("button", { name: `关闭 ${names[2]}`, exact: true })
+      .click();
+    await expect(second).toHaveAttribute("aria-selected", "true");
+    // The last file has no right neighbour, so closing it selects the file on its left.
+    await first.click();
+    await expect(first).toHaveAttribute("aria-selected", "true");
+    await first.press("Delete");
+    const remaining = page.getByRole("tab", { name: "README.md", exact: true });
+    await expect(remaining).toBeFocused();
+    await expect(panel).toContainText(`source ${ids[1]}`);
+    await page
+      .getByRole("button", { name: "关闭 README.md", exact: true })
+      .click();
+    await expect(conversation).toBeFocused();
+    await expect(conversation).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tab")).toHaveCount(3);
+    await page.goBack();
+    await expect(conversation).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(/#flow\/42\/conversation$/);
+    expect(page.context().pages()).toHaveLength(1);
+  });
+}
+
+test("worker file requests cancel on tab changes and cannot overwrite a later file", async ({
+  page,
+}) => {
+  const ids = ["a".repeat(32), "b".repeat(32)];
+  const body = ids.map((id, i) => `[文件${i}](/api/files/${id})`).join("\n\n");
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({
+      json: activityPage(
+        [
+          {
+            ...activity,
+            source: "worker",
+            kind: "message",
+            body,
+            body_length: body.length,
+            previous_version: null,
+          },
+        ],
+        0,
+        1,
+      ),
+    }),
+  );
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let pending = 0;
+  let completed = 0;
+  await page.route(`**/api/files/${ids[0]}`, async (route) => {
+    pending++;
+    await gate;
+    try {
+      await route.fulfill({ body: "stale response" });
+    } catch (error) {
+      if (!route.request().failure()) throw error;
+    } finally {
+      completed++;
+    }
+  });
+  await page.route(`**/api/files/${ids[1]}`, (route) =>
+    route.fulfill({ body: "current response" }),
+  );
+  await page.goto("/console/#flow/42/conversation");
+  const started = page.waitForRequest(`**/api/files/${ids[0]}`);
+  await page.getByRole("link", { name: "文件0", exact: true }).click();
+  const request = await started;
+  await expect(page.getByRole("status")).toContainText("正在读取文件");
+  await page.getByRole("tab", { name: "会话", exact: true }).click();
+  await expect.poll(() => request.failure()?.errorText).toBeTruthy();
+  await page.getByRole("link", { name: "文件1", exact: true }).click();
+  await expect(page.getByLabel("文件源码", { exact: true })).toHaveText(
+    "current response",
+  );
+  release();
+  await expect.poll(() => completed).toBe(pending);
+  await expect(page.getByLabel("文件源码", { exact: true })).toHaveText(
+    "current response",
+  );
+  expect(page.context().pages()).toHaveLength(1);
+});

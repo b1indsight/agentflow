@@ -92,13 +92,19 @@ export function textEnd(
     let lines = 1;
     for (let i = start; i < limit; i++) {
       if (text[i] === "\n" && ++lines > CODE_LINES) {
-        end = i;
+        // Keep the delimiter with its line so the next window starts on the next line.
+        end = i + 1;
         break;
       }
     }
   }
-  // Never split a UTF-16 surrogate pair between windows.
-  if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1])) end--;
+  // Never split a UTF-16 surrogate pair or CRLF between windows.
+  if (
+    end < text.length &&
+    (/[\uD800-\uDBFF]/.test(text[end - 1]) ||
+      (text[end - 1] === "\r" && text[end] === "\n"))
+  )
+    end--;
   return end;
 }
 
@@ -106,18 +112,22 @@ export function TextWindow({
   text,
   stateKey,
   code = false,
+  lineNumbers = false,
   label = "文本",
   maxChars,
 }: {
   text: string;
   stateKey: string;
   code?: boolean;
+  lineNumbers?: boolean;
   label?: string;
   maxChars?: number;
 }) {
   const [saved, setStart] = useReadingState(stateKey, 0);
   const start = saved < text.length ? saved : 0;
   const end = textEnd(text, start, code, maxChars);
+  const visible = text.slice(start, end);
+  const firstLine = lineNumbers ? text.slice(0, start).split("\n").length : 1;
   const previous = () => {
     let before = 0;
     for (
@@ -160,14 +170,31 @@ export function TextWindow({
   );
   return code ? (
     <>
-      <pre tabIndex={0} aria-label={label}>
-        <code>{text.slice(start, end)}</code>
+      <pre
+        tabIndex={0}
+        aria-label={label}
+        className={lineNumbers ? "numbered-code" : undefined}
+      >
+        <code>
+          {lineNumbers
+            ? (visible.match(/[^\n]*\n|[^\n]+$/g) ?? [""]).map((line, i) => (
+                <span className="code-line" key={i}>
+                  <span
+                    className="code-line-number"
+                    aria-hidden="true"
+                    data-line-number={firstLine + i}
+                  />
+                  <span className="code-line-text">{line}</span>
+                </span>
+              ))
+            : visible}
+        </code>
       </pre>
       {controls}
     </>
   ) : (
     <span className="text-window">
-      {text.slice(start, end)}
+      {visible}
       {controls}
     </span>
   );

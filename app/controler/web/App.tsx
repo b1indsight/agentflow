@@ -13,6 +13,7 @@ import {
   ArrowLeft,
   Check,
   ChevronDown,
+  FileText,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
@@ -39,10 +40,13 @@ import {
   conversationProvenanceRange,
   conversationRecordKey,
   conversationRowKey,
+  OpenWorkerFile,
   sameActivityGroup,
 } from "./activity";
 import { ConversationSources, SourceList } from "./ConversationSources";
 import { CreateFlow } from "./CreateFlow";
+import { FileViewer } from "./FileViewer";
+import type { WorkerFile } from "./files";
 import { InferenceNotices } from "./InferenceNotices";
 import { actionLabel, archiveReasonLabels, flowLabel, phases } from "./phases";
 import { SearchBox } from "./SearchBox";
@@ -87,17 +91,19 @@ const flowTabs = [
   { value: "conversation", label: "会话" },
   { value: "jobs", label: "执行记录" },
 ] as const;
-type Tab = (typeof flowTabs)[number]["value"];
+type Tab = (typeof flowTabs)[number]["value"] | `file-${string}`;
 const positions = new Map<string, number>();
 const route = () => {
   const m = location.hash.match(/^#flow\/(\d+)(?:\/([^/]+))?$/);
-  const tab = flowTabs.find(
+  const base = flowTabs.find(
     ({ value }) => value === (m?.[2] ?? "conversation"),
   );
+  const fileId = m?.[2]?.match(/^file-([0-9a-f]{32})$/)?.[1];
+  const tab: Tab = fileId ? `file-${fileId}` : (base?.value ?? "conversation");
   return {
     settings: location.hash === "#settings",
-    id: m && tab ? Number(m[1]) : null,
-    tab: tab?.value ?? "conversation",
+    id: m && (base || fileId) ? Number(m[1]) : null,
+    tab,
   };
 };
 const name = (f: FlowSummary) => f.title ?? `Flow #${f.id}`;
@@ -328,6 +334,43 @@ function Detail({
     }
   };
   const [compactHead, setCompactHead] = useState(false);
+  const [files, setFiles] = useState<WorkerFile[]>([]);
+  const activeFile = files.find((file) => `file-${file.id}` === tab);
+  const baseTab =
+    flowTabs.find(({ value }) => value === tab)?.value ?? "conversation";
+  const selectedTab = activeFile ? tab : baseTab;
+  const focusTab = useRef<string | null>(null);
+  const openFile = useCallback(
+    (file: WorkerFile) => {
+      setFiles((prior) =>
+        prior.some(({ id }) => id === file.id) ? prior : [...prior, file],
+      );
+      focusTab.current = `file-${file.id}`;
+      location.hash = `flow/${id}/file-${file.id}`;
+    },
+    [id],
+  );
+  const closeFile = (fileId: string) => {
+    const index = files.findIndex((file) => file.id === fileId);
+    const remaining = files.filter((file) => file.id !== fileId);
+    focusTab.current = selectedTab;
+    if (activeFile?.id === fileId) {
+      const next = remaining[index] ?? remaining[index - 1];
+      focusTab.current = next ? `file-${next.id}` : "conversation";
+      location.hash = `flow/${id}/${focusTab.current}`;
+    }
+    setFiles(remaining);
+  };
+  useEffect(() => {
+    // Open documents are local to this Flow visit; stale history entries return to the conversation.
+    // Check each render: rapid Back can revisit the same tab prop before hashchange settles.
+    if (
+      tab.startsWith("file-") &&
+      !activeFile &&
+      location.hash.endsWith(`/${tab}`)
+    )
+      location.replace(`#flow/${id}/conversation`);
+  });
   const head = useRef<HTMLElement>(null);
   const expandedHeight = useRef(0);
   const headTransition = useRef<{ height: number; scroll: number } | null>(
@@ -342,6 +385,16 @@ function Detail({
     rail = useRef<HTMLElement>(null);
   const jobsRequest = useRef<AbortController | null>(null);
   const jobsBusy = useRef(false);
+  useLayoutEffect(() => {
+    if (compactHead || focusTab.current !== selectedTab) return;
+    // A clicked message or closed tab unmounts; hand focus to the current editor tab.
+    const trigger = head.current?.querySelector<HTMLButtonElement>(
+      '[role="tab"][data-state="active"]',
+    );
+    if (!trigger) return;
+    focusTab.current = null;
+    trigger.focus({ preventScroll: true });
+  }, [selectedTab, files, Boolean(flow), compactHead]);
   useLayoutEffect(() => {
     const node = detail.current;
     if (!node) return;
@@ -593,7 +646,7 @@ function Detail({
         onClick={() => setNav(false)}
       />
       <Tabs
-        value={tab}
+        value={selectedTab}
         onValueChange={(value) => (location.hash = `flow/${id}/${value}`)}
         asChild
       >
@@ -672,13 +725,72 @@ function Detail({
                     {label}
                   </TabsTrigger>
                 ))}
+                {files.map((file) => {
+                  const value = `file-${file.id}`;
+                  const filename = file.name ?? file.id.slice(0, 8);
+                  const duplicate =
+                    file.name !== null &&
+                    files.some(
+                      (other) =>
+                        other.id !== file.id && other.name === file.name,
+                    );
+                  const label = duplicate
+                    ? `${filename} ${file.id.slice(0, 6)}`
+                    : filename;
+                  return (
+                    <div
+                      className="file-tab"
+                      data-active={tab === value}
+                      key={file.id}
+                      onFocus={(event) =>
+                        event.currentTarget.scrollIntoView({
+                          block: "nearest",
+                          inline: "nearest",
+                        })
+                      }
+                    >
+                      <TabsTrigger
+                        value={value}
+                        title={filename}
+                        onKeyDown={(event) => {
+                          if (event.key === "Delete") {
+                            event.preventDefault();
+                            closeFile(file.id);
+                          }
+                        }}
+                      >
+                        <FileText aria-hidden="true" />
+                        <span className="file-tab-name">{filename}</span>
+                        {duplicate && <small> {file.id.slice(0, 6)}</small>}
+                      </TabsTrigger>
+                      <button
+                        type="button"
+                        className="file-tab-close"
+                        aria-label={`关闭 ${label}`}
+                        tabIndex={-1}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => closeFile(file.id)}
+                      >
+                        <X aria-hidden="true" />
+                      </button>
+                    </div>
+                  );
+                })}
               </TabsList>
             </div>
           </header>
           <div className="detail-body" data-scroll-root ref={detail}>
-            <TabsContent value={tab} asChild>
-              <section className="content">
-                {
+            <TabsContent value={selectedTab} asChild>
+              <section
+                className={`content${activeFile ? " file-content" : ""}`}
+              >
+                {activeFile ? (
+                  <FileViewer
+                    key={activeFile.id}
+                    linkId={activeFile.id}
+                    filename={activeFile.name}
+                  />
+                ) : (
                   (
                     {
                       overview: (
@@ -910,12 +1022,14 @@ function Detail({
                         </>
                       ),
                       conversation: (
-                        <Conversation
-                          key={id}
-                          id={id}
-                          root={detail}
-                          refresh={refresh}
-                        />
+                        <OpenWorkerFile value={openFile}>
+                          <Conversation
+                            key={id}
+                            id={id}
+                            root={detail}
+                            refresh={refresh}
+                          />
+                        </OpenWorkerFile>
                       ),
                       jobs: (
                         <>
@@ -976,9 +1090,9 @@ function Detail({
                           )}
                         </>
                       ),
-                    } satisfies Record<Tab, ReactNode>
-                  )[tab]
-                }
+                    } satisfies Record<typeof baseTab, ReactNode>
+                  )[baseTab]
+                )}
               </section>
             </TabsContent>
           </div>

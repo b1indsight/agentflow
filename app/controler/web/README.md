@@ -58,6 +58,7 @@ npm run preview -- --port 8767
 - `/console/#flow/<id>/conversation`：GitHub + Agent 时间线、工具摘要、Review 线程、下滑加载和末尾刷新。
 - `/console/#flow/<id>/overview`、`/jobs`：概览、来源同步状态、当前动作/下一条件与执行记录。
 - `/console/#settings`：Codex / Amp 默认模型与推理强度，顶栏可进入；刷新只读取设置。
+- `/console/#flow/<id>/file-<文件ID>`：当前 Flow 内按文件名打开的编辑器页签，可切换和关闭；刷新或离开 Flow 后回到会话重新选择。
 - `/console/?q=repo%3Aagentflow+is%3Aactive+pr%3A95#board`：可分享、刷新后恢复的组合查询。
 
 Flow 编号必须来自当前数据库；没有固定可用的样例 ID。GitHub 链接指向真实记录。
@@ -176,6 +177,33 @@ GitHub 末尾 effect 标记在展示读取时移除，原始归档不变；预�
 脚注标签先映射为内部数字标识，避免 `a` 的重复引用与 `a-2` 标签生成相同引用 ID；
 显示编号、脚注正文及每次引用的回链不变。仅脚注定义添加程序化焦点入口，回链保留原引用的
 Tab / Shift+Tab 顺序。
+
+Worker 正文已由 worker 在返回历史前把成功登记的本地 Markdown 目的地址替换为 controller URL；
+前端不接收路径映射，也不能提交本地路径申请读取。仅 Worker 活动中精确匹配同源
+`/api/files/<32位小写十六进制ID>` 的链接与图片入口，在普通相对地址解析之前识别。
+新链接附加 `#name=<百分号编码的 basename>`，只供页签和下载命名；不包含本地目录，
+HTTP/RPC 仍只接收随机 ID。文件名片段须通过长度、解码与路径/控制字符校验；旧链接回退到链接文字或短 ID。
+点击或 Enter 在当前 Flow 打开文件名页签，焦点随之转移；同 ID 只打开一次，多文件独立切换，
+同名文件附短 ID 区分。页签带关闭按钮，聚焦页签按 Delete 也可关闭；关闭当前文件选择相邻文件，
+最后一个关闭后回到会话。长文件名省略并通过悬停显示全名；窄屏仅标签栏横向滚动，当前文件与关闭按钮一起滚入视野。
+不弹出浏览器窗口，切回会话沿用逻辑阅读位置恢复。图片在会话中仍只是链接，不自动读取。
+普通外链、跨域同路径、GitHub 相对链接、缺少来源的普通相对地址与脚注不改变原行为。
+
+文件读取复用 owner 鉴权的 attachment API，不改变下载响应；请求无缓存、可取消，
+切换页签或 Flow 后旧响应不能覆盖当前文件。按实际响应流限制最多 512 KiB，空文件可查看；
+在此上限内完整读取后预览，仅挂载当前文件；切回文件会重新读取，不缓存文件内容，也不使用下文的会话响应缓存。
+超限时预览与同一 API 下载均不可用，不提示绕过限额。UTF-8 文本、Markdown、HTML 和 SVG
+统一按带行号的等宽转义源码分段显示（每段最多 8192 字符、200 行），不执行脚本或加载文内资源。
+行号对应原文件，保留空行和缩进；软换行不增加行号，长单行跨段继续使用同一行号。
+按行数翻段时从下一源文件行开始，LF／CRLF 与 Unicode 代理对不在段间拆开。
+行号不进入源码、复制内容或屏幕阅读器文本；会话正文和工具代码不增加行号。
+PNG/JPEG/GIF/WebP 必须通过内容签名和浏览器解码验证，才以已有 CSP 允许的 data 图片显示；
+伪装图片、非 UTF-8 与其他二进制仅提供原下载入口，无需放宽 CSP 或添加 Blob 执行权限。
+页面区分登录失效／无权限、文件缺失／替换、超限、离线、繁忙、超时和不可读，并提供重试或重新登录入口。
+已开文件只保存在当前 Flow 详情内存，刷新、离开 Flow 或后退至已关闭文件时回到会话；
+没有独立 `#file` 页面或全局文件列表。预览区使用紧凑只读工具栏，不重复文件名标题或展示句柄。
+文件是原 Worker 当前内容，不是快照，不承诺离线可读。
+
 个人阅读状态未落库，另见 [#88](https://github.com/b1indsight/agentflow/issues/88)。
 
 ## 渲染与阅读约定
@@ -228,6 +256,7 @@ Tab / Shift+Tab 顺序。
 | `SettingsPage.tsx`                   | 编码默认值草稿、版本冲突与未知保存结果的回读核对   |
 | `modelPresets.ts`                    | Codex / Amp 具体模型预设元数据快照                 |
 | `activity.tsx`                       | 作者分组、结构化活动、安全 Markdown 与原文工具输出 |
+| `FileViewer.tsx` / `files.ts`        | 详情内文件预览、精确链接识别与有界原始字节读取     |
 | `DiffWindow.tsx`                     | 编辑 patch 的有界窗口、行号与行内高亮              |
 | `useConversation.ts`                 | 快照分页缓存、请求取消/隔离、回读、显式刷新与重试  |
 | `sessionCache.ts`                    | 会话数据共用的有界 LRU 内存缓存                    |
@@ -277,6 +306,16 @@ CI=1 PLAYWRIGHT_PORT=5175 npm run test:e2e -- e2e/settings.spec.ts --workers=2
 迟到读取隔离、hash 与浏览器导航、看板搜索/手机阶段和原有会话缓存。
 1440px / 390px 默认、选择后、保存成功、读取失败、未知写入和冲突截图名为
 `code-agent-settings-compact-{default,selected,saved,read-error,unknown,conflict}-{width}.png`。
+
+文件页签与链接控制回归（同时生成桌面／手机截图）：
+
+```sh
+CI=1 PLAYWRIGHT_PORT=5186 npm run test:e2e -- --workers=1 --grep 'worker file|standard tabs|footnote'
+```
+
+覆盖点击／键盘、同页签复用、会话位置、无自动图片请求／弹窗、安全源码分段、有效／伪装图片、
+二进制下载入口、错误与重试、迟到响应及请求取消。截图保存在
+`.amp/in/artifacts/worker-file-{text,image,binary,error}-{1440,390}.png`；须实际查看截图并检查无横向溢出。
 
 任务输入回归覆盖原样字符串（包括 CRLF 粘贴及后续编辑）、空标题编号回退、刷新后服务端标题、
 取消/重复提交/结果未知保护；截图为 `.amp/in/artifacts/task-text-{form,detail-pending,detail-generated}-{1440,390}.png`。
