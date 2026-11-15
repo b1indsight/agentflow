@@ -8,16 +8,16 @@ from app.contracts.result_models import CommentEffect, Effect, EffectState, Labe
 from app.domain.models import DeliveryState, Flow, FlowDelivery, FlowState, Job, JobKind, JobState
 from app.persistence.activity import ActivityStore
 from app.persistence.deliveries import DeliveryStore
+from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.results import ResultStore
-from app.persistence.workers import WorkerStore
 
 
 def archive_task(
-    flow: Flow, job: Job, *, deliveries: DeliveryStore, jobs: JobStore, workers: WorkerStore
+    flow: Flow, job: Job, *, deliveries: DeliveryStore, flows: FlowStore, jobs: JobStore
 ) -> ArchiveTask:
     """Check current ownership and quiescence before freezing or accepting cleanup."""
-    execution = workers.get_flow_execution(flow.id)
+    execution = flows.get_flow_execution(flow.id)
     delivery = deliveries.get_delivery(flow.id)
     if (
         flow.state not in {FlowState.FINALIZING, FlowState.BLOCKED}
@@ -52,11 +52,11 @@ def verify_archive(
     result: ArchiveResult,
     *,
     deliveries: DeliveryStore,
+    flows: FlowStore,
     jobs: JobStore,
-    workers: WorkerStore,
 ) -> None:
     """Accept cleanup only against both the dispatched command and current binding."""
-    expected = archive_task(flow, job, deliveries=deliveries, jobs=jobs, workers=workers)
+    expected = archive_task(flow, job, deliveries=deliveries, flows=flows, jobs=jobs)
     if (job.started_at is None or "archive" not in (job.payload or {})
             or ArchiveTask.model_validate(result.model_dump(exclude={"cleanup"})) != expected):
         raise ValueError("archive receipt does not match its frozen command")
@@ -116,13 +116,13 @@ def archive_effects(
 
 
 def archive_progress(
-    flow: Flow, jobs: list[Job], *, result_store: ResultStore, workers: WorkerStore
+    flow: Flow, jobs: list[Job], *, result_store: ResultStore, flows: FlowStore
 ) -> str:
     """Derive operator-visible cleanup progress from existing jobs and frozen results."""
     archive = next((job for job in reversed(jobs)
                     if job.kind is JobKind.ARCHIVE and job.round_no == flow.current_round_no), None)
     if flow.state is FlowState.ARCHIVED:
-        binding = workers.get_flow_execution(flow.id)
+        binding = flows.get_flow_execution(flow.id)
         cleanup = ("execution binding released" if binding is None or binding.released_at is not None
                    else "workspace cleanup pending on original worker")
         notification = ("no notification intent" if archive is None
@@ -160,7 +160,7 @@ def archive_progress(
         return "blocked: original executor status unknown" if archive.recovery_deadline else "cleaning"
     if any(job.state is JobState.RUNNING for job in jobs):
         return "waiting for the original executor and its result"
-    binding = workers.get_flow_execution(flow.id)
+    binding = flows.get_flow_execution(flow.id)
     if binding is None or binding.released_at is not None:
         return "blocked: original binding is missing; manual reconciliation required"
     return "waiting for the original worker"

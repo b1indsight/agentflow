@@ -144,7 +144,7 @@ def test_reconnect_and_publication_use_the_same_lock_order(store):
     flow = store.flows.create_flow("owner/repo", 7, 42)
     register_worker(store, "w", repo=flow.repo, epoch="old")
     enqueue_job(store, flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job("w", "token", "old") is not None
+    assert store.assignments.assign_job("w", "token", "old") is not None
     only_worker(store._db)
     sync = ConsoleSyncStore(store._db)
     claim = sync.claim()

@@ -1,6 +1,6 @@
 # WorkerStore 拆分与派发策略下沉 — 功能记录
 
-**阶段：** 规划中，等待审批；尚未修改产品代码或测试。
+**阶段：** 计划已批准并已实现；验证结果与交付状态见时间线。
 **PR：** [#172](https://github.com/b1indsight/agentflow/pull/172)（草稿）。
 **Bookmark：** `refactor/worker-store-split`；同一功能记录、同一 bookmark、同一个 PR。
 **需求与审批：** [本线程](https://ampcode.com/threads/T-01a1e050-ae2c-7193-81c2-44c2a71f1548)，由[架构审查线程](https://ampcode.com/threads/T-01a1df4f-9c18-7322-8a3a-1b1153ba4a2d)提出。
@@ -393,4 +393,57 @@ def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None
 
 ## 2. PR 变更时间线
 
-尚无条目。
+### [001] — 2026-11-16 — `cancel_jobs` 的归属理由更正，并改名为 `retire_queued_work`
+
+- **背景：** 审批时用户问 `JobStore` 为什么移出 `cancel_jobs`，随后提出改名并批准实现（[本线程](https://ampcode.com/threads/T-01a1e050-ae2c-7193-81c2-44c2a71f1548)）。
+- **更正：** 初始计划写的理由之一“它清空 `workers.current_job_id`，属于领取与槽位的事务”不成立：留在 `JobStore` 的 [`retire_preparation`](https://github.com/b1indsight/agentflow/blob/c1233e2ad121ef5133ba8fe9f72720e05ec38855/app/persistence/jobs.py#L293-L310) 和 [`complete_persisted_result`](https://github.com/b1indsight/agentflow/blob/c1233e2ad121ef5133ba8fe9f72720e05ec38855/app/persistence/jobs.py#L368-L415) 也清空同一列。移出的理由只有依赖方向：这个方法在一个事务里取消审核批次、退休编码任务、结算推理调用，后两个依赖位于 `jobs.py` 之上，留在 `JobStore` 就必须保留[两处函数内导入](https://github.com/b1indsight/agentflow/blob/c1233e2ad121ef5133ba8fe9f72720e05ec38855/app/persistence/jobs.py#L36-L37)。
+- **考虑过的做法：** 整体移到 `AssignmentStore`（调用方仍是一次调用）；留在 `JobStore` 并保留两处函数内导入；`JobStore` 只留编码任务部分，由 5 个调用点各自按顺序调三个仓储（漏掉一步就是行为变化）。
+- **决定（已接受，已实现）：** 移到 `AssignmentStore`，改名为 `retire_queued_work(flow_id, *, reason=...)`。它同时处理审核批次、编码任务和推理调用，并且只退休排队中和未派发的工作，原名两处都不准确。这取代初始计划“移动的方法保持原名”对这一个方法的适用；其他方法名不变。
+
+### [002] — 2026-11-16 — 基线、语句序列的记录方法与重放
+
+- **基线：** 未改动的 `c1233e2a` 在本项私有 PostgreSQL 上全量运行三次，结果都是 1882 passed、1 skipped（Git 后端不适用的 jj metadata 场景）。
+- **语句序列：** 用临时 pytest 插件包住 psycopg 的 `Cursor.execute` 和连接级命令，按测试、按线程记录归一化后的 SQL 文本及 `BEGIN`/`COMMIT`/`SAVEPOINT`，测试 schema 名统一替换。记录范围是全量测试，取代“实施中再定的问题”里的选定场景清单。插件和对比脚本不进入仓库。
+- **不稳定的序列：** 基线自身三次运行之间有 34 个测试的序列不同，都是多线程或异步轮询的端到端用例。对比时排除它们，只对它们检查是否出现基线没有的语句。
+- **重放：** 实现期间 `main` 前进到 `12ab7300`（#173、#174，只改 console 前端），本项提交已重放到其上；Python 代码与基线相同。
+
+### [003] — 2026-11-16 — 策略改为领域纯函数，公开 worker 锁方法（第一个代码提交）
+
+- **实现：** 新增 [`app/domain/inference_policy.py`](../../app/domain/inference_policy.py)：`decide_inference_cancellation`、`decide_inference_settlement`、`plan_inference_attempt`、`choose_inference_worker` 和 `MAX_INFERENCE_ATTEMPTS`；[`recovery_policy.py`](../../app/domain/recovery_policy.py) 增加 `decide_preparation_retry`。仓储里对应的分支删除，改为读事实后调用。`Database` 提供 `lock_workers()` / `lock_worker()`，11 处私有调用全部迁移。
+- **与计划一致的两项差异：** 结算只读一次时钟；心跳与完成使用显式事务块，线上语句顺序不变。
+- **新增的第三项差异（已实现，请确认）：** 取消判断现在一次读全来源事实（Flow、批次、批次当前性），再交给纯函数。原实现按判断顺序短路：已记录取消时不读，Flow 不符时不读批次，批次已指向其他任务时不查当前性。因此在调用被取消的那一刻，锁内最多多出 5 条只读 `SELECT`，结果不变。保留短路需要仓储按策略的判断顺序读取，等于把策略留一半在仓储里，所以没有保留。全量对比中有 3 个测试出现这些多出的读取。
+- **类型：** `InferenceSettlement` 和 `PreparationRetry` 按计划用冻结的 pydantic 模型。
+- **未改动的既有行为：** `record_assignment_result` 在自己的事务里调用 `self.assignment_active(...)`；仓储未绑定事务时，这次读取走连接池里的另一条连接。结果不受影响（本事务没有改动它读的行），但每次结果入库会同时占用两条连接。这是基线行为，本项没有改，留给后续决定。
+- **新测试：** [`tests/test_inference_policy.py`](../../tests/test_inference_policy.py)（不需要数据库）和 [`tests/test_recovery_decisions.py`](../../tests/test_recovery_decisions.py) 里的准备重试用例，期望值按本计划的规则独立写出。
+
+### [004] — 2026-11-16 — 按职责拆开 `WorkerStore`（第二个代码提交）
+
+- **实现：** 33 个方法按初始计划的对照表移动，方法体内只改所属的类、共用 SQL 片段的名字和 [001] 的改名。`assign_job` 仍是唯一入口，内部分成 `_assign_inference` 和 `_assign_coding`。新增 `InferenceStore.sweep_inference`、`cancel_flow_inference` 两个从原方法里拆出的片段。`Store` 增加 `assignments`、`inference` 入口。
+- **结果：** `workers.py` 240 行、`assignments.py` 782 行、`inference.py` 297 行。`AssignmentStore` 比计划估计的约 620 行多，原因是领取、租约、准备重试的 SQL 原样保留。`app/persistence` 内的函数内导入从 7 处降到 1 处（`flows.py` → `reviews`），`_lock_worker(s)` 不再存在。
+- **调用方：** 控制层按方法归属改用对应仓储。`archive.py` 的函数把 `workers` 参数换成 `flows`；`lifecycle.py` 的 `pause_delivery`、`close_delivery` 把 `jobs` 换成 `assignments`，`record_merge`、`adopt_created_pull_request` 把 `workers` 换成 `assignments`；`live_smoke` 的 `observe` 去掉只用于读绑定的 `workers` 参数；`conversation.py`、`effects.py`、`pull_requests.py` 不再构造 `WorkerStore`。
+- **测试改动：** 现有测试只改调用的仓储对象、上述参数名和三处 monkeypatch 的目标类，断言不变。新增两个合同测试：`test_claim_eligibility_matches_the_domain_dispatch_rules`（枚举 7 种可存储的 Flow 阶段 × 5 种交付状态 × 3 种任务类型，比较实际领取的集合与 `Flow.accepts`、`FlowDelivery.supersedes` 的结论）和 `test_persistence_stores_import_each_other_at_module_level`。
+- **文档：** 更新 [`components.md`](../architecture/components.md) 的策略说明和仓储表、[`roadmap.md`](../architecture/roadmap.md) 的目录说明、计划索引和 CHANGELOG。
+
+### [005] — 2026-11-16 — 语句序列对比、简化对照与最终检查
+
+- **语句序列：** 在拆分提交上全量运行带记录插件的测试，与两次按实际发送顺序（隐式 `BEGIN` 在语句之前）记录的基线比较。没有任何测试发出基线从未出现过的 SQL 文本。按测试比较时有 10 个测试的序列不同：3 个是 [003] 记录的取消事实多读；其余 7 个是端到端或轮询用例，差异只是整轮轮询语句多一次或少一次，与基线之间本来就存在的 33 个不稳定用例同类。锁语句的种类与先后关系没有变化。
+- **简化对照：** 用临时脚本每次改一处机制，运行新增合同测试和改动前就有的数据库回归，跑完恢复文件。
+
+  | 错误版本 | 新增测试 | 原有回归 |
+  | --- | --- | --- |
+  | 排除集当作避让集 | 失败 | 120 项通过 |
+  | 所有失败都排除 worker | 5 项失败 | 1 项失败 |
+  | 本地优先放在避让层之上 | 失败 | 120 项通过 |
+  | 次数上限改为 4 | 失败 | 1 项失败 |
+  | 去掉超大 `Retry-After` 的截断 | 失败 | 120 项通过 |
+  | 尝试规划忽略退避 | 失败 | 120 项通过 |
+  | 尝试规划给出完整超时 | 失败 | 120 项通过 |
+  | `flows.py` 恢复对 `workers` 的函数内导入 | 结构性测试失败 | 不适用 |
+  | 领取 SQL 去掉“交付已关闭”条件 | 失败 | 127 项通过 |
+  | 领取 SQL 允许 finalizing 的编码任务 | 失败 | 127 项通过 |
+
+  每个错误版本都至少让一个新增测试失败；10 项中有 8 项原有回归全部通过，说明这些规则以前没有便宜的测试。`plan_inference_attempt` 只有一个调用点，但它的两条规则只有新增的纯测试能发现，所以保留为独立函数，不内联（计划“实施中再定的问题”第一项的结论）。
+- **合同测试改用合法事件：** `test_claim_eligibility_matches_the_domain_dispatch_rules` 原先用 SQL 直接改写 Flow 的状态和归档结论，与 #171 “测试准备通过合法事件，不绕过状态写入口”的约定不符。现改为在 `flows.locked()` 内依次提交事件（含 `archive_round`）建立 7 种阶段，并断言六种状态都实际出现。上表最后两项在改写后重新运行，结果相同。同时修正了它的三处类型错误。
+- **与本项无关的不稳定用例：** 曾有两次全量运行与另一次全量运行同时在本机执行，`tests/test_project_sync.py` 的两三个用例失败（Projects 期望状态和截止时间）。这些用例不涉及本项改动的代码；单独运行该文件 3 次均全部通过，单独的全量运行也全部通过。
+- **检查：** `uv run ruff check app tests scripts/smoke/recovery.py`、`uv run mypy app tests`、`uv run python scripts/build_console.py`、`uv build --no-sources` 通过，wheel 内含新模块和 console 资源；diff 无行尾空白。全量回归结果记在下一次发布前的复验中。
+

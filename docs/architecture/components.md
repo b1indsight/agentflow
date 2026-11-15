@@ -326,9 +326,10 @@ terminal result 三方核对。当前缺口包括：
 当前持久层由 Database 与具体仓储组成；Store 只为运维、live smoke 和测试聚合仓储。
 
 反馈批次的前置判断/直接修订选择、指令和未决问题归并由 `review_policy` 的纯函数决定；
-`recovery_policy` 根据固定时间及读取的事实决定重排、失败、保留诊断和绑定释放。
+`recovery_policy` 根据固定时间及读取的事实决定重排、失败、保留诊断、绑定释放和准备阶段的重试预算；
+`inference_policy` 决定一次推理调用的取消、结算（退避、次数上限、结束原因、worker 避让）、单次尝试和候选 worker。
 功能仓储负责候选查询、信号/回执事实和原子写入，Database 统一维护连接、事务、时钟和共用锁。
-WorkerStore 的恢复扫描在原 worker 锁事务内先提交 job 动作，再查询事务内更新后的绑定事实；
+AssignmentStore 的恢复扫描在原 worker 锁事务内先提交 job 动作，再查询事务内更新后的绑定事实；
 策略函数不执行 SQL、读取时钟或调用外部服务。
 
 服务接收共享的 `Database`，自行创建并持有以下具体仓储，使用 Psycopg 3 同步连接池访问
@@ -337,10 +338,12 @@ PostgreSQL，例如在构造函数内执行 `self.flows = FlowStore(database)`�
 
 | 仓储与模块 | 操作归属 |
 | --- | --- |
-| `FlowStore` / `flows.py` | Flow 与 Attempt 的事实读写 |
+| `FlowStore` / `flows.py` | Flow 与 Attempt 的事实读写；Flow 执行绑定的读取与释放 |
 | `DeliveryStore` / `deliveries.py` | 交付状态与 tool-call 去重账本 |
 | `JobStore` / `jobs.py` | Job 生命周期、未应用结果分页及完成提交 |
-| `WorkerStore` / `workers.py` | Worker、Flow binding、fenced assignment、准备与租约恢复、drain |
+| `WorkerStore` / `workers.py` | Worker 会话与库存：连接、就绪、库存上报、断线与启动时的隔离、列表、drain |
+| `AssignmentStore` / `assignments.py` | fenced assignment：领取、开始、心跳、恢复、结果入库、完成、准备重试、退回队列、租约恢复、退休排队任务 |
+| `InferenceStore` / `inference.py` | 推理调用：入队、消费、取消、结果校验后的结算、失联恢复 |
 | `StopStore` / `stops.py` | 停止请求、发送授权与停止回执 |
 | `ResultStore` / `results.py` | 冻结结果计划和 effects/receipt 恢复 |
 | `ReviewStore` / `reviews.py` | 反馈版本、批次、审核上下文及线程事实 |
@@ -386,7 +389,7 @@ cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时�
 
 自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、assignment start/heartbeat/fencing、
 lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去重、跨 Store 可见性、delivery 去重和并发 assign。
-`WorkerStore.assign_job()` 是编码与推理的共同领取入口，gateway 接受多个独立配置 worker。
+`AssignmentStore.assign_job()` 是编码与推理的共同领取入口，gateway 接受多个独立配置 worker。
 
 仓储继续使用同步接口。编码 claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
 重新检查 epoch、在线状态、空闲槽位及 drain/binding；随后锁定最早 eligible Flow job，并原子创建
@@ -450,7 +453,7 @@ coordinator 不直接更新业务表。批次答案与结果评论保留各自�
 共享 `GitHubError.definitely_rejected` 的拒绝判定；线程回复与普通结果评论共用一个执行分支。
 
 control 的 `ReviewJudge` 负责 prompt 和业务判定，`JobInference` 提交/读取通用 messages、可选 schema、
-字节限制及总预算。`WorkerStore.assign_job` 统一选择固定 execute/infer 槽，结果经共同受理和
+字节限制及总预算。`AssignmentStore.assign_job` 统一选择固定 execute/infer 槽，结果经共同受理和
 `ResultApplication` 保存、校验和应用；review 的 `TriageVerdict` 校验必须在推理 Job 成功前完成。
 无 Flow 的通用推理也能执行。旧 `InferenceRouter`、`InferencePool` 已删除，不保留另一套调度循环。
 controller 只在 bub 配置和依赖预检通过时托管 mini worker；会话就绪、空闲且能力合条件时优先。

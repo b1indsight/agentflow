@@ -143,7 +143,7 @@ async def prepared_initial(store: Store, recording_resources: None, request):
     )
     assert flow is not None
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
-    job = store.workers.assign_job("worker-a", "token", "epoch")
+    job = store.assignments.assign_job("worker-a", "token", "epoch")
     assert job is not None
     github = RecordingGitHub()
     github.refs = {}
@@ -151,7 +151,7 @@ async def prepared_initial(store: Store, recording_resources: None, request):
     task = await prepare_initial(subject, job)
     assert isinstance(task, InitialTask)
     github.refs[task.branch] = "abc123"
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     request = FlowToolRequest(
         **call_header(), method="flow.open_pr",

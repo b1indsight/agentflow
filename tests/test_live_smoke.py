@@ -127,7 +127,6 @@ def test_observe_reads_without_creating_work_and_does_not_claim_partial_success(
             flows=store.flows,
             deliveries=store.deliveries,
             jobs=store.jobs,
-            workers=store.workers,
         )
         assert observed.pr == 8 and not observed.core_passed
         assert smoke.state.observed_heads == ["a"*40]
@@ -138,7 +137,6 @@ def test_observe_reads_without_creating_work_and_does_not_claim_partial_success(
             flows=store.flows,
             deliveries=store.deliveries,
             jobs=store.jobs,
-            workers=store.workers,
         )
         assert smoke.state.observed_heads == ["a"*40]
         remote.head.ref = "unexpected"
@@ -150,7 +148,6 @@ def test_observe_reads_without_creating_work_and_does_not_claim_partial_success(
                 flows=store.flows,
                 deliveries=store.deliveries,
                 jobs=store.jobs,
-                workers=store.workers,
             )
     assert not store.jobs.list_jobs(flow.id)
     assert "Please" not in next(tmp_path.glob("*.json")).read_text()
@@ -176,9 +173,9 @@ async def test_core_pass_requires_three_verified_heads_and_matching_merge(
     store.deliveries.update_delivery(delivery)
     register_worker(store, "worker-1", repo=flow.repo)
     initial = enqueue_job(store, flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job("worker-1", "initial").id == initial.id
-    assert store.workers.start_assignment(initial.id, attempt.id, "worker-1", "initial")
-    assert store.workers.finish_assignment(initial.id, "worker-1", "initial", JobState.DONE)
+    assert store.assignments.assign_job("worker-1", "initial").id == initial.id
+    assert store.assignments.start_assignment(initial.id, attempt.id, "worker-1", "initial")
+    assert store.assignments.finish_assignment(initial.id, "worker-1", "initial", JobState.DONE)
     report_settled(store, initial.id)
     remote = Pull(number=8, merged=False,
                   head={"sha": "a"*40, "ref": "flow/7", "repo": {"full_name": "owner/smoke"}},
@@ -218,7 +215,6 @@ async def test_core_pass_requires_three_verified_heads_and_matching_merge(
                     flows=store.flows,
                     deliveries=store.deliveries,
                     jobs=store.jobs,
-                    workers=store.workers,
                 ).core_passed
                 stop = store.stops.pending("worker-1")
                 assert store.stops.confirm(
@@ -234,7 +230,6 @@ async def test_core_pass_requires_three_verified_heads_and_matching_merge(
                 flows=store.flows,
                 deliveries=store.deliveries,
                 jobs=store.jobs,
-                workers=store.workers,
             )
             assert result.core_passed == (letter == "c")
 

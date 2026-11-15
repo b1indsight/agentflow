@@ -176,7 +176,7 @@ async def test_valid_signature_dispatches_webhook(
     assert flow is not None
     assert flow.state is FlowState.QUEUED
     register_worker(store, "worker-1", repo=flow.repo)
-    assert store.workers.assign_job("worker-1", "assignment-1") is not None
+    assert store.assignments.assign_job("worker-1", "assignment-1") is not None
 
 
 def signed_headers(body: bytes) -> dict[str, str]:

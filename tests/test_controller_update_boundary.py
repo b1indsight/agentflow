@@ -93,7 +93,7 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(
         receipt = session.load().terminal.result.delivery_receipt
         assert receipt.status == "prepared"
         assert receipt.head_sha == store.deliveries.get_delivery(flow.id).head_sha
-        assert store.workers.get_flow_execution(flow.id).released_at is None
+        assert store.flows.get_flow_execution(flow.id).released_at is None
     finally:
         proceed.set()
         for task in tasks:

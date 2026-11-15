@@ -164,10 +164,10 @@ def test_repeated_snapshots_do_not_count_execution_receipt_twice(store, postgres
     flow = store.flows.create_flow('private/repository', 1, 1)
     job = enqueue_job(store, flow.id, JobKind.INITIAL)
     register_worker(store, 'w', repo=flow.repo, epoch='epoch')
-    assert store.workers.assign_job('w', 'token', 'epoch')
+    assert store.assignments.assign_job('w', 'token', 'epoch')
     result = Succeeded(job_id=job.id, assignment_token='token',
                        result=InitialTaskResult(session_id='session', last_message='', exit_code=1))
-    assert store.workers.record_assignment_result(job.id, 'w', 'token', 'epoch',
+    assert store.assignments.record_assignment_result(job.id, 'w', 'token', 'epoch',
                                           result) == 'pending'
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET started_at=result_received_at-interval '3 seconds' WHERE id=%s", (job.id,))

@@ -29,15 +29,15 @@ async def pending_results(store, count):
         flow = required(ControlService(database=store.database).create_flow("owner/repo", issue, 42))
         worker = f"worker-{flow.id}"
         register_worker(store, worker, repo=flow.repo, epoch="epoch")
-        job = required(store.workers.assign_job(worker, f"token-{flow.id}", "epoch"))
+        job = required(store.assignments.assign_job(worker, f"token-{flow.id}", "epoch"))
         await prepare_initial(subject, job)
         task = await subject.prepare_for_assignment(job, worker, job.assignment_token, "epoch")
         assert isinstance(task, AssignmentArguments)
-        assert store.workers.start_assignment(job.id, task.task.attempt_id, worker,
+        assert store.assignments.start_assignment(job.id, task.task.attempt_id, worker,
                                               job.assignment_token, "epoch")
         subject.mark_started(job, task.task, worker)
         terminal = Failed(job_id=job.id, assignment_token=job.assignment_token, error="agent failed")
-        assert store.workers.record_assignment_result(
+        assert store.assignments.record_assignment_result(
             job.id, worker, job.assignment_token, "epoch", terminal,
         ) == "pending"
         jobs.append(required(store.jobs.get_job(job.id)))
@@ -202,7 +202,7 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits(store, monkey
             exited.set()
 
     monkeypatch.setattr(processor, "_apply", commit)
-    claim, sweep = runtime.reviews.claim_due, runtime.workers.sweep_expired_assignments
+    claim, sweep = runtime.reviews.claim_due, runtime.assignments.sweep_expired_assignments
 
     def claim_due():
         result = claim()
@@ -215,7 +215,7 @@ async def test_runtime_sweeps_continue_while_result_recovery_waits(store, monkey
         return result
 
     monkeypatch.setattr(runtime.reviews, "claim_due", claim_due)
-    monkeypatch.setattr(runtime.workers, "sweep_expired_assignments", sweep_expired)
+    monkeypatch.setattr(runtime.assignments, "sweep_expired_assignments", sweep_expired)
     loops = [runtime._sweep_results, runtime._sweep_assignments, runtime._sweep_reviews]
     runtime._tasks = [asyncio.create_task(loop()) for loop in loops]
     try:

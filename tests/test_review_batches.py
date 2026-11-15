@@ -398,7 +398,7 @@ def test_blocked_batch_retry_preserves_frozen_feedback_without_dispatching(store
     with store.transaction() as tx:
         flow = apply_flow_event(tx, flow, FlowEvent.RESULT_FAILED)
         assert tx.reviews.get_batch(batch_for(tx, job).id).state is BatchState.READY
-        tx.jobs.cancel_jobs(flow.id)
+        tx.assignments.retire_queued_work(flow.id)
     assert store.reviews.get_batch(batch_for(store, job).id).state is BatchState.CANCELLED
     assert settle(store) == []
     ControlService(
@@ -515,7 +515,7 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
         database=store.database,
     )
     flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
-    store.jobs.cancel_jobs(flow.id)
+    store.assignments.retire_queued_work(flow.id)
     service.retry(flow)
     replacement = store.jobs.list_jobs(flow.id)[-1]
     batch = batch_for(store, replacement)

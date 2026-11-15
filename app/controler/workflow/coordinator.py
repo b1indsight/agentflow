@@ -43,9 +43,11 @@ from app.domain.models import (
 from app.domain.ports import Judge
 from app.domain.review_models import BatchState, ReviewBatch
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequest, Repository
+from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
+from app.persistence.inference import InferenceStore
 from app.persistence.jobs import JobStore
 from app.persistence.reviews import ReviewStore
 from app.persistence.settings import SettingsStore
@@ -71,6 +73,8 @@ class JobCoordinator:
         self.jobs = JobStore(database)
         self.reviews = ReviewStore(database)
         self.workers = WorkerStore(database)
+        self.assignments = AssignmentStore(database)
+        self.inference = InferenceStore(database)
         self.github = github
         self.settings = settings
         self.plugins = plugins or get_plugin_manager()
@@ -164,12 +168,12 @@ class JobCoordinator:
         try:
             secret = await self._assignment_secret(job, prepared)
         except Exception as exc:  # noqa: BLE001 - signing errors become durable control failures
-            if not self.workers.clear_preparation(job.id, worker, token, epoch):
+            if not self.assignments.clear_preparation(job.id, worker, token, epoch):
                 raise PreparationStale("assignment expired during capability preparation") from None
             await self.fail(job, f"assignment capability failed: {type(exc).__name__}")
             return JobState.FAILED
         # Signing may outlive the lease or race a webhook; validate even without a gateway.
-        if not self.workers.clear_preparation(job.id, worker, token, epoch):
+        if not self.assignments.clear_preparation(job.id, worker, token, epoch):
             raise PreparationStale("assignment changed before dispatch")
         delivery = self.deliveries.get_delivery(job.required_flow_id)
         if delivery is not None and delivery.supersedes(job.kind):
@@ -200,10 +204,10 @@ class JobCoordinator:
             else:
                 if isinstance(prepared, JobState):
                     assert prepared in (JobState.QUEUED, JobState.DONE, JobState.FAILED)
-                if not isinstance(prepared, JobState) and not self.workers.clear_preparation(job.id, worker, token, epoch):
+                if not isinstance(prepared, JobState) and not self.assignments.clear_preparation(job.id, worker, token, epoch):
                     raise PreparationStale("preparation changed before dispatch")
                 return prepared
-        state = self.workers.defer_preparation(
+        state = self.assignments.defer_preparation(
             job.id, worker, token, epoch, error, max_failures=self.settings.prepare_max_failures,
             window_seconds=self.settings.prepare_retry_window_seconds,
         )
@@ -251,7 +255,7 @@ class JobCoordinator:
                         and previous.round_no == fresh.current_round_no
                         and not (previous.state is JobState.FAILED and previous.id < job.id)):
                     return previous.id
-            naming = self.jobs.using(tx).enqueue_inference(InferenceTask(
+            naming = self.inference.using(tx).enqueue_inference(InferenceTask(
                 messages=[
                     InferenceMessage(role="system", content=(
                         "Name the supplied coding task. Return JSON with title and branch_slug. "
@@ -310,7 +314,7 @@ class JobCoordinator:
                 suffix = f"-round-{fresh.current_round_no}" if fresh.current_round_no > 1 else ""
                 return f"{output['branch_slug']}{suffix}"
             expired = (naming.inference.deadline_at <= self.database.now()
-                       and self.workers.inference_needs_cancel(naming.id))
+                       and self.inference.inference_needs_cancel(naming.id))
             if naming.state is JobState.FAILED or expired:
                 reason = "execution_timeout" if expired else naming.last_error or "invalid_response"
                 await self.fail(job, f"Flow title/branch naming failed: {reason}")
@@ -342,7 +346,7 @@ class JobCoordinator:
                 await self.fail(job, "Flow 缺少 GitHub installation。")
                 return JobState.FAILED
             installation_id = flow.installation_id
-            execution = self.workers.get_flow_execution(flow.id)
+            execution = self.flows.get_flow_execution(flow.id)
             if execution is None or execution.released_at is not None:
                 await self.fail(job, "Flow 缺少 active execution binding。")
                 return JobState.FAILED
@@ -451,7 +455,7 @@ class JobCoordinator:
             if attempt.revision_cycles + 1 > self.settings.max_revision_cycles:
                 await self.fail(job, "已达最大修订轮数，暂停。")
                 return JobState.FAILED
-            execution = self.workers.get_flow_execution(flow.id)
+            execution = self.flows.get_flow_execution(flow.id)
             if execution is None or execution.released_at is not None:
                 await self.fail(job, "修订任务缺少有效 worker binding。")
                 return JobState.FAILED
@@ -498,10 +502,10 @@ class JobCoordinator:
                 tx = locked.database
                 deliveries_tx = self.deliveries.using(tx)
                 reviews_tx = self.reviews.using(tx)
-                workers_tx = self.workers.using(tx)
+                flows_tx = self.flows.using(tx)
                 fresh = locked.flow
                 current = tx.lock_job(job.id)
-                binding = workers_tx.get_flow_execution(flow.id)
+                binding = flows_tx.get_flow_execution(flow.id)
                 latest = deliveries_tx.get_delivery(flow.id)
                 if (
                     fresh is None
@@ -538,13 +542,13 @@ class JobCoordinator:
                     tx = locked.database
                     deliveries_tx = self.deliveries.using(tx)
                     jobs_tx = self.jobs.using(tx)
-                    workers_tx = self.workers.using(tx)
+                    flows_tx = self.flows.using(tx)
                     fresh = locked.flow
                     current = tx.lock_job(job.id)
                     if fresh is None or current is None:
                         raise ValueError("archive workflow disappeared")
                     archive = archive_task(
-                        fresh, current, deliveries=deliveries_tx, jobs=jobs_tx, workers=workers_tx
+                        fresh, current, deliveries=deliveries_tx, flows=flows_tx, jobs=jobs_tx
                     )
                     jobs_tx.freeze_archive(current, archive)
                     return archive
@@ -579,7 +583,7 @@ class JobCoordinator:
         attempt = self.flows.get_attempt(task.attempt_id)
         if attempt is None:
             raise ValueError(f"attempt {task.attempt_id} disappeared")
-        execution = self.workers.get_flow_execution(flow.id)
+        execution = self.flows.get_flow_execution(flow.id)
         if execution is None or execution.worker_id != worker_id:
             raise ValueError(f"flow {flow.id} is not bound to worker {worker_id}")
         if job.kind is JobKind.REVISION:

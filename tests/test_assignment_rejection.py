@@ -20,12 +20,12 @@ def test_assignment_rejection_preserves_competing_evidence(store, race):
     store.flows.update_flow_metadata(flow)
     register_worker(store, "worker", repo=flow.repo, epoch="epoch")
     job = enqueue_job(store, flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job("worker", "token", "epoch")
+    assert store.assignments.assign_job("worker", "token", "epoch")
     assert store.stops.authorize_dispatch(job.id, "worker", "token", "epoch")
     if race == "started":
-        assert store.workers.start_assignment(job.id, attempt.id, "worker", "token", "epoch")
+        assert store.assignments.start_assignment(job.id, attempt.id, "worker", "token", "epoch")
     elif race == "result":
-        store.workers.record_assignment_result(
+        store.assignments.record_assignment_result(
             job.id,
             "worker",
             "token",
@@ -50,9 +50,9 @@ def test_assignment_rejection_preserves_competing_evidence(store, race):
             "epoch",
         )
         report_settled(store, job.id, epoch="epoch", stopped=True)
-        assert store.workers.get_flow_execution(flow.id).released_at is not None
+        assert store.flows.get_flow_execution(flow.id).released_at is not None
     before = store.jobs.get_job(job.id)
-    rejected = store.workers.reject_assignment(job.id, "worker", "token", "epoch")
+    rejected = store.assignments.reject_assignment(job.id, "worker", "token", "epoch")
     after = store.jobs.get_job(job.id)
     assert rejected is (race is None)
     if race is not None:
@@ -67,7 +67,7 @@ def test_assignment_rejection_preserves_competing_evidence(store, race):
         assert inbox.source == "control"
         assert inbox.terminal.error == "assignment payload failed validation"
         assert after.started_at is None and after.result_applied_at is None
-        assert not store.workers.reject_assignment(job.id, "worker", "token", "epoch")
+        assert not store.assignments.reject_assignment(job.id, "worker", "token", "epoch")
         # Explicit validation refusal created no local journal to ACK or stop.
         assert store.jobs.complete_persisted_result(job.id, JobState.FAILED)
         assert all(w.current_job_id is None for w in store.workers.list_workspaces("worker"))

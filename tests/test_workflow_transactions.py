@@ -186,11 +186,11 @@ def test_assignment_skips_a_flow_locked_for_cancellation(store: Store):
     assert flow is not None
     with store.transaction() as tx:
         assert tx.lock_workflow(flow.id) is not None
-        assert store.workers.assign_job("worker-a", "token-a", "epoch-a") is None
+        assert store.assignments.assign_job("worker-a", "token-a", "epoch-a") is None
         ControlService(
             database=tx.database,
         ).cancel(flow)
-    assert store.workers.get_flow_execution(flow.id) is None
+    assert store.flows.get_flow_execution(flow.id) is None
 
 
 @pytest.mark.parametrize("command", ["retry", "resume"])
@@ -295,10 +295,10 @@ def bound_review_flow(store: Store):
     delivery.head_sha = "abc123"
     store.deliveries.update_delivery(delivery)
     initial = enqueue_job(store, flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job("worker-a", "initial-token", "epoch-a") is not None
+    assert store.assignments.assign_job("worker-a", "initial-token", "epoch-a") is not None
     # The fixture supplies the delivery directly; no INITIAL process was dispatched.
     # Starting this job would require a real terminal receipt before any later archive.
-    assert store.workers.finish_assignment(
+    assert store.assignments.finish_assignment(
         initial.id, "worker-a", "initial-token", JobState.DONE, "epoch-a"
     )
     report_settled(store, initial.id, epoch="epoch-a")
@@ -314,9 +314,9 @@ def accepted_coding(store: Store, *, receive: bool = True, started: bool = True)
         updated_at=store.now(), signal="request_changes", submitted=True,
     ), settle_seconds=0, submit_grace_seconds=0)
     batch, = store.reviews.claim_due()
-    job = store.workers.assign_job("worker-a", "triage-token", "epoch-a")
+    job = store.assignments.assign_job("worker-a", "triage-token", "epoch-a")
     assert job is not None and job.assignment_token is not None and job.payload is not None
-    binding = store.workers.get_flow_execution(flow.id)
+    binding = store.flows.get_flow_execution(flow.id)
     assert flow.current_attempt_id is not None and binding is not None
     task = RevisionTask(
         batch_id=batch.id, attempt_id=flow.current_attempt_id, feedback=batch.feedback,
@@ -329,14 +329,14 @@ def accepted_coding(store: Store, *, receive: bool = True, started: bool = True)
         assert tx.lock_workflow(flow.id) is not None
         tx.reviews.freeze_revision(job, task)
         if started:
-            assert tx.workers.start_assignment(job.id, task.attempt_id, "worker-a", "triage-token", "epoch-a")
+            assert tx.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "triage-token", "epoch-a")
             assert tx.reviews.started(job)
     result = verified_result(task)
     if receive:
         assert started
         message = Succeeded(job_id=job.id, assignment_token=job.assignment_token, result=result)
         assert (
-            store.workers.record_assignment_result(
+            store.assignments.record_assignment_result(
                 job.id, "worker-a", job.assignment_token, "epoch-a", message
             )
             == "pending"
@@ -356,8 +356,8 @@ def test_expired_cancelled_executor_does_not_overwrite_cancelled_flow(store: Sto
     store.workers.worker_disconnected("worker-a", "offline", "epoch-a")
     later = store.now() + timedelta(minutes=10)
     monkeypatch.setattr(store._db, "_clock", lambda: later)
-    assert store.workers.sweep_expired_assignments() == (0, 0)
-    execution = store.workers.get_flow_execution(flow.id)
+    assert store.assignments.sweep_expired_assignments() == (0, 0)
+    execution = store.flows.get_flow_execution(flow.id)
     assert execution is not None and execution.released_at is None
     cancelled = store.flows.get_flow(job.flow_id)
     assert cancelled is not None and cancelled.state is FlowState.BLOCKED
@@ -372,7 +372,7 @@ async def test_accepted_result_survives_expired_worker_recovery(
     store.workers.worker_disconnected("worker-a", "connection lost", "epoch-a")
     later = store.now() + timedelta(minutes=10)
     monkeypatch.setattr(store._db, "_clock", lambda: later)
-    assert store.workers.sweep_expired_assignments() == (0, 0)
+    assert store.assignments.sweep_expired_assignments() == (0, 0)
     flow = store.flows.get_flow(job.flow_id)
     assert flow is not None and flow.state is FlowState.RUNNING
     github = RecordingGitHub()
@@ -384,5 +384,5 @@ async def test_accepted_result_survives_expired_worker_recovery(
     await coordinator(store, github).results.apply(job.id)
     finished = store.jobs.get_job(job.id)
     assert finished is not None and finished.state is JobState.DONE
-    execution = store.workers.get_flow_execution(job.flow_id)
+    execution = store.flows.get_flow_execution(job.flow_id)
     assert execution is not None and execution.released_at is None

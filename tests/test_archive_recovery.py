@@ -8,7 +8,7 @@ from app.contracts.protocol import ExecutionStopped, RecoveryDescriptor
 from app.controler.workflow.service import ControlService
 from app.domain.models import ArchiveReason, FlowState, JobKind, JobState
 from app.persistence.activity import ActivityStore
-from app.persistence.workers import WorkerStore
+from app.persistence.flows import FlowStore
 from tests.test_merge import merge_payload, route_merge
 from tests.test_workflow_transactions import accepted_coding
 from tests.worker_fixtures import server_callbacks
@@ -24,30 +24,30 @@ async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypa
     activity = ActivityStore(store.database).archived(flow.id, 1)
     stop = store.stops.pending("worker-a")
     receipt = ExecutionStopped(**stop.fence().model_dump(), execution_nonce="original-executor")
-    original = WorkerStore.release_flow_execution
+    original = FlowStore.release_flow_execution
 
     def interrupted(self, flow_id):
         assert original(self, flow_id)
         raise RuntimeError("commit interrupted")
 
     with monkeypatch.context() as patch:
-        patch.setattr(WorkerStore, "release_flow_execution", interrupted)
+        patch.setattr(FlowStore, "release_flow_execution", interrupted)
         with pytest.raises(RuntimeError, match="commit interrupted"):
             store.stops.confirm("worker-a", receipt, "epoch-a")
     assert store.stops.pending("worker-a") == stop
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     current = next(w for w in store.workers.list_workspaces("worker-a") if w.workspace == job.workspace)
     assert (current.current_job_id, current.generation) == (job.id, job.generation)
     other = ControlService(database=store.database).create_flow("owner/repo", 999, 42)
-    assert store.workers.assign_job("worker-a", "next", "epoch-a") is None
+    assert store.assignments.assign_job("worker-a", "next", "epoch-a") is None
 
     assert store.stops.confirm("worker-a", receipt, "epoch-a")
     assert store.stops.confirm("worker-a", receipt, "epoch-a")
     assert store.flows.get_flow(flow.id) == archived
     assert ActivityStore(store.database).archived(flow.id, 1) == activity
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
     assert flow.id not in [item.id for item in store.flows.list_flows(active_only=True)]
-    assert store.workers.assign_job("worker-a", "next", "epoch-a").flow_id == other.id
+    assert store.assignments.assign_job("worker-a", "next", "epoch-a").flow_id == other.id
 
 
 async def test_archive_fences_do_not_release_binding(store):
@@ -62,9 +62,9 @@ async def test_archive_fences_do_not_release_binding(store):
         ("worker-a", receipt, "old"),
     ]:
         assert not store.stops.confirm(worker, evidence, epoch)
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     assert store.stops.confirm("worker-a", receipt, "epoch-a")
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
 
 
 async def test_merge_after_abandonment_cannot_adopt_a_released_binding(
@@ -96,11 +96,11 @@ async def test_merge_after_abandonment_cannot_adopt_a_released_binding(
     assert len(merges) == 1
     assert merges[0].metadata["merge_commit_sha"] == "a" * 40
     assert len([item for item in history if item.kind == "archive_correction"]) == 1
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
     assert [job for job in store.jobs.list_jobs(flow.id) if job.kind is JobKind.ARCHIVE] == []
     register_worker(store, "worker-b", repo=flow.repo, epoch="epoch-b")
-    assert store.workers.assign_job("worker-b", "adopt", "epoch-b") is None
-    assert store.workers.assign_job("worker-a", "archive", "epoch") is None
+    assert store.assignments.assign_job("worker-b", "adopt", "epoch-b") is None
+    assert store.assignments.assign_job("worker-a", "archive", "epoch") is None
 
 
 async def test_expired_merged_executor_is_pinned_until_original_worker_returns(store):
@@ -110,18 +110,18 @@ async def test_expired_merged_executor_is_pinned_until_original_worker_returns(s
     store.workers.worker_disconnected("worker-a", connection_epoch="epoch-a")
     now = store.now()
     store._db._clock = lambda: now + timedelta(hours=1)
-    store.workers.sweep_expired_assignments()
+    store.assignments.sweep_expired_assignments()
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(old.id).state is JobState.RUNNING
     assert "executor" in store.jobs.get_job(old.id).last_error
     with pytest.raises(ValueError, match="archived"):
         ControlService(database=store.database).retry(flow)
     register_worker(store, "worker-b", repo=flow.repo, epoch="epoch-b")
-    assert store.workers.assign_job("worker-b", "other", "epoch-b") is None
+    assert store.assignments.assign_job("worker-b", "other", "epoch-b") is None
     register_worker(store, "worker-a", repo=flow.repo, epoch="new-epoch")
-    assert not store.workers.resume_assignment(old.id, "worker-a", "triage-token", "new-epoch")
+    assert not store.assignments.resume_assignment(old.id, "worker-a", "triage-token", "new-epoch")
 
 
 @pytest.mark.parametrize("journal", ["missing", "started-without-executor"])
@@ -141,4 +141,4 @@ async def test_merged_coding_process_without_exit_proof_cannot_unlock_archive(st
         )) is None
     assert store.jobs.get_job(old.id).state is JobState.RUNNING
     assert store.jobs.get_job(old.id).result_received_at is None
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None

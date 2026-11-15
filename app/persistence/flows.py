@@ -1,4 +1,4 @@
-"""Flow and Attempt facts using the current database transaction."""
+"""Flow, Attempt and execution-binding facts using the current database transaction."""
 
 from __future__ import annotations
 
@@ -16,14 +16,16 @@ from app.domain.models import (
     DeliveryState,
     Flow,
     FlowDelivery,
+    FlowExecution,
     FlowState,
 )
 from app.github import PullRequestMerge
 from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
+from app.persistence.deliveries import DeliveryStore
 from app.persistence.records import required
 from app.persistence.repository import Repository
-from app.persistence.results import UNCONFIRMED_EFFECT_SQL
+from app.persistence.results import RESOURCE_JOB_SQL, UNCONFIRMED_EFFECT_SQL
 
 
 @dataclass(frozen=True)
@@ -40,7 +42,7 @@ class LockedFlow:
 
 
 class FlowStore(Repository):
-    """Flow and Attempt facts using the current database transaction."""
+    """Flow, Attempt and execution-binding facts using the current database transaction."""
 
     @contextmanager
     def locked(self, flow_id: int) -> Iterator[LockedFlow]:
@@ -245,6 +247,72 @@ class FlowStore(Repository):
                 (flow.repo, flow.issue_number, flow.id),
             )
 
+    def get_flow_execution(self, flow_id: int) -> FlowExecution | None:
+        with (
+            self._db.connection() as connection,
+            connection.cursor(row_factory=class_row(FlowExecution)) as cursor,
+        ):
+            return cursor.execute(
+                "SELECT * FROM flow_executions WHERE flow_id=%s", (flow_id,)
+            ).fetchone()
+
+    def get_worker_executions(self, worker_id: str) -> list[FlowExecution]:
+        with (
+            self._db.connection() as connection,
+            connection.cursor(row_factory=class_row(FlowExecution)) as cursor,
+        ):
+            return cursor.execute(
+                "SELECT * FROM flow_executions WHERE worker_id=%s AND released_at IS NULL ORDER BY workspace",
+                (worker_id,),
+            ).fetchall()
+
+    def get_worker_execution(self, worker_id: str, workspace: str | None = None) -> FlowExecution | None:
+        """Compatibility for a single binding; never pick an arbitrary concurrent Flow."""
+        executions = self.get_worker_executions(worker_id)
+        if workspace is not None:
+            return next((item for item in executions if item.workspace == workspace), None)
+        if len(executions) > 1:
+            raise ValueError("worker has multiple executions; specify a workspace")
+        return executions[0] if executions else None
+
+    def release_flow_execution(self, flow_id: int) -> bool:
+        """Release a settled Flow and advance the controller-owned generation atomically."""
+        now = self._db.now()
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx.lock_workflow(flow_id)
+            result = connection.execute(
+                "UPDATE flow_executions SET released_at=%s"
+                " WHERE flow_id=%s AND released_at IS NULL"
+                " AND EXISTS (SELECT 1 FROM workers w WHERE w.worker_id=flow_executions.worker_id"
+                " AND w.workspace=flow_executions.workspace AND w.generation=flow_executions.generation"
+                " AND w.current_job_id IS NULL)"
+                " AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=flow_executions.flow_id"
+                " AND s.binding_at=flow_executions.bound_at AND s.state!='confirmed')"
+                " AND NOT EXISTS (SELECT 1 FROM jobs j JOIN flows f ON f.id=j.flow_id"
+                " WHERE j.flow_id=flow_executions.flow_id"
+                f" AND j.round_no=f.current_round_no AND j.kind<>'inference' AND {RESOURCE_JOB_SQL}"
+                " AND (j.state='running'"
+                " OR (j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL)"
+                " OR ((j.started_at IS NOT NULL OR j.dispatch_authorized_at IS NOT NULL"
+                " OR (j.kind='archive' AND j.payload->'archive' IS NOT NULL))"
+                " AND j.result_received_at IS NULL AND NOT EXISTS (SELECT 1 FROM execution_stops s"
+                " WHERE s.job_id=j.id AND s.assignment_token=j.assignment_token AND s.state='confirmed'))))"
+                " AND NOT EXISTS (SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
+                " JOIN flows f ON f.id=j.flow_id WHERE j.flow_id=flow_executions.flow_id"
+                f" AND j.round_no=f.current_round_no AND {RESOURCE_JOB_SQL} AND {UNCONFIRMED_EFFECT_SQL})",
+                (now, flow_id),
+            )
+            if result.rowcount == 1:
+                advanced = connection.execute(
+                    "UPDATE workers w SET generation=w.generation+1"
+                    " FROM flow_executions e WHERE e.flow_id=%s AND w.worker_id=e.worker_id"
+                    " AND w.workspace=e.workspace AND w.generation=e.generation",
+                    (flow_id,),
+                )
+                if advanced.rowcount != 1:
+                    raise ValueError("Flow release lost its locked workspace generation")
+        return result.rowcount == 1
+
     def try_archive(self, flow_id: int) -> bool:
         """Finish a requested round or settle an already-archived round's resources.
 
@@ -252,13 +320,10 @@ class FlowStore(Repository):
         Its stop/result callbacks still release that binding through the controller's
         fenced generation update. Call after result/stop markers, never before them.
         """
-        from app.persistence.deliveries import DeliveryStore
-        from app.persistence.workers import WorkerStore
-
         with self._db.transaction() as tx, tx.connection() as connection:
             flow = tx.lock_workflow(flow_id)
             if flow is not None and flow.state is FlowState.ARCHIVED:
-                return WorkerStore(tx).release_flow_execution(flow_id)
+                return FlowStore(tx).release_flow_execution(flow_id)
             if (
                 flow is None
                 or flow.state is not FlowState.FINALIZING
@@ -303,15 +368,15 @@ class FlowStore(Repository):
                 or (delivery is not None and delivery.pr_number is not None)
             ):
                 return False
-            workers = WorkerStore(tx)
-            execution = workers.get_flow_execution(flow_id)
+            flows = FlowStore(tx)
+            execution = flows.get_flow_execution(flow_id)
             if (
                 execution is not None
                 and execution.released_at is None
-                and not workers.release_flow_execution(flow_id)
+                and not flows.release_flow_execution(flow_id)
             ):
                 return False
-            FlowStore(tx).archive_round(flow, delivery)
+            flows.archive_round(flow, delivery)
             return True
 
     def archive_round(self, flow: Flow, delivery: FlowDelivery | None) -> None:

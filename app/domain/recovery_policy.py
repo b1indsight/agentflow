@@ -66,7 +66,7 @@ def decide_job_recovery(job: JobRecoveryFacts, now: datetime) -> RecoveryAction:
     """
     if job.result_received_at is not None:
         return RecoveryAction.KEEP
-    # SQL dispatch/reconnect paths use Store's _MAY_HAVE_EXECUTED for the same proof.
+    # SQL dispatch/reconnect paths use persistence.jobs.MAY_HAVE_EXECUTED_SQL for the same proof.
     may_have_executed = (job.started_at is not None or job.dispatch_authorized_at is not None
                          or (job.kind is JobKind.ARCHIVE and job.archive_frozen))
     if (not may_have_executed and not job.has_pending_stop

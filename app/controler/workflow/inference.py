@@ -11,7 +11,7 @@ from app.domain.inference_models import (
 )
 from app.domain.models import JobState
 from app.persistence.database import Database
-from app.persistence.jobs import JobStore
+from app.persistence.inference import InferenceStore
 
 
 class InferencePending(Exception):
@@ -32,12 +32,12 @@ class JobInference:
 
     def __init__(self, database: Database, notify_jobs: Callable[[], None], *,
                  flow_id: int | None = None, batch_id: int | None = None) -> None:
-        self.jobs = JobStore(database)
+        self.inference = InferenceStore(database)
         self.notify_jobs = notify_jobs
         self.flow_id, self.batch_id = flow_id, batch_id
 
     async def infer(self, task: InferenceTask) -> InferenceOutput:
-        job = self.jobs.enqueue_inference(task, flow_id=self.flow_id, batch_id=self.batch_id,
+        job = self.inference.enqueue_inference(task, flow_id=self.flow_id, batch_id=self.batch_id,
                                           validation="review" if self.batch_id is not None else "text")
         state = job.inference
         assert state is not None
@@ -48,7 +48,7 @@ class JobInference:
             summary = state.summary
             if summary is None:
                 raise InferenceError(InferenceFailure(code="cancelled"))
-            self.jobs.consume_inference(job.id)
+            self.inference.consume_inference(job.id)
             raise InferenceError(
                 InferenceFailure(code=summary.last_failure_code), backend=summary.backend,
             )

@@ -630,12 +630,12 @@ async def revision_control(store, completed_open_initial, revision_feedback, req
         await subject.triage(batch, judge)
         batch = store.reviews.get_batch(batch.id)
     assert batch.job_id is not None
-    job = store.workers.assign_job("worker-a", "revision-token", "epoch")
+    job = store.assignments.assign_job("worker-a", "revision-token", "epoch")
     assert job is not None and job.id == batch.job_id and job.kind is JobKind.REVISION
     task = await subject.prepare(job)
     assert isinstance(task, RevisionTask)
     assert task.purpose == purpose
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "revision-token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "revision-token", "epoch")
     subject.mark_started(job, task, "worker-a")
     github.comments.clear()
     github.comment_bodies.clear()
@@ -754,7 +754,7 @@ async def test_failed_revision_keeps_diagnostics_local(revision_control):
     assert [(f.item_id, f.version) for f in store.reviews.pending(job.flow_id)] == [
         (f.item_id, f.version) for f in task.feedback
     ]
-    assert store.workers.get_flow_execution(job.flow_id).released_at is None
+    assert store.flows.get_flow_execution(job.flow_id).released_at is None
 
 
 @pytest.mark.parametrize("problem", ["incomplete", "missing_root"])

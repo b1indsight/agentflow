@@ -58,26 +58,26 @@ async def test_judge_failure_then_ignore_keeps_cleanup_owner(store, completed_op
                        updated_at=store.now()), settle_seconds=0, submit_grace_seconds=0)
     batch = store.reviews.claim_due()[0]
     _github.threads = feedback_threads(batch.feedback)
-    before = store.workers.get_flow_execution(flow.id)
+    before = store.flows.get_flow_execution(flow.id)
     judge = SimpleNamespace(triage=AsyncMock(side_effect=RuntimeError("provider stopped")))
     with pytest.raises(RuntimeError, match="provider stopped"):
         await subject.triage(batch, judge)
     judge.triage.side_effect = lambda context: judge_decision(TriageVerdict(verdict=Verdict.IGNORE), context)
     await subject.triage(store.reviews.get_batch(batch.id), judge)
-    assert store.workers.get_flow_execution(flow.id) == before
+    assert store.flows.get_flow_execution(flow.id) == before
     await route_merge(store, flow)
     archived = store.flows.get_flow(flow.id)
     assert (archived.state, archived.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
-    assert store.workers.get_flow_execution(flow.id) == before
+    assert store.flows.get_flow_execution(flow.id) == before
     notice = store.jobs.list_jobs(flow.id)[-1]
     assert notice.kind is JobKind.ARCHIVE and notice.assigned_worker_id is None
     assert notice.assignment_token is None
     assert notice.result_payload["terminal"]["type"] == "merge_archive"
-    assert store.workers.assign_job("worker-a", "archive", "epoch") is None
+    assert store.assignments.assign_job("worker-a", "archive", "epoch") is None
     stop = store.stops.pending("worker-a")
     assert stop.job_id == initial.arguments.job_id
     assert store.stops.confirm(
         "worker-a", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch"
     )
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
     assert store.jobs.get_job(notice.id).result_applied_at is None

@@ -11,7 +11,7 @@ from app.controler.workflow.lifecycle import pause_delivery
 from app.controler.workflow.preparation import PreparationStale
 from app.domain.models import JobKind, JobState
 from app.github import GitHubError, GitHubErrorKind, Repository
-from app.persistence.workers import WorkerStore
+from app.persistence.assignments import AssignmentStore
 from tests.flow_fixtures import enqueue_job
 from tests.test_revision_recovery import (
     pending_revision as pending_revision,  # noqa: PLC0414 - fixture re-export
@@ -43,7 +43,7 @@ async def test_coordinator_rechecks_after_capability_io(store, pending_revision,
             with store.transaction() as tx:
                 tx.lock_workflow(flow.id)
                 pause_delivery(
-                    tx.deliveries.get_delivery(flow.id), deliveries=tx.deliveries, jobs=tx.jobs
+                    tx.deliveries.get_delivery(flow.id), deliveries=tx.deliveries, assignments=tx.assignments
                 )
         elif change == "merged":
             with store.connection() as connection:
@@ -108,12 +108,12 @@ async def test_transient_read_requeues_and_recovers_without_a_revision_cycle(sto
     assert pending.prepare_failures == 1 and pending.prepare_next_at > store.now()
     assert pending.state is JobState.QUEUED and pending.result_received_at is None
     assert store.flows.get_attempt(task.attempt_id).revision_cycles == 0
-    assert store.workers.get_flow_execution(flow.id).released_at is None
-    assert store.workers.assign_job("worker-a", "too-early", "epoch") is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
+    assert store.assignments.assign_job("worker-a", "too-early", "epoch") is None
     future = pending.prepare_next_at + timedelta(seconds=1)
     monkeypatch.setattr(store._db, "_clock", lambda: future)
     monkeypatch.setattr(Repository, "fetch_ref", original)
-    retry = store.workers.assign_job("worker-a", "retry", "epoch")
+    retry = store.assignments.assign_job("worker-a", "retry", "epoch")
     prepared = await preparation._prepare_assignment(retry, "retry")
     assert (
         isinstance(prepared, AssignmentArguments)
@@ -139,7 +139,7 @@ async def test_retry_after_and_count_survive_restart(store, pending_revision, mo
     restarted = server_runtime(
         github=github, clock=lambda: pending.prepare_next_at + timedelta(seconds=1),
     )
-    retry = restarted.workers.assign_job("worker-a", "retry", "epoch")
+    retry = restarted.assignments.assign_job("worker-a", "retry", "epoch")
     await server_callbacks(restarted, "worker-a", "epoch")._prepare_assignment(retry, "retry")
     again = store.jobs.get_job(job.id)
     assert again.prepare_failures == 2
@@ -180,13 +180,13 @@ def test_defer_requires_the_exact_unstarted_assignment(store, pending_revision, 
     if change == "epoch":
         register_worker(store, "worker-a", repo=flow.repo, epoch="new-epoch")
     else:
-        assert store.workers.requeue_assignment(job.id, "worker-a", "token", "epoch")
-        assert store.workers.assign_job("worker-a", "new-token", "epoch") is not None
-    result = store.workers.defer_preparation(job.id, "worker-a", "token", "epoch",
+        assert store.assignments.requeue_assignment(job.id, "worker-a", "token", "epoch")
+        assert store.assignments.assign_job("worker-a", "new-token", "epoch") is not None
+    result = store.assignments.defer_preparation(job.id, "worker-a", "token", "epoch",
         GitHubError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900)
     assert result is None
     assert store.jobs.get_job(job.id).prepare_failures == 0
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
 
 
 async def test_close_wins_over_a_read_failure(store, pending_revision, monkeypatch, preparation):
@@ -196,7 +196,7 @@ async def test_close_wins_over_a_read_failure(store, pending_revision, monkeypat
         with store.transaction() as tx:
             tx.lock_workflow(flow.id)
             pause_delivery(
-                tx.deliveries.get_delivery(flow.id), deliveries=tx.deliveries, jobs=tx.jobs
+                tx.deliveries.get_delivery(flow.id), deliveries=tx.deliveries, assignments=tx.assignments
             )
         raise GitHubError(GitHubErrorKind.TRANSIENT, "get_ref")
 
@@ -204,7 +204,7 @@ async def test_close_wins_over_a_read_failure(store, pending_revision, monkeypat
     prepared = await preparation._prepare_assignment(job, "token")
     assert prepared is JobState.DONE
     assert store.jobs.get_job(job.id).prepare_next_at is None
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
 
 
 async def test_capability_signing_failure_never_enters_the_read_retry_budget(store, pending_revision, monkeypatch, preparation):
@@ -232,7 +232,7 @@ async def test_expired_window_stops_before_another_github_request(store, pending
     await preparation._prepare_assignment(job, "token")
     first = store.jobs.get_job(job.id).prepare_first_failed_at
     monkeypatch.setattr(store._db, "_clock", lambda: first + timedelta(seconds=901))
-    retry = store.workers.assign_job("worker-a", "expired", "epoch")
+    retry = store.assignments.assign_job("worker-a", "expired", "epoch")
     prepared = await preparation._prepare_assignment(retry, "expired")
     assert prepared is JobState.FAILED and len(calls) == 1
     assert store.jobs.get_job(job.id).prepare_failures == 1
@@ -243,27 +243,27 @@ async def test_expired_window_stops_before_another_github_request(store, pending
 
 def test_another_worker_can_progress_while_original_binding_waits(store, pending_revision):
     flow, job, _, _, _ = pending_revision
-    assert store.workers.defer_preparation(job.id, "worker-a", "token", "epoch",
+    assert store.assignments.defer_preparation(job.id, "worker-a", "token", "epoch",
         GitHubError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900) is JobState.QUEUED
     other = store.flows.create_flow("owner/other", 8, 42)
     enqueue_job(store, other.id, JobKind.INITIAL)
     register_worker(store, "worker-b", repo=other.repo, epoch="other-epoch")
-    assigned = store.workers.assign_job("worker-b", "other-token", "other-epoch")
+    assigned = store.assignments.assign_job("worker-b", "other-token", "other-epoch")
     assert assigned.flow_id == other.id
-    assert store.workers.get_flow_execution(flow.id).worker_id == "worker-a"
+    assert store.flows.get_flow_execution(flow.id).worker_id == "worker-a"
 
 
 def test_retry_budget_and_requeue_are_one_transaction(store, pending_revision, monkeypatch):
     _, job, _, _, _ = pending_revision
-    original = WorkerStore.requeue_assignment
+    original = AssignmentStore.requeue_assignment
 
     def crash(self, *args):
         original(self, *args)
         raise RuntimeError("before commit")
 
-    monkeypatch.setattr(WorkerStore, "requeue_assignment", crash)
+    monkeypatch.setattr(AssignmentStore, "requeue_assignment", crash)
     with pytest.raises(RuntimeError):
-        store.workers.defer_preparation(job.id, "worker-a", "token", "epoch",
+        store.assignments.defer_preparation(job.id, "worker-a", "token", "epoch",
             GitHubError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900)
     assert store.jobs.get_job(job.id).state is JobState.RUNNING
     assert store.jobs.get_job(job.id).prepare_failures == 0
@@ -271,12 +271,12 @@ def test_retry_budget_and_requeue_are_one_transaction(store, pending_revision, m
 
 async def test_a_slow_retry_read_cannot_run_beyond_the_window(store, pending_revision, monkeypatch, preparation):
     _, job, _, _github, _subject = pending_revision
-    store.workers.defer_preparation(job.id, "worker-a", "token", "epoch",
+    store.assignments.defer_preparation(job.id, "worker-a", "token", "epoch",
         GitHubError(GitHubErrorKind.TRANSIENT, "get_ref"), max_failures=5, window_seconds=900)
     first = store.jobs.get_job(job.id).prepare_first_failed_at
     monkeypatch.setattr(store._db, "_clock", lambda: first + timedelta(seconds=10))
     preparation.coordinator.settings.prepare_retry_window_seconds = 10.01
-    retry = store.workers.assign_job("worker-a", "slow", "epoch")
+    retry = store.assignments.assign_job("worker-a", "slow", "epoch")
 
     async def slow(repo, branch, *, retry_transient=False):
         await asyncio.Event().wait()

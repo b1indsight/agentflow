@@ -25,8 +25,8 @@ def running(store):
     store.flows.update_flow_metadata(flow)
     register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = enqueue_job(store, flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job("w", "token", "epoch")
-    assert store.workers.start_assignment(job.id, attempt.id, "w", "token", "epoch")
+    assert store.assignments.assign_job("w", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, attempt.id, "w", "token", "epoch")
     return flow, job
 
 
@@ -35,14 +35,14 @@ def test_cancel_retains_slot_and_fence_past_recovery_timeout(store):
     ControlService(
         database=store.database,
     ).cancel(flow)
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     stop = store.stops.pending("w")
     assert stop.job_id == job.id and stop.assignment_token == "token"
     store._db._clock = lambda: job.created_at + timedelta(days=1)
     store.workers.recover_abandoned_assignments()
     store._db._clock = lambda: job.created_at + timedelta(days=2)
-    store.workers.sweep_expired_assignments()
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    store.assignments.sweep_expired_assignments()
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(job.id).assignment_token == "token"
 
 
@@ -63,21 +63,21 @@ def test_confirmation_requires_current_epoch_and_exact_request(store):
     assert not stops.confirm("w", receipt, "old")
     assert stops.confirm("w", receipt, "epoch")
     assert stops.confirm("w", receipt, "epoch")
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
 
 
 def test_cancel_during_followup_preparation_stops_last_dispatched_job(store):
     # A review-waiting Flow still owns its checkout; an unsent followup has no worker journal.
     flow, job = running(store)
-    assert store.workers.finish_assignment(job.id, "w", "token", JobState.DONE, "epoch")
+    assert store.assignments.finish_assignment(job.id, "w", "token", JobState.DONE, "epoch")
     with store.connection() as conn:
         conn.execute("UPDATE jobs SET result_received_at=now() WHERE id=%s", (job.id,))
     followup = enqueue_job(store, flow.id, JobKind.REVISION)
-    assert store.workers.assign_job("w", "preparing", "epoch").id == followup.id
+    assert store.assignments.assign_job("w", "preparing", "epoch").id == followup.id
     ControlService(database=store.database).cancel(flow)
     stop = store.stops.pending("w")
     assert stop is not None and stop.job_id == job.id
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
 
 
 def test_drain_survives_reconnect_and_allows_bound_followup(store):
@@ -86,10 +86,10 @@ def test_drain_survives_reconnect_and_allows_bound_followup(store):
     register_worker(store, "w", repo=flow.repo, epoch="next")
     assert store.workers.list_workers()[0].draining
     # The existing flow still owns the worker; only new Flow allocation is disabled.
-    assert store.workers.finish_assignment(job.id, "w", "token", JobState.DONE, "next")
+    assert store.assignments.finish_assignment(job.id, "w", "token", JobState.DONE, "next")
     next_job = enqueue_job(store, flow.id, JobKind.REVISION)
-    assert store.workers.assign_job("w", "revision", "next").id == next_job.id
-    assert store.workers.finish_assignment(next_job.id, "w", "revision", JobState.DONE, "next")
+    assert store.assignments.assign_job("w", "revision", "next").id == next_job.id
+    assert store.assignments.finish_assignment(next_job.id, "w", "revision", JobState.DONE, "next")
     ControlService(database=store.database).cancel(flow)
     stop = store.stops.pending("w")
     assert store.stops.confirm(
@@ -99,9 +99,9 @@ def test_drain_survives_reconnect_and_allows_bound_followup(store):
     another = store.flows.create_flow("owner/another", 2, 1)
     register_worker(store, "w", repo=another.repo, epoch="next")
     enqueue_job(store, another.id, JobKind.INITIAL)
-    assert store.workers.assign_job("w", "new", "next") is None
+    assert store.assignments.assign_job("w", "new", "next") is None
     store.workers.drain("w", False)
-    assert store.workers.assign_job("w", "new", "next") is not None
+    assert store.assignments.assign_job("w", "new", "next") is not None
 
 
 def test_never_dispatched_cancel_needs_no_stop(store):
@@ -123,27 +123,27 @@ async def test_merge_during_cancel_retains_binding_until_original_stop_settles(s
         database=store.database,
     ).cancel(flow)
     stop = store.stops.pending("w")
-    binding = store.workers.get_flow_execution(flow.id)
+    binding = store.flows.get_flow_execution(flow.id)
     await route_merge(store, flow)
     archived = store.flows.get_flow(flow.id)
     assert (archived.state, archived.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
     assert store.stops.pending("w") == stop
-    assert store.workers.get_flow_execution(flow.id) == binding
+    assert store.flows.get_flow_execution(flow.id) == binding
     notice = store.jobs.list_jobs(flow.id)[-1]
     assert notice.kind is JobKind.ARCHIVE and notice.state is JobState.RUNNING
     assert notice.assigned_worker_id is None and notice.assignment_token is None
     assert notice.result_payload["terminal"]["type"] == "merge_archive"
     successor = store.flows.create_flow(flow.repo, 2, 1)
     queued = enqueue_job(store, successor.id, JobKind.INITIAL)
-    assert store.workers.assign_job("w", "before-stop", "epoch") is None
+    assert store.assignments.assign_job("w", "before-stop", "epoch") is None
     assert store.stops.confirm(
         "w", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch"
     )
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
     epoch = "reconnected" if reconnect else "epoch"
     if reconnect:
         register_worker(store, "w", repo=flow.repo, epoch=epoch)
-    replacement = store.workers.assign_job("w", "replacement", epoch)
+    replacement = store.assignments.assign_job("w", "replacement", epoch)
     assert replacement is not None and replacement.id == queued.id
     job = store.jobs.get_job(job.id)
     assert replacement.workspace == job.workspace and replacement.generation == job.generation + 1
@@ -173,14 +173,14 @@ def test_unresolved_dispatched_effect_blocks_stop_except_skipped_status_labels(s
     receipt = ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned")
     if kind != "label":
         assert not store.stops.confirm("w", receipt, "epoch")
-        assert store.workers.get_flow_execution(flow.id).released_at is None
+        assert store.flows.get_flow_execution(flow.id).released_at is None
         assert store.stops.pending("w").state == "stopped"
         assert all(w.current_job_id is None for w in store.workers.list_workspaces("w"))
         with store.connection() as conn:
             conn.execute("UPDATE result_effects SET receipt='{}' WHERE job_id=%s", (job.id,))
     assert store.stops.confirm("w", receipt, "epoch")
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
 
 
 def test_stopped_writer_does_not_block_its_pending_terminal_application(store):
@@ -188,14 +188,14 @@ def test_stopped_writer_does_not_block_its_pending_terminal_application(store):
     # Its exact claim can clear without stranding the result application behind it.
     flow, job = running(store)
     terminal = Failed(job_id=job.id, assignment_token="token", error="worker stopped")
-    assert store.workers.record_assignment_result(job.id, "w", "token", "epoch", terminal) == "pending"
+    assert store.assignments.record_assignment_result(job.id, "w", "token", "epoch", terminal) == "pending"
     ControlService(database=store.database).cancel(flow)
     stop = store.stops.pending("w")
     receipt = ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned")
     assert not store.stops.confirm("w", receipt, "epoch")
     assert store.stops.pending("w").state == "stopped"
     assert all(w.current_job_id is None for w in store.workers.list_workspaces("w"))
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     assert store.jobs.complete_persisted_result(job.id, JobState.FAILED)
     assert store.stops.confirm("w", receipt, "epoch")
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
@@ -219,45 +219,45 @@ async def test_finalizing_flow_reserves_issue_until_late_merge_cleanup_settles(s
     store._db._clock = lambda: flow.created_at + timedelta(days=1)
     store.workers.recover_abandoned_assignments()
     store._db._clock = lambda: flow.created_at + timedelta(days=2)
-    store.workers.sweep_expired_assignments()
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    store.assignments.sweep_expired_assignments()
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
 
 
 def test_lost_started_ack_cannot_requeue_then_cancel_as_unsent(store):
     flow = store.flows.create_flow("owner/repo", 1, 1)
     register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = enqueue_job(store, flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job("w", "token", "epoch")
+    assert store.assignments.assign_job("w", "token", "epoch")
     assert store.stops.authorize_dispatch(job.id, "w", "token", "epoch")
-    assert not store.workers.requeue_assignment(job.id, "w", "token", "epoch")
+    assert not store.assignments.requeue_assignment(job.id, "w", "token", "epoch")
     store.workers.worker_disconnected("w", "lost ACK", "epoch")
     store._db._clock = lambda: job.created_at + timedelta(days=1)
-    assert store.workers.sweep_expired_assignments() == (0, 0)
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.assignments.sweep_expired_assignments() == (0, 0)
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     ControlService(
         database=store.database,
     ).cancel(flow)
     assert store.stops.pending("w") is not None
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
 
 
 def test_cancel_during_preparation_releases_slot_without_nonexistent_journal(store):
     flow = store.flows.create_flow("owner/repo", 1, 1)
     register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = enqueue_job(store, flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job("w", "preparing", "epoch")
+    assert store.assignments.assign_job("w", "preparing", "epoch")
     ControlService(
         database=store.database,
     ).cancel(flow)
     assert store.stops.pending("w") is None
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
     assert store.jobs.get_job(job.id).state is JobState.FAILED
     assert store.workers.list_workers()[0].current_job_id is None
     assert not store.stops.authorize_dispatch(job.id, "w", "preparing", "epoch")
     replacement = store.flows.create_flow("owner/repo", 2, 1)
     next_job = enqueue_job(store, replacement.id, JobKind.INITIAL)
-    assert store.workers.assign_job("w", "replacement", "epoch").id == next_job.id
-    assert not store.workers.clear_preparation(job.id, "w", "preparing", "epoch")
+    assert store.assignments.assign_job("w", "replacement", "epoch").id == next_job.id
+    assert not store.assignments.clear_preparation(job.id, "w", "preparing", "epoch")
     assert any(w.current_job_id == next_job.id for w in store.workers.list_workspaces("w"))
 
 
@@ -273,12 +273,12 @@ def test_confirmed_stop_can_be_reacknowledged_after_flow_rebind(store):
         database=store.database,
     ).resume(store.flows.get_flow(flow.id), expected_round_no=flow.current_round_no)
     register_worker(store, "new-worker", repo=flow.repo, epoch="new-epoch")
-    replacement = store.workers.assign_job("new-worker", "new-token", "new-epoch")
+    replacement = store.assignments.assign_job("new-worker", "new-token", "new-epoch")
     assert replacement is not None
-    before = store.workers.get_flow_execution(flow.id)
+    before = store.flows.get_flow_execution(flow.id)
     register_worker(store, "w", epoch="reconnect")
     assert store.stops.confirm("w", receipt, "reconnect")
-    assert store.workers.get_flow_execution(flow.id) == before
+    assert store.flows.get_flow_execution(flow.id) == before
     assert store.jobs.get_job(replacement.id).assignment_token == "new-token"
 
 
@@ -375,8 +375,8 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(
         assert notice.kind is JobKind.ARCHIVE and notice.assigned_worker_id is None
         assert notice.assignment_token is None
         assert notice.result_payload["terminal"]["type"] == "merge_archive"
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
-    assert store.workers.assign_job("w", "archive", "epoch") is None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
+    assert store.assignments.assign_job("w", "archive", "epoch") is None
 
 
 async def test_preparation_result_releases_cancelled_binding_after_application(
@@ -385,14 +385,14 @@ async def test_preparation_result_releases_cancelled_binding_after_application(
     flow = store.flows.create_flow("owner/repo", 1, 1)
     register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = enqueue_job(store, flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job("w", "preparing", "epoch")
+    assert store.assignments.assign_job("w", "preparing", "epoch")
     message = Failed(job_id=job.id, assignment_token="preparing", error="prepare failed")
     store.jobs.record_control_result(job.id, message, "prepare failed")
     ControlService(
         database=store.database,
     ).cancel(flow)
     assert store.stops.pending("w") is None
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     await coordinator(store, RecordingGitHub()).results.apply(job.id)
     assert store.jobs.get_job(job.id).result_applied_at is not None
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None

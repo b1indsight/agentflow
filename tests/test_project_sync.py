@@ -313,7 +313,7 @@ async def test_unbound_initial_is_todo_then_bound_work_is_in_progress(store, pro
     await converge(sync)
     assert state(store).desired_status is ProjectStatus.TODO
     register_worker(store, "project-worker", repo=flow.repo, epoch="epoch")
-    assert store.workers.assign_job("project-worker", "token", "epoch") is not None
+    assert store.assignments.assign_job("project-worker", "token", "epoch") is not None
     clock.now += timedelta(seconds=31)
     await sync.sweep()
     assert state(store).desired_status is ProjectStatus.IN_PROGRESS
@@ -621,7 +621,7 @@ async def test_archive_ack_and_worker_release_succeed_while_projects_are_offline
         "worker-a", ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned"), "epoch-a",
     )
     assert await subject.results.apply(job.id) is JobState.DONE
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
     assert store.jobs.get_job(job.id).result_applied_at is not None
     archived = store.flows.get_flow(flow.id)
     assert (
@@ -726,7 +726,7 @@ async def test_merged_executor_recovery_preserves_done_projection(
     # Executor recovery cannot replace the committed business conclusion.
     later = store.now() + timedelta(hours=1)
     monkeypatch.setattr(store._db, "_clock", lambda: later)
-    store.workers.sweep_expired_assignments()
+    store.assignments.sweep_expired_assignments()
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     await sync.sweep()
     assert state(store).desired_status is ProjectStatus.DONE

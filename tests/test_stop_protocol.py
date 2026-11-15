@@ -302,7 +302,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
                 repo = pool.path(session.load().workspace)
                 assert (repo / "README.md").read_text() == "cancelled tracked edit"
                 assert (repo / "untracked").exists()
-                assert store.workers.get_flow_execution(flow.id).released_at is None
+                assert store.flows.get_flow_execution(flow.id).released_at is None
             await super().send(raw)
 
     class Agent(RecordingAgent):
@@ -339,11 +339,11 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
             assert store.workers.report_workspace("worker-1", "setup", item)
         other = store.flows.create_flow("owner/repo", 999, 1)
         other_job = enqueue_job(store, other.id, JobKind.INITIAL)
-        claimed = store.workers.assign_job("worker-1", "unrelated", "setup")
+        claimed = store.assignments.assign_job("worker-1", "unrelated", "setup")
         assert claimed.id == other_job.id
         unrelated = await pool.claim("owner/repo", other.id, claimed.workspace, claimed.generation,
                                      base_branch="main", remote="origin", push_token=None)
-        assert store.workers.finish_assignment(other_job.id, "worker-1", "unrelated", JobState.DONE, "setup")
+        assert store.assignments.finish_assignment(other_job.id, "worker-1", "unrelated", JobState.DONE, "setup")
     server = asyncio.create_task(
         serve_worker(
             QueueSocket(to_serve, to_worker),
@@ -423,7 +423,7 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(
 
         monkeypatch.setattr(Repository, "open_pull_request", lost_response)
         terminal = Succeeded(job_id=job.id, assignment_token=job.assignment_token, result=initial_result)
-        assert store.workers.record_assignment_result(
+        assert store.assignments.record_assignment_result(
             job.id, "worker-a", job.assignment_token, "epoch", terminal,
         ) == "pending"
         with pytest.raises(ResultPending):

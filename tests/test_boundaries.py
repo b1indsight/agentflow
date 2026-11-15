@@ -132,3 +132,17 @@ def test_flow_state_sql_has_one_runtime_owner():
                 if re.search(r"(?:^|,)\s*state\s*=", update[1], re.IGNORECASE):
                     writers.add(path.as_posix())
     assert writers == {"app/persistence/flows.py"}
+
+
+def test_persistence_stores_import_each_other_at_module_level():
+    # A function-level import hides a dependency cycle between stores. The one left keeps
+    # review cancellation inside the Flow state write's transaction (flows -> reviews).
+    deferred = set()
+    for path in Path("app/persistence").glob("*.py"):
+        for scope in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(scope):
+                if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("app.persistence"):
+                    deferred.add((path.name, node.module))
+    assert deferred == {("flows.py", "app.persistence.reviews")}

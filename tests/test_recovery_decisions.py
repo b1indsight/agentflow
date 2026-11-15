@@ -26,9 +26,9 @@ def expiring(store, *, started=False):
     store.flows.update_flow_metadata(flow)
     register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = enqueue_job(store, flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job("w", "token", "epoch").id == job.id
+    assert store.assignments.assign_job("w", "token", "epoch").id == job.id
     if started:
-        assert store.workers.start_assignment(job.id, attempt.id, "w", "token", "epoch")
+        assert store.assignments.start_assignment(job.id, attempt.id, "w", "token", "epoch")
     with store.connection() as connection:
         connection.execute(
             "UPDATE jobs SET lease_expires_at=%s,recovery_deadline=%s WHERE id=%s",
@@ -59,13 +59,13 @@ def test_sweep_waiting_on_worker_reads_committed_receipt(store, monkeypatch, rec
     with ThreadPoolExecutor(max_workers=1) as pool:
         with store.transaction() as tx:
             tx.lock_workflow(flow.id)
-            sweep = pool.submit(store.workers.sweep_expired_assignments)
+            sweep = pool.submit(store.assignments.sweep_expired_assignments)
             assert waiting.wait(5)
             assert not sweep.done()
             if receipt == "result":
                 terminal = Failed(job_id=job.id, assignment_token="token", error="executor failed")
                 assert (
-                    tx.workers.record_assignment_result(job.id, "w", "token", "epoch", terminal)
+                    tx.assignments.record_assignment_result(job.id, "w", "token", "epoch", terminal)
                     == "pending"
                 )
             else:
@@ -88,10 +88,10 @@ def test_sweep_waiting_on_worker_reads_committed_receipt(store, monkeypatch, rec
     )
     if receipt == "result":
         assert store.jobs.get_job(job.id).result_received_at == NOW
-        assert store.workers.get_flow_execution(flow.id).released_at is None
+        assert store.flows.get_flow_execution(flow.id).released_at is None
     else:
         assert store.jobs.get_job(job.id).last_error == "execution stopped"
-        assert store.workers.get_flow_execution(flow.id).released_at == NOW
+        assert store.flows.get_flow_execution(flow.id).released_at == NOW
 
 
 def test_sweep_failure_rolls_back_prior_job_updates(store, monkeypatch):
@@ -108,12 +108,12 @@ def test_sweep_failure_rolls_back_prior_job_updates(store, monkeypatch):
 
     monkeypatch.setattr(psycopg.Connection, "execute", interrupted)
     with pytest.raises(RuntimeError, match="claim cleanup interrupted"):
-        store.workers.sweep_expired_assignments()
+        store.assignments.sweep_expired_assignments()
     assert store.jobs.get_job(job.id).state is JobState.RUNNING
     assert store.jobs.get_job(job.id).assignment_token == "token"
     assert store.flows.get_flow(flow.id).state is FlowState.RUNNING
     assert any(w.current_job_id == job.id for w in store.workers.list_workspaces("w"))
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
 
 
 def preparation_retry(error, *, failures=0, first_failed=None, last_error=None):

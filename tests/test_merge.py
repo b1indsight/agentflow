@@ -154,7 +154,7 @@ async def test_merge_archives_business_without_waiting_for_worker(store, merge_f
                                    (store.now(), flow.id))
         elif binding == "offline":
             store.workers.worker_disconnected("worker-a", connection_epoch="epoch-a")
-    execution = store.workers.get_flow_execution(flow.id)
+    execution = store.flows.get_flow_execution(flow.id)
     await route_merge(store, flow)
     await route_merge(store, flow, "merge-duplicate")
     archived = store.flows.get_flow(flow.id)
@@ -165,7 +165,7 @@ async def test_merge_archives_business_without_waiting_for_worker(store, merge_f
     assert len(notices) == 1
     assert notices[0].assigned_worker_id is None and notices[0].assignment_token is None
     assert notices[0].result_payload["terminal"]["type"] == "merge_archive"
-    assert store.workers.get_flow_execution(flow.id) == execution
+    assert store.flows.get_flow_execution(flow.id) == execution
     assert store.stops.has_pending(flow.id) is (binding in {"running", "offline"})
 
 
@@ -175,7 +175,7 @@ async def test_merge_retires_review_but_keeps_resources_until_stop_cleanup(store
     flow = store.flows.get_flow(job.flow_id)
     await route_merge(store, flow)
     assert store.reviews.for_job(job).state is BatchState.CANCELLED
-    assert store.workers.assign_job("worker-a", "archive-token", "epoch-a") is None
+    assert store.assignments.assign_job("worker-a", "archive-token", "epoch-a") is None
     github = RecordingGitHub()
     subject = coordinator(store, github)
     assert await subject.results.apply(job.id) is JobState.DONE
@@ -183,16 +183,16 @@ async def test_merge_retires_review_but_keeps_resources_until_stop_cleanup(store
     assert github.comments == []
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.MERGED
-    assert store.workers.assign_job("worker-a", "before-ack", "epoch-a") is None
+    assert store.assignments.assign_job("worker-a", "before-ack", "epoch-a") is None
     report_settled(store, job.id, epoch="epoch-a")
-    assert store.workers.assign_job("worker-a", "after-coding-ack", "epoch-a") is None
+    assert store.assignments.assign_job("worker-a", "after-coding-ack", "epoch-a") is None
     assert [j.id for j in store.jobs.list_jobs(flow.id) if j.kind is JobKind.REVISION] == [job.id]
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     stop = store.stops.pending("worker-a")
     assert store.stops.confirm("worker-a", ExecutionStopped(
         **stop.fence().model_dump(), execution_nonce="original-executor",
     ), "epoch-a")
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
     notice = store.jobs.list_jobs(flow.id)[-1]
     assert notice.assigned_worker_id is None and notice.kind is JobKind.ARCHIVE
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED

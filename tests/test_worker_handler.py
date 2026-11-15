@@ -88,7 +88,7 @@ def recovery_registration(store, job, recovery):
     """Report the same concrete locations and binding selected by the real repository."""
     items = []
     for workspace in store.workers.list_workspaces(job.assigned_worker_id):
-        binding = store.workers.get_worker_execution(job.assigned_worker_id, workspace.workspace)
+        binding = store.flows.get_worker_execution(job.assigned_worker_id, workspace.workspace)
         items.append(WorkspaceInventory(
             workspace=workspace.workspace, repository=workspace.repository,
             generation=workspace.generation, flow_id=binding.flow_id if binding else None,
@@ -187,8 +187,8 @@ async def test_gateway_authorizes_dispatch_after_preparation(store, queued_initi
     async def reassigned(job, worker, token, epoch):
         assignment = await prepare(job, worker, token, epoch)
         # Another scheduler replaces an unstarted claim while preparation is in flight.
-        assert store.workers.requeue_assignment(job.id, worker, token, epoch)
-        replacement = required(store.workers.assign_job(worker, "reassigned-token", epoch))
+        assert store.assignments.requeue_assignment(job.id, worker, token, epoch)
+        replacement = required(store.assignments.assign_job(worker, "reassigned-token", epoch))
         assert replacement.id == job.id
         return assignment
 
@@ -352,7 +352,7 @@ async def test_gateway_disconnect_policy(store, queued_initial, disconnect_after
     job = required(store.jobs.get_job(queued_initial[1].id))
     assert job.state is JobState.RUNNING and job.result_received_at is None
     assert (job.started_at is not None) == disconnect_after_start
-    binding = required(store.workers.get_flow_execution(job.flow_id))
+    binding = required(store.flows.get_flow_execution(job.flow_id))
     assert binding.released_at is None
     assert next(w for w in store.workers.list_workspaces("worker-1")
                 if w.workspace == job.workspace).current_job_id == job.id
@@ -396,8 +396,8 @@ async def test_gateway_resumes_started_assignment_under_a_new_epoch(store, serve
     assert worker.connection_epoch == resumed.connection_epoch != "epoch-a"
     persisted = required(store.jobs.get_job(job.id))
     assert persisted.state is JobState.RUNNING and persisted.heartbeat_at is not None
-    assert store.workers.assignment_active(job.id, "worker-a", job.assignment_token, worker.connection_epoch)
-    assert not store.workers.assignment_active(job.id, "worker-a", job.assignment_token, "epoch-a")
+    assert store.assignments.assignment_active(job.id, "worker-a", job.assignment_token, worker.connection_epoch)
+    assert not store.assignments.assignment_active(job.id, "worker-a", job.assignment_token, "epoch-a")
 
 
 @pytest.mark.parametrize("first,code", [
@@ -650,7 +650,7 @@ async def test_registration_only_answers_actual_committed_acceptance(
     _flow, subject, _, request, _ = prepared_initial
     job = required(store.jobs.get_job(request.arguments.job_id))
     terminal = Failed(job_id=job.id, assignment_token=job.assignment_token, error="failed offline")
-    assert store.workers.record_assignment_result(job.id, "worker-a", job.assignment_token,
+    assert store.assignments.record_assignment_result(job.id, "worker-a", job.assignment_token,
                                                   "epoch", terminal) == "pending"
     if committed:
         await subject.results.apply(job.id)
@@ -705,7 +705,7 @@ async def test_duplicate_prior_job_result_does_not_retire_current_assignment(sto
     previous = required(store.jobs.get_job(request.arguments.job_id))
     old_terminal = Failed(job_id=previous.id, assignment_token=previous.assignment_token, error="old failure")
     old_t, old_a = terminal_items(old_terminal)
-    assert store.workers.record_assignment_result(previous.id, "worker-a", previous.assignment_token,
+    assert store.assignments.record_assignment_result(previous.id, "worker-a", previous.assignment_token,
                                                   "epoch", old_terminal) == "pending"
     await subject.results.apply(previous.id)
     report_settled(store, previous.id, epoch="epoch")
@@ -743,7 +743,7 @@ async def test_split_result_acceptance_orders_same_flow_successor_after_ack(stor
     routes.freeze()
     callbacks.on_published()
     await callbacks.on_opened()
-    job = required(store.workers.assign_job("worker-1", "token", "epoch"))
+    job = required(store.assignments.assign_job("worker-1", "token", "epoch"))
     arguments = await callbacks.coordinator.prepare_for_assignment(job, "worker-1", "token", "epoch")
     await callbacks._on_prepared(job, "token", arguments)
     started = Started(**call_header(), method="server.execution_started",
@@ -754,7 +754,7 @@ async def test_split_result_acceptance_orders_same_flow_successor_after_ack(stor
     assert required(store.jobs.get_job(job.id)).result_applied_at is not None
     assert ControlService(database=store.database).retry(queued_initial[0])
     report_settled(store, job.id, epoch="epoch")
-    following = required(store.workers.assign_job("worker-1", "next", "epoch"))
+    following = required(store.assignments.assign_job("worker-1", "next", "epoch"))
     preparation = asyncio.create_task(callbacks.coordinator.prepare_for_assignment(
         following, "worker-1", "next", "epoch",
     ))

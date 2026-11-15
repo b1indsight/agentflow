@@ -175,7 +175,7 @@ async def test_resume_before_first_delivery_still_requires_worker_naming(store, 
     resumed = service.resume(flow, expected_round_no=1)
     assert resumed.current_round_no == 2 and store.deliveries.get_delivery(flow.id) is None
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
-    coding = store.workers.assign_job("worker-a", "token", "epoch")
+    coding = store.assignments.assign_job("worker-a", "token", "epoch")
     github = RecordingGitHub()
     github.refs = {}
     task = await prepare_initial(coordinator(store, github), coding)
@@ -219,13 +219,13 @@ async def test_failed_initial_round_stops_workspace_before_resume(
                                    workspace=default.workspace, repo_workspace_limit=1, coding_agent="codex")
     for item in await pool.provision(flow.repo):
         assert store.workers.report_workspace("worker-a", "epoch", item)
-    job = store.workers.assign_job("worker-a", "first", "epoch")
+    job = store.assignments.assign_job("worker-a", "first", "epoch")
     github = RecordingGitHub()
     github.refs = {}
     subject = coordinator(store, github)
     task = await prepare_initial(subject, job)
     assert isinstance(task, InitialTask)
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "first", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "first", "epoch")
     state = ExecutionState(root, flow.id)
     executor = WorkerExecutor(root, RecordingAgent(), worker_id="worker-a", state=state, workspaces=pool)
     state.record_received(
@@ -258,7 +258,7 @@ async def test_failed_initial_round_stops_workspace_before_resume(
         InitialTaskResult(session_id=None, last_message="failed", exit_code=1)
     )
     assert (
-        store.workers.record_assignment_result(job.id, "worker-a", "first", "epoch", terminal)
+        store.assignments.record_assignment_result(job.id, "worker-a", "first", "epoch", terminal)
         == "pending"
     )
     assert await subject.results.apply(job.id) is JobState.FAILED
@@ -266,12 +266,12 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     state.reconcile_acknowledgement()
     for item in pool.inventory():
         assert store.workers.report_workspace("worker-a", "epoch", item)
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     store.workers.worker_disconnected("worker-a", connection_epoch="epoch")
     later = store.now() + timedelta(days=1)
     monkeypatch.setattr(store._db, "_clock", lambda: later)
-    store.workers.sweep_expired_assignments()
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    store.assignments.sweep_expired_assignments()
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch",
                                    workspace=default.workspace, repo_workspace_limit=1, coding_agent="codex")
     for item in pool.inventory():
@@ -296,7 +296,7 @@ async def test_failed_initial_round_stops_workspace_before_resume(
         assert store.workers.report_workspace("worker-a", "epoch", item)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     service.resume(flow, expected_round_no=1)
-    next_job = store.workers.assign_job("worker-a", "second", "epoch")
+    next_job = store.assignments.assign_job("worker-a", "second", "epoch")
     next_task = await subject.prepare(next_job)
     assert isinstance(next_task, InitialTask)
     assert next_task.branch == f"{task.branch}-round-2"

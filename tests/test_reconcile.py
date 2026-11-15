@@ -100,7 +100,7 @@ async def test_persisted_merged_backlog_archives_without_new_webhook_or_binding(
     running, _ = accepted_coding(store)
     released = store.flows.get_flow(running.flow_id)
     assert store.jobs.complete_persisted_result(running.id, JobState.DONE)
-    assert store.workers.release_flow_execution(released.id)
+    assert store.flows.release_flow_execution(released.id)
     with store.flows.locked(released.id) as context:
         released = context.flow
         released.archive_reason = ArchiveReason.SUCCEEDED
@@ -111,7 +111,7 @@ async def test_persisted_merged_backlog_archives_without_new_webhook_or_binding(
     delivery.merge_commit_sha = "a" * 40
     delivery.version += 1
     store.deliveries.update_delivery(delivery)
-    binding = store.workers.get_flow_execution(released.id)
+    binding = store.flows.get_flow_execution(released.id)
     missing = store.flows.create_flow("owner/repo", 501, 42)
     incomplete = store.flows.create_flow("owner/repo", 502, 42)
     for flow in (missing, incomplete):
@@ -140,8 +140,8 @@ async def test_persisted_merged_backlog_archives_without_new_webhook_or_binding(
         notices = [job for job in store.jobs.list_jobs(flow.id)
                    if job.result_payload and job.result_payload.get("version") == 2]
         assert len(notices) == 1 and notices[0].assigned_worker_id is None
-    assert store.workers.get_flow_execution(released.id) == binding
-    assert store.workers.get_flow_execution(missing.id) is None
+    assert store.flows.get_flow_execution(released.id) == binding
+    assert store.flows.get_flow_execution(missing.id) is None
     assert store.flows.get_flow(merge_flow.id) == merge_flow
     assert store.flows.get_flow(incomplete.id) == incomplete
 

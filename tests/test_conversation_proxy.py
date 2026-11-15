@@ -339,12 +339,12 @@ async def test_service_resolves_existing_database_metadata_and_released_binding(
     store.flows.update_flow_metadata(flow)
     register_worker(store, "worker-1", repo=flow.repo, epoch="epoch")
     enqueue_job(store, flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job("worker-1", "assignment", "epoch") is not None
+    assert store.assignments.assign_job("worker-1", "assignment", "epoch") is not None
     assert (await service.read(flow.id, None, 100)).unavailable_reason == "no_session"
     attempt.codex_session_id = SESSION
     store.flows.update_attempt(attempt)
     ControlService(database=store.database).cancel(flow)
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
     query = AsyncMock(return_value=HistoryPage(session_id=SESSION))
     monkeypatch.setattr(broker, "query", query)
     await service.read(flow.id, None, 100)

@@ -84,8 +84,8 @@ async def pending_revision(store, revision_resources, request):
     store.flows.update_flow_metadata(flow)
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     initial = enqueue_job(store, flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job("worker-a", "initial", "epoch") is not None
-    assert store.workers.finish_assignment(initial.id, "worker-a", "initial", JobState.DONE, "epoch")
+    assert store.assignments.assign_job("worker-a", "initial", "epoch") is not None
+    assert store.assignments.finish_assignment(initial.id, "worker-a", "initial", JobState.DONE, "epoch")
     report_settled(store, initial.id, epoch="epoch")
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
@@ -98,7 +98,7 @@ async def pending_revision(store, revision_resources, request):
                          settle_seconds=0, submit_grace_seconds=0)
     queued = settle(store)[0]
     assert queued.kind is JobKind.REVISION
-    job = store.workers.assign_job("worker-a", "token", "epoch")
+    job = store.assignments.assign_job("worker-a", "token", "epoch")
     github = RevisionGitHub()
     updates = getattr(request, "param", {})
     github.sha = updates.get("head", github.sha)
@@ -115,7 +115,7 @@ async def pending_revision(store, revision_resources, request):
 
 def accept(store, job, result):
     terminal = Succeeded(job_id=job.id, assignment_token="token", result=result)
-    return store.workers.record_assignment_result(job.id, "worker-a", "token", "epoch", terminal)
+    return store.assignments.record_assignment_result(job.id, "worker-a", "token", "epoch", terminal)
 
 
 @pytest.mark.parametrize("pending_revision", [{"head": "external", "base": "release"}], indirect=True)
@@ -128,7 +128,7 @@ async def test_external_updates_use_fetched_baseline_without_claiming_external_w
     assert task.previous_head_sha == "baseline"
     assert task.expected_head_sha == "external" and task.base_branch == "release"
     assert store.deliveries.get_delivery(flow.id).head_sha == "baseline"
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
 
     async def compare(repo, base, head):
@@ -159,7 +159,7 @@ async def test_answer_uses_fresh_pr_without_adopting_external_delivery(store, pe
     flow, job, task, github, subject = pending_revision
     before = store.deliveries.get_delivery(flow.id)
     assert task.purpose == "answer" and task.expected_head_sha == "external"
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     item, = task.feedback
     result = verified_result(task, commit_sha="local-working-copy", remote_sha=None, branch=None,
@@ -207,12 +207,12 @@ async def test_changed_pr_rebuilds_judge_context_before_unstarted_revision(store
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET lease_expires_at=created_at WHERE id=%s", (job.id,))
     store.workers.recover_abandoned_assignments()
-    store.workers.sweep_expired_assignments()
+    store.assignments.sweep_expired_assignments()
     assert store.jobs.get_job(job.id).state is JobState.DONE
     register_worker(store, "worker-a", repo=flow.repo, epoch="restarted")
     judge = SimpleNamespace(triage=AsyncMock(side_effect=lambda new: judge_decision(verdict, new)))
     await subject.triage(store.reviews.pending_triage()[0], judge)
-    replacement = store.workers.assign_job("worker-a", "replacement", "restarted")
+    replacement = store.assignments.assign_job("worker-a", "replacement", "restarted")
     assert replacement is not None and replacement.id != job.id
     prepared = await subject.prepare(replacement)
     assert isinstance(prepared, RevisionTask) and prepared.expected_head_sha == "external"
@@ -223,7 +223,7 @@ async def test_changed_pr_rebuilds_judge_context_before_unstarted_revision(store
 @pytest.mark.parametrize("baseline", [None, "unrelated"])
 async def test_current_revision_requires_actual_baseline_evidence(store, pending_revision, baseline):
     flow, job, task, github, subject = pending_revision
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     github.sha = "revision"
     result = verified_result(task, baseline_sha=baseline, commit_sha=github.sha, remote_sha=github.sha)
@@ -238,18 +238,18 @@ def test_started_and_revision_budget_commit_atomically(store, pending_revision):
     _, job, task, _, _ = pending_revision
     # A control crash between accepting Started and marking feedback relayed still consumes one run.
     with pytest.raises(RuntimeError), store.transaction() as tx:
-        assert tx.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+        assert tx.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
         raise RuntimeError("crash before commit")
     assert store.flows.get_attempt(task.attempt_id).revision_cycles == 0
     assert store.jobs.get_job(job.id).started_at is None
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
-    assert not store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert not store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     assert store.flows.get_attempt(task.attempt_id).revision_cycles == 1
 
 
 async def test_result_commit_failure_replays_facts_without_new_execution(store, pending_revision, monkeypatch):
     flow, job, task, github, subject = pending_revision
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     item = task.feedback[0]
     output = revision_output(addressed=[AddressedComment(item_id=item.item_id, version=item.version,
@@ -315,7 +315,7 @@ async def test_cancel_during_remote_verification_prevents_effects_and_commit(
     store, pending_revision, monkeypatch,
 ):
     flow, job, task, github, subject = pending_revision
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     assert accept(store, job, verified_result(task)) == "pending"
     original = Repository.fetch_ref
@@ -345,30 +345,30 @@ async def test_revision_limit_applies_to_strong_signals(store, pending_revision)
 
 async def test_failed_revision_retry_retains_repo_and_consumes_a_new_cycle(store, pending_revision):
     flow, job, task, _, subject = pending_revision
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     failed = verified_result(task, exit_code=65, failure_stage="push", failure_detail="not pushed")
     assert accept(store, job, failed) == "pending"
     assert await subject.results.apply(job.id) is JobState.FAILED
     report_settled(store, job.id, epoch="epoch")
-    binding = store.workers.get_flow_execution(flow.id)
+    binding = store.flows.get_flow_execution(flow.id)
     assert binding.released_at is None
     ControlService(
         database=store.database,
     ).retry(store.flows.get_flow(flow.id))
-    replacement = store.workers.assign_job("worker-a", "new-token", "epoch")
+    replacement = store.assignments.assign_job("worker-a", "new-token", "epoch")
     assert replacement.id != job.id
     prepared = await subject.prepare(replacement)
     assert prepared.repo_identity == task.repo_identity
     assert prepared.expected_head_sha == task.expected_head_sha
-    assert store.workers.start_assignment(replacement.id, task.attempt_id, "worker-a", "new-token", "epoch")
+    assert store.assignments.start_assignment(replacement.id, task.attempt_id, "worker-a", "new-token", "epoch")
     assert store.flows.get_attempt(task.attempt_id).revision_cycles == 2
-    assert store.workers.get_flow_execution(flow.id).worker_id == binding.worker_id
+    assert store.flows.get_flow_execution(flow.id).worker_id == binding.worker_id
 
 
 async def test_failed_revision_cannot_retry_coding_after_merge(store, pending_revision):
     flow, job, task, _, subject = pending_revision
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     failed = verified_result(task, exit_code=65, failure_stage="push", failure_detail="not pushed")
     assert accept(store, job, failed) == "pending"
@@ -376,7 +376,7 @@ async def test_failed_revision_cannot_retry_coding_after_merge(store, pending_re
     report_settled(store, job.id, epoch="epoch")
     await route_merge(store, flow)
     jobs = store.jobs.list_jobs(flow.id)
-    binding = store.workers.get_flow_execution(flow.id)
+    binding = store.flows.get_flow_execution(flow.id)
     delivery = store.deliveries.get_delivery(flow.id)
     assert delivery.state is DeliveryState.MERGED
 
@@ -393,9 +393,9 @@ async def test_failed_revision_cannot_retry_coding_after_merge(store, pending_re
     assert store.flows.get_flow(flow.id) == archived
     assert store.flows.get_active_flow(flow.repo, flow.issue_number) is None
     assert store.jobs.list_jobs(flow.id) == jobs
-    assert store.workers.get_flow_execution(flow.id) == binding
+    assert store.flows.get_flow_execution(flow.id) == binding
     assert store.stops.pending("worker-a") == stop
-    assert store.workers.assign_job("worker-a", "after-merge", "epoch") is None
+    assert store.assignments.assign_job("worker-a", "after-merge", "epoch") is None
     assert store.deliveries.get_delivery(flow.id) == delivery
 
 
@@ -404,7 +404,7 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
     store, pending_revision, monkeypatch, transition,
 ):
     flow, job, task, github, subject = pending_revision
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     item = task.feedback[0]
     output = revision_output(addressed=[AddressedComment(item_id=item.item_id, version=item.version,
@@ -459,7 +459,7 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
             service.retry(flow)
         assert store.flows.get_flow(flow.id) == archived
         assert store.jobs.list_jobs(flow.id) == jobs
-        assert store.workers.get_flow_execution(flow.id).released_at is None
+        assert store.flows.get_flow_execution(flow.id).released_at is None
         assert store.stops.pending("worker-a").job_id == job.id
         assert github.comments == comments and github.review_requests == []
         assert store.flows.get_attempt(task.attempt_id).codex_session_id == "old-session"
@@ -484,7 +484,7 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
     assert store.flows.get_attempt(task.attempt_id).codex_session_id == "new-session"
     assert store.flows.get_attempt(task.attempt_id).session_generation == 1
     assert store.reviews.pending(flow.id) == []
-    assert store.workers.assign_job("worker-a", "next-token", "epoch") is None
+    assert store.assignments.assign_job("worker-a", "next-token", "epoch") is None
 
 
 @pytest.mark.parametrize("merge_at", ["verification", "commit"])
@@ -493,7 +493,7 @@ async def test_merge_during_revision_application_preserves_delivery_and_session(
 ):
     # Remote verification and effect I/O can each overlap a human merging the current PR.
     flow, job, task, github, subject = pending_revision
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     result = verified_result(task, commit_sha="revision", remote_sha="revision")
     github.sha = "revision"
     assert accept(store, job, result) == "pending"
@@ -515,7 +515,7 @@ async def test_merge_during_revision_application_preserves_delivery_and_session(
     archived = store.flows.get_flow(flow.id)
     assert (archived.state, archived.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
     assert store.flows.get_attempt(task.attempt_id).codex_session_id == "old-session"
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     assert len(store.reviews.pending(flow.id)) == 1
     persisted = store.jobs.get_job(job.id)
     assert persisted.result_payload == accepted.result_payload
@@ -543,7 +543,7 @@ async def test_revision_preparation_failure_is_persisted_and_explicitly_retryabl
     ControlService(
         database=store.database,
     ).retry(flow)
-    replacement = store.workers.assign_job("worker-a", "retry-token", "epoch")
+    replacement = store.assignments.assign_job("worker-a", "retry-token", "epoch")
     assert isinstance(await subject.prepare(replacement), RevisionTask)
     assert store.flows.get_attempt(task.attempt_id).revision_cycles == 0
 
@@ -552,7 +552,7 @@ async def test_uncertain_revision_notification_cannot_be_explicitly_resent(
     store, pending_revision, monkeypatch,
 ):
     flow, job, task, _github, subject = pending_revision
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     assert accept(store, job, verified_result(task)) == "pending"
 
@@ -579,7 +579,7 @@ async def test_durable_revision_recovery_and_reopen_keep_original_inbox(
     # Both ordinary recovery and a closed PR's late result must read old stored wire receipts,
     # while retaining the exact payload/digest that existing plans and effects reference.
     flow, job, task, github, subject = pending_revision
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     # A real historical assignment/result has neither new field; its original digest must survive.
     task = task.model_copy(update={"previous_head_sha": None})
@@ -592,7 +592,7 @@ async def test_durable_revision_recovery_and_reopen_keep_original_inbox(
     assert "baseline_sha" not in result.model_dump(mode="json")
     terminal = Succeeded(job_id=job.id, assignment_token="token", result=result)
     assert (
-        store.workers.record_assignment_result(job.id, "worker-a", "token", "epoch", terminal)
+        store.assignments.record_assignment_result(job.id, "worker-a", "token", "epoch", terminal)
         == "pending"
     )
     if version != 1:

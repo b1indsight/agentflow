@@ -48,7 +48,7 @@ def accept_result(subject: JobCoordinator, job: Job, result: ExecutionResult) ->
     worker = next(w for w in subject.workers.list_workers() if w.worker_id == job.assigned_worker_id)
     assert worker.connection_epoch is not None
     terminal = Succeeded(job_id=job.id, assignment_token=job.assignment_token, result=result)
-    accepted = subject.workers.record_assignment_result(
+    accepted = subject.assignments.record_assignment_result(
         job.id, job.assigned_worker_id, job.assignment_token, worker.connection_epoch, terminal,
     )
     assert accepted in {"pending", "applied"}
@@ -98,7 +98,7 @@ async def prepare_initial(subject, coding):
             worker = next(w for w in subject.workers.list_workers() if w.worker_id == worker_id)
             epoch = worker.connection_epoch
             subject.workers.worker_ready(worker_id, epoch, InferenceCapability(adapter_version="codex/v1"))
-            naming = subject.workers.assign_job(worker_id, "naming", epoch, slot="infer")
+            naming = subject.assignments.assign_job(worker_id, "naming", epoch, slot="infer")
             assert naming is not None and naming.id == flow.title_job_id
             call = naming.inference.current_task
             response = InferenceResult(
@@ -108,7 +108,7 @@ async def prepare_initial(subject, coding):
                     text=json.dumps({"title": "Task title", "branch_slug": "feat/implement-task"}),
                 ),
             )
-            assert subject.workers.record_assignment_result(naming.id, worker_id, "naming", epoch, response) == "pending"
+            assert subject.assignments.record_assignment_result(naming.id, worker_id, "naming", epoch, response) == "pending"
             await subject.results.apply(naming.id)
             return await preparing
     finally:
@@ -125,7 +125,7 @@ async def test_assignment_selects_coding_default_without_inference_capability(st
 
     flow = ControlService(database=store.database).create_flow("owner/repo", 8, 42)
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch", coding_agent=agent_type)
-    job = store.workers.assign_job("worker-a", "token", "epoch")
+    job = store.assignments.assign_job("worker-a", "token", "epoch")
     github = RecordingGitHub()
     github.refs = {}
     subject = coordinator(store, github)
@@ -159,7 +159,7 @@ async def test_initial_waits_for_title_and_branch_from_one_inference(store, task
     github = RecordingGitHub()
     github.refs = {}
     subject = coordinator(store, github)
-    coding = store.workers.assign_job("worker-a", "token", "epoch")
+    coding = store.assignments.assign_job("worker-a", "token", "epoch")
     preparing = asyncio.create_task(subject.prepare(coding))
     try:
         async with asyncio.timeout(2):
@@ -168,7 +168,7 @@ async def test_initial_waits_for_title_and_branch_from_one_inference(store, task
         assert not preparing.done()
         assert store.deliveries.get_delivery(flow.id) is None
         store.workers.worker_ready("worker-a", "epoch", InferenceCapability(adapter_version="codex/v1"))
-        naming = store.workers.assign_job("worker-a", "naming", "epoch", slot="infer")
+        naming = store.assignments.assign_job("worker-a", "naming", "epoch", slot="infer")
         assert naming.id == store.flows.get_flow(flow.id).title_job_id
         call = naming.inference.current_task
         # The naming inference, not the later coding prompt, must choose a typed branch slug.
@@ -188,7 +188,7 @@ async def test_initial_waits_for_title_and_branch_from_one_inference(store, task
                 text=json.dumps({"title": "移除登录功能", "branch_slug": branch_slug}),
             ),
         )
-        assert store.workers.record_assignment_result(naming.id, "worker-a", "naming", "epoch", result) == "pending"
+        assert store.assignments.record_assignment_result(naming.id, "worker-a", "naming", "epoch", result) == "pending"
         await subject.results.apply(naming.id)
         task = await asyncio.wait_for(preparing, 2)
         assert isinstance(task, InitialTask) and task.branch == branch_slug
@@ -229,7 +229,7 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr(store, prepared_
     assert github.review_requests == [["carol"]]
     assert github.labels == [["flow:in-review"]]
     assert [j.kind for j in store.jobs.list_jobs(flow.id) if j.kind is not JobKind.INFERENCE] == [JobKind.INITIAL]
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
 
 
 async def test_issue_edits_change_prepared_text_without_resubmitting_title(store, prepared_initial, monkeypatch):
@@ -259,7 +259,7 @@ async def pending_naming(store):
     github = RecordingGitHub()
     github.refs = {}
     subject = coordinator(store, github)
-    coding = store.workers.assign_job("worker-a", "token", "epoch")
+    coding = store.assignments.assign_job("worker-a", "token", "epoch")
     preparing = asyncio.create_task(subject.prepare(coding))
     try:
         async with asyncio.timeout(2):
@@ -319,7 +319,7 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, pending_nam
     assert store.flows.get_flow(flow.id).title_job_id == title_job.id
     assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind is JobKind.INFERENCE]) == 1
     store.workers.worker_ready("worker-a", "epoch", InferenceCapability(adapter_version="codex/v1"))
-    assigned = store.workers.assign_job("worker-a", "title-token", "epoch", slot="infer")
+    assigned = store.assignments.assign_job("worker-a", "title-token", "epoch", slot="infer")
     assert assigned is not None and assigned.id == title_job.id
     call = assigned.inference.current_task
     if (isinstance(reply, dict) and set(reply) == {"title", "branch_slug"}
@@ -338,7 +338,7 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, pending_nam
             adapter_version="codex/v1") if not isinstance(reply, InferenceFailure) else None,
         failure=reply if isinstance(reply, InferenceFailure) else None,
     )
-    assert store.workers.record_assignment_result(assigned.id, "worker-a", "title-token", "epoch", response) == "pending"
+    assert store.assignments.record_assignment_result(assigned.id, "worker-a", "title-token", "epoch", response) == "pending"
     if cancelled == "stop":
         ControlService(database=store.database).cancel(flow)
     elif cancelled:
@@ -385,15 +385,15 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, pending_nam
 
 async def test_title_enqueue_failure_blocks_coding_without_an_id_fallback(store, monkeypatch):
     # A descriptive branch is required before any coding assignment can be sent.
-    from app.persistence.jobs import JobStore
+    from app.persistence.inference import InferenceStore
 
     def unavailable(*args, **kwargs):
         raise ValueError("title inference unavailable")
 
-    monkeypatch.setattr(JobStore, "enqueue_inference", unavailable)
+    monkeypatch.setattr(InferenceStore, "enqueue_inference", unavailable)
     flow = ControlService(database=store.database).create_flow("owner/repo", None, 42, task_content="\n原文 α\r\n")
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
-    job = store.workers.assign_job("worker-a", "token", "epoch")
+    job = store.assignments.assign_job("worker-a", "token", "epoch")
     task = await coordinator(store, RecordingGitHub()).prepare(job)
     assert task is JobState.FAILED
     assert store.deliveries.get_delivery(flow.id) is None
@@ -416,7 +416,7 @@ async def test_naming_deadline_without_an_inference_worker_blocks_initial(store,
 
     report_settled(store, coding.id, epoch="epoch")
     assert ControlService(database=store.database).retry(store.flows.get_flow(flow.id))
-    retry = store.workers.assign_job("worker-a", "retry", "epoch")
+    retry = store.assignments.assign_job("worker-a", "retry", "epoch")
     task = await prepare_initial(subject, retry)
     assert isinstance(task, InitialTask) and task.branch == "feat/implement-task"
     named = store.flows.get_flow(flow.id)

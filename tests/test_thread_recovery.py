@@ -117,8 +117,8 @@ async def thread_revision(store, request, thread_resources):
     store.flows.update_flow_metadata(flow)
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     initial = enqueue_job(store, flow.id, JobKind.INITIAL)
-    assert store.workers.assign_job("worker-a", "initial", "epoch") is not None
-    assert store.workers.finish_assignment(initial.id, "worker-a", "initial", JobState.DONE, "epoch")
+    assert store.assignments.assign_job("worker-a", "initial", "epoch") is not None
+    assert store.assignments.finish_assignment(initial.id, "worker-a", "initial", JobState.DONE, "epoch")
     report_settled(store, initial.id, epoch="epoch")
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
@@ -139,11 +139,11 @@ async def thread_revision(store, request, thread_resources):
     if mode == "incomplete":
         github.thread = github.thread.model_copy(update={"complete": False})
     settle(store)
-    job = store.workers.assign_job("worker-a", "token", "epoch")
+    job = store.assignments.assign_job("worker-a", "token", "epoch")
     subject = coordinator(store, github)
     task = await subject.prepare(job)
     assert isinstance(task, RevisionTask)
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     github.sha = "baseline" if mode == "noop" else "revision"
     addressed, deferred = [], []
@@ -472,12 +472,12 @@ async def test_next_revision_combines_valid_historical_coverage_on_the_same_pr(
         updated_at=new.updated_at, signal="request_changes", submitted=True,
     ), settle_seconds=0, submit_grace_seconds=0)
     settle(store)
-    job = store.workers.assign_job("worker-a", "token", "epoch")
+    job = store.assignments.assign_job("worker-a", "token", "epoch")
     task = await subject.prepare(job)
     assert isinstance(task, RevisionTask)
     assert task.expected_head_sha == "revision" and task.session_id == "old-session"
     assert [f.github_id for f in task.feedback] == [2, 3]
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     github.sha = "revision2"
 

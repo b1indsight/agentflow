@@ -11,12 +11,12 @@ from pydantic import BaseModel
 from app.contracts.protocol import ExecutionStopped, StopFence
 from app.contracts.receipts import matches_stop_receipt, stop_receipt_digest
 from app.domain.models import DeliveryState, FlowState
+from app.persistence.assignments import AssignmentStore
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.repository import Repository
 from app.persistence.results import RESOURCE_JOB_SQL, UNCONFIRMED_EFFECT_SQL
-from app.persistence.workers import WorkerStore
 
 
 class StopIntent(BaseModel):
@@ -47,7 +47,7 @@ class StopStore(Repository):
 
     def request(self, flow_id: int) -> None:
         """Called under the workflow lock before attempting to release the binding."""
-        binding = WorkerStore(self._db).get_flow_execution(flow_id)
+        binding = FlowStore(self._db).get_flow_execution(flow_id)
         if binding is None or binding.released_at is not None:
             return
         with self._db.connection() as conn:
@@ -83,7 +83,7 @@ class StopStore(Repository):
             delivery = DeliveryStore(tx).get_delivery(flow.id)
             if delivery is not None and (delivery.state is DeliveryState.CLOSED or delivery.supersedes(job.kind)):
                 return False
-            if not WorkerStore(tx).assignment_active(job_id, worker_id, token, epoch):
+            if not AssignmentStore(tx).assignment_active(job_id, worker_id, token, epoch):
                 return False
             with tx.connection() as conn:
                 conn.execute("UPDATE jobs SET dispatch_authorized_at=COALESCE(dispatch_authorized_at,%s) WHERE id=%s",
@@ -125,7 +125,7 @@ class StopStore(Repository):
                 intent = conn.cursor(row_factory=class_row(StopIntent)).execute(
                     "SELECT * FROM execution_stops WHERE request_id=%s FOR UPDATE", (receipt.request_id,),
                 ).fetchone()
-                binding = WorkerStore(tx).get_flow_execution(receipt.flow_id)
+                binding = FlowStore(tx).get_flow_execution(receipt.flow_id)
                 worker = conn.execute(
                     "SELECT connection_epoch FROM workers WHERE worker_id=%s AND repository IS NULL", (worker_id,),
                 ).fetchone()
