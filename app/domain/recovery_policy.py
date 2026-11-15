@@ -1,11 +1,12 @@
 """Pure lease decisions over locked facts; stores own fencing and atomic updates."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
-from app.domain.models import DeliveryState, FlowState, JobKind
+from app.domain.models import DeliveryState, FlowState, Job, JobKind
+from app.github import GitHubError, retry_delay
 
 RECOVERY_BLOCKED = "Flow blocked: original worker executor status is unknown"
 
@@ -86,4 +87,39 @@ def should_release_binding(binding: BindingRecoveryFacts, now: datetime) -> bool
         and not binding.has_pending_stop
         and not binding.has_unreclaimed_execution
         and not binding.has_unapplied_result
+    )
+
+
+class PreparationRetry(BaseModel):
+    """Retry bookkeeping for one failed or expired preparation read."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    failures: int
+    first_failed_at: datetime
+    # None: the budget or window is spent and the job ends as a control failure.
+    next_at: datetime | None
+    cause: str
+    reason: str
+
+
+def decide_preparation_retry(
+    job: Job, error: GitHubError | None, *, now: datetime, max_failures: int, window_seconds: float,
+) -> PreparationRetry:
+    """Retry a transient read within its failure count and time window, else stop.
+
+    A missing error means the persisted window expired before another request was
+    issued. The window starts at the first failure, and a retry that would only be
+    allowed after it closes is not scheduled.
+    """
+    failures = job.prepare_failures + (error is not None)
+    first = job.prepare_first_failed_at or now
+    next_at = now + timedelta(seconds=retry_delay(failures, now, error))
+    permanent = error is not None and not error.retryable
+    exhausted = (permanent or error is None or failures >= max_failures
+                 or next_at >= first + timedelta(seconds=window_seconds))
+    cause = str(error) if error else job.prepare_last_error or "preparation window expired"
+    return PreparationRetry(
+        failures=failures, first_failed_at=first, next_at=None if exhausted else next_at, cause=cause,
+        reason=f"preparation retry budget/window exhausted: {cause}" if exhausted and not permanent else cause,
     )

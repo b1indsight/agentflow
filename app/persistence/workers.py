@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import timedelta
-from typing import Literal
+from datetime import datetime
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from psycopg.rows import class_row
@@ -13,13 +13,13 @@ from psycopg.types.json import Jsonb
 from app.contracts.protocol import Failed, InferenceResult, TerminalPayload, terminal_digest
 from app.contracts.receipts import ResultInbox
 from app.domain.flow_policy import FlowEvent
-from app.domain.inference_models import (
-    LOCAL_BUB_WORKER_ID,
-    InferenceCapability,
-    InferenceFailure,
-    InferenceSummary,
-    InferenceTask,
-    StopReason,
+from app.domain.inference_models import InferenceCapability, InferenceFailure, InferenceTask
+from app.domain.inference_policy import (
+    MAX_INFERENCE_ATTEMPTS,
+    choose_inference_worker,
+    decide_inference_cancellation,
+    decide_inference_settlement,
+    plan_inference_attempt,
 )
 from app.domain.models import (
     DeliveryState,
@@ -37,8 +37,8 @@ from app.domain.recovery_policy import (
     JobRecoveryFacts,
     RecoveryAction,
     decide_job_recovery,
+    decide_preparation_retry,
 )
-from app.github import GitHubError, retry_delay
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.inference_notices import InferenceNoticeStore
@@ -46,6 +46,9 @@ from app.persistence.jobs import JobStore
 from app.persistence.records import required
 from app.persistence.repository import Repository
 from app.persistence.results import RESOURCE_JOB_SQL, UNCONFIRMED_EFFECT_SQL
+
+if TYPE_CHECKING:
+    from app.github import GitHubError
 
 # A frozen archive may have started deleting before its Started message reached serve.
 _MAY_HAVE_EXECUTED = (
@@ -171,7 +174,7 @@ class WorkerStore(Repository):
             tx.connection() as connection,
             connection.cursor(row_factory=class_row(WorkerRecord)) as cursor,
         ):
-            tx._lock_workers(connection)
+            tx.lock_workers()
             previous = cursor.execute(
                 "SELECT * FROM workers WHERE worker_id=%s AND repository IS NULL", (worker_id,),
             ).fetchone()
@@ -223,7 +226,7 @@ class WorkerStore(Repository):
         neither that generation nor the advisory flow_id overwrites controller facts.
         """
         with self._db.transaction() as tx, tx.connection() as conn:
-            tx._lock_workers(conn)
+            tx.lock_workers()
             owner = conn.execute(
                 "SELECT * FROM workers WHERE worker_id=%s AND repository IS NULL"
                 " AND connection_epoch=%s AND status IN ('online','busy')", (worker_id, epoch),
@@ -289,7 +292,7 @@ class WorkerStore(Repository):
     ) -> None:
         now = self._db.now()
         with self._db.transaction() as tx, tx.connection() as connection:
-            tx._lock_workers(connection)
+            tx.lock_workers()
             if connection.execute("SELECT 1 FROM workers WHERE repository IS NULL AND worker_id=%s AND connection_epoch=%s",
                                   (worker_id, connection_epoch)).fetchone() is None:
                 return
@@ -368,7 +371,7 @@ class WorkerStore(Repository):
         with self._db.transaction() as tx, tx.connection() as connection:
             workers = WorkerStore(tx)
             if slot == "infer":
-                tx._lock_workers(connection)
+                tx.lock_workers()
                 available = connection.cursor(row_factory=class_row(WorkerRecord)).execute(
                     "SELECT * FROM workers WHERE repository IS NULL AND status IN ('online','busy') AND NOT draining"
                     " AND inventory_epoch=connection_epoch"
@@ -383,32 +386,22 @@ class WorkerStore(Repository):
                     "SELECT * FROM jobs WHERE state='queued' AND kind='inference' ORDER BY created_at,id",
                 ).fetchall()
                 for job in pending:
-                    assert job.inference is not None
-                    call = job.inference
+                    call = required(job.inference)
                     if workers.inference_needs_cancel(job.id):
                         continue
-                    now = tx.now()
-                    if call.next_attempt_at is not None and call.next_attempt_at > now:
+                    attempt = plan_inference_attempt(call, request_id=uuid4().hex, now=tx.now())
+                    if attempt is None:
                         continue
-                    if call.deadline_at <= now:
-                        workers._settle_inference(job, InferenceFailure(code="execution_timeout"))
+                    if isinstance(attempt, InferenceFailure):
+                        workers._settle_inference(job, attempt)
                         continue
-                    current_task = call.task.model_copy(update={
-                        "request_id": uuid4().hex,
-                        "timeout_seconds": (call.deadline_at - now).total_seconds(),
-                    })
-                    candidates = [w for w in available if w.worker_id not in call.excluded_workers
-                                  and w.inference is not None and w.inference.supports(current_task)]
-                    # Avoid confirmed failures when another worker is ready. Within that
-                    # tier bub wins; unknown/busy workers are excluded, not just avoided.
-                    candidates.sort(key=lambda w: (w.worker_id in call.avoid_workers,
-                                                   w.worker_id != LOCAL_BUB_WORKER_ID))
-                    if candidates and candidates[0].worker_id == worker_id:
-                        return workers._claim_job(job.id, worker_id, token, connection_epoch, current_task)
+                    chosen = choose_inference_worker(call, attempt, available)
+                    if chosen is not None and chosen.worker_id == worker_id:
+                        return workers._claim_job(job.id, worker_id, token, connection_epoch, attempt)
                 return None
             # A Flow may also own an inference lane on another worker. Fence all
             # owners in deterministic order before locking any Flow or job.
-            tx._lock_workers(connection)
+            tx.lock_workers()
             selection = (
                 "SELECT j.id,j.flow_id,f.repo,slot.workspace,slot.generation,bound.flow_id AS bound_flow"
                 " FROM jobs j JOIN flows f ON f.id=j.flow_id"
@@ -476,7 +469,7 @@ class WorkerStore(Repository):
                 if inference.deadline_at <= now:
                     self._settle_inference(job, InferenceFailure(code="execution_timeout"))
                     return None
-                assert current_task is not None and job.attempt < 3
+                assert current_task is not None and job.attempt < MAX_INFERENCE_ATTEMPTS
                 worker = connection.cursor(row_factory=class_row(WorkerRecord)).execute(
                     "SELECT * FROM workers WHERE worker_id=%s AND repository IS NULL", (worker_id,),
                 ).fetchone()
@@ -589,8 +582,8 @@ class WorkerStore(Repository):
     ) -> bool:
         """Refresh liveness for either slot; inference's absolute budget never renews."""
         now = self._db.now()
-        with self._db.connection() as connection:
-            self._db._lock_worker(connection, worker_id)
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx.lock_worker(worker_id)
             result = connection.execute(
                 "UPDATE jobs SET heartbeat_at=%s,"
                 " lease_expires_at=CASE WHEN kind='inference' THEN lease_expires_at ELSE %s END,updated_at=%s"
@@ -718,8 +711,8 @@ class WorkerStore(Repository):
             payload = inbox.model_dump(mode="json")
             digest = terminal_digest(terminal)
         now = self._db.now()
-        with self._db.connection() as connection, connection.transaction():
-            self._db._lock_worker(connection, worker_id)
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx.lock_worker(worker_id)
             row = connection.cursor(row_factory=class_row(Job)).execute(
                 "SELECT * FROM jobs WHERE id=%s"
                 " AND assigned_worker_id=%s AND assignment_token=%s"
@@ -759,8 +752,7 @@ class WorkerStore(Repository):
         if job.flow_id is not None:
             self._db.lock_workflow(job.flow_id)
         elif job.assigned_worker_id is not None:
-            with self._db.connection() as connection:
-                self._db._lock_worker(connection, job.assigned_worker_id)
+            self._db.lock_worker(job.assigned_worker_id)
         current = self._db.lock_job(job_id)
         # A queued generic call can be claimed between the initial read and worker
         # lock. Never acquire its new worker after the job lock; let the caller retry.
@@ -770,34 +762,19 @@ class WorkerStore(Repository):
             return None
         return current
 
-    def _inference_cancellation(self, job: Job) -> InferenceFailure | None:
-        """Only source currentness and the original deadline can retire an active call."""
+    def _inference_cancellation(self, job: Job, now: datetime) -> InferenceFailure | None:
+        """Read the source facts of a locked call and decide whether it must stop."""
         from app.persistence.reviews import ReviewStore
 
-        call = job.inference
-        assert call is not None
-        if call.cancel_failure is not None:
-            return call.cancel_failure
-        if job.flow_id is not None:
-            flow = FlowStore(self._db).get_flow(job.flow_id)
-            if (
-                flow is None
-                or not flow.accepts(JobKind.INFERENCE)
-                or flow.current_attempt_id != call.source_attempt_id
-            ):
-                return InferenceFailure(code="cancelled")
+        call = required(job.inference)
+        flow = FlowStore(self._db).get_flow(job.flow_id) if job.flow_id is not None else None
+        batch, batch_current = None, False
         if call.batch_id is not None:
-            batch = ReviewStore(self._db).get_batch(call.batch_id)
-            if (batch.inference_job_id != job.id or not ReviewStore(self._db).current(batch)
-                    or batch.decision is not None
-                    or (call.context_digest is not None
-                        and (batch.context is None or batch.context.digest != call.context_digest))):
-                return InferenceFailure(code="cancelled")
-        # An on-time durable answer stays valid when application resumes after restart.
-        received = job.result_received_at if job.state is JobState.RUNNING and job.result_applied_at is None else None
-        if (received or self._db.now()) >= call.deadline_at:
-            return InferenceFailure(code="execution_timeout")
-        return None
+            reviews = ReviewStore(self._db)
+            batch = reviews.get_batch(call.batch_id)
+            batch_current = reviews.current(batch)
+        return decide_inference_cancellation(
+            job, flow=flow, batch=batch, batch_current=batch_current, now=now)
 
     def inference_needs_cancel(self, job_id: int) -> bool:
         """Retire expired queued work, or persist a running cancellation until cleanup.
@@ -810,7 +787,7 @@ class WorkerStore(Repository):
             job = workers._lock_inference(job_id)
             if job is None or job.state not in {JobState.QUEUED, JobState.RUNNING}:
                 return False
-            failure = workers._inference_cancellation(job)
+            failure = workers._inference_cancellation(job, tx.now())
             if failure is None:
                 return False
             assert job.inference is not None
@@ -859,45 +836,10 @@ class WorkerStore(Repository):
                     "SELECT 1 FROM jobs WHERE id=%s AND " + _CURRENT_WORKSPACE, (job.id,),
                 ).fetchone() is None:
                     raise ValueError("inference settlement lost its workspace generation")
-        call = job.inference
-        assert call is not None
         now = self._db.now()
-        cancellation = self._inference_cancellation(job)
-        failure = cancellation or failure
-        state = JobState.DONE
-        if failure is not None:
-            delay = failure.retry_after_seconds
-            if delay is None:
-                delay = 0.25 * job.attempt if failure.code in {"rate_limited", "backend_unavailable"} else 0
-            # A provider may suggest any finite delay; compare before constructing a
-            # datetime so a huge Retry-After cannot strand the durable inbox forever.
-            next_at = (call.deadline_at if delay >= (call.deadline_at - now).total_seconds()
-                       else now + timedelta(seconds=delay))
-            state = JobState.FAILED
-            reason: StopReason = "non_retryable"
-            if failure.recoverable:
-                if cancellation is not None or next_at >= call.deadline_at:
-                    reason = "deadline"
-                elif job.attempt >= 3:
-                    reason = "max_attempts"
-                else:
-                    state = JobState.QUEUED
-            worker_ids = frozenset({job.assigned_worker_id}) if job.assigned_worker_id else frozenset()
-            call = call.model_copy(update={
-                "failures": [*call.failures, failure] if job.state is JobState.RUNNING else call.failures,
-                "avoid_workers": call.avoid_workers | worker_ids,
-                "excluded_workers": call.excluded_workers | (
-                    worker_ids if failure.code in {"busy", "connection_closed", "rpc_timeout"} else frozenset()),
-                "next_attempt_at": next_at if state is JobState.QUEUED else None,
-                "cancel_failure": cancellation,
-            })
-            if state is JobState.FAILED:
-                call = call.model_copy(update={"summary": InferenceSummary(
-                    logical_call_id=call.task.request_id, attempts=job.attempt,
-                    stop_reason=reason, last_failure_code=failure.code,
-                    last_worker_id=job.assigned_worker_id, backend=call.backend,
-                    finished_at=now, elapsed_ms=max(0, int((now - job.created_at).total_seconds() * 1000)),
-                )})
+        settled = decide_inference_settlement(
+            job, failure, cancellation=self._inference_cancellation(job, now), now=now)
+        state, call, failure = settled.state, settled.call, settled.failure
         with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET state=%s,inference=%s,last_error=%s,updated_at=%s,"
@@ -943,8 +885,8 @@ class WorkerStore(Repository):
     ) -> bool:
         if state not in (JobState.DONE, JobState.FAILED):
             raise ValueError("remote assignments can only finish as done or failed")
-        with self._db.connection() as connection:
-            self._db._lock_worker(connection, worker_id)
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx.lock_worker(worker_id)
             result = connection.execute(
                 "UPDATE jobs SET state=%s, result_applied_at=COALESCE(result_applied_at,%s),"
                 " updated_at=%s"
@@ -1077,25 +1019,17 @@ class WorkerStore(Repository):
                 or (delivery is not None and delivery.supersedes(current.kind))
             ):
                 return JobState.DONE
-            now = tx.now()
-            failures = current.prepare_failures + (error is not None)
-            first = current.prepare_first_failed_at or now
-            next_at = now + timedelta(seconds=retry_delay(failures, now, error))
-            permanent = error is not None and not error.retryable
-            exhausted = (permanent or error is None or failures >= max_failures
-                         or next_at >= first + timedelta(seconds=window_seconds))
-            cause = str(error) if error else current.prepare_last_error or "preparation window expired"
-            reason = (f"preparation retry budget/window exhausted: {cause}"
-                      if exhausted and not permanent else cause)
+            retry = decide_preparation_retry(
+                current, error, now=tx.now(), max_failures=max_failures, window_seconds=window_seconds)
             with tx.connection() as connection:
                 connection.execute(
                     "UPDATE jobs SET prepare_failures=%s,prepare_first_failed_at=%s,prepare_next_at=%s,"
                     " prepare_last_error=%s,last_error=%s WHERE id=%s",
-                    (failures, first, None if exhausted else next_at, cause, reason, job_id),
+                    (retry.failures, retry.first_failed_at, retry.next_at, retry.cause, retry.reason, job_id),
                 )
-            if exhausted:
-                terminal = Failed(job_id=job_id, assignment_token=token, error=reason)
-                JobStore(tx).record_control_result(job_id, terminal, reason)
+            if retry.next_at is None:
+                terminal = Failed(job_id=job_id, assignment_token=token, error=retry.reason)
+                JobStore(tx).record_control_result(job_id, terminal, retry.reason)
                 return JobState.FAILED
             if not WorkerStore(tx).requeue_assignment(job_id, worker, token, epoch):
                 raise ValueError("locked preparation could not be requeued")
@@ -1151,7 +1085,7 @@ class WorkerStore(Repository):
 
         now = self._db.now()
         with self._db.transaction() as tx, tx.connection() as connection:
-            tx._lock_workers(connection)
+            tx.lock_workers()
             connection.execute(
                 "UPDATE workers SET status=%s,inference=NULL WHERE repository IS NULL",
                 (WorkerStatus.OFFLINE,),
@@ -1174,7 +1108,7 @@ class WorkerStore(Repository):
         now = self._db.now()
         inference_requeued = inference_failed = 0
         with self._db.transaction() as tx, tx.connection() as connection:
-            tx._lock_workers(connection)
+            tx.lock_workers()
             # Worker -> Flow -> Job, also for recovery. Never wait for a Flow
             # after locking its job while a result writer holds the opposite order.
             locked_flows = connection.cursor(row_factory=class_row(Flow)).execute(

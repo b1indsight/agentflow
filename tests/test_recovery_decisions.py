@@ -1,7 +1,7 @@
 """Recovery decisions must be applied to fresh facts in one worker-fenced transaction."""
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Event
 
 import psycopg
@@ -9,7 +9,9 @@ import pytest
 
 from app.contracts.protocol import ExecutionStopped, Failed
 from app.controler.workflow.service import ControlService
-from app.domain.models import FlowState, JobKind, JobState
+from app.domain.models import FlowState, Job, JobKind, JobState
+from app.domain.recovery_policy import decide_preparation_retry
+from app.github import GitHubError, GitHubErrorKind
 from tests.flow_fixtures import enqueue_job
 from tests.workspace_fixtures import register_worker, report_settled
 
@@ -112,3 +114,46 @@ def test_sweep_failure_rolls_back_prior_job_updates(store, monkeypatch):
     assert store.flows.get_flow(flow.id).state is FlowState.RUNNING
     assert any(w.current_job_id == job.id for w in store.workers.list_workspaces("w"))
     assert store.workers.get_flow_execution(flow.id).released_at is None
+
+
+def preparation_retry(error, *, failures=0, first_failed=None, last_error=None):
+    job = Job(id=1, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING, prepare_failures=failures,
+              prepare_first_failed_at=NOW - timedelta(seconds=first_failed) if first_failed is not None else None,
+              prepare_last_error=last_error)
+    return decide_preparation_retry(job, error, now=NOW, max_failures=3, window_seconds=600)
+
+
+def test_transient_preparation_read_backs_off_within_count_and_window():
+    transient = GitHubError(GitHubErrorKind.TRANSIENT, "GET /issues")
+
+    first = preparation_retry(transient)
+    assert (first.failures, first.first_failed_at, first.next_at) == (1, NOW, NOW + timedelta(seconds=2))
+    assert first.cause == first.reason == str(transient)
+    # The window is anchored at the first failure, not at each retry.
+    second = preparation_retry(transient, failures=1, first_failed=595)
+    assert (second.failures, second.first_failed_at) == (2, NOW - timedelta(seconds=595))
+    assert second.next_at == NOW + timedelta(seconds=4)
+
+
+@pytest.mark.parametrize(("error", "previous", "prefixed"), [
+    # The third counted failure spends the budget.
+    (GitHubError(GitHubErrorKind.TRANSIENT, "GET /issues"), {"failures": 2, "first_failed": 10}, True),
+    # A retry due exactly when the window closes is not scheduled.
+    (GitHubError(GitHubErrorKind.TRANSIENT, "GET /issues"), {"failures": 1, "first_failed": 596}, True),
+    (GitHubError(GitHubErrorKind.RATE_LIMITED, "GET /issues", retry_after="900"), {}, True),
+    # A permanent error reports itself, not an exhausted budget.
+    (GitHubError(GitHubErrorKind.NOT_FOUND, "GET /issues"), {}, False),
+])
+def test_preparation_stops_at_its_budget_window_or_a_permanent_error(error, previous, prefixed):
+    stopped = preparation_retry(error, **previous)
+
+    assert stopped.next_at is None and stopped.cause == str(error)
+    assert stopped.reason == (f"preparation retry budget/window exhausted: {error}" if prefixed else str(error))
+
+
+def test_expired_preparation_window_stops_without_counting_another_failure():
+    stopped = preparation_retry(None, failures=2, first_failed=600, last_error="GitHub GET /issues failed")
+
+    assert (stopped.failures, stopped.next_at, stopped.cause) == (2, None, "GitHub GET /issues failed")
+    assert stopped.reason == "preparation retry budget/window exhausted: GitHub GET /issues failed"
+    assert preparation_retry(None).cause == "preparation window expired"
