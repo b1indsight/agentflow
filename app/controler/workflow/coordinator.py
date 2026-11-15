@@ -79,11 +79,7 @@ class JobCoordinator:
     @staticmethod
     def _retired(flow: Flow, job: Job, *, deliveries: DeliveryStore) -> bool:
         delivery = deliveries.get_delivery(flow.id)
-        return (
-            not flow.accepts(job.kind)
-            or job.round_no != flow.current_round_no
-            or (delivery is not None and delivery.supersedes(job.kind))
-        )
+        return not flow.accepts(job.kind) or flow.retires(job, delivery)
 
     async def triage(self, batch: ReviewBatch, judge: Judge) -> None:
         """Resolve feedback into an answer/revise worker task or a wait/ignore decision."""

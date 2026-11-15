@@ -269,11 +269,7 @@ class ResultApplication:
             if current.result_digest != plan.digest:
                 raise ValueError("result digest changed before commit")
             delivery = deliveries_tx.get_delivery(flow.id)
-            retired = (
-                (flow.archive_reason is not None and current.kind is not JobKind.ARCHIVE)
-                or current.round_no != flow.current_round_no
-                or (delivery is not None and delivery.supersedes(current.kind))
-            )
+            retired = flow.retires(current, delivery)
             if retired:
                 # Preserve the frozen plan/receipts as history; only execution facts survive merge.
                 if plan.archive_notice is None:
@@ -306,15 +302,10 @@ class ResultApplication:
                 or job.result_payload is None or self.result_store.get_plan(job.id) is not None):
             return None
         flow = self.flows.get_flow(job.required_flow_id)
-        if (
-            flow is None
-            or flow.state in TERMINAL_STATES
-            or flow.archive_reason is not None
-            or job.round_no != flow.current_round_no
-        ):
+        if flow is None or flow.state in TERMINAL_STATES:
             return None
         delivery = self.deliveries.get_delivery(flow.id)
-        if delivery is not None and delivery.supersedes(job.kind):
+        if flow.retires(job, delivery):
             return None
         if job.result_digest is None:
             raise ValueError("result inbox is missing its digest")
@@ -390,9 +381,7 @@ class ResultApplication:
         if batch is not None:
             base = base.model_copy(update={"attempt_id": batch.attempt_id, "batch_id": batch.id})
         delivery = deliveries_tx.get_delivery(flow.id)
-        if (flow.archive_reason is not None and job.kind is not JobKind.ARCHIVE) or (
-            delivery is not None and delivery.supersedes(job.kind)
-        ):
+        if flow.retires(job, delivery):
             return self._retired_plan(job, base.attempt_id)
         if batch is not None and (batch.attempt_id != flow.current_attempt_id
                 or batch.state not in {BatchState.READY, BatchState.PROCESSING}):

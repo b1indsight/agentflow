@@ -34,7 +34,7 @@ from app.controler.workflow.thread_effects import (
     resolve_thread,
     revision_current,
 )
-from app.domain.models import TERMINAL_STATES, DeliveryState
+from app.domain.models import TERMINAL_STATES, DeliveryState, Flow, Job
 from app.domain.review_models import BatchState
 from app.github import (
     GitHubApp,
@@ -63,6 +63,17 @@ class _PendingReviewFeedback(RuntimeError):
 def _pending_feedback(plan: ResultPlan, *, reviews: ReviewStore) -> bool:
     frozen = {(f.item_id, f.version) for f in plan.consumed}
     return any((f.item_id, f.version) not in frozen for f in reviews.pending(plan.flow_id))
+
+
+def _plan_stale(flow: Flow, job: Job, plan: ResultPlan) -> bool:
+    """A notice survives terminal state, but never a round or attempt change."""
+    return (
+        (flow.state in TERMINAL_STATES and plan.archive_notice is None)
+        or flow.current_attempt_id != plan.attempt_id
+        or job.round_no != flow.current_round_no
+        or (flow.archive_reason is not None
+            and plan.archive is None and plan.archive_notice is None)
+    )
 
 
 class ResultEffects:
@@ -95,10 +106,6 @@ class ResultEffects:
                 result_store_tx = self.result_store.using(tx)
                 workers_tx = self.workers.using(tx)
                 flow = tx.lock_workflow(plan.flow_id)
-                cancelled = (
-                    flow is not None and flow.archive_reason is not None
-                    and plan.archive is None and plan.archive_notice is None
-                )
                 if flow is None:
                     result_store_tx.skip_remaining(plan.job_id, "Flow disappeared")
                     return None
@@ -107,9 +114,7 @@ class ResultEffects:
                     raise ValueError("result job disappeared")
                 delivery = deliveries_tx.get_delivery(plan.flow_id)
                 retired = (
-                    cancelled or job.round_no != flow.current_round_no
-                    or flow.current_attempt_id != plan.attempt_id
-                    or (flow.state in TERMINAL_STATES and plan.archive_notice is None)
+                    _plan_stale(flow, job, plan)
                     or (delivery is not None and delivery.supersedes(job.kind))
                 )
                 if plan.archive_notice is not None:
@@ -226,14 +231,10 @@ class ResultEffects:
             job = tx.lock_job(plan.job_id)
             if (
                 flow is None
-                or (flow.state in TERMINAL_STATES and plan.archive_notice is None)
                 or job is None
                 or job.result_applied_at is not None
                 or job.result_digest != plan.digest
-                or flow.current_attempt_id != plan.attempt_id
-                or job.round_no != flow.current_round_no
-                or (flow.archive_reason is not None
-                    and plan.archive is None and plan.archive_notice is None)
+                or _plan_stale(flow, job, plan)
             ):
                 raise ResultPending("Flow changed before GitHub dispatch")
             delivery = deliveries_tx.get_delivery(flow.id)
