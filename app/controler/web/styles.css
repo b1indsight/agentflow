@@ -1518,6 +1518,9 @@ pre code {
   display: flow-root;
   min-width: 0;
 }
+.body-sentinel {
+  height: 1px;
+}
 .text-window {
   overflow-wrap: anywhere;
 }
