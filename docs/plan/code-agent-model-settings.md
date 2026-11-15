@@ -198,3 +198,9 @@
 - **触发与上下文：** 用户要求推送并提交 PR。最新 main 已将新任务分支命名更新为 Conventional Commits 类型前缀，涉及本功能同样扩展的 coordinator 与 remote Session 测试。
 - **实际合并：** 同一 feature change rebase 到 main 的 `736a16c33c37`；保留上游类型化分支的参数化用例和 `feat/implement-task` 预期，同时保留按 coding_agent 选择 model / effort、派发值冻结与真实 Session 接收值的断言。不回退命名规则，不混入共享工作区的其他改动；页面与协议实现没有因此扩展范围。
 - **校验与交付边界：** 发布前重新执行真实 PostgreSQL 回归、Ruff / Mypy 及固定提交的双审查 gate，前端沿用本次完整浏览器与构建验证。执行结果见本线程 `.amp/in/artifacts/code-agent-effort/pr-*` 日志和 PR 的 CI；gate 仅 critical 阻断，其他发现完整披露，不以发现本身授权改码。wire26 协调升级、真实账号与 resume、Docker 运行和生产部署仍不属于本次推 PR。
+
+### 2026-11-15 — 补全恢复演练的 worker 类型声明
+
+- **触发与原因：** [PR #165 的 recovery 检查](https://github.com/b1indsight/agentflow/actions/runs/43690491444/job/132739912484) 在注册 fixture worker 时失败；新增必填 `coding_agent` 后漏改了 `scripts/smoke/recovery.py` 的直接调用，备份尚未执行。普通 pytest 未运行完整演练，因此没有覆盖这个入口。
+- **修复与边界：** 演练中的编码 worker 显式声明 `coding_agent='codex'`，与现有测试 fixture 一致；保留生产接口必填约束，不以默认值掩盖缺失声明，也不改动设置页、协议或模型执行。
+- **验证：** 在专用 PostgreSQL 17 和同版本 dump / restore 工具上，未修复代码复现相同 TypeError；修复后完整演练确认数据库及 HOME 恢复、原 journal 不变、复制 root 身份被拒绝。恢复 bundle、workspace、worker 注册、coordinator 和真实 remote Session 的相关回归及 Ruff / Mypy 通过。证据位于本线程 `.amp/in/artifacts/code-agent-effort/recovery-ci-{red.log,green.json,pytest.log,ruff.log,mypy.log}`。CI 的 Linux 容器演练待新提交检查，不据本地结果声称全部 CI 通过；仍未执行生产恢复、部署或真实模型调用。

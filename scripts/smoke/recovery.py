@@ -152,7 +152,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         default = pool.initialize()
         store.workers.worker_connected(
             'fixture-worker', PROTOCOL_VERSION, 'fixture-epoch',
-            workspace=default.workspace, repo_workspace_limit=pool.limit,
+            workspace=default.workspace, repo_workspace_limit=pool.limit, coding_agent='codex',
         )
         # Provision real empty directories without Git/network access before claiming one.
         for item in asyncio.run(pool.provision(flow.repo)):
