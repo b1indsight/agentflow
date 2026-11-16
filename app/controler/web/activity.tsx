@@ -49,6 +49,20 @@ import {
   useReadingState,
 } from "./windowing";
 
+function MarkdownImage({ src, alt, title }: ComponentProps<"img">) {
+  return src ? (
+    <img
+      src={src}
+      alt={alt ?? "图片"}
+      title={title}
+      loading="lazy"
+      referrerPolicy="no-referrer"
+    />
+  ) : (
+    <>图片：{alt || "查看图片"}</>
+  );
+}
+
 export const OpenWorkerFile = createContext<
   ((file: WorkerFile) => void) | null
 >(null);
@@ -129,12 +143,17 @@ export function ActivityMarkdown({
   const components = useMemo<Components>(
     () => ({
       ...markdownComponents,
-      // Archived images remain links; only an explicit activation can fetch a worker file.
-      img: ({ node, src, alt }) => (
-        <MarkdownLink node={node} href={src} onFileOpen={onFileOpen}>
-          图片：{alt || "查看图片"}
-        </MarkdownLink>
-      ),
+      // Private attachments still require activation; ordinary web images can load inline.
+      img: ({ node, src, alt, title }) =>
+        typeof src === "string" &&
+        typeof location !== "undefined" &&
+        workerFileLink(src.split(/[?#]/, 1)[0], location.origin) ? (
+          <MarkdownLink node={node} href={src} onFileOpen={onFileOpen}>
+            图片：{alt || "查看图片"}
+          </MarkdownLink>
+        ) : (
+          <MarkdownImage src={src} alt={alt} title={title} />
+        ),
       h2: ({ node: _node, id: headingId, ...props }) => (
         <h2
           {...props}
@@ -165,13 +184,25 @@ export function ActivityMarkdown({
               onAuxClick={(event) => event.preventDefault()}
             />
           );
+        const image =
+          href &&
+          /^https?:/i.test(href) &&
+          !node?.children.some(
+            (child) => child.type === "element" && child.tagName === "img",
+          ) &&
+          /\.(?:apng|avif|bmp|gif|ico|jpe?g|png|svg|webp)$/i.test(
+            new URL(href).pathname,
+          );
         return (
           <MarkdownLink
             {...props}
             node={node}
             href={href}
             onFileOpen={onFileOpen}
-          />
+          >
+            {props.children}
+            {image && <MarkdownImage src={href} alt="" />}
+          </MarkdownLink>
         );
       },
     }),
@@ -182,7 +213,7 @@ export function ActivityMarkdown({
       <Markdown
         remarkPlugins={[remarkGfm, numberFootnoteIdentifiers]}
         remarkRehypeOptions={{ clobberPrefix: `${id}-` }}
-        urlTransform={(url, _key, node) => {
+        urlTransform={(url, key, node) => {
           const safe = defaultUrlTransform(url);
           if (!safe) return undefined;
           if (
@@ -199,12 +230,13 @@ export function ActivityMarkdown({
             if (file.name) node.properties["data-worker-file-name"] = file.name;
             return safe;
           }
-          if (/^[a-z][a-z\d+.-]*:/i.test(safe)) return safe;
           try {
-            return (
-              defaultUrlTransform(new URL(safe, sourceUrl ?? undefined).href) ||
-              undefined
-            );
+            const destination = /^[a-z][a-z\d+.-]*:/i.test(safe)
+              ? new URL(safe)
+              : new URL(safe, sourceUrl ?? undefined);
+            if (key === "src" && !/^https?:$/.test(destination.protocol))
+              return undefined;
+            return defaultUrlTransform(destination.href) || undefined;
           } catch {
             // Missing or malformed source URLs must not send relative links to the console.
             return undefined;
