@@ -21,6 +21,8 @@ from app.domain.models import (
     WorkerView,
 )
 from app.github import PullRequestMerge
+from app.github.console import Observation
+from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
@@ -55,6 +57,10 @@ class RetryRejected(ValueError):
     def __init__(self, code: RetryFailureCode, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class ContinuationRejected(ValueError):
+    """A console instruction cannot safely start another revision yet."""
 
 
 class ControlService:
@@ -157,6 +163,58 @@ class ControlService:
     def notify_merge(self, flow: Flow) -> None:
         """Notify plugins and workers only after merge facts and archive work have committed."""
         self._fire("on_merged", flow=flow)
+        self._jobs_available()
+
+    def continue_flow(self, flow_id: int, message: str, request_id: str, author: str) -> None:
+        """Atomically record owner input and resume the existing Flow's revision pipeline."""
+        with self.database.transaction() as tx:
+            fresh = tx.lock_workflow(flow_id)
+            if fresh is None:
+                raise ContinuationRejected("flow_not_found")
+            jobs = self.jobs.using(tx)
+            previous = jobs.continuation_request(flow_id, request_id)
+            if previous is not None:
+                if (previous.payload or {}).get("instruction") != message:
+                    raise ContinuationRejected("continue_request_conflict")
+                return
+            delivery = self.deliveries.using(tx).get_delivery(flow_id)
+            execution = self.workers.using(tx).get_flow_execution(flow_id)
+            reviews = self.reviews.using(tx)
+            if (
+                fresh.state is not FlowState.ACTIVE
+                or fresh.current_attempt_id is None
+                or fresh.installation_id is None
+                or delivery is None
+                or delivery.state is not DeliveryState.OPEN
+                or execution is None
+                or execution.released_at is not None
+            ):
+                raise ContinuationRejected("continue_unavailable")
+            if (
+                self.stops.using(tx).has_pending(flow_id)
+                or jobs.has_unfinished_work(flow_id)
+                or reviews.has_active_batch(flow_id)
+            ):
+                raise ContinuationRejected("continue_busy")
+            job = reviews.enqueue_continuation(
+                flow_id,
+                fresh.current_attempt_id,
+                message,
+                request_id,
+            )
+            ActivityStore(tx).append(
+                flow_id,
+                Observation(
+                    key=f"console:{request_id}",
+                    source="console",
+                    kind="message",
+                    author=author,
+                    body=message,
+                    occurred_at=tx.now(),
+                    updated_at=tx.now(),
+                    metadata={"job_id": job.id, "attempt_id": fresh.current_attempt_id},
+                ),
+            )
         self._jobs_available()
 
     def retry(self, flow: Flow) -> bool:

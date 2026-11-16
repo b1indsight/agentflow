@@ -379,6 +379,73 @@ class ReviewStore(Repository):
                 self.advance(row["id"], job)
             return self.get_batch(row["id"])
 
+    def has_active_batch(self, flow_id: int) -> bool:
+        """Include Judge prerequisites, which do not yet own a worker job."""
+        with self._db.connection() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM review_batches WHERE flow_id=%s"
+                    " AND state IN ('ready','processing')",
+                    (flow_id,),
+                ).fetchone()
+                is not None
+            )
+
+    def enqueue_continuation(
+        self,
+        flow_id: int,
+        attempt_id: int,
+        instruction: str,
+        request_id: str,
+    ) -> Job:
+        """Freeze owner input as regular revision work under the caller's workflow lock.
+
+        Advance the shared generation without changing pending GitHub feedback deadlines
+        or consuming its versions. Console messages have no fabricated GitHub identity.
+        """
+        with self._db.connection() as connection:
+            generation = connection.execute(
+                "INSERT INTO review_buffers(flow_id,generation) VALUES(%s,1)"
+                " ON CONFLICT(flow_id) DO UPDATE SET generation=review_buffers.generation+1"
+                " RETURNING generation",
+                (flow_id,),
+            ).fetchone()
+            assert generation is not None
+            waiting = connection.execute(
+                "SELECT open_points FROM review_batches WHERE flow_id=%s AND state='waiting'"
+                " ORDER BY id",
+                (flow_id,),
+            ).fetchall()
+            row = connection.execute(
+                "INSERT INTO review_batches(flow_id,attempt_id,generation,state,trigger,feedback,"
+                " open_points,created_at) VALUES(%s,%s,%s,'ready','console','[]',%s,%s) RETURNING id",
+                (
+                    flow_id,
+                    attempt_id,
+                    generation["generation"],
+                    Jsonb(list(dict.fromkeys(p for r in waiting for p in r["open_points"]))),
+                    self._db.now(),
+                ),
+            ).fetchone()
+            assert row is not None
+            # The pending GitHub deadline may survive this batch. Reserve its next
+            # generation now, even when all pending versions were already relayed.
+            connection.execute(
+                "UPDATE review_buffers SET generation=generation+1 WHERE flow_id=%s",
+                (flow_id,),
+            )
+        job = JobStore(self._db).enqueue_job(
+            flow_id,
+            JobKind.REVISION,
+            {
+                "batch_id": row["id"],
+                "instruction": instruction,
+                "console_request_id": request_id,
+            },
+        )
+        self.advance(row["id"], job)
+        return job
+
     def pending_triage(self) -> list[ReviewBatch]:
         """Read unfinished prerequisites; they have no job or execution ownership."""
         with self._db.connection() as connection:

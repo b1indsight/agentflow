@@ -608,6 +608,57 @@ svg {
   overflow: auto;
   overflow-anchor: none;
 }
+.flow-input {
+  flex-shrink: 0;
+  padding: 14px clamp(16px, 3vw, 42px);
+  padding-bottom: max(14px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  background: var(--paper);
+}
+.flow-input label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+  font-size: var(--text-control);
+}
+.flow-input textarea {
+  display: block;
+  width: 100%;
+  max-height: 18vh;
+  min-height: 64px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+}
+.flow-input textarea:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 1px;
+}
+.flow-input-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+.flow-input small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.flow-input .btn {
+  flex-shrink: 0;
+}
+.flow-input p {
+  margin: 8px 0 0;
+  font-size: var(--text-control);
+  overflow-wrap: anywhere;
+}
+.flow-input [role="alert"] {
+  color: #a82f28;
+}
 .detail-head {
   flex-shrink: 0;
   padding: 24px 42px 0;

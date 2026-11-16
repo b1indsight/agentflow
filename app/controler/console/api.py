@@ -11,6 +11,7 @@ from app.contracts.console import (
     ArchiveRequest,
     ConsoleFailure,
     ContentPage,
+    ContinueRequest,
     FlowDetail,
     FlowPage,
     JobPage,
@@ -19,7 +20,7 @@ from app.contracts.console import (
     RetryRequest,
 )
 from app.controler.runtime import ServerRuntime
-from app.controler.workflow.service import ControlService, RetryRejected
+from app.controler.workflow.service import ContinuationRejected, ControlService, RetryRejected
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.flows import FlowStore
@@ -62,7 +63,7 @@ async def detail(request: Request, flow_id: FlowId) -> FlowDetail:
 
 
 def _require_same_origin_json(request: Request) -> None:
-    """Protect both console commands, including behind TLS and Host-rewriting proxies."""
+    """Protect console commands, including behind TLS and Host-rewriting proxies."""
     origin = request.headers.get("origin")
     fetch_site = request.headers.get("sec-fetch-site")
     # Browser-controlled Fetch Metadata survives proxy TLS termination and Host rewriting.
@@ -115,6 +116,33 @@ async def retry(request: Request, flow_id: FlowId, body: RetryRequest) -> FlowDe
             ) from error
         if not accepted:
             raise ConsoleFailure("retry_no_change")
+        return ConsoleStore(runtime.database).detail(flow_id)
+
+    return await runtime.console.db(command)
+
+
+@router.post("/flows/{flow_id}/continue", response_model=FlowDetail)
+async def continue_flow(request: Request, flow_id: FlowId, body: ContinueRequest) -> FlowDetail:
+    """Accept one owner instruction without creating a new Flow, branch, or PR."""
+    _require_same_origin_json(request)
+    runtime: ServerRuntime = request.app.state.runtime
+    loop = asyncio.get_running_loop()
+
+    def notify_jobs() -> None:
+        loop.call_soon_threadsafe(runtime.gateway.notify_jobs)
+
+    def command() -> FlowDetail:
+        service = ControlService(
+            database=runtime.database,
+            jobs_available=notify_jobs,
+        )
+        try:
+            service.continue_flow(
+                flow_id, body.message, str(body.request_id), str(runtime.settings.access_owner_email),
+            )
+        except ContinuationRejected as error:
+            code = str(error)
+            raise ConsoleFailure(code, 404 if code == "flow_not_found" else 409) from error
         return ConsoleStore(runtime.database).detail(flow_id)
 
     return await runtime.console.db(command)

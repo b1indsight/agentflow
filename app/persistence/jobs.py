@@ -137,6 +137,32 @@ class JobStore(Repository):
                 "SELECT * FROM jobs WHERE flow_id=%s ORDER BY id", (flow_id,)
             ).fetchall()
 
+    def continuation_request(self, flow_id: int, request_id: str) -> Job | None:
+        """Find an accepted console request, including after retry or result completion."""
+        with self._db.connection() as connection:
+            return (
+                connection.cursor(row_factory=class_row(Job))
+                .execute(
+                    "SELECT * FROM jobs WHERE flow_id=%s AND payload->>'console_request_id'=%s"
+                    " ORDER BY id LIMIT 1",
+                    (flow_id, request_id),
+                )
+                .fetchone()
+            )
+
+    def has_unfinished_work(self, flow_id: int) -> bool:
+        """Continuation must not overlap queued work, execution, or unknown outcomes."""
+        with self._db.connection() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM jobs WHERE flow_id=%s AND (state IN ('queued','running')"
+                    " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL)"
+                    " OR (started_at IS NOT NULL AND result_received_at IS NULL)) LIMIT 1",
+                    (flow_id,),
+                ).fetchone()
+                is not None
+            )
+
     def freeze_archive(self, job: Job, task: ArchiveTask) -> None:
         """Persist the command under the caller's workflow/job locks before dispatch."""
         with self._db.connection() as connection:

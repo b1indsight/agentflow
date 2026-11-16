@@ -5,6 +5,7 @@ from datetime import timedelta
 from threading import Barrier, get_ident
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+from uuid import uuid4
 
 import pytest
 from starlette.testclient import TestClient
@@ -12,13 +13,17 @@ from starlette.testclient import TestClient
 from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.api import create_app
 from app.controler.console.sync import ConsoleSynchronizer
-from app.domain.models import DeliveryState, FlowState, JobKind
+from app.domain.models import DeliveryState, FlowState, JobKind, ReviewItemKind
+from app.domain.review_models import BatchState, FeedbackUpdate
+from app.github import PullRequest
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.console_sync import ConsoleSyncStore
 from app.telemetry.metrics import Metrics
 from tests.access import AccessIssuer
+from tests.github import RecordingGitHub
+from tests.test_coordinator import coordinator
 
 
 @pytest.fixture
@@ -89,6 +94,256 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
         )
         console_runtime.settings.access_owner_email = None
         assert client.get("/console/", headers=headers).status_code == 503
+
+
+@pytest.fixture
+def continuable_flow(store):
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    attempt = store.flows.create_attempt(flow.id)
+    attempt.codex_session_id = "original-session"
+    store.flows.update_attempt(attempt)
+    flow.current_attempt_id = attempt.id
+    store.flows.update_flow(flow)
+    initial = store.jobs.enqueue_job(flow.id, JobKind.INITIAL)
+    store.workers.worker_connected("worker-1", PROTOCOL_VERSION, "epoch")
+    assert store.workers.assign_job("worker-1", "token", "epoch") is not None
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (initial.id,))
+        connection.execute("UPDATE workers SET status='online',current_job_id=NULL")
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
+    delivery.head_sha, delivery.base_branch = "abc123", "main"
+    store.deliveries.update_delivery(delivery)
+    return flow
+
+
+async def test_continue_resumes_original_session_and_records_input_once(
+    console_runtime, store, continuable_flow, recording_resources
+):
+    # A lost POST response must not create a second coding task on retry.
+    flow = continuable_flow
+    path = f"/api/flows/{flow.id}/continue"
+    body = {"message": "  添加键盘导航\n保留现有行为  ", "request_id": str(uuid4())}
+    notifications = []
+    console_runtime.gateway.notify_jobs = lambda: notifications.append(
+        (get_ident(), len(store.jobs.list_jobs(flow.id)))
+    )
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        loop_thread = client.portal.call(get_ident)
+        response = client.post(path, json=body, headers=headers)
+        assert response.status_code == 200
+        assert response.json()["phase"] == "running"
+        assert response.json()["action"] == "revision:queued"
+        assert response.json()["branch"] == "flow/7"
+        assert client.post(path, json=body, headers=headers).status_code == 200
+        assert (
+            client.post(path, json=body | {"message": "不同要求"}, headers=headers).status_code
+            == 409
+        )
+        client.portal.call(lambda: None)
+        page = client.get(f"/api/flows/{flow.id}/activity", headers=headers).json()
+    assert notifications == [(loop_thread, 2)]
+    messages = [item for item in page["items"] if item["source"] == "console"]
+    assert [item["body"] for item in messages] == ["添加键盘导航\n保留现有行为"]
+    job = store.jobs.list_jobs(flow.id)[-1]
+    assert job.kind is JobKind.REVISION
+    assert store.reviews.for_job(job).trigger == "console"
+    assigned = store.workers.assign_job("worker-1", "next-token", "epoch")
+    assert assigned.id == job.id
+    github = RecordingGitHub()
+    github.pull_request = PullRequest(
+        repo=flow.repo,
+        number=17,
+        state="open",
+        head_branch="flow/7",
+        head_sha="abc123",
+        head_repository=flow.repo,
+        base_branch="main",
+    )
+    task = await coordinator(store, github).prepare(assigned)
+    assert task.flow_id == flow.id and task.attempt_id == flow.current_attempt_id
+    assert task.session_id == "original-session" and task.branch == "flow/7"
+    assert task.pr_number == 17 and task.instruction == "添加键盘导航\n保留现有行为"
+    assert task.feedback == []
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "cancelled",
+        "failed",
+        "succeeded",
+        "closed",
+        "merged",
+        "no_binding",
+        "no_attempt",
+        "queued",
+        "running",
+        "pending_result",
+        "unknown_execution",
+        "triage",
+        "stop",
+    ],
+)
+def test_continue_refuses_unsafe_states(console_runtime, store, continuable_flow, scenario):
+    flow = continuable_flow
+    with store.connection() as connection:
+        if scenario in ("cancelled", "failed", "succeeded"):
+            connection.execute("UPDATE flows SET state=%s WHERE id=%s", (scenario, flow.id))
+        elif scenario in ("closed", "merged"):
+            connection.execute(
+                "UPDATE flow_deliveries SET state=%s WHERE flow_id=%s", (scenario, flow.id)
+            )
+        elif scenario == "no_binding":
+            connection.execute(
+                "UPDATE flow_executions SET released_at=now() WHERE flow_id=%s", (flow.id,)
+            )
+        elif scenario == "no_attempt":
+            connection.execute("UPDATE flows SET current_attempt_id=NULL WHERE id=%s", (flow.id,))
+        elif scenario in ("queued", "running"):
+            connection.execute("UPDATE jobs SET state=%s WHERE flow_id=%s", (scenario, flow.id))
+        elif scenario == "pending_result":
+            connection.execute(
+                "UPDATE jobs SET result_received_at=now() WHERE flow_id=%s", (flow.id,)
+            )
+        elif scenario == "unknown_execution":
+            connection.execute("UPDATE jobs SET started_at=now() WHERE flow_id=%s", (flow.id,))
+        elif scenario == "triage":
+            connection.execute(
+                "INSERT INTO review_batches(flow_id,attempt_id,generation,state,trigger,feedback,open_points,created_at)"
+                " VALUES(%s,%s,1,'ready','discussion','[]','[]',now())",
+                (flow.id, flow.current_attempt_id),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO execution_stops(request_id,flow_id,job_id,worker_id,assignment_token,binding_at,requested_at)"
+                " SELECT 'stop',e.flow_id,j.id,e.worker_id,j.assignment_token,e.bound_at,now()"
+                " FROM flow_executions e JOIN jobs j ON j.flow_id=e.flow_id WHERE e.flow_id=%s",
+                (flow.id,),
+            )
+    with TestClient(create_app(console_runtime)) as client:
+        response = client.post(
+            f"/api/flows/{flow.id}/continue",
+            headers=console_runtime.issuer.headers(),
+            json={"message": "继续", "request_id": str(uuid4())},
+        )
+        assert response.status_code == 409
+    assert len(store.jobs.list_jobs(flow.id)) == 1
+    console_runtime.gateway.notify_jobs.assert_not_called()
+
+
+def test_continue_requires_owner_same_origin_and_valid_input(
+    console_runtime, store, continuable_flow
+):
+    path = f"/api/flows/{continuable_flow.id}/continue"
+    body = {"message": "继续", "request_id": str(uuid4())}
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        assert client.post(path, json=body).status_code == 401
+        assert (
+            client.post(
+                path, json=body, headers=console_runtime.issuer.headers(email="other@example.com")
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                path, json=body, headers=headers | {"Origin": "https://evil.test"}
+            ).status_code
+            == 403
+        )
+        assert client.post(path, json=body | {"force": True}, headers=headers).status_code == 422
+        for text in ("", " \n ", "x" * 16001, "bad\0text"):
+            assert (
+                client.post(path, json=body | {"message": text}, headers=headers).status_code == 422
+            )
+        assert (
+            client.post(path, json=body | {"request_id": "invalid"}, headers=headers).status_code
+            == 422
+        )
+        assert (
+            client.post("/api/flows/99999/continue", json=body, headers=headers).status_code == 404
+        )
+    assert len(store.jobs.list_jobs(continuable_flow.id)) == 1
+
+
+def test_concurrent_continuation_requests_enqueue_once(console_runtime, store, continuable_flow):
+    # Two browser tabs can submit the same request before either receives a response.
+    barrier = Barrier(2)
+    body = {"message": "继续处理边界情况", "request_id": str(uuid4())}
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+
+        def submit():
+            barrier.wait()
+            return client.post(
+                f"/api/flows/{continuable_flow.id}/continue", json=body, headers=headers
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(pool.map(lambda _: submit(), range(2)))
+        assert [response.status_code for response in responses] == [200, 200]
+    assert len(store.jobs.list_jobs(continuable_flow.id)) == 2
+
+
+def test_continue_preserves_waiting_questions_and_due_feedback(
+    console_runtime, store, continuable_flow
+):
+    # A due re-triage of already-relayed feedback must not reuse the console batch's generation.
+    flow = continuable_flow
+    store.reviews.ingest(
+        flow.id,
+        "feedback",
+        "issue_comment",
+        {},
+        FeedbackUpdate(
+            kind=ReviewItemKind.CONVERSATION,
+            github_id=101,
+            author="alice",
+            body="Which limit?",
+            updated_at=flow.created_at,
+        ),
+        settle_seconds=0,
+        submit_grace_seconds=0,
+    )
+    waiting = store.reviews.claim_due()[0]
+    store.reviews.relayed(waiting)
+    store.reviews.complete(waiting.id, BatchState.WAITING, [], ["Which limit?"])
+    store.reviews.reopened(flow.id, 0)
+    with TestClient(create_app(console_runtime)) as client:
+        response = client.post(
+            f"/api/flows/{flow.id}/continue",
+            headers=console_runtime.issuer.headers(),
+            json={"message": "Use 10", "request_id": str(uuid4())},
+        )
+        assert response.status_code == 200
+    batch = store.reviews.for_job(store.jobs.list_jobs(flow.id)[-1])
+    assert batch.open_points == ["Which limit?"]
+    assert [item.body for item in store.reviews.pending(flow.id)] == ["Which limit?"]
+    store.reviews.complete(batch.id, BatchState.COMPLETED, [], [])
+    resumed = store.reviews.claim_due()[0]
+    assert resumed.id != batch.id and resumed.open_points == ["Which limit?"]
+    assert [item.github_id for item in resumed.feedback] == [101]
+
+
+def test_continue_rolls_back_job_when_message_cannot_be_recorded(
+    console_runtime, store, continuable_flow, monkeypatch
+):
+    # A failure between queueing and archiving must leave neither a task nor a reserved request ID.
+    path = f"/api/flows/{continuable_flow.id}/continue"
+    body = {"message": "继续", "request_id": str(uuid4())}
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                ActivityStore, "append", Mock(side_effect=RuntimeError("archive unavailable"))
+            )
+            with pytest.raises(RuntimeError, match="archive unavailable"):
+                client.post(path, json=body, headers=headers)
+        assert len(store.jobs.list_jobs(continuable_flow.id)) == 1
+        console_runtime.gateway.notify_jobs.assert_not_called()
+        assert client.post(path, json=body, headers=headers).status_code == 200
 
 
 @pytest.mark.parametrize("command", ["archive", "retry"])

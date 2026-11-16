@@ -52,7 +52,7 @@ class ReviewBatch(BaseModel):
     attempt_id: int
     generation: int
     state: BatchState
-    trigger: Literal["discussion", "strong"]
+    trigger: Literal["discussion", "strong", "console"]
     job_id: int | None
     feedback: list[ReviewFeedback]
     open_points: list[str]

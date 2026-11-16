@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import {
   archiveFlow,
+  continueFlow,
   getFlow,
   getFlows,
   getJobs,
@@ -30,6 +31,7 @@ import {
   type ToolActivityGroup,
 } from "./activity";
 import { ConversationSources, SourceList } from "./ConversationSources";
+import { FlowInput } from "./FlowInput";
 import { actionLabel, phases } from "./phases";
 import { SearchBox } from "./SearchBox";
 import type {
@@ -225,7 +227,9 @@ function Detail({
       () => positions.get("collapsed") === 1,
     ),
     [nav, setNav] = useState(false);
-  const [pending, setPending] = useState<"archive" | "retry" | null>(null);
+  const [pending, setPending] = useState<
+    "archive" | "retry" | "continue" | null
+  >(null);
   const writing = useRef(false);
   const [archiveError, setArchiveError] = useState("");
   const [retryError, setRetryError] = useState("");
@@ -577,7 +581,7 @@ function Detail({
                   PR #{flow.pr_number} ↗
                 </a>
               )}
-              <span className="tag">支持归档与安全重试</span>
+              <span className="tag">支持继续工作、归档与安全重试</span>
             </div>
             <div className="tabs" role="tablist" onKeyDown={tabs}>
               {(
@@ -712,6 +716,37 @@ function Detail({
             )}
           </section>
         </div>
+        <FlowInput
+          disabledReason={
+            pending !== null
+              ? "正在提交，请稍候。"
+              : flow.lifecycle !== "active" ||
+                  flow.phase === "done" ||
+                  !flow.pr_number
+                ? "此 Flow 暂不可继续；需要活跃状态及打开的 PR。"
+                : flow.phase !== "review"
+                  ? "等待当前任务完成后发送，可先填写补充要求。"
+                  : ""
+          }
+          onSubmit={async (message, requestId) => {
+            if (writing.current) throw new Error("正在提交其他操作，请稍候。");
+            writing.current = true;
+            setPending("continue");
+            try {
+              const value = await continueFlow(id, message, requestId);
+              onChanged();
+              if (mounted.current)
+                setFlow((prior) =>
+                  prior && prior.state_version > value.state_version
+                    ? prior
+                    : value,
+                );
+            } finally {
+              writing.current = false;
+              if (mounted.current) setPending(null);
+            }
+          }}
+        />
       </main>
     </div>
   );

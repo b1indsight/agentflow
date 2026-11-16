@@ -1,9 +1,10 @@
 """Console display DTOs; internal execution payloads never cross this boundary."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
 
 Phase = Literal["queued", "running", "review", "blocked", "done"]
 
@@ -18,6 +19,18 @@ class ArchiveRequest(ConsoleModel):
 
 class RetryRequest(ConsoleModel):
     """Retry the existing Flow without allowing clients to override its safety checks."""
+
+
+class ContinueRequest(ConsoleModel):
+    """An idempotent owner instruction for the existing coding session."""
+
+    request_id: UUID
+    message: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True, min_length=1, max_length=16000, pattern=r"^[^\x00]*$"
+        ),
+    ]
 
 
 class FlowSummary(ConsoleModel):

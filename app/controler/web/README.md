@@ -1,7 +1,7 @@
 # Web 控制台
 
 当前由 `flowtool serve` 在 `/console/` 提供，使用真实同源 `/api/`，**没有生产示例数据或 mock 回退**。
-提供 cancelled Flow 的手动展示归档，以及受阻 Flow 的安全重试；其余工作流管理操作不在页面提供。
+提供详情页底部的继续工作输入、cancelled Flow 的手动展示归档，以及受阻 Flow 的安全重试。
 页面、静态资源和 API 均要求 Cloudflare Access 的单 owner 身份；数据库、GitHub 与 Worker
 读取由 control 负责。真实 Access 登录/MFA、GitHub App 全来源回填和目标部署仍待验收。
 架构与持久化边界见[控制台功能记录](../../../docs/plan/web-console-kanban.md)。
@@ -60,6 +60,18 @@ npm run preview -- --port 8767
 
 Flow 编号必须来自当前数据库；没有固定可用的样例 ID。GitHub 链接指向真实记录。
 API 错误显式显示，已有内容不会被示例数据替换；Worker 离线仍可读已归档内容，未采集历史无法凭空恢复。
+
+详情页各页签底部共用独立的 `FlowInput` 输入组件。Enter 换行，Ctrl / ⌘ + Enter 发送，
+中文输入法确认不会发送；空白不可提交，最多 16000 字。切换页签保留草稿，切换 Flow 清空。
+`POST /api/flows/{id}/continue` 接收 `message` 和 UUID `request_id`，要求 owner 同源 JSON。
+仅接受已有打开 PR、当前 Attempt 和有效 Worker 绑定的活跃 Flow；有排队/运行任务、
+未确认执行、结果对账、停止意图或正在处理的反馈时返回 409，不覆盖现有工作。
+提交将用户正文和普通 REVISION 任务原子保存，沿用原分支、PR、Worker 和会话续跑逻辑；
+不为输入伪造 GitHub 评论，也不消费待处理的 GitHub 反馈。可在时间线看到 `console` 来源消息。
+同一 Flow 的相同 request_id / 正文只创建一次任务；同一 ID 换正文返回 409。
+响应丢失会保留草稿和当前请求 ID，当前页面重试复用该 ID；不自动重发。
+整页重载或离开 Flow 后不保留草稿/请求 ID，应先查看会话和执行记录确认之前的提交。
+当前 checkout 尚无新建 Flow 表单；该组件将输入交互和异步提交分开，供后续创建入口复用。
 
 顶栏只有一个查询框，支持普通关键词、双引号短语、`repo:`、`is:active|done`、
 `status:queued|running|review|blocked|done`、`issue:`、`pr:`；词和条件之间为 AND。

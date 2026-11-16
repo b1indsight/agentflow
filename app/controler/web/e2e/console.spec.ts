@@ -107,6 +107,93 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+for (const width of [1440, 390]) {
+  test(`detail composer continues the current Flow safely at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    let current = {
+      ...flow,
+      phase: "review",
+      action: "awaiting_review",
+      reason: "等待后续要求",
+      next_condition: "继续工作",
+      sources: [],
+    };
+    await page.route("**/api/flows/42", (route) =>
+      route.fulfill({ json: current }),
+    );
+    const requests: { message: string; request_id: string }[] = [];
+    let finish = () => {};
+    const committed = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    await page.route("**/api/flows/42/continue", async (route) => {
+      expect(route.request().method()).toBe("POST");
+      requests.push(route.request().postDataJSON());
+      if (requests.length === 1) return route.abort("failed");
+      await committed;
+      current = {
+        ...current,
+        phase: "running",
+        action: "revision:queued",
+        state_version: 3,
+      };
+      return route.fulfill({ json: current });
+    });
+    await page.goto("/#flow/42/conversation");
+    const input = page.getByRole("textbox", { name: "补充要求" });
+    const send = page.getByRole("button", { name: "发送", exact: true });
+    await expect(send).toBeDisabled();
+    await input.fill("   ");
+    await expect(send).toBeDisabled();
+    await input.fill("补充键盘导航\n保留原有行为");
+    await page.getByRole("tab", { name: "执行记录" }).click();
+    await expect(input).toHaveValue("补充键盘导航\n保留原有行为");
+    await page.getByRole("tab", { name: "会话" }).click();
+    await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
+    await input.dispatchEvent("keydown", {
+      key: "Enter",
+      ctrlKey: true,
+      isComposing: true,
+    });
+    expect(requests).toHaveLength(0);
+    await expect(send).toBeEnabled();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-input-${width}-default.png`,
+    });
+    await input.press("Control+Enter");
+    await expect(page.getByRole("alert")).toContainText("无法确认是否已发送");
+    await expect(input).toHaveValue("补充键盘导航\n保留原有行为");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-input-${width}-error.png`,
+    });
+    await send.click();
+    await expect(input).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "正在发送…" }),
+    ).toBeDisabled();
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toEqual(requests[1]);
+    expect(requests[0].request_id).toMatch(/^[0-9a-f-]{36}$/);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-input-${width}-pending.png`,
+    });
+    finish();
+    await expect(page.getByRole("status")).toContainText("继续任务已排队");
+    await expect(input).toHaveValue("");
+    await expect(send).toBeDisabled();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-input-${width}-success.png`,
+    });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  });
+}
+
 test("archived column distinguishes closed unmerged PRs from completed archives", async ({
   page,
 }) => {
