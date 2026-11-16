@@ -334,3 +334,15 @@ Worker 必须能以其自身 Amp 身份访问附件；本机下载成功不代�
 **回归与简化对照。** 扩展现有公开活动渲染回归，覆盖 Worker／GitHub 来源、编码 ID、编码路径分隔符、query、尾斜杠、外层导航链接，以及跨域编码 ID 和非文件路径中的无效 UTF-8 编码。扩展桌面／手机现有 Amp 图片浏览器用例，按后端方式解码请求中的 ID：旧代码在未点击时均请求一次本地文件，断言失败；修复后同一场景在显式激活前没有本地文件请求，编码入口为链接，普通本地文件仍可经键盘打开，原有 Amp 成功／错误／重试及普通外图回归保持通过。旧的仅原始规范匹配作为简化对照不能守住自动读取边界；保留请求识别与规范入口识别的语义区分，不新增传输层或缓存。证据为 `.amp/in/artifacts/amp-images-encoded-{before,after}.log`。
 
 已通过完整前端单测、Playwright、类型、格式及差异空白检查，重新执行标准控制台构建和 wheel／sdist 打包，并逐字节核对 wheel 内全部静态资源与当前构建一致。桌面／手机成功及离线状态截图均已实际查看，编码本地图片保持链接，Amp 图片及错误入口保留，截图为 `.amp/in/artifacts/amp-images-encoded-{success,error}-{1440,390}.png`。构建日志为 `amp-images-encoded-build.log`，仍只有既有非阻断 chunk 大小提示。本轮仅修改前端保护逻辑，没有后端行为、数据库或协议变更，未重跑完整后端套件；浏览器使用确定性 API 拦截，不作为线上 Worker 或生产鉴权验收，尚未合并或部署。
+
+### 016 — 2026-11-16 — Amp 兼容收敛至 Worker，前端保持 main
+
+**需求修订与决定。** 用户明确要求“原有页面有内嵌预览，你更新代码，前端完全不动”。本次重新 fetch，远端 main 仍为 [详情导航刷新修复](https://github.com/b1indsight/agentflow/commit/9d0f0186)，没有待整合的新版本。撤销 011 第 5–6 项及 013–015 的 Amp 专用前端方案，整个 `app/controler/` 恢复为与该 main 完全一致，包括文件投影版本；仅保留 Worker 的地址校验、登记、按需认证下载与配额。原有图片渲染和文件位图预览均保留，不借此修改通用前端策略或修复 main 的其他问题。
+
+**实现与展示边界。** Worker 统一输出既有 `/api/files/<id>#name=<basename>`，删除 `&amp=<canonical-url>` 显示扩展，不向前端暴露新的 Amp 类型或标记。附件引用仍只在 Worker 私有注册表保存，controller 文件 API、数据库及 wire 不变。详情沿用原文件页签：点击图片链接或按 Enter 后打开现有位图预览，使用原有下载、重读和错误提示；普通 HTTP(S) 图片仍按 main 内嵌显示。本次不保留 Amp 私有图片在会话正文中的额外自动加载，也不新增原 Amp 入口或专用重试控件。旧归档沿用显式刷新后的分批重读，无需为本次兼容修改 controller 投影指纹。
+
+**回归与简化对照。** 先将现有 Worker 历史回归的预期改为标准文件链接，旧实现因多出 `&amp=` 失败；移除显示扩展后通过，继续检查真实 Markdown 目的地址、引用、代码不改写、伪造 `amp-media-source` 不授予本地读取权以及原生缓存和 cursor 不变。前端直接使用 main 的全部源码、样式、测试和 README，没有保留本 PR 的组件、URL 解析器、解码器抽取或样式修改；`jj diff --from main@origin --name-only app/controler` 输出为空。这也是本轮简化对照：无需 Amp 专用组件与元数据，已有文件预览可正常显示认证获取的图片。
+
+已通过真实 PostgreSQL 下历史改写、文件登记与读取、文件代理、Amp 进程、原生会话历史、会话 API 及控制台同步回归，并通过完整前端单测、Playwright、格式、类型检查，以及 Ruff、应用与测试 Mypy。未重跑未受影响的全量后端套件。标准控制台构建和 wheel／sdist 打包成功，核对 wheel 静态资源与本地构建一致、Worker 附件源码与当前文件一致。构建仍只有既有非阻断 chunk 大小提示。证据为 `.amp/in/artifacts/amp-worker-only-{before,history,backend,types,build}.log` 和 `amp-worker-only-playwright.json`；浏览器完整复现命令为 `CI=1 PLAYWRIGHT_PORT=5192 npm run test:e2e -- --workers=2`，工作目录为 `app/controler/web`。
+
+**真实附件与交付状态。** 复用 013 的隔离 PostgreSQL、双端 Session fixture 和本地签名 owner assertion 验证方法，用正式 `link_history` 将测试线程的真实 Amp PNG 转成标准文件链接。真实 Worker CLI 认证下载后，经未修改的 owner HTTP 文件接口返回，SHA-256 与先前独立下载的原图一致；生产构建的原有文件查看器在桌面／手机均成功解码 1440 × 1200 图片，并通过比例、无横向溢出、正确文件名页签和文件接口 200 断言。打开前没有文件读取，浏览器没有 Amp Cookie，也未向 Amp 发图片请求；读取后临时目录为空。截图 `amp-worker-only-preview-{1440,390}.png` 已实际查看，HTTP 与浏览器记录为 `amp-worker-only-real-http.log`、`amp-worker-only-real-browser.json`。临时验收脚本保留在 HTTP 日志中，执行后删除。此检查未 mock 下载或 API 响应，仍不等于生产 Access、公网 WebSocket 或部署 Worker 验收。本轮修改仅在本地，尚未提交、推送、合并或部署，PR #179 仍为上一版。

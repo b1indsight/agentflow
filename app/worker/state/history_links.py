@@ -188,8 +188,6 @@ async def link_history(
             try:
                 # Basename is display-only; fragments never reach the opaque attachment endpoint.
                 links[path] = f"{await register(path)}#name={quote(path.name, safe='')}"
-                if isinstance(path, AmpAttachment):
-                    links[path] += f"&amp={quote(path.url, safe='')}"
             except FileFailure:
                 pass  # Optional attachments must not discard readable conversation text.
 

@@ -118,7 +118,7 @@ async def test_private_amp_images_register_without_downloading_or_trusting_sourc
     monkeypatch.setattr(worker, "register_file", register)
     native = await asyncio.to_thread(worker._amp_history.query, HistoryQuery(session_id=AMP_SESSION))
     page = await worker.read_history(HistoryQuery(session_id=AMP_SESSION))
-    named = f"{LINK}#name=screen.png&amp={quote(url, safe='')}"
+    named = f"{LINK}#name=screen.png"
     assert page.items[0].content.text == text.replace(f"<{full}>", f"<{named}>").replace(
         f"<{url}>", f"<{named}>",
     )

@@ -8,8 +8,8 @@
 
 ## Unreleased
 
-- 详情会话支持 Amp 私有附件图片：Worker 登记允许的附件地址，在图片接近视口时用自身 Amp 登录态
-  按需读取，经现有 owner 文件 API 返回并验证位图后显示；失败保留原 Amp 入口并支持重试。
+- Worker 兼容 Amp 私有附件：将允许的附件地址转换为原有文件链接，使用自身 Amp 登录态按需读取，
+  经现有 owner 文件 API 和文件页签预览；前端与 controller 保持不变，不增加 Amp 专用显示标记。
   保留 512 KiB 上限、进程写入配额及临时文件清理，不读取 `amp-media-source` 本地路径，
   不公开附件、不缓存图片，也不修改原生历史、游标、数据库或 wire 字段。旧归档通过刷新分批补齐。
 - 详情输入统一为向现有 Flow 追加一次 Agent 任务：API、Service 和前端组件使用 Agent task 命名，

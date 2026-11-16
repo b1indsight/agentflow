@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { previewFile, readFile, workerFileLink } from "./files";
+import { readFile, workerFileLink } from "./files";
 
 const origin = "https://console.example.test";
 const id = "0123456789abcdef0123456789abcdef";
@@ -36,82 +36,6 @@ test("worker file destinations require an exact same-origin file route", () => {
     `https://console.example.test\n${path}`,
   ])
     assert.equal(workerFileLink(url, origin), null, url);
-});
-
-test("Amp display markers require both a same-origin file ID and a canonical attachment URL", () => {
-  // The fragment is untrusted display metadata, not permission to proxy a URL or read amp-media-source.
-  const name = "截图 (100%#).png";
-  const ampUrl = `https://ampcode.com/user-content/attachments/${"a".repeat(64)}-${encodeURIComponent(name)}`;
-  const marker = `${path}#name=${encodeURIComponent(name)}&amp=${encodeURIComponent(ampUrl)}`;
-  assert.deepEqual(workerFileLink(marker, origin), { id, name, ampUrl });
-  assert.deepEqual(workerFileLink(`${origin}${marker}`, origin), {
-    id,
-    name,
-    ampUrl,
-  });
-  for (const invalid of [
-    `https://other.test${marker}`,
-    marker.replace(id, id.toUpperCase()),
-    marker.replace("#name=", "#amp="),
-    `${marker}&amp-media-source=%2Fetc%2Fpasswd`,
-    `${marker}&unknown=value`,
-    marker.replace("&amp=", "&unknown="),
-    `${path}#name=preview.png&amp=%FF`,
-    ...[
-      ampUrl.replace("https:", "http:"),
-      ampUrl.replace("ampcode.com", "ampcode.com.evil.test"),
-      ampUrl.replace("ampcode.com", "user@ampcode.com"),
-      ampUrl.replace("ampcode.com", "ampcode.com:443"),
-      ampUrl.replace("a".repeat(64), "A".repeat(64)),
-      ampUrl.replace("attachments/", "attachments/../"),
-      ampUrl.replace("attachments/", "attachments%2F"),
-      `${ampUrl}?download=1`,
-      `${ampUrl}#amp-media-source=/etc/passwd`,
-      ampUrl.replace(encodeURIComponent(name), "..%2Fsecret.png"),
-      ampUrl.replace(encodeURIComponent(name), "bad%5Cname.png"),
-      ampUrl.replace(encodeURIComponent(name), "bad%00name.png"),
-    ].map(
-      (url) =>
-        `${path}#name=${encodeURIComponent(name)}&amp=${encodeURIComponent(url)}`,
-    ),
-  ])
-    assert.equal(workerFileLink(invalid, origin), null, invalid);
-});
-
-test("shared file previews require raster signatures and a successful decoder, never executable source", async (t) => {
-  // A .png hint can contain HTML/SVG or damaged bytes; the inline and file viewers must agree.
-  let closed = false;
-  let broken = false;
-  const descriptor = Object.getOwnPropertyDescriptor(
-    globalThis,
-    "createImageBitmap",
-  );
-  Object.defineProperty(globalThis, "createImageBitmap", {
-    configurable: true,
-    value: async () => {
-      if (broken) throw new Error("bad image");
-      return {
-        close() {
-          closed = true;
-        },
-      };
-    },
-  });
-  t.after(() => {
-    if (descriptor)
-      Object.defineProperty(globalThis, "createImageBitmap", descriptor);
-    else Reflect.deleteProperty(globalThis, "createImageBitmap");
-  });
-  const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0]);
-  assert.equal((await previewFile(png)).kind, "image");
-  assert.equal(closed, true);
-  broken = true;
-  assert.deepEqual(await previewFile(png), { kind: "binary" });
-  for (const text of ["<svg onload='alert(1)'/>", "<script>alert(1)</script>"])
-    assert.deepEqual(await previewFile(new TextEncoder().encode(text)), {
-      kind: "text",
-      text,
-    });
 });
 
 test("file reads preserve raw bytes and the authenticated cancellable download contract", async (t) => {

@@ -25,14 +25,8 @@ import Markdown, {
 } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getContent, getDiff, getThread } from "./api";
-import { AmpImage } from "./AmpImage";
 import { DiffWindow } from "./DiffWindow";
-import {
-  ampAttachmentUrl,
-  isWorkerFileRequest,
-  workerFileLink,
-  type WorkerFile,
-} from "./files";
+import { workerFileLink, type WorkerFile } from "./files";
 import type {
   ActivityIdentity,
   ActivityItem,
@@ -54,21 +48,6 @@ import {
   textEnd,
   useReadingState,
 } from "./windowing";
-
-/** Emphasis can wrap linked images without removing their own navigation and retry controls. */
-function markdownImages(
-  node: ExtraProps["node"],
-): NonNullable<ExtraProps["node"]>[] {
-  return (
-    node?.children.flatMap((child) =>
-      child.type !== "element"
-        ? []
-        : child.tagName === "img"
-          ? [child]
-          : markdownImages(child),
-    ) ?? []
-  );
-}
 
 function MarkdownImage({ src, alt, title }: ComponentProps<"img">) {
   return src ? (
@@ -164,37 +143,17 @@ export function ActivityMarkdown({
   const components = useMemo<Components>(
     () => ({
       ...markdownComponents,
-      img: ({ node, src, alt, title }) => {
-        const linkId = node?.properties["data-worker-file-id"];
-        const ampUrl = node?.properties["data-worker-file-amp-url"];
-        const name = node?.properties["data-worker-file-name"];
-        if (
-          typeof linkId === "string" &&
-          typeof ampUrl === "string" &&
-          !(typeof name === "string" && /\.(?:svg|html?)$/i.test(name))
-        )
-          return (
-            <AmpImage
-              key={src}
-              id={linkId}
-              ampUrl={ampUrl}
-              alt={alt || "查看图片"}
-              title={title}
-            />
-          );
-        if (
-          node?.properties["data-private-image"] ||
-          (typeof src === "string" &&
-            typeof location !== "undefined" &&
-            isWorkerFileRequest(src, location.origin))
-        )
-          return (
-            <MarkdownLink node={node} href={src} onFileOpen={onFileOpen}>
-              图片：{alt || "查看图片"}
-            </MarkdownLink>
-          );
-        return <MarkdownImage src={src} alt={alt} title={title} />;
-      },
+      // Private attachments still require activation; ordinary web images can load inline.
+      img: ({ node, src, alt, title }) =>
+        typeof src === "string" &&
+        typeof location !== "undefined" &&
+        workerFileLink(src.split(/[?#]/, 1)[0], location.origin) ? (
+          <MarkdownLink node={node} href={src} onFileOpen={onFileOpen}>
+            图片：{alt || "查看图片"}
+          </MarkdownLink>
+        ) : (
+          <MarkdownImage src={src} alt={alt} title={title} />
+        ),
       h2: ({ node: _node, id: headingId, ...props }) => (
         <h2
           {...props}
@@ -225,54 +184,12 @@ export function ActivityMarkdown({
               onAuxClick={(event) => event.preventDefault()}
             />
           );
-        const linkId = node?.properties["data-worker-file-id"];
-        const ampUrl = node?.properties["data-worker-file-amp-url"];
-        const name = node?.properties["data-worker-file-name"];
-        const images = markdownImages(node);
-        if (
-          typeof linkId === "string" &&
-          typeof ampUrl === "string" &&
-          typeof name === "string" &&
-          !images.length &&
-          /\.(?:gif|jpe?g|png|webp)$/i.test(name)
-        )
-          return (
-            <AmpImage
-              key={href}
-              id={linkId}
-              ampUrl={ampUrl}
-              alt={typeof props.children === "string" ? props.children : name}
-              title={props.title}
-            >
-              {props.children}
-            </AmpImage>
-          );
-        // Linked private images have their own original URL and retry action, so keep navigation a sibling.
-        if (
-          images.some(
-            (image) =>
-              image.properties["data-worker-file-id"] ||
-              image.properties["data-private-image"],
-          )
-        )
-          return (
-            <span>
-              <MarkdownLink
-                {...props}
-                node={node}
-                href={href}
-                onFileOpen={onFileOpen}
-              >
-                打开链接
-              </MarkdownLink>
-              {props.children}
-            </span>
-          );
         const image =
           href &&
           /^https?:/i.test(href) &&
-          !node?.properties["data-private-image"] &&
-          !images.length &&
+          !node?.children.some(
+            (child) => child.type === "element" && child.tagName === "img",
+          ) &&
           /\.(?:apng|avif|bmp|gif|ico|jpe?g|png|svg|webp)$/i.test(
             new URL(href).pathname,
           );
@@ -311,32 +228,12 @@ export function ActivityMarkdown({
             // Remember the original match, not a later normalized/source-relative lookalike.
             node.properties["data-worker-file-id"] = file.id;
             if (file.name) node.properties["data-worker-file-name"] = file.name;
-            if (file.ampUrl)
-              node.properties["data-worker-file-amp-url"] = file.ampUrl;
-            node.properties["data-private-image"] = true;
             return safe;
           }
           try {
             const destination = /^[a-z][a-z\d+.-]*:/i.test(safe)
               ? new URL(safe)
               : new URL(safe, sourceUrl ?? undefined);
-            if (
-              destination.hostname === "ampcode.com" &&
-              destination.pathname.startsWith("/user-content/attachments/")
-            ) {
-              node.properties["data-private-image"] = true;
-              return (
-                ampAttachmentUrl(destination.href.split("#", 1)[0]) ??
-                (key === "href" ? destination.href.split("#", 1)[0] : undefined)
-              );
-            }
-            if (
-              typeof location !== "undefined" &&
-              (isWorkerFileRequest(destination.href, location.origin) ||
-                (workerFileLink(safe.split(/[?#]/, 1)[0], location.origin) &&
-                  /(?:^#|&)(?:name|amp)=/.test(destination.hash)))
-            )
-              node.properties["data-private-image"] = true;
             if (key === "src" && !/^https?:$/.test(destination.protocol))
               return undefined;
             return defaultUrlTransform(destination.href) || undefined;

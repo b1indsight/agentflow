@@ -190,8 +190,7 @@ GitHub 末尾 effect 标记在展示读取时移除，原始归档不变；预�
 表格；跨段语法按各段独立解析，不额外读取整篇正文。工具输出和 diff 保持原文。原始 HTML
 仅显示转义文本，危险 URL 被过滤；Markdown 图片与带常见图片后缀的 HTTP(S) 链接内嵌显示，
 图片按正文宽度等比缩小，不放大小图，延迟加载且不发送 Referrer；链接保留原有跳转入口。
-无后缀的图片地址须使用 `![说明](图片地址)`；本地 Worker 附件仍显示为链接，仅在显式打开时读取。
-私有 Amp 附件只通过下文的 Worker 文件标记内嵌，不直接向 Amp 发起图片请求。
+无后缀的图片地址须使用 `![说明](图片地址)`；私有 Worker 附件仍显示为链接，仅在显式打开时读取。
 消息、工具活动、代码块与宽表格的排版规则见 [样式指南](../../../docs/STYLE_GUIDE.md#布局窄屏与长内容)。
 普通相对链接（含片段）与图片地址按消息原始来源 URL 解析；来源缺失或无效时保留文字，
 不将相对目标跳到控制台域名。GFM 脚注使用每条正文独立的引用、标题及回链 ID；点击或键盘
@@ -208,20 +207,8 @@ HTTP/RPC 仍只接收随机 ID。文件名片段须通过长度、解码与路�
 点击或 Enter 在当前 Flow 打开文件名页签，焦点随之转移；同 ID 只打开一次，多文件独立切换，
 同名文件附短 ID 区分。页签带关闭按钮，聚焦页签按 Delete 也可关闭；关闭当前文件选择相邻文件，
 最后一个关闭后回到会话。长文件名省略并通过悬停显示全名；窄屏仅标签栏横向滚动，当前文件与关闭按钮一起滚入视野。
-不弹出浏览器窗口，切回会话沿用逻辑阅读位置恢复。本地附件图片在会话中仍只是链接，不自动读取。
+不弹出浏览器窗口，切回会话沿用逻辑阅读位置恢复。私有附件图片在会话中仍只是链接，不自动读取。
 普通外链、跨域同路径、GitHub 相对链接、缺少来源的普通相对地址与脚注不改变原行为。
-
-Amp 附件扩展为 `/api/files/<32位小写十六进制ID>#name=<编码basename>&amp=<编码规范Amp地址>`。
-仅在 Worker 正文且具有文件打开上下文时，在来源相对地址解析前识别；ID、同源地址、文件名及
-Amp URL 分别校验，片段仅为显示提示，不提供读取授权。Amp 地址仅接受 HTTPS、精确 `ampcode.com`、
-无 userinfo／端口／query／fragment 的 `/user-content/attachments/<64位小写十六进制>-<文件名>`，
-拒绝路径分隔符及控制字符。原始 `amp-media-source` 等片段一律忽略，不用作本地路径。
-Markdown 图片及 PNG/JPEG/GIF/WebP 后缀链接在距阅读区 600px 内通过现有 `readFile(id, signal)` 读取，
-复用文件查看器的签名与 `createImageBitmap` 验证后才显示 data 图片；HTML/SVG 保留文件页签的转义源码入口。
-始终保留去除元数据的原 Amp 链接（新窗口、`noopener noreferrer`）；读取失败、登录失效、超限、超时或
-解码失败显示错误及独立重试按钮，不回退为浏览器直接加载私图。链接包裹图片时导航与预览控件保持同级。
-未登记或无效标记不自动读取，普通本地图片仍需激活，未改写的 Amp 图片只显示链接／文字而不生成破图。
-切换来源、Flow、页签或卸载时取消并隔离旧请求／解码；不增加文件内容缓存或请求共享。
 
 文件读取复用 owner 鉴权的 attachment API，不改变下载响应；请求无缓存、可取消，
 切换页签或 Flow 后旧响应不能覆盖当前文件。按实际响应流限制最多 512 KiB，空文件可查看；
@@ -292,7 +279,6 @@ PNG/JPEG/GIF/WebP 必须通过内容签名和浏览器解码验证，才以已�
 | `modelPresets.ts`                    | Codex / Amp 具体模型预设元数据快照                 |
 | `activity.tsx`                       | 作者分组、结构化活动、安全 Markdown 与原文工具输出 |
 | `FileViewer.tsx` / `files.ts`        | 详情内文件预览、精确链接识别与有界原始字节读取     |
-| `AmpImage.tsx`                       | 私有 Amp 图片的近视口文件读取、取消与错误重试      |
 | `DiffWindow.tsx`                     | 编辑 patch 的有界窗口、行号与行内高亮              |
 | `useConversation.ts`                 | 快照分页缓存、请求取消/隔离、回读、显式刷新与重试  |
 | `sessionCache.ts`                    | 会话数据共用的有界 LRU 内存缓存                    |
@@ -353,17 +339,6 @@ CI=1 PLAYWRIGHT_PORT=5186 npm run test:e2e -- --workers=1 --grep 'worker file|st
 二进制下载入口、错误与重试、迟到响应及请求取消。截图保存在
 `.amp/in/artifacts/worker-file-{text,image,binary,error}-{1440,390}.png`；须实际查看截图并检查无横向溢出。
 
-普通图片、Amp 私有图片及脚注回归：
-
-```sh
-CI=1 PLAYWRIGHT_PORT=5296 npm run test:e2e -- e2e/console.spec.ts --workers=1 --grep 'conversation images|private Amp|worker file|standard tabs|footnote'
-```
-
-Amp 回归通过确定性 `/api/files` 响应并拒绝原 Amp 域网络，覆盖图片语法／后缀链接、近视口才读取、
-本地／无效／SVG 入口不自动读取、离线／登录／413／超时／坏解码与重试、来源替换的迟到解码及跨 Flow 取消。
-桌面／手机默认成功与失败截图为 `.amp/in/artifacts/amp-attachments-{success,error}-{1440,390}.png`。
-这些 mock 不代表真实 Worker Amp 登录及端到端认证下载已经验收。
-
 任务输入回归覆盖原样字符串（包括 CRLF 粘贴及后续编辑）、空标题编号回退、刷新后服务端标题、
 取消/重复提交/结果未知保护；截图为 `.amp/in/artifacts/task-text-{form,detail-pending,detail-generated}-{1440,390}.png`。
 Issue/PR 关联但标题为 null 时的 `Flow #ID` 标题和独立身份徽标截图为 `task-text-fallback-{cards,pr,issue}-{1440,390}.png`。
@@ -380,7 +355,7 @@ npm run test:e2e -- --workers=2 --grep 'six-state preview|round archive|round co
 仓库本地 exclude；截图不进入提交。
 浏览器回归覆盖 DTO 展示与 API 故障、快照分页与缓存回读、会话分组与阅读恢复、窗口上限与键盘焦点，
 以及 Markdown/编辑 diff、归档和桌面/手机交互；具体读取和渲染规则见前文。
-图片回归覆盖桌面/手机内嵌、比例与正文宽度约束、无 Referrer 请求、本地附件的显式打开及 Amp 附件的认证文件通道。
+图片回归覆盖桌面/手机内嵌、比例与正文宽度约束、无 Referrer 请求，以及私有附件的显式打开。
 缓存回归还覆盖页签切换后的正文/diff/回复响应复用、空快照缓存与整页重载清空、
 跨 Flow 返回时的 LRU 保留与淘汰、超大快照仍可阅读但返回时重读，以及缓存分页错误的重试。
 测试拦截 `/api/` 网络响应，组件、分页 hook 与窗口化均用正式实现；
