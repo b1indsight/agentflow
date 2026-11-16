@@ -445,5 +445,12 @@ def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None
   每个错误版本都至少让一个新增测试失败；10 项中有 8 项原有回归全部通过，说明这些规则以前没有便宜的测试。`plan_inference_attempt` 只有一个调用点，但它的两条规则只有新增的纯测试能发现，所以保留为独立函数，不内联（计划“实施中再定的问题”第一项的结论）。
 - **合同测试改用合法事件：** `test_claim_eligibility_matches_the_domain_dispatch_rules` 原先用 SQL 直接改写 Flow 的状态和归档结论，与 #171 “测试准备通过合法事件，不绕过状态写入口”的约定不符。现改为在 `flows.locked()` 内依次提交事件（含 `archive_round`）建立 7 种阶段，并断言六种状态都实际出现。上表最后两项在改写后重新运行，结果相同。同时修正了它的三处类型错误。
 - **与本项无关的不稳定用例：** 曾有两次全量运行与另一次全量运行同时在本机执行，`tests/test_project_sync.py` 的两三个用例失败（Projects 期望状态和截止时间）。这些用例不涉及本项改动的代码；单独运行该文件 3 次均全部通过，单独的全量运行也全部通过。
-- **检查：** `uv run ruff check app tests scripts/smoke/recovery.py`、`uv run mypy app tests`、`uv run python scripts/build_console.py`、`uv build --no-sources` 通过，wheel 内含新模块和 console 资源；diff 无行尾空白。全量回归结果记在下一次发布前的复验中。
+- **检查：** `uv run ruff check app tests scripts/smoke/recovery.py`、`uv run mypy app tests`、`uv run python scripts/build_console.py`、`uv build --no-sources` 通过，wheel 内含新模块和 console 资源；diff 无行尾空白。
+
+### [006] — 2026-11-16 — 发布前复验与审查
+
+- **全量回归：** 对将要发布的精确提交 [`ae1db41f`](https://github.com/b1indsight/agentflow/commit/ae1db41f84c0864c1b4e3c3e78c08399b06dc33f)，在本项私有 PostgreSQL 上执行 `uv run pytest --no-testmon -q --tb=short -rs`：全部通过，唯一的 skip 与基线相同（Git 后端不适用的 jj metadata 场景），唯一的 warning 是既有的 Starlette/httpx 弃用提示。基线 `main` 为 `12ab7300`，发布前 `jj git fetch` 确认未前进。
+- **审查门禁：** 两个代码提交分别通过仓库的 review gate（功能/安全与复杂度两项只读审查）：[`c1988f6f`](https://github.com/b1indsight/agentflow/commit/c1988f6f9530ee3c455d0676a856e02480fa6c24)（策略下沉）和 `ae1db41f`（拆分），两者都没有 findings。bookmark 设到门禁返回的 `ae1db41f` 后推送；本条记录是其后的纯文档提交。
+- **交付状态：** 已推送到 PR #172，CI 由 PR 正常触发。未合并、未部署；无数据库迁移。
+- **遗留限制：** 见初始计划“延后工作”：`flows.py` → `reviews` 的一处函数内导入、持久层对 wire 类型的导入、约 39 处推理类型过滤（方案 P1）、`FlowStore.transition()` 读取最少事实，以及 [003] 记录的 `record_assignment_result` 在未绑定事务时多占一条连接的基线行为。
 
