@@ -3,6 +3,7 @@
 import asyncio
 import json
 from unittest.mock import AsyncMock
+from urllib.parse import quote
 
 import pytest
 from pydantic import SecretStr
@@ -89,6 +90,40 @@ async def test_amp_repeat_and_next_page_keep_native_cursor_and_cache(worker, mon
     assert await worker.read_history(query) == page
     following = await worker.read_history(HistoryQuery(session_id=AMP_SESSION, cursor=page.next_cursor))
     assert following.items[0].content.text == "second"
+
+
+async def test_private_amp_images_register_without_downloading_or_trusting_source(worker, tmp_path, monkeypatch):
+    # The published URL needs Amp auth; amp-media-source is only metadata, not file authority.
+    url = "https://ampcode.com/user-content/attachments/" + "b" * 64 + "-screen.png"
+    sentinel = tmp_path / "do-not-expose.txt"
+    sentinel.write_text("not an image")
+    full = url + "#amp-media-source=" + quote(sentinel.as_uri(), safe="")
+    text = f'![截图](<{full}> "标题")\n\n[图片][ref]\n\n[ref]: <{url}>\n\n`![代码]({full})`'
+    payload = {"id": AMP_SESSION, "messages": [
+        {"protocolMessageID": "one", "role": "assistant", "content": [{"type": "text", "text": text}]},
+    ]}
+
+    async def export(*args, **kwargs):
+        return AmpProcessResult(stdout=json.dumps(payload).encode(), stderr=b"", exit_code=0)
+
+    from app.worker.state.amp_attachments import AmpAttachment
+
+    async def register(source):
+        assert isinstance(source, AmpAttachment)
+        assert source.url == url
+        assert source.name == "screen.png"
+        return LINK
+
+    monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
+    monkeypatch.setattr(worker, "register_file", register)
+    native = await asyncio.to_thread(worker._amp_history.query, HistoryQuery(session_id=AMP_SESSION))
+    page = await worker.read_history(HistoryQuery(session_id=AMP_SESSION))
+    named = f"{LINK}#name=screen.png"
+    assert page.items[0].content.text == text.replace(f"<{full}>", f"<{named}>").replace(
+        f"<{url}>", f"<{named}>",
+    )
+    assert page.next_cursor == native.next_cursor
+    assert native.items[0].content.text == text
 
 
 async def test_registration_deadline_and_failure_keep_partial_text(worker, monkeypatch):

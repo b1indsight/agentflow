@@ -4,10 +4,11 @@ import asyncio
 import os
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from app.contracts.files import MAX_FILE_BYTES, FileFailure
 from app.contracts.protocol import FileRegister, WorkerMessage, call_header, message_header
@@ -15,9 +16,11 @@ from app.controler.api import create_app
 from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.transport import serve_worker
 from app.worker.config import WorkerSettings
+from app.worker.execution.amp_process import AmpProcessResult
 from app.worker.execution.lifecycle import WorkerProtocolError
 from app.worker.runtime import WorkerRuntime
-from app.worker.state.file_links import LocalFileLinks
+from app.worker.state.amp_attachments import AmpAttachment
+from app.worker.state.file_links import FileLinks
 from app.worker.transport.state import WorkerStateCallbacks
 from tests.access import AccessIssuer
 from tests.test_remote_e2e import QueueConnection, QueueSocket, remote_connection
@@ -164,14 +167,15 @@ async def test_slow_file_io_and_late_replies_do_not_interrupt_execution(
         await asyncio.wait_for(executing.wait(), 10)
         link = await worker.register_file(path)
         target = runtime.files.store if operation == "register" else worker.files
-        original = getattr(target, operation)
+        method = "register" if operation == "register" else "_lookup"
+        original = getattr(target, method)
 
         def slow(*args):
             blocked.set()
             assert release.wait(10)
             return original(*args)
 
-        monkeypatch.setattr(target, operation, slow)
+        monkeypatch.setattr(target, method, slow)
         runtime.files.timeout = 0.05
         pending = asyncio.create_task(worker.register_file(path) if operation == "register"
                                       else runtime.files.read(link.rsplit("/", 1)[1]))
@@ -223,29 +227,154 @@ def test_registration_rejects_unreadable_or_unbounded_files(tmp_path, kind):
     elif kind == "unreadable":
         path.touch(mode=0)
     with pytest.raises(FileFailure) as error:
-        LocalFileLinks(tmp_path / "worker").register(path)
+        FileLinks(tmp_path / "worker").register(path)
     assert str(path) not in str(error.value)
 
 
-def test_links_reject_file_substitution_and_growth(tmp_path):
+async def test_links_reject_file_substitution_and_growth(tmp_path):
     # Workspaces are reused: an old URL must not reveal the next Flow's replacement file.
     path = tmp_path / "file"
     path.write_bytes(b"original")
-    links = LocalFileLinks(tmp_path / "worker")
+    links = FileLinks(tmp_path / "worker")
     handle = links.register(path)
     path.rename(tmp_path / "original")
     path.write_bytes(b"another Flow")
     with pytest.raises(FileFailure, match="file_changed"):
-        links.read(handle)
+        await links.read(handle)
     path.unlink()
     path.symlink_to(tmp_path / "original")
     with pytest.raises(FileFailure):
-        links.read(handle)
+        await links.read(handle)
     path.unlink()
     (tmp_path / "original").rename(path)
     path.write_bytes(b"x" * MAX_FILE_BYTES)
-    assert links.read(handle) == b"x" * MAX_FILE_BYTES
+    assert await links.read(handle) == b"x" * MAX_FILE_BYTES
     with path.open("ab") as stream:
         stream.write(b"x")
     with pytest.raises(FileFailure, match="file_too_large"):
-        links.read(handle)
+        await links.read(handle)
+
+
+AMP_ATTACHMENT = "https://ampcode.com/user-content/attachments/" + "b" * 64 + "-screen.png"
+
+
+@pytest.mark.parametrize("url", [
+    AMP_ATTACHMENT.replace("https:", "http:"),
+    AMP_ATTACHMENT.replace("ampcode.com/", "ampcode.com.evil.test/"),
+    AMP_ATTACHMENT.replace("ampcode.com/", "evil.test@ampcode.com/"),
+    AMP_ATTACHMENT.replace("ampcode.com/", "ampcode.com:443/"),
+    AMP_ATTACHMENT + "?download=1",
+    AMP_ATTACHMENT.replace("screen.png", "%2fprivate.png"),
+    AMP_ATTACHMENT.replace("screen.png", "%5cprivate.png"),
+    AMP_ATTACHMENT.replace("screen.png", "../private.png"),
+    AMP_ATTACHMENT.replace("screen.png", "%2e%2e"),
+    AMP_ATTACHMENT.replace("screen.png", "%00.png"),
+    AMP_ATTACHMENT.replace("screen.png", "%FF.png"),
+])
+def test_amp_attachment_rejects_other_authorities_and_paths(url):
+    with pytest.raises(ValidationError):
+        AmpAttachment(url=url)
+
+
+async def test_amp_download_is_lazy_private_ephemeral_and_restartable(server_runtime, tmp_path, monkeypatch):
+    # Remote registrations survive restart alongside old local records, without storing image bytes.
+    root = tmp_path / "worker"
+    local = tmp_path / "local.txt"
+    local.write_bytes(b"local")
+    old_handle = FileLinks(root).register(local)
+    content = b"\x89PNG\r\n\x1a\n" + b"x" * (MAX_FILE_BYTES - 8)
+    downloads = []
+
+    async def download(args, **kwargs):
+        assert args[:3] == ["files", "get", AMP_ATTACHMENT]
+        assert kwargs["max_file_bytes"] == MAX_FILE_BYTES + 1
+        target = Path(args[args.index("-o") + 1])
+        assert target.parent.stat().st_mode & 0o777 == 0o700
+        downloads.append(target)
+        target.write_bytes(content)
+        return AmpProcessResult(b"", b"", 0)
+
+    monkeypatch.setattr("app.worker.state.amp_attachments.run_amp", download)
+    source = AmpAttachment(url=AMP_ATTACHMENT + "#amp-media-source=file%3A%2F%2F%2Fprivate")
+    async with connected_files(server_runtime, root) as (worker, _, http, frames):
+        link = await worker.register_file(source)
+        assert await worker.register_file(AmpAttachment(url=AMP_ATTACHMENT)) == link
+        assert downloads == []
+        assert (await http.get(link, headers={"cf-access-jwt-assertion": "invalid"})).status_code == 401
+        assert downloads == []
+        response = await http.get(link)
+        assert response.status_code == 200 and response.content == content
+        assert len(downloads) == 1 and not downloads[-1].parent.exists()
+        assert "no-store" in response.headers["cache-control"]
+        assert "sandbox" in response.headers["content-security-policy"]
+        assert AMP_ATTACHMENT not in "".join(frames)
+        assert await worker.files.read(old_handle) == b"local"
+    async with connected_files(server_runtime, root) as (worker, _, http, _):
+        assert await worker.register_file(source) == link
+        assert (await http.get(link)).content == content
+        assert len(downloads) == 2 and not downloads[-1].parent.exists()
+        assert await worker.files.read(old_handle) == b"local"
+
+
+@pytest.mark.parametrize(("outcome", "status", "error"), [
+    ("large", 413, "file_too_large"),
+    ("auth", 502, "file_unreadable"),
+    ("missing", 502, "file_unreadable"),
+    ("timeout", 504, "query_timeout"),
+])
+async def test_amp_download_failure_is_bounded_retryable_and_cleaned(
+    server_runtime, tmp_path, monkeypatch, outcome, status, error,
+):
+    directories = []
+
+    async def download(args, **kwargs):
+        target = Path(args[args.index("-o") + 1])
+        directories.append(target.parent)
+        if outcome == "large":
+            # The CLI can hit its quota on a staging file before the final rename.
+            stage = target.parent / ".download" / "partial"
+            stage.parent.mkdir()
+            stage.write_bytes(b"x" * (MAX_FILE_BYTES + 1))
+        elif outcome == "timeout":
+            target.write_bytes(b"partial")
+        elif outcome == "ok":
+            target.write_bytes(b"retry succeeded")
+        return AmpProcessResult(b"", b"private error", int(outcome in {"large", "auth"}),
+                                timed_out=outcome == "timeout")
+
+    monkeypatch.setattr("app.worker.state.amp_attachments.run_amp", download)
+    async with connected_files(server_runtime, tmp_path / "worker") as (worker, _, http, _):
+        link = await worker.register_file(AmpAttachment(url=AMP_ATTACHMENT))
+        response = await http.get(link)
+        assert response.status_code == status and response.json() == {"detail": error}
+        assert not directories[-1].exists()
+        outcome = "ok"
+        response = await http.get(link)
+        assert response.status_code == 200 and response.content == b"retry succeeded"
+        assert not directories[-1].exists()
+
+
+async def test_worker_disconnect_cancels_amp_download_and_removes_partial_copy(
+    server_runtime, tmp_path, monkeypatch,
+):
+    started, stopped = asyncio.Event(), asyncio.Event()
+    directories = []
+
+    async def download(args, **kwargs):
+        target = Path(args[args.index("-o") + 1])
+        target.write_bytes(b"partial")
+        directories.append(target.parent)
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr("app.worker.state.amp_attachments.run_amp", download)
+    async with connected_files(server_runtime, tmp_path / "worker") as (worker, _, http, _):
+        link = await worker.register_file(AmpAttachment(url=AMP_ATTACHMENT))
+        pending = asyncio.create_task(http.get(link))
+        await asyncio.wait_for(started.wait(), 2)
+    await asyncio.wait_for(stopped.wait(), 2)
+    assert not directories[-1].exists()
+    assert (await pending).status_code == 503

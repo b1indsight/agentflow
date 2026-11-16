@@ -15,14 +15,14 @@ from app.contracts.protocol import (
     message_header,
     result_header,
 )
-from app.worker.state.file_links import LocalFileLinks
+from app.worker.state.file_links import FileLinks
 
 
 class WorkerFileCallbacks:
     """Run filesystem IO outside the driver without occupying its scarce watch slots."""
 
     def __init__(self, *, session: Session[ServerMessageUnion, WorkerMessageUnion],
-                 files: LocalFileLinks) -> None:
+                 files: FileLinks) -> None:
         self.session, self.files = session, files
         self._pending: set[asyncio.Task[FileResult]] = set()
 
@@ -46,7 +46,7 @@ class WorkerFileCallbacks:
 
     async def _read(self, call: FileQuery) -> FileResult:
         try:
-            content = await asyncio.to_thread(self.files.read, call.file_id)
+            content = await self.files.read(call.file_id)
             return FileResult(**result_header(call.message_id), method=call.method,
                               content_base64=base64.b64encode(content).decode())
         except FileFailure as error:

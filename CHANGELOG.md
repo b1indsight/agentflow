@@ -8,6 +8,10 @@
 
 ## Unreleased
 
+- Worker 兼容 Amp 私有附件：将允许的附件地址转换为原有文件链接，使用自身 Amp 登录态按需读取，
+  经现有 owner 文件 API 和文件页签预览；前端与 controller 保持不变，不增加 Amp 专用显示标记。
+  保留 512 KiB 上限、进程写入配额及临时文件清理，不读取 `amp-media-source` 本地路径，
+  不公开附件、不缓存图片，也不修改原生历史、游标、数据库或 wire 字段。旧归档通过刷新分批补齐。
 - 详情输入统一为向现有 Flow 追加一次 Agent 任务：API、Service 和前端组件使用 Agent task 命名，
   继续复用普通 REVISION 与共享任务编辑器。删除 Service 的 author 参数，会话输入使用固定 user 角色，
   不再保存 owner 邮箱；保留历史请求的幂等重放能力。

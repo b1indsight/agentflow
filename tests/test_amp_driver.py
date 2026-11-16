@@ -213,6 +213,18 @@ async def test_process_supervisor_drains_both_pipes_and_bounds_output(monkeypatc
     assert result.overflow and not result.timed_out and len(result.stderr) <= 1024
 
 
+async def test_download_quota_bounds_files_not_just_process_output(monkeypatch, tmp_path):
+    # Amp downloads to disk: limiting stdout alone would still fill the worker disk.
+    monkeypatch.setattr("app.worker.execution.amp_process.AMP_BIN", sys.executable)
+    result = await run_amp(
+        ["-c", "f=open('attachment', 'wb'); f.write(b'x' * 4096); f.close()"], cwd=tmp_path,
+        max_file_bytes=1025, timeout=5,
+    )
+    assert result.exit_code != 0
+    assert (tmp_path / "attachment").stat().st_size == 1025
+    assert not result.overflow and not result.timed_out
+
+
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_supervisor_cleans_separate_child_group_before_returning(monkeypatch, tmp_path, cancel):
     # Native Amp shells use their own PGID; killing just the CLI group leaks them.

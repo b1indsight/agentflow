@@ -42,9 +42,10 @@ from app.worker.execution.inference import NativeAgentInference
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.health import HealthFile
+from app.worker.state.amp_attachments import AmpAttachment
 from app.worker.state.amp_history import AmpHistory
 from app.worker.state.execution import ExecutionState
-from app.worker.state.file_links import LocalFileLinks
+from app.worker.state.file_links import FileLinks
 from app.worker.state.history import CodexHistory
 from app.worker.state.history_links import link_history
 from app.worker.transport.business import WorkerBusinessCallbacks
@@ -175,7 +176,7 @@ class WorkerRuntime:
         )
         self.gateway = Gateway[ServerMessageUnion, WorkerMessageUnion]()
         self._connected = False
-        self.files = LocalFileLinks(self.settings.worker_root)
+        self.files = FileLinks(self.settings.worker_root)
         self._file_registrations = 0
 
     def initialize(self) -> None:
@@ -260,8 +261,8 @@ class WorkerRuntime:
             raise ConversationFailure("query_timeout") from None
         return await link_history(page, self.register_file, deadline=deadline)
 
-    async def register_file(self, path: Path) -> str:
-        """Return an owner-only server-relative URL for a local file (at most 512 KiB).
+    async def register_file(self, source: Path | AmpAttachment) -> str:
+        """Return an owner-only URL for local bytes or a private Amp attachment (at most 512 KiB).
 
         Call on this runtime's loop, outside Session callbacks, after registration.
         A timed-out call may be retried: both local and server mappings are idempotent.
@@ -275,7 +276,7 @@ class WorkerRuntime:
         try:
             registration.session.check_request()
             async with asyncio.timeout(10):
-                file_id = await asyncio.to_thread(self.files.register, path)
+                file_id = await asyncio.to_thread(self.files.register, source)
                 call = FileRegister(**call_header(), method="server.file_register", file_id=file_id)
                 response, _ = await request_reply(
                     registration, call, FileRegistered,
