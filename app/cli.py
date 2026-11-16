@@ -264,7 +264,7 @@ def flow_show(flow_id: int) -> None:
         )
         if f.task_content is not None:
             typer.echo(f"  task:\n{f.task_content}")
-        execution = store.workers.get_flow_execution(f.id)
+        execution = store.flows.get_flow_execution(f.id)
         delivery = store.deliveries.get_delivery(f.id)
         if execution is not None:
             typer.echo(
@@ -301,7 +301,7 @@ def flow_show(flow_id: int) -> None:
         jobs = store.jobs.list_jobs(f.id)
         if delivery is not None and delivery.state is DeliveryState.MERGED:
             typer.echo(
-                f"  archive: {archive_progress(f, jobs, result_store=store.results, workers=store.workers)}"
+                f"  archive: {archive_progress(f, jobs, result_store=store.results, flows=store.flows)}"
             )
         for job in jobs:
             recovery = _remaining(job.recovery_deadline)

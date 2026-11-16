@@ -17,13 +17,13 @@ from app.controler.workflow.service import ControlService
 from app.domain.flow_policy import FlowEvent
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequestMerge, retry_delay
+from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.reconciliation import ReconcileState, ReconcileStore
 from app.persistence.stops import StopStore
-from app.persistence.workers import WorkerStore
 
 
 class Reconciler:
@@ -45,7 +45,7 @@ class Reconciler:
         self.jobs = JobStore(database)
         self.reconcile_store = ReconcileStore(database)
         self.stops = StopStore(database)
-        self.workers = WorkerStore(database)
+        self.assignments = AssignmentStore(database)
         self.github = github
         self.service = service
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency
@@ -82,7 +82,7 @@ class Reconciler:
                         archived = record_merge(
                             flow, delivery, merge, deliveries=self.deliveries.using(tx),
                             flows=self.flows.using(tx), jobs=self.jobs.using(tx),
-                            stops=self.stops.using(tx), workers=self.workers.using(tx),
+                            stops=self.stops.using(tx), assignments=self.assignments.using(tx),
                             origin="merged_backlog",
                         )
                     if archived:
@@ -185,7 +185,7 @@ class Reconciler:
                         flows=flows_tx,
                         jobs=jobs_tx,
                         stops=stops_tx,
-                        workers=self.workers.using(tx),
+                        assignments=self.assignments.using(tx),
                         origin="reconciliation",
                     )
                 elif fresh.state is not FlowState.ARCHIVED:
@@ -195,8 +195,8 @@ class Reconciler:
                             current,
                             deliveries=deliveries_tx,
                             flows=flows_tx,
-                            jobs=jobs_tx,
                             stops=stops_tx,
+                            assignments=self.assignments.using(tx),
                         )
                         diagnostic = "PR closed; round finalization requested"
                     elif fresh.archive_reason is not None:
@@ -217,7 +217,8 @@ class Reconciler:
                         if coding is not None and coding.result_applied_at is None:
                             diagnostic = "in-flight coding delivery awaits its original result verification"
                         else:
-                            pause_delivery(current, deliveries=deliveries_tx, jobs=jobs_tx)
+                            pause_delivery(
+                                current, deliveries=deliveries_tx, assignments=self.assignments.using(tx))
                             flows_tx.transition(fresh, FlowEvent.DELIVERY_BASELINE_REJECTED)
                             diagnostic = "PR source branch changed; verified delivery is unchanged"
                 delay = max(1800.0, self.interval) if fresh.state in TERMINAL_STATES else self.interval

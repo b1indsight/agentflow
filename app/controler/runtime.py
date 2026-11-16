@@ -34,6 +34,7 @@ from app.domain.inference_models import InferenceError
 from app.github import GitHubApp
 from app.inference.bub import BubInference
 from app.inference.local import serve_local_inference
+from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.readiness import database_ready
 from app.persistence.results import ResultStore
@@ -129,6 +130,7 @@ class ServerRuntime:
         self.label_sync = LabelSynchronizer(github, self.settings)
         self.database = database
         self.workers = WorkerStore(database)
+        self.assignments = AssignmentStore(database)
         self.reviews = ReviewStore(database)
         self.result_store = ResultStore(database)
         self.webhook_store = WebhookStore(database)
@@ -222,7 +224,7 @@ class ServerRuntime:
         while True:
             await asyncio.sleep(self.settings.worker_sweep_interval)
             try:
-                requeued, failed = self.workers.sweep_expired_assignments()
+                requeued, failed = self.assignments.sweep_expired_assignments()
                 self.metrics.expired.labels("requeued").inc(requeued)
                 self.metrics.expired.labels("failed").inc(failed)
                 if requeued or failed:

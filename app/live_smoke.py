@@ -30,7 +30,6 @@ from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.store import Store
-from app.persistence.workers import WorkerStore
 
 TASK = """Add smoke/greeting.py exposing greet(name), returning 'Hello, <name>!'.
 Add a focused Python standard-library unittest. Only change files under smoke/. Do not modify CI, dependencies or credentials.
@@ -215,7 +214,7 @@ class SmokeSession:
 
     def observe(
         self, github: GitHubProbe, revision: str, *, database: Database,
-        flows: FlowStore, deliveries: DeliveryStore, jobs: JobStore, workers: WorkerStore,
+        flows: FlowStore, deliveries: DeliveryStore, jobs: JobStore,
     ) -> Evidence:
         """Only read persistent workflow facts; never initialize or repair the database."""
         if self.state.issue is None:
@@ -225,7 +224,6 @@ class SmokeSession:
             flows_tx = flows.using(tx)
             deliveries_tx = deliveries.using(tx)
             jobs_tx = jobs.using(tx)
-            workers_tx = workers.using(tx)
             conn.execute("SET TRANSACTION READ ONLY")
             conn.execute("SET LOCAL statement_timeout = '2s'")
             rows = conn.execute("SELECT id FROM flows WHERE repo=%s AND issue_number=%s LIMIT 2",
@@ -242,7 +240,7 @@ class SmokeSession:
                 delivery = deliveries_tx.get_delivery(flow.id)
                 attempts = flows_tx.list_attempts(flow.id)
                 evidence.revisions = sum(attempt.revision_cycles for attempt in attempts)
-                binding = workers_tx.get_flow_execution(flow.id)
+                binding = flows_tx.get_flow_execution(flow.id)
                 job_records = jobs_tx.list_jobs(flow.id)
                 evidence.archived = (
                     flow.state == FlowState.ARCHIVED
@@ -306,7 +304,6 @@ def _run(args: argparse.Namespace, deadline: float) -> int:
                         flows=store.flows,
                         deliveries=store.deliveries,
                         jobs=store.jobs,
-                        workers=store.workers,
                     )
                     print(evidence.model_dump_json())
                     if evidence.core_passed:

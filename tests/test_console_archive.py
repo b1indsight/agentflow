@@ -267,7 +267,7 @@ def test_finalizing_waits_for_stop_receipt_before_archiving_and_releasing_issue(
     control = ControlService(database=store.database)
     control.cancel(flow)
     stop = store.stops.pending("w")
-    binding = store.workers.get_flow_execution(flow.id)
+    binding = store.flows.get_flow_execution(flow.id)
     job_before = store.jobs.get_job(job.id)
     console = ConsoleStore(store.database)
     detail = console.detail(flow.id)
@@ -278,7 +278,7 @@ def test_finalizing_waits_for_stop_receipt_before_archiving_and_releasing_issue(
     assert [item.id for item in console.flows(q="is:active").items] == [flow.id]
     control.cancel(store.flows.get_flow(flow.id))
     assert store.stops.pending("w") == stop
-    assert store.workers.get_flow_execution(flow.id) == binding
+    assert store.flows.get_flow_execution(flow.id) == binding
     assert store.jobs.get_job(job.id) == job_before
     with pytest.raises(ValueError, match="awaiting confirmed stop"):
         control.retry(store.flows.get_flow(flow.id))
@@ -288,7 +288,7 @@ def test_finalizing_waits_for_stop_receipt_before_archiving_and_releasing_issue(
     assert archived.phase == "archived" and archived.lifecycle is FlowState.ARCHIVED
     assert archived.archive_reason is ArchiveReason.ABANDONED and archived.worker_historical
     assert archived.archived_at == store.flows.get_flow(flow.id).archived_at is not None
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
     assert store.flows.get_active_flow(flow.repo, flow.issue_number) is None
 
 

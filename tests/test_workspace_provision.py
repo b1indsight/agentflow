@@ -91,7 +91,7 @@ async def test_bounded_demands_skip_blocked_repositories_and_reset_on_reconnect(
     # Real inventory, not the capacity result, removes this repository's demand.
     for index in range(2):
         provision(store, "worker-1", index, last.repository)
-    assert last.repository not in store.workers.workspace_demand("worker-1", "epoch")
+    assert last.repository not in store.assignments.workspace_demand("worker-1", "epoch")
     await deliver(callbacks, routes, last)
     await callbacks.poll()
     assert len(requests(callbacks)) == MAX_PAYLOAD_ITEMS + 1

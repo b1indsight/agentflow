@@ -73,8 +73,8 @@ async def test_allowed_label_creates_one_flow_and_job(
     assert flow is not None
     assert flow.state is FlowState.QUEUED
     register_worker(store, "worker-1", repo=flow.repo)
-    assert store.workers.assign_job("worker-1", "assignment-1") is not None
-    assert store.workers.assign_job("worker-1", "assignment-2") is None
+    assert store.assignments.assign_job("worker-1", "assignment-1") is not None
+    assert store.assignments.assign_job("worker-1", "assignment-2") is None
 
 
 @pytest.mark.asyncio

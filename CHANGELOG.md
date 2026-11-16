@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- 推理调用的取消、结算（退避、三次上限、结束原因、worker 避让）、单次尝试与候选 worker 选择，以及准备阶段的
+  重试预算改由 domain 纯函数决定。`WorkerStore` 按职责拆开：保留会话与库存，领取与租约归新的
+  `AssignmentStore`，推理调用归新的 `InferenceStore`，Flow 执行绑定的读取与释放归 `FlowStore`；
+  `JobStore.cancel_jobs` 改名为 `AssignmentStore.retire_queued_work`。`Database` 提供公开的 worker 锁方法。
+  数据库结构、wire 协议、worker → Flow → job 锁顺序和对外行为不变。
 - Flow 六态的合法转换统一由领域事件决定，运行期状态更新收拢到 FlowStore；元数据更新不再回写状态。
   公共上下文复用事务、锁后重读及轮次/attempt 比较，领取与回收复用预锁事实并保持 worker → Flow → job
   顺序；job 入队只接收当前事务中的单一 Flow 对象，不再隐式加锁。保留结果恢复、合并立即业务归档、

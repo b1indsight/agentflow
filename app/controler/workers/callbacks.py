@@ -74,8 +74,10 @@ from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.tools import FlowToolService
 from app.domain.inference_models import InferenceFailure
 from app.domain.models import Job, JobKind, JobState, WorkerRecord
+from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
+from app.persistence.inference import InferenceStore
 from app.persistence.jobs import JobStore
 from app.persistence.stops import StopIntent, StopStore
 from app.persistence.workers import WorkerStore
@@ -106,6 +108,7 @@ class ServerCallbacks:
         self.worker_id, self.register, self.session = worker_id, register, session
         self.deliveries, self.jobs = DeliveryStore(database), JobStore(database)
         self.stops, self.workers = StopStore(database), WorkerStore(database)
+        self.assignments, self.inference = AssignmentStore(database), InferenceStore(database)
         self.coordinator, self.results = coordinator, results
         self.notify_jobs, self.metrics = notify_jobs, metrics
         self.heartbeat_interval, self.heartbeat_timeout = heartbeat_interval, heartbeat_timeout
@@ -265,7 +268,7 @@ class ServerCallbacks:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 self.preparing.pop(job_id)
-                self.workers.requeue_assignment(job.id, self.worker_id, token, self.epoch)
+                self.assignments.requeue_assignment(job.id, self.worker_id, token, self.epoch)
                 self.notify_jobs()
         fence = intent.fence()
         stop = StopExecution(**call_header(stop_call_id(fence)), method="worker.stop", arguments=fence)
@@ -293,7 +296,7 @@ class ServerCallbacks:
             await self._poll_provision()
             for _ in range(MAX_PAYLOAD_ITEMS):
                 token = uuid4().hex
-                claimed = self.workers.assign_job(self.worker_id, token, self.epoch)
+                claimed = self.assignments.assign_job(self.worker_id, token, self.epoch)
                 if claimed is None:
                     break
                 task = asyncio.create_task(self._prepare_assignment(claimed, token))
@@ -315,7 +318,7 @@ class ServerCallbacks:
         for call, deadline in list(self.provisioning.values()):
             if now >= deadline:
                 self._finish_provision(call, "timeout", retryable=True)
-        for repository in self.workers.workspace_demand(self.worker_id, self.epoch):
+        for repository in self.assignments.workspace_demand(self.worker_id, self.epoch):
             if len(self.provisioning) >= MAX_PAYLOAD_ITEMS:
                 break
             if repository in self.provisioning or now < self._provision_retry_at.get(repository, 0):
@@ -377,7 +380,7 @@ class ServerCallbacks:
                 assert current.inference is not None and current.inference.current_task is not None
                 self.routes.forget_reply(current.inference.current_task.request_id)
                 self.inference_current, self.inference_cancelling = None, False
-            elif not self.inference_cancelling and self.workers.inference_needs_cancel(current.id):
+            elif not self.inference_cancelling and self.inference.inference_needs_cancel(current.id):
                 assert current.assignment_token is not None
                 await self.session.send(CancelJob(
                     **message_header(self.epoch), control="cancel_job", payload=[],
@@ -386,7 +389,7 @@ class ServerCallbacks:
                 self.inference_cancelling = True
         if self.inference_current is None and self.register.inference is not None:
             token = uuid4().hex
-            job = self.workers.assign_job(self.worker_id, token, self.epoch, slot="infer")
+            job = self.assignments.assign_job(self.worker_id, token, self.epoch, slot="infer")
             if job is not None:
                 assert job.inference is not None and job.inference.current_task is not None
                 task = job.inference.current_task
@@ -455,14 +458,14 @@ class ServerCallbacks:
             await self._inventory(message)
             return
         if isinstance(message, Heartbeat) and self._inference_heartbeat(message):
-            self.workers.heartbeat_assignment(
+            self.assignments.heartbeat_assignment(
                 message.job_id, self.worker_id, message.assignment_token, self.epoch,
             )
             return
         if (
             isinstance(message, Heartbeat)
             and message.job_id not in self.stopping
-            and not self.workers.heartbeat_assignment(
+            and not self.assignments.heartbeat_assignment(
                 message.job_id,
                 self.worker_id,
                 message.assignment_token,
@@ -503,7 +506,7 @@ class ServerCallbacks:
         self._validate_active(item.arguments.job_id, item.arguments.assignment_token)
         job, token, task = self.current[job_id]
         assert task is not None
-        if not self.workers.start_assignment(
+        if not self.assignments.start_assignment(
             job.id, task.attempt_id, self.worker_id, token, self.epoch
         ):
             raise ProtocolViolation("assignment is no longer active")
@@ -530,7 +533,7 @@ class ServerCallbacks:
             )
         ):
             raise ProtocolViolation("result belongs to another assignment")
-        receipt = self.workers.record_assignment_result(
+        receipt = self.assignments.record_assignment_result(
             job.id, self.worker_id, item.assignment_token, self.epoch, terminal
         )
         if receipt in {"conflict", "rejected"}:
@@ -546,7 +549,7 @@ class ServerCallbacks:
                 or current.inference is None or current.inference.current_task is None
                 or current.inference.current_task.request_id != item.reply_to):
             return  # A late or foreign result cannot complete or release another slot.
-        receipt = self.workers.record_assignment_result(
+        receipt = self.assignments.record_assignment_result(
             item.job_id, self.worker_id, item.assignment_token, self.epoch, item,
         )
         if receipt in {"conflict", "rejected"}:
@@ -646,7 +649,7 @@ class ServerCallbacks:
                 ):
                     if job.id in self.stopping:
                         return  # No journal exists to supply R; preserve the safe blocked stop.
-                    if not self.workers.reject_assignment(
+                    if not self.assignments.reject_assignment(
                         job.id, self.worker_id, token, self.epoch
                     ):
                         stop = next((intent for intent in self.stops.pending_for_worker(self.worker_id)
@@ -786,9 +789,9 @@ class ServerCallbacks:
         """Resume on the serial driver; preparing never authorizes worker execution."""
         if isinstance(prepared, JobState):
             if prepared is JobState.QUEUED:
-                self.workers.requeue_assignment(job.id, self.worker_id, token, self.epoch)
+                self.assignments.requeue_assignment(job.id, self.worker_id, token, self.epoch)
             else:
-                self.workers.finish_assignment(job.id, self.worker_id, token, prepared, self.epoch)
+                self.assignments.finish_assignment(job.id, self.worker_id, token, prepared, self.epoch)
             self.notify_jobs()
             return
         if not self.stops.authorize_dispatch(job.id, self.worker_id, token, self.epoch):
@@ -820,7 +823,7 @@ class ServerCallbacks:
         preparing = asyncio.create_task(build())
         try:
             while True:
-                if not self.workers.heartbeat_assignment(job.id, self.worker_id, token, self.epoch):
+                if not self.assignments.heartbeat_assignment(job.id, self.worker_id, token, self.epoch):
                     raise ProtocolViolation("assignment expired during preparation")
                 done, _ = await asyncio.wait({preparing}, timeout=self.heartbeat_interval)
                 if done:
@@ -850,7 +853,7 @@ class ServerCallbacks:
             raise ProtocolViolation("result acceptance conflicts with durable inbox") from error
         if inbox.source != "worker" or not isinstance(inbox.terminal, (Succeeded, Failed)):
             raise ProtocolViolation("result acceptance requires a remote execution result")
-        if self.workers.record_assignment_result(
+        if self.assignments.record_assignment_result(
             job.id,
             self.worker_id,
             token,
@@ -937,7 +940,7 @@ class ServerCallbacks:
             self.current[job.id] = job, recovery.assignment_token, None
             return RecoveryDecision(job_id=job.id, assignment_token=recovery.assignment_token, action="replay")
         if recovery.state == "received":
-            requeued = self.workers.requeue_assignment(
+            requeued = self.assignments.requeue_assignment(
                 job.id, self.worker_id, recovery.assignment_token, self.epoch
             )
             reason = "unstarted assignment abandoned"
@@ -956,7 +959,7 @@ class ServerCallbacks:
         ):
             logger.warning("retaining job {}: original executor exit cannot be confirmed", job.id)
             return None
-        if not self.workers.resume_assignment(
+        if not self.assignments.resume_assignment(
             job.id, self.worker_id, recovery.assignment_token, self.epoch
         ):
             await reject("recovery deadline expired")
@@ -975,7 +978,7 @@ class ServerCallbacks:
         job = self.jobs.get_job(job_id)
         if job is None or job.assignment_token is None:
             return
-        if job.started_at is None and self.workers.requeue_assignment(
+        if job.started_at is None and self.assignments.requeue_assignment(
             job.id, self.worker_id, job.assignment_token, self.epoch
         ):
             self.notify_jobs()

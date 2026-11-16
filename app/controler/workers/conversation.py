@@ -33,7 +33,6 @@ from app.contracts.protocol import (
 from app.domain.models import Attempt
 from app.persistence.database import Database
 from app.persistence.flows import FlowStore
-from app.persistence.workers import WorkerStore
 
 
 class ConversationBroker:
@@ -115,13 +114,12 @@ class ConversationService:
 
     def __init__(self, broker: ConversationBroker, *, database: Database) -> None:
         self.flows = FlowStore(database)
-        self.workers = WorkerStore(database)
         self.broker = broker
 
     def _resolve(self, flow_id: int) -> tuple[str | None, list[Attempt]]:
         if self.flows.get_flow(flow_id) is None:
             raise ConversationFailure("flow_not_found")
-        execution = self.workers.get_flow_execution(flow_id)
+        execution = self.flows.get_flow_execution(flow_id)
         if execution is None:
             return None, []
         attempts: dict[str, Attempt] = {}

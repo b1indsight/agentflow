@@ -24,7 +24,7 @@ def register_worker(
     if repo is not None:
         workspace = uuid5(NAMESPACE_URL, worker_id + ":" + repo).hex
         existing = next((w for w in store.workers.list_workspaces(worker_id) if w.workspace == workspace), None)
-        binding = store.workers.get_worker_execution(worker_id, workspace)
+        binding = store.flows.get_worker_execution(worker_id, workspace)
         assert store.workers.report_workspace(worker_id, epoch, WorkspaceInventory(
             workspace=workspace, repository=repo, generation=existing.generation if existing else 1,
             flow_id=binding.flow_id if binding else None,

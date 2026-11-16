@@ -112,7 +112,7 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, r
     async with connected(server, worker) as (working, serving):
         try:
             await asyncio.wait_for(coding_entered.wait(), 3)
-            inference = store.jobs.enqueue_inference(request())
+            inference = store.inference.enqueue_inference(request())
             server.gateway.wake_all()
             await asyncio.wait_for(infer_entered.wait(), 3)
             clock = utcnow() + timedelta(seconds=20)
@@ -261,7 +261,7 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
             while not isinstance(registered := parse_server_message(await incoming.get()), Registered):
                 pass
         epoch = registered.connection_epoch
-        first = store.jobs.enqueue_inference(request())
+        first = store.inference.enqueue_inference(request())
         server.gateway.wake_all()
         first_call = await next_call(InferenceRequest)
         await outgoing.put(WorkerMessage(**message_header(epoch), control=None,
@@ -285,7 +285,7 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
             while store.jobs.get_job(coding.id).started_at is None:
                 await asyncio.sleep(.01)
 
-        second = store.jobs.enqueue_inference(request())
+        second = store.inference.enqueue_inference(request())
         server.gateway.wake_all()
         second_call = await next_call(InferenceRequest)
         saved_first = store.jobs.get_job(first.id)
@@ -327,7 +327,7 @@ async def test_invalid_inference_exchange_fails_its_slot_and_keeps_the_connectio
         async with asyncio.timeout(3):
             while not isinstance(registered := parse_server_message(await incoming.get()), Registered):
                 pass
-            job = store.jobs.enqueue_inference(request())
+            job = store.inference.enqueue_inference(request())
             server.gateway.wake_all()
             while not isinstance(
                 call := next(iter(parse_server_message(await incoming.get()).payload), None),
@@ -392,7 +392,7 @@ async def test_slow_coding_preparation_keeps_inference_live(store, remote_flow, 
     async with connected(server, worker) as (working, serving):
         await asyncio.wait_for(preparing.wait(), 3)
         first_coding_heartbeat = store.jobs.get_job(coding.id).heartbeat_at
-        inference = store.jobs.enqueue_inference(request())
+        inference = store.inference.enqueue_inference(request())
         server.gateway.wake_all()
         await asyncio.wait_for(inferring.wait(), 3)
         first_inference_heartbeat = store.jobs.get_job(inference.id).heartbeat_at

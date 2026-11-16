@@ -13,10 +13,10 @@ from app.contracts.protocol import (
 from app.domain.delivery_models import DeliveryReceipt, OpenedDelivery, PreparedDelivery
 from app.domain.models import DeliveryState, FlowDelivery, JobKind
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
+from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
-from app.persistence.workers import WorkerStore
 
 
 class FlowToolRejected(RuntimeError):
@@ -39,7 +39,7 @@ class FlowToolService:
         self.database = database
         self.deliveries = DeliveryStore(database)
         self.flows = FlowStore(database)
-        self.workers = WorkerStore(database)
+        self.assignments = AssignmentStore(database)
         self.github = github
         self._locks: dict[int, asyncio.Lock] = {}
 
@@ -78,7 +78,7 @@ class FlowToolService:
         connection_epoch: str,
     ) -> DeliveryReceipt:
         arguments = request.arguments
-        if not self.workers.assignment_active(
+        if not self.assignments.assignment_active(
             arguments.job_id,
             worker_id,
             arguments.assignment_token,
@@ -90,7 +90,7 @@ class FlowToolService:
             )
         flow = self.flows.get_flow(arguments.flow_id)
         attempt = self.flows.get_attempt(arguments.attempt_id)
-        execution = self.workers.get_flow_execution(arguments.flow_id)
+        execution = self.flows.get_flow_execution(arguments.flow_id)
         delivery = self.deliveries.get_delivery(arguments.flow_id)
         if flow is None or not flow.accepts(JobKind.INITIAL):
             raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "Flow is not active")
@@ -187,13 +187,13 @@ class FlowToolService:
         # both pieces of prepared intent on one connection before acknowledging the tool call.
         with self.database.transaction() as tx:
             deliveries_tx = self.deliveries.using(tx)
-            workers_tx = self.workers.using(tx)
+            assignments_tx = self.assignments.using(tx)
             current_flow = tx.lock_workflow(flow.id)
             if (
                 current_flow is None
                 or not current_flow.accepts(JobKind.INITIAL)
                 or current_flow.current_attempt_id != arguments.attempt_id
-                or not workers_tx.assignment_active(
+                or not assignments_tx.assignment_active(
                     arguments.job_id,
                     worker_id,
                     arguments.assignment_token,

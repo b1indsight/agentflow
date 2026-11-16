@@ -451,7 +451,7 @@ async def test_resumed_round_rejects_old_issue_comments_even_if_first_seen_or_ed
     resumed = service.resume(flow, expected_round_no=1)
     # An INITIAL retry / late preparation must not move the round's feedback boundary.
     clock.now += timedelta(seconds=10)
-    store.jobs.cancel_jobs(flow.id)
+    store.assignments.retire_queued_work(flow.id)
     resumed.current_attempt_id = store.flows.create_attempt(flow.id).id
     store.flows.update_flow_metadata(resumed)
     resumed = apply_flow_event(store, resumed, FlowEvent.DELIVERY_APPLIED)

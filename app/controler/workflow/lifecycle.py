@@ -26,12 +26,12 @@ from app.domain.models import (
     Job,
 )
 from app.github import PullRequest, PullRequestMerge, Repository
+from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.stops import StopStore
-from app.persistence.workers import WorkerStore
 from app.plugins import emit_hook
 
 
@@ -76,7 +76,7 @@ def adopt_created_pull_request(
     flows: FlowStore,
     jobs: JobStore,
     stops: StopStore,
-    workers: WorkerStore,
+    assignments: AssignmentStore,
     plugins: PluginManager,
 ) -> None:
     """Bind a verified creation receipt and apply its lifecycle under the unchanged intent."""
@@ -110,7 +110,7 @@ def adopt_created_pull_request(
                 flows=flows_tx,
                 jobs=jobs_tx,
                 stops=stops_tx,
-                workers=workers.using(tx),
+                assignments=assignments.using(tx),
                 origin="delivery_recovery",
             )
         elif cancelled:
@@ -123,8 +123,8 @@ def adopt_created_pull_request(
                 current,
                 deliveries=deliveries_tx,
                 flows=flows_tx,
-                jobs=jobs_tx,
                 stops=stops_tx,
+                assignments=assignments.using(tx),
             )
     if archived:
         # Match ControlService.notify_merge: plugins observe the committed business
@@ -139,14 +139,17 @@ def _merge_observation(remote: PullRequest) -> PullRequestMerge:
                             merge_commit_sha=remote.merge_commit_sha)
 
 
-def pause_delivery(delivery: FlowDelivery, *, deliveries: DeliveryStore, jobs: JobStore) -> None:
+def pause_delivery(
+    delivery: FlowDelivery, *, deliveries: DeliveryStore, assignments: AssignmentStore,
+) -> None:
     """Runs under the Flow lock; leave running executors and the binding untouched."""
     if delivery.state in {DeliveryState.CLOSED, DeliveryState.MERGED}:
         return
     delivery.state = DeliveryState.CLOSED
     delivery.version += 1
     deliveries.update_delivery(delivery)
-    jobs.cancel_jobs(delivery.flow_id, reason="PR closed or baseline changed; queued work retired")
+    assignments.retire_queued_work(
+        delivery.flow_id, reason="PR closed or baseline changed; queued work retired")
 
 
 def close_delivery(
@@ -155,19 +158,19 @@ def close_delivery(
     *,
     deliveries: DeliveryStore,
     flows: FlowStore,
-    jobs: JobStore,
     stops: StopStore,
+    assignments: AssignmentStore,
 ) -> None:
     """An unmerged close ends this round; a later reopen grants no new work."""
     if flow.state is FlowState.ARCHIVED or delivery.state is DeliveryState.MERGED:
         return
-    pause_delivery(delivery, deliveries=deliveries, jobs=jobs)
+    pause_delivery(delivery, deliveries=deliveries, assignments=assignments)
     if flow.archive_reason is None:
         flow.archive_reason = ArchiveReason.ABANDONED
         flow.archive_summary = "Current PR closed without merge"
         flows.transition(flow, FlowEvent.FINALIZATION_REQUESTED)
     stops.request(flow.id)
-    jobs.cancel_jobs(flow.id)
+    assignments.retire_queued_work(flow.id)
     flows.try_archive(flow.id)
 
 
@@ -265,7 +268,7 @@ def record_merge(
     flows: FlowStore,
     jobs: JobStore,
     stops: StopStore,
-    workers: WorkerStore,
+    assignments: AssignmentStore,
     origin: str,
 ) -> bool:
     """Apply verified merge facts under the caller's workflow lock, for webhook or poll."""
@@ -288,10 +291,10 @@ def record_merge(
     flow.archive_reason = ArchiveReason.SUCCEEDED
     flows.transition(flow, FlowEvent.FINALIZATION_REQUESTED)
     stops.request(flow.id)
-    jobs.cancel_jobs(flow.id, reason="PR merged; queued work retired")
+    assignments.retire_queued_work(flow.id, reason="PR merged; queued work retired")
     jobs.record_merge_notice(flow, delivery)
     flows.archive_round(flow, delivery)
     # This can release a never-dispatched preparation immediately. Real execution
     # remains pinned by the unchanged stop/result/ACK preconditions.
-    workers.release_flow_execution(flow.id)
+    flows.release_flow_execution(flow.id)
     return True

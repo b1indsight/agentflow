@@ -24,7 +24,7 @@ from app.domain.models import (
     JobState,
     WorkspaceInventory,
 )
-from app.persistence.workers import WorkerStore
+from app.persistence.flows import FlowStore
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import VcsVerificationError
 from app.worker.execution.workspaces import RepositoryWorkspaces, WorkspaceBinding
@@ -481,19 +481,19 @@ def test_archived_stop_settlement_reuses_only_exact_cleaned_generation(store, mo
             conn.execute("UPDATE jobs SET result_applied_at=%s WHERE id=%s", (store.now(), job.id))
             conn.execute("UPDATE result_effects SET receipt='{}' WHERE job_id=%s", (job.id,))
     successor = queued(store, 3)
-    assert store.workers.assign_job("a", "too-soon", "epoch") is None
+    assert store.assignments.assign_job("a", "too-soon", "epoch") is None
     if blocker == "release-failure":
         with monkeypatch.context() as patch:
-            patch.setattr(WorkerStore, "release_flow_execution", lambda *args: False)
+            patch.setattr(FlowStore, "release_flow_execution", lambda *args: False)
             assert store.stops.confirm("a", receipt, "epoch")
         current = next(w for w in store.workers.list_workspaces("a") if w.workspace == job.workspace)
         assert current.current_job_id is None and current.generation == job.generation
-        assert store.workers.get_flow_execution(flow.id).released_at is None
+        assert store.flows.get_flow_execution(flow.id).released_at is None
         assert not store.workers.report_workspace("a", "epoch", fresh)
         assert store.flows.try_archive(flow.id)
     else:
         assert store.stops.confirm("a", receipt, "epoch")
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
     assert store.workers.report_workspace("a", "epoch", fresh)
     # No clock advance or sweeper: settlement immediately publishes the next generation.
     next_job = claim_job(store, token="next")
@@ -542,7 +542,7 @@ def test_only_local_merge_notice_is_independent_of_resource_settlement(store, mi
     assert confirmed is (mismatch is None)
     fresh = item.model_copy(update={"generation": 2})
     assert store.workers.report_workspace("a", "epoch", fresh) is (mismatch is None)
-    assert (store.workers.get_flow_execution(flow.id).released_at is not None) is (mismatch is None)
+    assert (store.flows.get_flow_execution(flow.id).released_at is not None) is (mismatch is None)
     assert store.jobs.get_job(notice.id).result_applied_at is None
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
 
@@ -556,12 +556,12 @@ def test_archived_coding_cannot_resume_or_supply_cleanup_evidence(store, started
     attempt = store.flows.get_flow(job.flow_id).current_attempt_id
     assert store.stops.authorize_dispatch(job.id, "a", "token", "epoch")
     if started:
-        assert store.workers.start_assignment(job.id, attempt, "a", "token", "epoch")
+        assert store.assignments.start_assignment(job.id, attempt, "a", "token", "epoch")
     merged_business(store, job.flow_id)
-    assert not store.workers.start_assignment(job.id, attempt, "a", "token", "epoch")
-    assert not store.workers.resume_assignment(job.id, "a", "token", "epoch")
+    assert not store.assignments.start_assignment(job.id, attempt, "a", "token", "epoch")
+    assert not store.assignments.resume_assignment(job.id, "a", "token", "epoch")
     finish(store, job)  # A late coding result may settle, but it never proves cleanup.
     assert not store.workers.report_workspace("a", "epoch", item.model_copy(update={"generation": 2}))
     current = next(w for w in store.workers.list_workspaces("a") if w.workspace == job.workspace)
     assert current.current_job_id is None and current.generation == job.generation
-    assert store.workers.get_flow_execution(job.flow_id).released_at is None
+    assert store.flows.get_flow_execution(job.flow_id).released_at is None

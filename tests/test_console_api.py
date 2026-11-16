@@ -404,7 +404,7 @@ async def test_merged_console_is_archived_while_original_cleanup_is_pending(cons
         refused = client.post(f"/api/flows/{flow.id}/resume",
                               json={"expected_round_no": 1}, headers=headers)
         assert refused.status_code == 409 and refused.json() == {"detail": "resume_rejected"}
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     assert store.stops.has_pending(flow.id)
 
 
@@ -523,7 +523,7 @@ def test_archive_request_reports_finalizing_until_stop_is_confirmed(console_runt
     assert body["archive_reason"] == "abandoned" and body["archive_summary"] == "停止本轮"
     assert body["archived_at"] is None and body["current_round_no"] == 1
     assert store.stops.pending("w").job_id == job.id
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     console_runtime.gateway.wake_all.assert_called_once_with()
 
 
@@ -648,7 +648,7 @@ def test_detail_explains_execution_facts_without_exposing_internal_errors(
     job = enqueue_job(store, flow.id, JobKind.INITIAL)
     if scenario != "queued":
         register_worker(store, "worker-safe", repo=flow.repo, epoch="epoch-safe")
-        assert store.workers.assign_job("worker-safe", "private-assignment", "epoch-safe")
+        assert store.assignments.assign_job("worker-safe", "private-assignment", "epoch-safe")
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.pr_number = 17
     delivery.state = DeliveryState.MERGED if kind is JobKind.ARCHIVE else DeliveryState.OPEN

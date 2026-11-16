@@ -75,17 +75,17 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     from tests.flow_fixtures import apply_flow_event
 
     flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
-    assert store.workers.release_flow_execution(flow.id)
+    assert store.flows.release_flow_execution(flow.id)
     service.retry(flow)
     # Fresh worker-b starts from seed A, then checks out existing H where H descends A and H != A.
     register_worker(store, "worker-b", repo=flow.repo, epoch="epoch-b")
-    job = store.workers.assign_job("worker-b", "retry-token", "epoch-b")
+    job = store.assignments.assign_job("worker-b", "retry-token", "epoch-b")
     assert job is not None and job.kind is JobKind.INITIAL
     task = await subject.prepare(job)
     assert isinstance(task, InitialTask) and task.attempt_id == flow.current_attempt_id
     assert task.branch == initial_request.arguments.branch
     assert task.repo_identity == "worker-b:owner/repo"
-    assert store.workers.start_assignment(
+    assert store.assignments.start_assignment(
         job.id, task.attempt_id, "worker-b", "retry-token", "epoch-b"
     )
     retry = FlowToolRequest(
@@ -109,7 +109,7 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     archived = store.flows.get_flow(flow.id)
     assert (archived.state, archived.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
     stop = store.stops.pending("worker-b")
-    binding = store.workers.get_flow_execution(flow.id)
+    binding = store.flows.get_flow_execution(flow.id)
     if exit_code == 0:
         result = initial_result.model_copy(
             update={
@@ -125,7 +125,7 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     terminal = Succeeded(job_id=job.id, assignment_token="retry-token", result=result)
     digest = terminal_digest(terminal)
     assert (
-        store.workers.record_assignment_result(
+        store.assignments.record_assignment_result(
             job.id, "worker-b", "retry-token", "epoch-b", terminal
         )
         == "pending"
@@ -135,10 +135,10 @@ async def test_merged_initial_retry_keeps_execution_facts_without_reopening(
     assert store.deliveries.get_delivery(flow.id) == merged
     assert store.flows.get_flow(flow.id) == archived
     assert store.stops.pending("worker-b") == stop and stop.job_id == job.id
-    assert store.workers.get_flow_execution(flow.id) == binding
+    assert store.flows.get_flow_execution(flow.id) == binding
     report_settled(store, job.id, epoch="epoch-b")
-    assert store.workers.get_flow_execution(flow.id).released_at is None
-    assert store.workers.assign_job("worker-b", "late-coding", "epoch-b") is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
+    assert store.assignments.assign_job("worker-b", "late-coding", "epoch-b") is None
     assert store.flows.get_attempt(task.attempt_id).codex_session_id == "initial-session"
     accepted = store.jobs.get_job(job.id)
     assert accepted.result_digest == digest and accepted.result_applied_at is not None
@@ -157,7 +157,7 @@ async def test_cancel_before_terminal_keeps_executor_slot_until_result_ack(scena
     assert await apply_result(coordinator(store, github), job, result) is JobState.DONE
     assert store.flows.get_flow(job.flow_id).state is FlowState.FINALIZING
     assert store.jobs.get_job(job.id).result_applied_at is not None
-    assert store.workers.get_flow_execution(job.flow_id).released_at is None
+    assert store.flows.get_flow_execution(job.flow_id).released_at is None
     assert store.stops.has_pending(job.flow_id)
     assert not github.comments
     assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
@@ -284,7 +284,7 @@ async def test_closed_pr_after_lost_creation_response_finishes_without_new_write
     assert store.jobs.get_job(job.id).result_applied_at is not None
     assert store.flows.get_flow(job.flow_id).state is FlowState.FINALIZING
     assert store.stops.has_pending(job.flow_id)
-    assert store.workers.get_flow_execution(job.flow_id).released_at is None
+    assert store.flows.get_flow_execution(job.flow_id).released_at is None
     assert len(github.opened) == 1
     assert github.labels == github.review_requests == []
 
@@ -340,7 +340,7 @@ async def test_merge_during_comment_lookup_prevents_dispatch(scenario, result_cl
     assert store.jobs.get_job(job.id).result_applied_at is not None
     assert store.flows.get_flow(job.flow_id).state is FlowState.ARCHIVED
     assert store.flows.get_flow(job.flow_id).archive_reason is ArchiveReason.SUCCEEDED
-    assert store.workers.get_flow_execution(job.flow_id).released_at is None
+    assert store.flows.get_flow_execution(job.flow_id).released_at is None
     assert github.comments == []
     assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [
         JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION, JobKind.ARCHIVE,
@@ -397,7 +397,7 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
     assert store.flows.get_flow(job.flow_id).state is (
         FlowState.ARCHIVED if transition == "merge" else FlowState.FINALIZING
     )
-    assert store.workers.get_flow_execution(job.flow_id).released_at is None
+    assert store.flows.get_flow_execution(job.flow_id).released_at is None
 
 
 async def test_unknown_comment_is_not_resubmitted_and_keeps_result_pending(scenario, result_clock, monkeypatch) -> None:
@@ -464,7 +464,7 @@ async def test_cancel_during_remote_lookup_does_not_authorize_a_comment(
     assert github.comments == []
     assert store.jobs.get_job(job.id).result_applied_at is not None
     assert store.stops.has_pending(job.flow_id)
-    assert store.workers.get_flow_execution(job.flow_id).released_at is None
+    assert store.flows.get_flow_execution(job.flow_id).released_at is None
     assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
 
 

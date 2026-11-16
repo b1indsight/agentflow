@@ -46,6 +46,7 @@ from app.github import (
     retry_delay,
 )
 from app.persistence.activity import ActivityStore
+from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore, LockedFlow
@@ -53,7 +54,6 @@ from app.persistence.jobs import JobStore
 from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
 from app.persistence.stops import StopStore
-from app.persistence.workers import WorkerStore
 
 
 class _PendingReviewFeedback(RuntimeError):
@@ -95,7 +95,7 @@ class ResultEffects:
         self.result_store = ResultStore(database)
         self.reviews = ReviewStore(database)
         self.stops = StopStore(database)
-        self.workers = WorkerStore(database)
+        self.assignments = AssignmentStore(database)
         self.github = github
 
     async def run(self, plan: ResultPlan) -> str | None:
@@ -106,7 +106,7 @@ class ResultEffects:
                 deliveries_tx = self.deliveries.using(tx)
                 jobs_tx = self.jobs.using(tx)
                 result_store_tx = self.result_store.using(tx)
-                workers_tx = self.workers.using(tx)
+                flows_tx = self.flows.using(tx)
                 flow = context.flow
                 if flow is None:
                     result_store_tx.skip_remaining(plan.job_id, "Flow disappeared")
@@ -129,7 +129,7 @@ class ResultEffects:
                             plan.archive,
                             deliveries=deliveries_tx,
                             jobs=jobs_tx,
-                            workers=workers_tx,
+                            flows=flows_tx,
                         )
                     except ValueError as error:
                         raise ResultPending(str(error)) from error
@@ -229,7 +229,7 @@ class ResultEffects:
             jobs_tx = self.jobs.using(tx)
             result_store_tx = self.result_store.using(tx)
             reviews_tx = self.reviews.using(tx)
-            workers_tx = self.workers.using(tx)
+            flows_tx = self.flows.using(tx)
             flow = context.flow
             job = tx.lock_job(plan.job_id)
             if (
@@ -255,7 +255,7 @@ class ResultEffects:
                         plan.archive,
                         deliveries=deliveries_tx,
                         jobs=jobs_tx,
-                        workers=workers_tx,
+                        flows=flows_tx,
                     )
                 except ValueError as error:
                     raise ResultPending(str(error)) from error
@@ -330,7 +330,7 @@ class ResultEffects:
                     flows=self.flows,
                     jobs=self.jobs,
                     stops=self.stops,
-                    workers=self.workers,
+                    assignments=self.assignments,
                     plugins=self.plugins,
                 )
                 found = remote
@@ -420,7 +420,7 @@ class ResultEffects:
                         flows=self.flows,
                         jobs=self.jobs,
                         stops=self.stops,
-                        workers=self.workers,
+                        assignments=self.assignments,
                         plugins=self.plugins,
                     )
                     return EffectReceipt(pull_request=remote)

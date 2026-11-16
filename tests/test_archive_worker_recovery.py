@@ -34,7 +34,7 @@ from tests.worker_fixtures import run_worker, worker_runtime
 async def matching_pool(store, root, flow, monkeypatch):
     """Create real directories with the controller fixture's original allocation IDs."""
     worker = store.workers.list_workers()[0]
-    original = store.workers.get_flow_execution(flow.id)
+    original = store.flows.get_flow_execution(flow.id)
     other_id = uuid4().hex
     ids = iter([worker.workspace, original.workspace, other_id])
     pool = RepositoryWorkspaces(root, "worker-a", limit=2)
@@ -48,11 +48,11 @@ async def matching_pool(store, root, flow, monkeypatch):
         assert store.workers.report_workspace("worker-a", "epoch-a", item)
     other = store.flows.create_flow(flow.repo, 9000, 42)
     queued = enqueue_job(store, other.id, JobKind.INITIAL)
-    claimed = store.workers.assign_job("worker-a", "other-token", "epoch-a")
+    claimed = store.assignments.assign_job("worker-a", "other-token", "epoch-a")
     assert claimed.id == queued.id and claimed.workspace == other_id
     other_binding = await pool.claim(flow.repo, other.id, claimed.workspace, claimed.generation,
                                      base_branch="main", remote="origin", push_token=None)
-    assert store.workers.finish_assignment(queued.id, "worker-a", "other-token", JobState.DONE, "epoch-a")
+    assert store.assignments.finish_assignment(queued.id, "worker-a", "other-token", JobState.DONE, "epoch-a")
     return pool, binding, other_binding
 
 
@@ -110,7 +110,7 @@ async def test_modern_merge_stops_original_worker_before_reusing_only_its_genera
             assert store.workers.report_workspace("worker-a", "epoch-a", item)
         sibling_bytes = sibling.path.read_bytes()
         sibling_inventory = next(item for item in pool.inventory() if item.workspace == other.slot_id)
-        sibling_binding = store.workers.get_flow_execution(other.flow_id)
+        sibling_binding = store.flows.get_flow_execution(other.flow_id)
         journal = ExecutionState(root, flow.id)
         journal.record_received(AssignmentArguments(
             job_id=job.id, flow_id=flow.id, assignment_token=job.assignment_token,
@@ -181,7 +181,7 @@ async def test_modern_merge_stops_original_worker_before_reusing_only_its_genera
             assert stopped.stopped.request_id == stop.request_id and not stopped.acknowledged
             assert dirty.exists() and (repo / "README.md").read_text() == "unfinished tracked edit"
             assert store.stops.receipt_request("worker-a", stop.request_id).state == "confirmed"
-            assert store.workers.get_flow_execution(flow.id).released_at is not None
+            assert store.flows.get_flow_execution(flow.id).released_at is not None
             released = next(item for item in store.workers.list_workspaces("worker-a")
                             if item.workspace == binding.slot_id)
             assert (released.current_job_id, released.generation) == (None, binding.generation + 1)
@@ -201,7 +201,7 @@ async def test_modern_merge_stops_original_worker_before_reusing_only_its_genera
         successor = store.flows.create_flow(flow.repo, 999, 42)
         queued = enqueue_job(store, successor.id, JobKind.INITIAL)
         epoch = store.workers.list_workers()[0].connection_epoch
-        replacement = store.workers.assign_job("worker-a", "next-generation", epoch)
+        replacement = store.assignments.assign_job("worker-a", "next-generation", epoch)
         assert replacement.id == queued.id and replacement.workspace == binding.slot_id
         assert replacement.generation == binding.generation + 1
         reused = await pool.claim(
@@ -214,7 +214,7 @@ async def test_modern_merge_stops_original_worker_before_reusing_only_its_genera
         assert sibling_file.read_text() == "keep this work" and sibling.path.read_bytes() == sibling_bytes
         assert next(item for item in pool.inventory() if item.workspace == other.slot_id) == sibling_inventory
         assert pool.lookup(flow.repo, other.flow_id) == other
-        assert store.workers.get_flow_execution(other.flow_id) == sibling_binding
+        assert store.flows.get_flow_execution(other.flow_id) == sibling_binding
         assert store.jobs.get_job(sibling_job.id) == sibling_job
     finally:
         tasks = [task for task in (server, worker) if task is not None]

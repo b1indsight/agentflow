@@ -161,16 +161,16 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
                 raise RuntimeError('fixture inventory rejected')
         with store.flows.locked(flow.id) as context:
             store.jobs.using(context.database).enqueue_job(required(context.flow), JobKind.INITIAL)
-        job = store.workers.assign_job('fixture-worker', 'fixture-token', 'fixture-epoch')
+        job = store.assignments.assign_job('fixture-worker', 'fixture-token', 'fixture-epoch')
         if job is None or job.workspace is None or job.generation is None:
             raise RuntimeError('fixture assignment failed')
-        if not store.workers.start_assignment(job.id, attempt.id, 'fixture-worker', 'fixture-token', 'fixture-epoch'):
+        if not store.assignments.start_assignment(job.id, attempt.id, 'fixture-worker', 'fixture-token', 'fixture-epoch'):
             raise RuntimeError('fixture start failed')
         expected_flow = store.flows.get_flow(flow.id)
         if expected_flow is None or expected_flow.state is not FlowState.RUNNING:
             raise RuntimeError('fixture flow did not enter running')
         expected_workspaces = store.workers.list_workspaces('fixture-worker')
-        expected_binding = store.workers.get_flow_execution(flow.id)
+        expected_binding = store.flows.get_flow_execution(flow.id)
         if expected_binding is None or expected_binding.released_at is not None:
             raise RuntimeError('fixture workspace binding missing')
         store.webhooks.receive('fixture-delivery', 'ping', {}, 'a' * 64)
@@ -219,7 +219,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
     restored = Store(scoped)
     try:
         restored_job = restored.jobs.get_job(job.id)
-        binding = restored.workers.get_flow_execution(flow.id)
+        binding = restored.flows.get_flow_execution(flow.id)
         if (restored.flows.get_flow(flow.id) != expected_flow or not restored_job
                 or restored_job.assignment_token != 'fixture-token'
                 or (restored_job.workspace, restored_job.generation) != (job.workspace, job.generation)

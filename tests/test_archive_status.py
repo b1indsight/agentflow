@@ -170,13 +170,13 @@ async def test_merge_notice_survives_permission_failure_without_worker(
         await subject.results.apply(job.id)
     archived = store.flows.get_flow(merge_flow.id)
     assert archived.state is FlowState.ARCHIVED
-    assert store.workers.get_flow_execution(archived.id) is None
+    assert store.flows.get_flow_execution(archived.id) is None
     assert store.jobs.get_job(job.id).assigned_worker_id is None
     plan = store.results.get_plan(job.id)
     assert plan.archive is None and plan.archive_notice is not None
     assert [number for number, _ in github.notifications] == [archived.issue_number]
     assert "notification failed" in archive_progress(
-        archived, store.jobs.list_jobs(archived.id), result_store=store.results, workers=store.workers,
+        archived, store.jobs.list_jobs(archived.id), result_store=store.results, flows=store.flows,
     )
     monkeypatch.setattr(Issue, "comment", comment)
     subject.results.settings.done_label = "changed-after-freeze"
@@ -273,7 +273,7 @@ async def test_archive_publishes_stable_status_and_replay_does_not_backfill(stor
     assert len(github.notifications) == 2
     settle_cleanup(store)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
 
 
 async def test_permanent_archive_write_failure_retries_only_frozen_missing_effects(store, monkeypatch, archive_resources):
@@ -292,11 +292,11 @@ async def test_permanent_archive_write_failure_retries_only_frozen_missing_effec
     plan = store.results.get_plan(job.id)
     assert plan.archive_notice == result and plan.archive is None
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     assert store.jobs.get_job(job.id).result_applied_at is None
     assert "comment" in store.jobs.get_job(job.id).last_error
     assert "GitHub" in archive_progress(
-        flow, store.jobs.list_jobs(flow.id), result_store=store.results, workers=store.workers
+        flow, store.jobs.list_jobs(flow.id), result_store=store.results, flows=store.flows
     )
     assert [number for number, _ in github.notifications] == [flow.issue_number]
     jobs = store.jobs.list_jobs(flow.id)
@@ -331,7 +331,7 @@ async def test_archive_recovers_remote_write_before_receipt_after_restart(
     if operation == "comment":
         with pytest.raises(ResultPending):
             await subject.results.apply(job.id)
-        assert store.workers.get_flow_execution(flow.id).released_at is None
+        assert store.flows.get_flow_execution(flow.id).released_at is None
     else:
         assert await subject.results.apply(job.id) is JobState.DONE
         skipped = [r for r in store.results.list_effects(job.id) if r.state is EffectState.SKIPPED]
@@ -345,7 +345,7 @@ async def test_archive_recovers_remote_write_before_receipt_after_restart(
         )
         settle_cleanup(store)
         assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-        assert store.workers.get_flow_execution(flow.id).released_at is not None
+        assert store.flows.get_flow_execution(flow.id).released_at is not None
     monkeypatch.setattr(Issue, operation, original)
     store.results.recover_claims()
     due(store, job.id)
@@ -370,7 +370,7 @@ async def test_unknown_archive_comment_stays_pending_without_resending_or_reclea
         ControlService(database=store.database).retry(flow)
     assert store.results.get_plan(job.id).archive_notice == result
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     assert not github.notifications
 
 
@@ -418,7 +418,7 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
     assert effect.state is (EffectState.UNCERTAIN if already_dispatched else expected)
     assert (effect.dispatched_at is not None) is already_dispatched
     assert store.results.get_plan(job.id).archive_notice == notice
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
 
     monkeypatch.setattr(Issue, "comment", comment)
     monkeypatch.setattr(Issue, "find_comment", find_comment)
@@ -430,7 +430,7 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
     settle_cleanup(store)
     assert len(github.notifications) == 2
     assert store.flows.get_flow(flow.id).current_attempt_id == attempt_id
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
 
 
 async def test_archive_keeps_dispatch_evidence_when_token_expires_after_post(store, tmp_path, monkeypatch, archive_resources):
@@ -463,7 +463,7 @@ async def test_archive_keeps_dispatch_evidence_when_token_expires_after_post(sto
     assert effect.dispatched_at is not None
     assert requests == ["/app/installations/42/access_tokens",
                         f"/repos/{flow.repo}/issues/{flow.issue_number}/comments"]
-    assert store.workers.get_flow_execution(flow.id).released_at is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
 
 
 async def test_archive_retry_policy_keeps_push_token_acquisition_retryable(tmp_path, monkeypatch):
@@ -609,7 +609,7 @@ async def test_archive_label_errors_do_not_block_completion(
     )
     settle_cleanup(store)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
     assert len(github.notifications) == 2
 
 
@@ -649,4 +649,4 @@ async def test_restart_recovers_comment_before_receipt(store, monkeypatch, archi
     assert store.jobs.get_job(job.id).result_applied_at is not None
     settle_cleanup(store)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None

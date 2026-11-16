@@ -57,7 +57,7 @@ def authority(store, flow_id):
         return {
             "jobs": store.jobs.list_jobs(flow_id),
             "attempts": store.flows.list_attempts(flow_id),
-            "execution": store.workers.get_flow_execution(flow_id),
+            "execution": store.flows.get_flow_execution(flow_id),
             "owners": connection.execute("SELECT * FROM issue_flow_owners").fetchall(),
         }
 
@@ -192,7 +192,7 @@ def test_archive_activity_failure_rolls_back_release_and_cancellation(store, mon
     service = ControlService(database=store.database)
     flow = service.create_flow("owner/repo", 8, 42)
     register_worker(store, "worker", repo=flow.repo)
-    store.workers.assign_job("worker", "undispatched")
+    store.assignments.assign_job("worker", "undispatched")
     before = authority(store, flow.id)
     original_flow = store.flows.get_flow(flow.id)
     original_append = ActivityStore.append_flow
@@ -211,7 +211,7 @@ def test_archive_activity_failure_rolls_back_release_and_cancellation(store, mon
     assert ActivityStore(store.database).archived(flow.id, 1) is None
     service.cancel(flow)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-    assert store.workers.get_flow_execution(flow.id).released_at is not None
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
 
 
 @pytest.mark.parametrize("first", ["correction", "resume"])

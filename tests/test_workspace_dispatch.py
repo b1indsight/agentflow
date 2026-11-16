@@ -144,7 +144,7 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
         worker.finish[finished].set()
         await wait_until(lambda: all(w.current_job_id != finished for w in store.workers.list_workspaces("worker-a")))
         finished_job = required(store.jobs.get_job(finished))
-        binding = required(store.workers.get_flow_execution(finished_job.required_flow_id))
+        binding = required(store.flows.get_flow_execution(finished_job.required_flow_id))
         assert binding.released_at is None  # Completion retains review affinity.
         assert set(worker.running) == initial - {finished}
 
@@ -240,8 +240,8 @@ async def test_provision_failure_does_not_disconnect_other_workspaces(
             heartbeat_interval=0.05, heartbeat_timeout=10, poll_interval=0.02,
         )
         if failure == "filesystem_error":
-            demand = callbacks.workers.workspace_demand
-            monkeypatch.setattr(callbacks.workers, "workspace_demand",
+            demand = callbacks.assignments.workspace_demand
+            monkeypatch.setattr(callbacks.assignments, "workspace_demand",
                                 lambda *args: [bad_repo, *demand(*args)])
         try:
             await peers.serve("worker-a", session, callbacks, replace=True)

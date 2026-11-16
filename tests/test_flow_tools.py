@@ -42,8 +42,8 @@ async def test_direct_open_pr_preserves_body_without_closing_a_fake_issue(store,
     flow.current_attempt_id = attempt.id
     store.flows.update_flow_metadata(flow)
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
-    job = store.workers.assign_job("worker-a", "token", "epoch")
-    assert store.workers.start_assignment(job.id, attempt.id, "worker-a", "token", "epoch")
+    job = store.assignments.assign_job("worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, attempt.id, "worker-a", "token", "epoch")
     delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
     delivery.base_branch = "trunk"
     store.deliveries.update_delivery(delivery)
@@ -93,9 +93,9 @@ async def test_open_pr_after_merge_cannot_restore_opening_delivery(store, comple
     # A still-running execution can emit a tool call after the merge webhook retires coding.
     flow, subject, github, request, _ = completed_open_initial
     job = enqueue_job(store, flow.id, JobKind.REVISION)
-    replacement = store.workers.assign_job("worker-a", "later-token", "epoch")
+    replacement = store.assignments.assign_job("worker-a", "later-token", "epoch")
     assert replacement is not None and replacement.id == job.id
-    assert store.workers.start_assignment(
+    assert store.assignments.start_assignment(
         job.id, request.arguments.attempt_id, "worker-a", "later-token", "epoch",
     )
     invocation = request.model_copy(update={
@@ -260,7 +260,7 @@ async def test_reconnect_during_tool_read_keeps_original_epoch(
 
     async def reconnect(repo, branch, *, retry_transient=False):
         register_worker(store, "worker-a", repo=flow.repo, epoch="epoch-b")
-        assert store.workers.resume_assignment(
+        assert store.assignments.resume_assignment(
             fresh_tool_request.arguments.job_id, "worker-a", "token", "epoch-b",
         )
         return RemoteRef(branch=branch, sha="abc123")
@@ -275,8 +275,8 @@ async def test_reconnect_during_tool_read_keeps_original_epoch(
     assert response.call_id == fresh_tool_request.arguments.call_id
     assert store.deliveries.get_delivery(flow.id) == before
     assert store.deliveries.get_tool_call(fresh_tool_request.arguments.call_id).response is None
-    assert store.workers.assignment_active(fresh_tool_request.arguments.job_id, "worker-a", "token", "epoch-b")
-    assert not store.workers.assignment_active(fresh_tool_request.arguments.job_id, "worker-a", "token", "epoch")
+    assert store.assignments.assignment_active(fresh_tool_request.arguments.job_id, "worker-a", "token", "epoch-b")
+    assert not store.assignments.assignment_active(fresh_tool_request.arguments.job_id, "worker-a", "token", "epoch")
 
 
 async def test_unknown_tool_returns_correlated_domain_error(store, prepared_initial, fresh_tool_request):
@@ -302,7 +302,7 @@ async def test_tool_ledger_keeps_business_arguments_and_rejects_call_id_reuse_by
     assert call.arguments == invocation.arguments.arguments
     assert call.response == result.delivery_receipt
     job = enqueue_job(store, flow.id, JobKind.REVISION)
-    replacement = store.workers.assign_job("worker-a", "token-b", "epoch")
+    replacement = store.assignments.assign_job("worker-a", "token-b", "epoch")
     assert replacement is not None and replacement.id == job.id
     # A later execution cannot claim an old call_id, even with identical business arguments.
     conflicting = invocation.model_copy(update={

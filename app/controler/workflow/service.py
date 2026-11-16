@@ -24,6 +24,7 @@ from app.domain.models import (
 )
 from app.github import PullRequestMerge
 from app.persistence.activity import ActivityStore
+from app.persistence.assignments import AssignmentStore
 from app.persistence.console_sync import ConsoleSyncStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
@@ -75,6 +76,7 @@ class ControlService:
         self.stops = StopStore(database)
         self.webhook_store = WebhookStore(database)
         self.workers = WorkerStore(database)
+        self.assignments = AssignmentStore(database)
         self._after_commit = after_commit
         self.plugins = plugins or get_plugin_manager()
         self._jobs_available = jobs_available or (lambda: None)
@@ -139,7 +141,7 @@ class ControlService:
                         "number": delivery.pr_number, "merged": True,
                         "merged_at": delivery.merged_at, "merge_commit_sha": delivery.merge_commit_sha,
                     }), deliveries=deliveries_tx, flows=flows_tx, jobs=jobs_tx,
-                    stops=stops_tx, workers=self.workers.using(tx), origin="finish",
+                    stops=stops_tx, assignments=self.assignments.using(tx), origin="finish",
                 )
             else:
                 if reason is ArchiveReason.SUCCEEDED:
@@ -153,7 +155,7 @@ class ControlService:
                 fresh.archive_summary = summary.strip() or None
                 flows_tx.transition(fresh, FlowEvent.FINALIZATION_REQUESTED)
                 stops_tx.request(fresh.id)
-                jobs_tx.cancel_jobs(fresh.id)
+                self.assignments.using(tx).retire_queued_work(fresh.id)
                 flows_tx.try_archive(fresh.id)
         if merged:
             self.notify_merge(fresh)
@@ -177,7 +179,7 @@ class ControlService:
                 or ActivityStore(tx).archived(fresh.id, expected_round_no) is None
             ):
                 raise ValueError("only an archived round can be resumed")
-            binding = self.workers.using(tx).get_flow_execution(fresh.id)
+            binding = self.flows.using(tx).get_flow_execution(fresh.id)
             if binding is not None and binding.released_at is None:
                 raise ValueError("archived execution is not released")
             ConsoleSyncStore(tx).reset_round(fresh.id)
@@ -228,8 +230,8 @@ class ControlService:
                 delivery,
                 deliveries=deliveries,
                 flows=self.flows.using(tx),
-                jobs=self.jobs.using(tx),
                 stops=self.stops.using(tx),
+                assignments=self.assignments.using(tx),
             )
         self._jobs_available()
 
@@ -272,7 +274,7 @@ class ControlService:
                 flows=flows_tx,
                 jobs=jobs_tx,
                 stops=self.stops.using(tx),
-                workers=self.workers.using(tx),
+                assignments=self.assignments.using(tx),
                 origin="webhook",
             )
         if first_merge:
@@ -294,7 +296,7 @@ class ControlService:
             result_store_tx = self.result_store.using(tx)
             reviews_tx = self.reviews.using(tx)
             stops_tx = self.stops.using(tx)
-            workers_tx = self.workers.using(tx)
+            assignments_tx = self.assignments.using(tx)
             tx.serialize_issue(flow.repo, flow.issue_number)
             fresh = tx.lock_workflow(flow.id)
             if fresh is None:
@@ -337,16 +339,16 @@ class ControlService:
                         "merged_at": delivery.merged_at,
                         "merge_commit_sha": delivery.merge_commit_sha,
                     }), deliveries=deliveries_tx, flows=flows_tx, jobs=jobs_tx,
-                    stops=stops_tx, workers=workers_tx, origin="retry",
+                    stops=stops_tx, assignments=assignments_tx, origin="retry",
                 )
             elif jobs_tx.has_pending_result(flow.id):
                 if not self._retry_delivery_effects(
                     fresh,
                     database=tx,
                     deliveries=deliveries_tx,
+                    flows=flows_tx,
                     jobs=jobs_tx,
                     result_store=result_store_tx,
-                    workers=workers_tx,
                 ):
                     raise RetryRejected(
                         "retry_result_pending",
@@ -370,7 +372,7 @@ class ControlService:
                     flows_tx.try_archive(fresh.id)
                     return True
                 # Recovery may have failed the Flow before its queued work was swept.
-                jobs_tx.cancel_jobs(fresh.id)
+                assignments_tx.retire_queued_work(fresh.id)
                 failed_job = jobs_tx.latest_failed_job(fresh.id)
                 kind = failed_job.kind if failed_job is not None else JobKind.INITIAL
                 delivery = deliveries_tx.get_delivery(fresh.id)
@@ -401,9 +403,9 @@ class ControlService:
         *,
         database: Database,
         deliveries: DeliveryStore,
+        flows: FlowStore,
         jobs: JobStore,
         result_store: ResultStore,
-        workers: WorkerStore,
     ) -> bool:
         """Validate verified delivery or cleanup before rearming its failed GitHub effects."""
         plan = result_store.get_pending_plan(flow.id)
@@ -420,7 +422,7 @@ class ControlService:
                 return False
             try:
                 verify_archive(
-                    flow, job, plan.archive, deliveries=deliveries, jobs=jobs, workers=workers
+                    flow, job, plan.archive, deliveries=deliveries, flows=flows, jobs=jobs
                 )
             except ValueError:
                 return False
@@ -432,7 +434,7 @@ class ControlService:
     def list_workers(self) -> list[WorkerView]:
         views: list[WorkerView] = []
         for worker in self.workers.list_workers():
-            executions = self.workers.get_worker_executions(worker.worker_id)
+            executions = self.flows.get_worker_executions(worker.worker_id)
             workspaces = self.workers.list_workspaces(worker.worker_id)
             views.append(
                 WorkerView(

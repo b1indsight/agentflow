@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from itertools import product
 from threading import Barrier
 from uuid import NAMESPACE_URL, uuid5
 
@@ -10,13 +11,22 @@ import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Failed
 from app.controler.workflow.service import ControlService
+from app.domain.flow_policy import FlowEvent
 from app.domain.inference_models import (
     LOCAL_BUB_WORKER_ID,
     InferenceCapability,
     InferenceMessage,
     InferenceTask,
 )
-from app.domain.models import FlowState, Job, JobKind, JobState, WorkspaceInventory
+from app.domain.models import (
+    ArchiveReason,
+    DeliveryState,
+    FlowState,
+    Job,
+    JobKind,
+    JobState,
+    WorkspaceInventory,
+)
 from app.persistence.records import required
 from app.persistence.store import Store
 from tests.flow_fixtures import enqueue_job
@@ -58,7 +68,7 @@ def queued(store: Store, issue: int = 1, repo: str = "owner/repo") -> Job:
 
 
 def claim(store: Store, worker: str = "a", token: str = "token", epoch: str = "epoch") -> Job:
-    job = store.workers.assign_job(worker, token, epoch)
+    job = store.assignments.assign_job(worker, token, epoch)
     assert job is not None
     return job
 
@@ -66,21 +76,21 @@ def claim(store: Store, worker: str = "a", token: str = "token", epoch: str = "e
 def finish(store: Store, job: Job) -> None:
     assert job.assigned_worker_id is not None and job.assignment_token is not None
     terminal = Failed(job_id=job.id, assignment_token=job.assignment_token, error="test outcome")
-    assert store.workers.record_assignment_result(job.id, job.assigned_worker_id, job.assignment_token, "epoch", terminal) == "pending"
+    assert store.assignments.record_assignment_result(job.id, job.assigned_worker_id, job.assignment_token, "epoch", terminal) == "pending"
     assert store.jobs.complete_persisted_result(job.id, JobState.FAILED)
 
 
 def test_demand_never_claims_without_registered_inventory(store: Store) -> None:
     connect(store, "a", 3)
     job = queued(store)
-    assert store.workers.workspace_demand("a", "epoch") == ["owner/repo"]
-    assert store.workers.assign_job("a", "none", "epoch") is None
+    assert store.assignments.workspace_demand("a", "epoch") == ["owner/repo"]
+    assert store.assignments.assign_job("a", "none", "epoch") is None
     assert required(store.jobs.get_job(job.id)).state is JobState.QUEUED
-    assert store.workers.get_flow_execution(job.required_flow_id) is None
+    assert store.flows.get_flow_execution(job.required_flow_id) is None
     item = provision(store, "a")
     assigned = claim(store)
     assert (assigned.workspace, assigned.generation) == (item.workspace, item.generation)
-    assert required(store.workers.get_flow_execution(job.required_flow_id)).workspace == item.workspace
+    assert required(store.flows.get_flow_execution(job.required_flow_id)).workspace == item.workspace
 
 
 def test_worker_specific_limits_and_cross_repository_capacity(store: Store) -> None:
@@ -94,14 +104,14 @@ def test_worker_specific_limits_and_cross_repository_capacity(store: Store) -> N
     a = [claim(store, "a", f"a-{i}") for i in range(3)]
     b = [claim(store, "b", f"b-{i}") for i in range(2)]
     assert len({(job.assigned_worker_id, job.workspace) for job in a + b}) == 5
-    assert store.workers.assign_job("a", "full", "epoch") is None
-    assert store.workers.assign_job("b", "full", "epoch") is None
+    assert store.assignments.assign_job("a", "full", "epoch") is None
+    assert store.assignments.assign_job("b", "full", "epoch") is None
     other = queued(store, 1, "owner/other")
-    assert store.workers.workspace_demand("a", "epoch") == ["owner/other"]
+    assert store.assignments.workspace_demand("a", "epoch") == ["owner/other"]
     provision(store, "a", repo="owner/other")
     assert claim(store, "a", "other").id == other.id
     assert len(store.workers.list_workers()) == 2
-    assert len(store.workers.get_worker_executions("a")) == 4
+    assert len(store.flows.get_worker_executions("a")) == 4
 
 
 def test_heartbeat_renews_only_its_job_not_sibling_workspaces(store: Store, monkeypatch) -> None:
@@ -114,7 +124,7 @@ def test_heartbeat_renews_only_its_job_not_sibling_workspaces(store: Store, monk
     before = required(store.jobs.get_job(second.id))
     now = store.database.now() + timedelta(seconds=5)
     monkeypatch.setattr(store.database, "_clock", lambda: now)
-    assert store.workers.heartbeat_assignment(first.id, "a", "token-0", "epoch")
+    assert store.assignments.heartbeat_assignment(first.id, "a", "token-0", "epoch")
     renewed = required(store.jobs.get_job(first.id))
     untouched = required(store.jobs.get_job(second.id))
     assert renewed.heartbeat_at == now
@@ -138,7 +148,7 @@ def test_lowered_limit_retains_bound_work_without_filling_old_idle_slots(store: 
             item = item.model_copy(update={"flow_id": first.flow_id})
         assert store.workers.report_workspace("a", "new", item)
     assert claim(store, "a", "revision", "new").id == revision.id
-    assert store.workers.assign_job("a", "over-limit", "new") is None
+    assert store.assignments.assign_job("a", "over-limit", "new") is None
 
 
 def test_competing_claims_cannot_overlap_flow_or_workspace(store: Store) -> None:
@@ -152,7 +162,7 @@ def test_competing_claims_cannot_overlap_flow_or_workspace(store: Store) -> None
 
     def compete(index: int) -> Job | None:
         barrier.wait(timeout=5)
-        return store.workers.assign_job("a", f"token-{index}", "epoch")
+        return store.assignments.assign_job("a", f"token-{index}", "epoch")
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         assignments = [job for job in pool.map(compete, range(4)) if job is not None]
@@ -173,7 +183,7 @@ def test_late_inventory_and_reconnect_cannot_erase_claim(store: Store) -> None:
     revision = enqueue_job(store, job.required_flow_id, JobKind.REVISION)
     connect(store, "a", epoch="new")
     assert not store.workers.report_workspace("a", "epoch", item)
-    assert store.workers.assign_job("a", "new", "new") is None
+    assert store.assignments.assign_job("a", "new", "new") is None
     assert store.workers.report_workspace("a", "new", item.model_copy(update={"flow_id": job.flow_id}))
     assert claim(store, "a", "new", "new").id == revision.id
 
@@ -187,16 +197,16 @@ def test_recovery_before_inventory_page_uses_existing_durable_fence(store: Store
     job = claim(store)
     attempt = required(store.flows.get_flow(job.required_flow_id)).current_attempt_id
     assert attempt is not None
-    assert store.workers.start_assignment(job.id, attempt, "a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, attempt, "a", "token", "epoch")
     connect(store, "a", epoch="new")
     row = next(w for w in store.workers.list_workspaces("a") if w.workspace == job.workspace)
     assert row.inventory_epoch is None
-    assert store.workers.resume_assignment(job.id, "a", "token", "new")
-    assert store.workers.heartbeat_assignment(job.id, "a", "token", "new")
-    assert store.workers.record_assignment_result(
+    assert store.assignments.resume_assignment(job.id, "a", "token", "new")
+    assert store.assignments.heartbeat_assignment(job.id, "a", "token", "new")
+    assert store.assignments.record_assignment_result(
         job.id, "a", "token", "new", Failed(job_id=job.id, assignment_token="token", error="done"),
     ) == "pending"
-    assert store.workers.assign_job("a", "another", "new") is None
+    assert store.assignments.assign_job("a", "another", "new") is None
 
 
 def test_terminal_commit_reuses_binding_without_ack_and_preserves_drain(store: Store) -> None:
@@ -205,7 +215,7 @@ def test_terminal_commit_reuses_binding_without_ack_and_preserves_drain(store: S
     queued(store)
     job = claim(store)
     next_job = enqueue_job(store, job.required_flow_id, JobKind.REVISION)
-    assert store.workers.assign_job("a", "too-soon", "epoch") is None
+    assert store.assignments.assign_job("a", "too-soon", "epoch") is None
     finish(store, job)
     queued(store, 2)
     store.workers.drain("a", True)
@@ -255,10 +265,10 @@ def test_stop_and_terminal_replays_after_reuse_cannot_clear_successor(store: Sto
     assert successor.generation == 2
     assert store.stops.confirm("a", receipt, "epoch")
     assert not store.stops.confirm("a", receipt.model_copy(update={"execution_nonce": "changed"}), "epoch")
-    assert store.workers.record_assignment_result(
+    assert store.assignments.record_assignment_result(
         job.id, "a", "token", "epoch", Failed(job_id=job.id, assignment_token="token", error="test outcome"),
     ) == "applied"
-    assert store.workers.record_assignment_result(
+    assert store.assignments.record_assignment_result(
         job.id, "a", "token", "epoch", Failed(job_id=job.id, assignment_token="token", error="changed"),
     ) == "conflict"
     assert store.workers.report_workspace("a", "epoch", item.model_copy(update={"flow_id": job.flow_id}))
@@ -274,17 +284,17 @@ def test_release_advances_once_and_reconnect_accepts_lower_inventory_without_rev
     # A business transaction can fail after release; neither ownership nor its
     # generation may escape the rollback and advertise a reusable successor.
     with pytest.raises(RuntimeError, match="interrupted"), store.transaction() as tx:
-        assert tx.workers.release_flow_execution(job.required_flow_id)
+        assert tx.flows.release_flow_execution(job.required_flow_id)
         raise RuntimeError("interrupted")
-    assert required(store.workers.get_flow_execution(job.required_flow_id)).released_at is None
+    assert required(store.flows.get_flow_execution(job.required_flow_id)).released_at is None
     assert next(w for w in store.workers.list_workspaces("a") if w.workspace == item.workspace).generation == 1
-    assert store.workers.release_flow_execution(job.required_flow_id)
-    assert not store.workers.release_flow_execution(job.required_flow_id)
+    assert store.flows.release_flow_execution(job.required_flow_id)
+    assert not store.flows.release_flow_execution(job.required_flow_id)
     connect(store, "a", epoch="new")
     assert store.workers.report_workspace("a", "new", item.model_copy(update={"flow_id": job.flow_id}))
     row = next(w for w in store.workers.list_workspaces("a") if w.workspace == item.workspace)
     assert row.generation == 2 and row.current_job_id is None and row.inventory_epoch == "new"
-    assert required(store.workers.get_flow_execution(job.required_flow_id)).released_at is not None
+    assert required(store.flows.get_flow_execution(job.required_flow_id)).released_at is not None
     assert not store.workers.report_workspace("a", "new", item.model_copy(update={"generation": 3}))
     assert not store.workers.report_workspace("a", "new", item.model_copy(update={"repository": "owner/other"}))
     queued(store, 2)
@@ -298,12 +308,12 @@ def test_started_control_failure_retains_unknown_writer_claim(store: Store) -> N
     job = claim(store)
     attempt = required(store.flows.get_flow(job.required_flow_id)).current_attempt_id
     assert attempt is not None
-    assert store.workers.start_assignment(job.id, attempt, "a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, attempt, "a", "token", "epoch")
     store.jobs.record_control_result(job.id, Failed(job_id=job.id, assignment_token="token", error="lost"), "lost")
     assert store.jobs.complete_persisted_result(job.id, JobState.FAILED)
     enqueue_job(store, job.required_flow_id, JobKind.REVISION)
-    assert not store.workers.release_flow_execution(job.required_flow_id)
-    assert store.workers.assign_job("a", "unsafe", "epoch") is None
+    assert not store.flows.release_flow_execution(job.required_flow_id)
+    assert store.assignments.assign_job("a", "unsafe", "epoch") is None
     assert next(w for w in store.workers.list_workspaces("a") if w.workspace == job.workspace).current_job_id == job.id
 
 
@@ -320,13 +330,13 @@ def test_missing_or_wrong_workspace_rejects_every_assignment_api(store: Store, c
             conn.execute("DELETE FROM workers WHERE worker_id='a' AND workspace=%s", (job.workspace,))
         else:
             conn.execute("UPDATE workers SET generation=2 WHERE worker_id='a' AND workspace=%s", (job.workspace,))
-    assert not store.workers.assignment_active(job.id, "a", "token", "epoch")
-    assert not store.workers.start_assignment(job.id, attempt, "a", "token", "epoch")
-    assert not store.workers.heartbeat_assignment(job.id, "a", "token", "epoch")
-    assert not store.workers.resume_assignment(job.id, "a", "token", "epoch")
+    assert not store.assignments.assignment_active(job.id, "a", "token", "epoch")
+    assert not store.assignments.start_assignment(job.id, attempt, "a", "token", "epoch")
+    assert not store.assignments.heartbeat_assignment(job.id, "a", "token", "epoch")
+    assert not store.assignments.resume_assignment(job.id, "a", "token", "epoch")
     assert not store.stops.authorize_dispatch(job.id, "a", "token", "epoch")
-    assert not store.workers.finish_assignment(job.id, "a", "token", JobState.FAILED, "epoch")
-    assert store.workers.record_assignment_result(
+    assert not store.assignments.finish_assignment(job.id, "a", "token", JobState.FAILED, "epoch")
+    assert store.assignments.record_assignment_result(
         job.id, "a", "token", "epoch", Failed(job_id=job.id, assignment_token="token", error="failure"),
     ) == "rejected"
 
@@ -338,17 +348,17 @@ def test_inference_is_one_default_lane_with_local_preference(store: Store) -> No
         provision(store, "a", i)
     for worker in ("a", LOCAL_BUB_WORKER_ID):
         assert store.workers.worker_ready(worker, "epoch", InferenceCapability(adapter_version="test"))
-    first = store.jobs.enqueue_inference(InferenceTask(messages=[InferenceMessage(role="user", content="one")]))
-    assert store.workers.assign_job("a", "remote", "epoch", slot="infer") is None
-    local = store.workers.assign_job(LOCAL_BUB_WORKER_ID, "local", "epoch", slot="infer")
+    first = store.inference.enqueue_inference(InferenceTask(messages=[InferenceMessage(role="user", content="one")]))
+    assert store.assignments.assign_job("a", "remote", "epoch", slot="infer") is None
+    local = store.assignments.assign_job(LOCAL_BUB_WORKER_ID, "local", "epoch", slot="infer")
     assert local is not None
     assert local.id == first.id and local.workspace == identity(LOCAL_BUB_WORKER_ID + ":default")
-    store.jobs.enqueue_inference(InferenceTask(messages=[InferenceMessage(role="user", content="two")]))
-    remote = store.workers.assign_job("a", "remote", "epoch", slot="infer")
+    store.inference.enqueue_inference(InferenceTask(messages=[InferenceMessage(role="user", content="two")]))
+    remote = store.assignments.assign_job("a", "remote", "epoch", slot="infer")
     assert remote is not None
     assert remote.workspace == identity("a:default")
-    store.jobs.enqueue_inference(InferenceTask(messages=[InferenceMessage(role="user", content="three")]))
-    assert store.workers.assign_job("a", "extra", "epoch", slot="infer") is None
+    store.inference.enqueue_inference(InferenceTask(messages=[InferenceMessage(role="user", content="three")]))
+    assert store.assignments.assign_job("a", "extra", "epoch", slot="infer") is None
 
 
 def test_legacy_worker_schema_requires_explicit_physical_identity_migration(postgresql_url: str) -> None:
@@ -372,3 +382,57 @@ def test_obsolete_workspace_state_schema_is_explicitly_rejected(postgresql_url: 
             store.init_db()
     finally:
         store.close()
+
+
+def test_claim_eligibility_matches_the_domain_dispatch_rules(store: Store) -> None:
+    # The claim query repeats Flow.accepts and FlowDelivery.supersedes in SQL so that one
+    # statement filters the whole queue. A rule changed on only one side would dispatch
+    # work the per-job checks refuse (or strand work they allow), so enumerate every
+    # storable Flow stage and delivery state and compare the claimed set with the domain.
+    connect(store, "a", limit=1)
+    # Each stage is reached from a freshly queued Flow through legal events; True archives the round.
+    stages: list[tuple[ArchiveReason | None, tuple[FlowEvent, ...], bool]] = [
+        (None, (), False),
+        (None, (FlowEvent.JOB_CLAIMED,), False),
+        (None, (FlowEvent.DELIVERY_APPLIED,), False),
+        (None, (FlowEvent.RESULT_FAILED,), False),
+        (ArchiveReason.ABANDONED, (FlowEvent.FINALIZATION_REQUESTED, FlowEvent.EXECUTION_UNCERTAIN), False),
+        (ArchiveReason.ABANDONED, (FlowEvent.FINALIZATION_REQUESTED,), False),
+        (ArchiveReason.ABANDONED, (FlowEvent.FINALIZATION_REQUESTED,), True),
+    ]
+    kinds = (JobKind.INITIAL, JobKind.REVISION, JobKind.ARCHIVE)
+    expected: set[int] = set()
+    for index, ((reason, events, archive), delivery_state, kind) in enumerate(product(stages, DeliveryState, kinds)):
+        repo = f"owner/repo-{index}"
+        slot = provision(store, "a", 0, repo)
+        flow = store.flows.create_flow(repo, 1, None)
+        job = enqueue_job(store, flow.id, kind)
+        delivery = store.deliveries.get_or_create_delivery(flow.id, "branch")
+        delivery.state = delivery_state
+        store.deliveries.update_delivery(delivery)
+        with store.flows.locked(flow.id) as context:
+            flows, fresh = store.flows.using(context.database), required(context.flow)
+            fresh.archive_reason = reason
+            for event in events:
+                fresh = flows.transition(fresh, event)
+            if archive:
+                flows.archive_round(fresh, delivery)
+        with store.connection() as connection:
+            # Bind every Flow so that affinity, not the initial-only rule, admits each kind.
+            connection.execute(
+                "INSERT INTO flow_executions(flow_id,worker_id,workspace,generation,repo_identity,bound_at)"
+                " VALUES (%s,'a',%s,1,%s,%s)", (flow.id, slot.workspace, f"a:{repo}", store.now()),
+            )
+        flow = required(store.flows.get_flow(flow.id))
+        if (flow.accepts(kind) and delivery.state is not DeliveryState.CLOSED and not delivery.supersedes(kind)
+                # Cleanup is dispatched for a merged delivery, and for nothing else.
+                and (kind is JobKind.ARCHIVE) == (delivery.state is DeliveryState.MERGED)):
+            expected.add(job.id)
+
+    claimed: set[int] = set()
+    while (assigned := store.assignments.assign_job("a", f"token-{len(claimed)}", "epoch")) is not None:
+        claimed.add(assigned.id)
+
+    # Every storable stage was really built, including the archived and concluded ones.
+    assert {flow.state for flow in store.flows.list_flows()} == set(FlowState)
+    assert expected and claimed == expected

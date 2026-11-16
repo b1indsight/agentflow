@@ -179,7 +179,7 @@ def test_delayed_inference_notice_uses_frozen_job_and_batch_identity(store, revi
     ingest(store, flow, feedback(clock))
     batch, = claim(store, clock)
     task = InferenceTask(messages=[InferenceMessage(role="user", content="Review feedback")])
-    job = store.jobs.enqueue_inference(task, flow_id=flow.id, batch_id=batch.id)
+    job = store.inference.enqueue_inference(task, flow_id=flow.id, batch_id=batch.id)
     resumed = ControlService(database=store.database).resume(archive(store, flow), expected_round_no=1)
     assert resumed.current_round_no == 2
     summary = InferenceSummary(

@@ -65,10 +65,10 @@ from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
+from app.persistence.inference import InferenceStore
 from app.persistence.jobs import JobStore
 from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
-from app.persistence.workers import WorkerStore
 from app.plugins import emit_hook
 
 # Shared with the naming schema. The final lookahead anchors the absolute end in
@@ -98,7 +98,7 @@ class ResultApplication:
         self.jobs = JobStore(database)
         self.result_store = ResultStore(database)
         self.reviews = ReviewStore(database)
-        self.workers = WorkerStore(database)
+        self.inference = InferenceStore(database)
         self.github = github
         self.effects = effects
         self.settings = settings
@@ -158,7 +158,7 @@ class ResultApplication:
         except ValueError:
             failure = InferenceFailure(code="invalid_response")
         with self.database.transaction() as tx, tx.connection() as connection:
-            self.workers.using(tx).complete_inference_result(job.id, failure=failure)
+            self.inference.using(tx).complete_inference_result(job.id, failure=failure)
             current = self.jobs.using(tx).get_job(job.id)
             assert current is not None
             if (current.state is JobState.DONE and job.flow_id is not None
@@ -352,7 +352,6 @@ class ResultApplication:
         flows_tx = self.flows.using(tx)
         jobs_tx = self.jobs.using(tx)
         reviews_tx = self.reviews.using(tx)
-        workers_tx = self.workers.using(tx)
         if job.result_payload is None or job.result_digest is None:
             raise ValueError("result application requires a persisted terminal and digest")
         message = decode_result_inbox(
@@ -477,7 +476,7 @@ class ResultApplication:
                 )
             task = frozen_revision(job)
             delivery = deliveries_tx.get_delivery(flow.id)
-            execution = workers_tx.get_flow_execution(flow.id)
+            execution = flows_tx.get_flow_execution(flow.id)
             mismatch = revision_error or revision_mismatch(task, result)
             if mismatch:
                 return self._failure(base, mismatch)
@@ -546,7 +545,7 @@ class ResultApplication:
         if isinstance(result, ArchiveResult):
             try:
                 verify_archive(
-                    flow, job, result, deliveries=deliveries_tx, jobs=jobs_tx, workers=workers_tx
+                    flow, job, result, deliveries=deliveries_tx, flows=flows_tx, jobs=jobs_tx
                 )
             except ValueError as error:
                 return self._failure(base, str(error))
@@ -608,7 +607,6 @@ class ResultApplication:
         jobs_tx = self.jobs.using(tx)
         result_store_tx = self.result_store.using(tx)
         reviews_tx = self.reviews.using(tx)
-        workers_tx = self.workers.using(tx)
         delivery = deliveries_tx.get_delivery(flow.id)
         retired = delivery is not None and delivery.supersedes(job.kind)
         if plan.run is not None and plan.attempt_id is not None:
@@ -638,7 +636,7 @@ class ResultApplication:
                     plan.archive,
                     deliveries=deliveries_tx,
                     jobs=jobs_tx,
-                    workers=workers_tx,
+                    flows=flows_tx,
                 )
             except ValueError as error:
                 raise ResultPending(str(error)) from error

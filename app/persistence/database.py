@@ -129,22 +129,24 @@ class Database:
         with self._bound_connection.cursor(row_factory=class_row(Job)) as cursor:
             return cursor.execute("SELECT * FROM jobs WHERE id=%s FOR UPDATE", (job_id,)).fetchone()
 
-    @staticmethod
-    def _lock_worker(connection: Connection[Row], worker_id: str) -> None:
+    def lock_worker(self, worker_id: str) -> None:
         """Keep assignment writers ordered worker -> job/binding, like workflow completion."""
-        connection.execute(
+        if self._bound_connection is None:
+            raise RuntimeError("worker lock requires a transaction")
+        self._bound_connection.execute(
             "SELECT worker_id,workspace FROM workers WHERE worker_id=%s ORDER BY workspace FOR UPDATE",
             (worker_id,),
         ).fetchall()
 
-    @staticmethod
-    def _lock_workers(connection: Connection[Row]) -> None:
+    def lock_workers(self) -> None:
         """Fence cross-slot selection/recovery before taking any Flow or job lock.
 
         Inference's local preference compares slots across workers. Lock in the same
         deterministic order as workflow locking, never skip a locked local candidate.
         """
-        connection.execute(
+        if self._bound_connection is None:
+            raise RuntimeError("worker lock requires a transaction")
+        self._bound_connection.execute(
             "SELECT worker_id,workspace FROM workers ORDER BY worker_id,workspace FOR UPDATE"
         ).fetchall()
 

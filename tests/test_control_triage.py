@@ -121,7 +121,7 @@ async def test_slow_judge_keeps_settle_available_without_a_second_execution(tria
 
 
 async def finish_inference(store, subject, reply: str | InferenceFailure):
-    job = store.workers.assign_job("plain", "token", "epoch", slot="infer")
+    job = store.assignments.assign_job("plain", "token", "epoch", slot="infer")
     task = job.inference.current_task
     response = InferenceResult(
         **result_header(task.request_id), method="worker.infer",
@@ -130,7 +130,7 @@ async def finish_inference(store, subject, reply: str | InferenceFailure):
             text=reply, adapter_version="codex/v1") if isinstance(reply, str) else None,
         failure=reply if isinstance(reply, InferenceFailure) else None,
     )
-    assert store.workers.record_assignment_result(
+    assert store.assignments.record_assignment_result(
         job.id, "plain", job.assignment_token, "epoch", response,
     ) == "pending"
     await subject.results.apply(job.id)
