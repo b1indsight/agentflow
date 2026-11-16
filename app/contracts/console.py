@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from app.domain.inference_models import AdapterVersion, FailureCode, StopReason
 from app.domain.models import ArchiveReason, FlowState
@@ -99,6 +108,18 @@ class ResumeRequest(ConsoleModel):
 
 class RetryRequest(ConsoleModel):
     """Retry the existing Flow without allowing clients to override its safety checks."""
+
+
+class AppendAgentTaskRequest(ConsoleModel):
+    """An idempotent Agent task instruction for an existing Flow."""
+
+    request_id: UUID
+    instruction: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True, min_length=1, max_length=16000, pattern=r"^[^\x00]*$"
+        ),
+    ]
 
 
 class FlowSummary(ConsoleModel):

@@ -187,6 +187,45 @@ export const retryFlow = (id: number) =>
     body: "{}",
   });
 
+export async function appendAgentTask(
+  id: number,
+  instruction: string,
+  requestId: string,
+) {
+  try {
+    return await api<FlowDetail>(
+      `/api/flows/${id}/agent-tasks`,
+      {},
+      undefined,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction, request_id: requestId }),
+      },
+    );
+  } catch (error) {
+    if (error instanceof ApiError) {
+      const refusals: Record<string, string> = {
+        agent_task_busy:
+          "Flow 仍有任务、反馈处理或结果待确认，请刷新后再发送。",
+        agent_task_unavailable:
+          "仅支持已有打开的 PR 和有效执行绑定的活跃 Flow。",
+        agent_task_request_conflict:
+          "此请求已用于其他内容，请刷新核对后再发送。",
+        flow_not_found: "Flow 不存在，请返回看板。",
+      };
+      if (error.status === 401 || error.status === 403)
+        throw new Error("登录失效或没有发送权限，请重新登录后再操作。");
+      if (error.status === 422)
+        throw new Error("请输入 1–16000 字的有效内容。");
+      if (refusals[error.message]) throw new Error(refusals[error.message]);
+    }
+    throw new Error(
+      "无法确认是否已发送。请先用顶部刷新核对；当前页面重试会复用请求，避免重复创建任务。",
+    );
+  }
+}
+
 const retryRefusals: Record<string, string> = {
   flow_not_found: "Flow 不存在，请刷新确认。",
   retry_no_change: "当前没有可重试的任务，请刷新确认状态。",

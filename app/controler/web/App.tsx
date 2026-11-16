@@ -23,6 +23,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  appendAgentTask,
   archiveFlow,
   getFlow,
   getFlows,
@@ -47,6 +48,7 @@ import {
 import { ConversationSources, SourceList } from "./ConversationSources";
 import { CreateFlow } from "./CreateFlow";
 import { FileViewer } from "./FileViewer";
+import { AgentTaskInput } from "./AgentTaskInput";
 import type { WorkerFile } from "./files";
 import { InferenceNotices } from "./InferenceNotices";
 import { actionLabel, archiveReasonLabels, flowLabel, phases } from "./phases";
@@ -277,9 +279,9 @@ function Detail({
       () => positions.get("collapsed") === 1,
     ),
     [nav, setNav] = useState(false);
-  const [pending, setPending] = useState<"archive" | "resume" | "retry" | null>(
-    null,
-  );
+  const [pending, setPending] = useState<
+    "archive" | "resume" | "retry" | "agent-task" | null
+  >(null);
   const writing = useRef(false);
   const [writeError, setWriteError] = useState("");
   const [writeNotice, setWriteNotice] = useState("");
@@ -1160,6 +1162,34 @@ function Detail({
               </section>
             </TabsContent>
           </div>
+          <AgentTaskInput
+            disabledReason={
+              pending !== null
+                ? "正在提交，请稍候。"
+                : flow.lifecycle !== "review" || !flow.pr_number
+                  ? "等待当前任务完成并进入待审核后发送，可先填写补充要求。"
+                  : ""
+            }
+            onSubmit={async (instruction, requestId) => {
+              if (writing.current)
+                throw new Error("正在提交其他操作，请稍候。");
+              writing.current = true;
+              setPending("agent-task");
+              try {
+                const value = await appendAgentTask(id, instruction, requestId);
+                onChanged();
+                if (mounted.current)
+                  setFlow((prior) =>
+                    prior && prior.state_version > value.state_version
+                      ? prior
+                      : value,
+                  );
+              } finally {
+                writing.current = false;
+                if (mounted.current) setPending(null);
+              }
+            }}
+          />
         </main>
       </Tabs>
     </div>

@@ -23,6 +23,7 @@ from app.domain.models import (
     WorkerView,
 )
 from app.github import PullRequestMerge
+from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.assignments import AssignmentStore
 from app.persistence.console_sync import ConsoleSyncStore
@@ -56,6 +57,10 @@ class RetryRejected(ValueError):
     def __init__(self, code: RetryFailureCode, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class AgentTaskRejected(ValueError):
+    """An Agent task cannot safely be appended to the Flow."""
 
 
 class ControlService:
@@ -285,6 +290,67 @@ class ControlService:
         self._fire("on_merged", flow=flow)
         if flow.state is FlowState.ARCHIVED:
             self._fire("on_archived", flow=flow)
+        self._jobs_available()
+
+    def append_agent_task(self, flow_id: int, instruction: str, request_id: str) -> None:
+        """Atomically append an Agent task using the Flow's existing revision pipeline."""
+        with self.flows.locked(flow_id) as context:
+            tx, fresh = context.database, context.flow
+            if fresh is None:
+                raise AgentTaskRejected("flow_not_found")
+            jobs = self.jobs.using(tx)
+            history = jobs.list_jobs(flow_id)
+            # Preserve idempotency for tasks persisted before the input path was renamed.
+            previous = next((job for job in history
+                if (job.payload or {}).get("agent_task_request_id",
+                    (job.payload or {}).get("console_request_id")) == request_id), None)
+            if previous is not None:
+                if (previous.payload or {}).get("instruction") != instruction:
+                    raise AgentTaskRejected("agent_task_request_conflict")
+                return
+            delivery = self.deliveries.using(tx).get_delivery(flow_id)
+            execution = self.flows.using(tx).get_flow_execution(flow_id)
+            reviews = self.reviews.using(tx)
+            if (
+                fresh.state is not FlowState.REVIEW
+                or fresh.current_attempt_id is None
+                or fresh.installation_id is None
+                or delivery is None
+                or delivery.state is not DeliveryState.OPEN
+                or execution is None
+                or execution.released_at is not None
+            ):
+                raise AgentTaskRejected("agent_task_unavailable")
+            if (
+                self.stops.using(tx).has_pending(flow_id)
+                or any(job.state in {JobState.QUEUED, JobState.RUNNING} for job in history)
+                or jobs.reopen_blocked(flow_id)
+                or reviews.has_active_batch(flow_id)
+            ):
+                raise AgentTaskRejected("agent_task_busy")
+            batch = reviews.create_batch(
+                fresh, trigger="strong", feedback=[],
+                open_points=reviews.waiting_open_points(flow_id),
+            )
+            job = jobs.enqueue_job(fresh, JobKind.REVISION, {
+                "batch_id": batch.id, "instruction": instruction,
+                "purpose": "revise", "agent_task_request_id": request_id,
+            })
+            reviews.advance(batch.id, job)
+            ActivityStore(tx).append(
+                flow_id,
+                Observation(
+                    key=f"agent_task:{request_id}",
+                    source="agent_task",
+                    kind="message",
+                    round_no=fresh.current_round_no,
+                    author="user",
+                    body=instruction,
+                    occurred_at=tx.now(),
+                    updated_at=tx.now(),
+                    metadata={"job_id": job.id, "attempt_id": fresh.current_attempt_id},
+                ),
+            )
         self._jobs_available()
 
     def retry(self, flow: Flow) -> bool:

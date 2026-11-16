@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- 详情输入统一为向现有 Flow 追加一次 Agent 任务：API、Service 和前端组件使用 Agent task 命名，
+  继续复用普通 REVISION 与共享任务编辑器。删除 Service 的 author 参数，会话输入使用固定 user 角色，
+  不再保存 owner 邮箱；保留历史请求的幂等重放能力。
 - INITIAL、REVISION、ARCHIVE 的任务准备与结果计划构造分别归入对应 workflow 模块；命名跟随 INITIAL，
   answer/revise 的远端核验跟随 REVISION，共用有界读取和计划构造。公共入口保留派发复查、失败批次绑定、
   冻结计划恢复及原子提交，`retry` 的共同生命周期检查不变；不改数据库、wire、结果格式或副作用顺序。

@@ -5,6 +5,7 @@ from datetime import timedelta
 from threading import Barrier, get_ident
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -15,7 +16,16 @@ from app.controler.api import create_app
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workflow.service import ControlService
 from app.domain.flow_policy import FlowEvent
-from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind
+from app.domain.models import (
+    ArchiveReason,
+    DeliveryState,
+    FlowState,
+    JobKind,
+    JobState,
+    ReviewItemKind,
+)
+from app.domain.review_models import BatchState, FeedbackUpdate
+from app.github import PullRequest
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
@@ -23,10 +33,13 @@ from app.persistence.console_sync import ConsoleSyncStore
 from app.telemetry.metrics import Metrics
 from tests.access import AccessIssuer
 from tests.flow_fixtures import apply_flow_event, enqueue_job
+from tests.github import RecordingGitHub
 from tests.test_cancel_drain import running
+from tests.test_coordinator import apply_result, coordinator
 from tests.test_merge import route_merge
+from tests.test_revision_delivery import verified_result
 from tests.test_workflow_transactions import accepted_coding
-from tests.workspace_fixtures import register_worker
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 @pytest.fixture
@@ -310,6 +323,216 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
         assert console.headers["referrer-policy"] == "no-referrer"
         console_runtime.settings.access_owner_email = None
         assert client.get("/console/", headers=headers).status_code == 503
+
+
+@pytest.fixture
+def flow_ready_for_agent_task(store):
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    attempt = store.flows.create_attempt(flow.id)
+    attempt.codex_session_id = "original-session"
+    store.flows.update_attempt(attempt)
+    flow.current_attempt_id = attempt.id
+    store.flows.update_flow_metadata(flow)
+    register_worker(store, "worker-1", repo=flow.repo, epoch="epoch")
+    initial = enqueue_job(store, flow.id, JobKind.INITIAL)
+    assert store.assignments.assign_job("worker-1", "token", "epoch") is not None
+    assert store.assignments.finish_assignment(initial.id, "worker-1", "token", JobState.DONE, "epoch")
+    report_settled(store, initial.id, epoch="epoch")
+    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
+    delivery.head_sha, delivery.base_branch = "abc123", "main"
+    store.deliveries.update_delivery(delivery)
+    return apply_flow_event(store, flow, FlowEvent.DELIVERY_APPLIED)
+
+
+@pytest.mark.parametrize("request_key", ["agent_task_request_id", "console_request_id"])
+async def test_append_agent_task_uses_revision_pipeline_and_records_input_once(
+    console_runtime, store, flow_ready_for_agent_task, recording_resources, request_key
+):
+    # A lost response must not duplicate work, including after the ordinary revision completes.
+    flow = flow_ready_for_agent_task
+    path = f"/api/flows/{flow.id}/agent-tasks"
+    body = {"instruction": "  添加键盘导航\n保留现有行为  ", "request_id": str(uuid4())}
+    notifications = []
+    console_runtime.gateway.wake_all = lambda: notifications.append(
+        (get_ident(), len(store.jobs.list_jobs(flow.id)))
+    )
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        loop_thread = client.portal.call(get_ident)
+        response = client.post(path, json=body, headers=headers)
+        assert response.status_code == 200
+        assert response.json()["phase"] == "queued"
+        assert response.json()["branch"] == "flow/7"
+        assert client.post(path, json=body, headers=headers).status_code == 200
+        conflict = client.post(path, json=body | {"instruction": "不同要求"}, headers=headers)
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"] == "agent_task_request_conflict"
+        client.portal.call(lambda: None)
+        page = client.get(f"/api/flows/{flow.id}/activity", headers=headers).json()
+    assert notifications == [(loop_thread, 2)]
+    messages = [item for item in page["items"] if item["source"] == "agent_task"]
+    assert [item["body"] for item in messages] == ["添加键盘导航\n保留现有行为"]
+    assert messages[0]["round_no"] == flow.current_round_no
+    assert messages[0]["author"] == "user"
+    job = store.jobs.list_jobs(flow.id)[-1]
+    assert job.kind is JobKind.REVISION
+    assert job.payload["agent_task_request_id"] == body["request_id"]
+    assert store.reviews.for_job(job).trigger == "strong"
+    assigned = store.assignments.assign_job("worker-1", "next-token", "epoch")
+    assert assigned.id == job.id
+    github = RecordingGitHub()
+    github.pull_request = PullRequest(
+        repo=flow.repo, number=17, state="open", head_branch="flow/7", head_sha="abc123",
+        head_repository=flow.repo, base_branch="main",
+    )
+    subject = coordinator(store, github)
+    task = await subject.prepare(assigned)
+    assert task.flow_id == flow.id and task.attempt_id == flow.current_attempt_id
+    assert task.session_id == "original-session" and task.branch == "flow/7"
+    assert task.pr_number == 17 and task.instruction == "添加键盘导航\n保留现有行为"
+    assert task.feedback == [] and task.purpose == "revise"
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-1", "next-token", "epoch")
+    subject.mark_started(assigned, task, "worker-1")
+    assert await apply_result(subject, assigned, verified_result(task)) is JobState.DONE
+    assert store.reviews.for_job(job).state is BatchState.COMPLETED
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
+    assert store.flows.get_current_attempt(flow).codex_session_id == "original-session"
+    if request_key == "console_request_id":
+        # Jobs accepted before the rename must still deduplicate after an upgrade.
+        with store.connection() as connection:
+            connection.execute(
+                "UPDATE jobs SET payload=(payload-'agent_task_request_id') || "
+                "jsonb_build_object('console_request_id',payload->'agent_task_request_id') WHERE id=%s",
+                (job.id,),
+            )
+    with TestClient(create_app(console_runtime)) as client:
+        assert client.post(path, json=body, headers=console_runtime.issuer.headers()).status_code == 200
+        assert client.post(path, json=body | {"instruction": "不同要求"},
+                           headers=console_runtime.issuer.headers()).status_code == 409
+    assert len(store.jobs.list_jobs(flow.id)) == 2
+
+
+@pytest.mark.parametrize("scenario", [
+    "blocked", "archived", "finalizing", "closed", "merged", "no_binding", "no_attempt",
+    "queued", "running", "pending_result", "unknown_execution", "triage", "stop",
+])
+def test_append_agent_task_refuses_unsafe_states(console_runtime, store, flow_ready_for_agent_task, scenario):
+    flow = flow_ready_for_agent_task
+    with store.connection() as connection:
+        if scenario in ("archived", "finalizing"):
+            connection.execute(
+                "UPDATE flows SET state=%s,archive_reason='abandoned',"
+                " archived_at=CASE WHEN %s='archived' THEN now() END WHERE id=%s",
+                (scenario, scenario, flow.id),
+            )
+        elif scenario == "blocked":
+            connection.execute("UPDATE flows SET state=%s WHERE id=%s", (scenario, flow.id))
+        elif scenario in ("closed", "merged"):
+            connection.execute("UPDATE flow_deliveries SET state=%s WHERE flow_id=%s", (scenario, flow.id))
+        elif scenario == "no_binding":
+            connection.execute("UPDATE flow_executions SET released_at=now() WHERE flow_id=%s", (flow.id,))
+        elif scenario == "no_attempt":
+            connection.execute("UPDATE flows SET current_attempt_id=NULL WHERE id=%s", (flow.id,))
+        elif scenario in ("queued", "running"):
+            connection.execute("UPDATE jobs SET state=%s WHERE flow_id=%s", (scenario, flow.id))
+        elif scenario == "pending_result":
+            connection.execute("UPDATE jobs SET result_received_at=now(),result_applied_at=NULL WHERE flow_id=%s", (flow.id,))
+        elif scenario in ("unknown_execution", "stop"):
+            connection.execute("UPDATE jobs SET started_at=now() WHERE flow_id=%s", (flow.id,))
+        elif scenario == "triage":
+            with store.flows.locked(flow.id) as context:
+                store.reviews.using(context.database).create_batch(
+                    context.flow, trigger="discussion", feedback=[], open_points=[],
+                )
+    if scenario == "stop":
+        with store.flows.locked(flow.id) as context:
+            store.stops.using(context.database).request(flow.id)
+        assert store.stops.has_pending(flow.id)
+    with TestClient(create_app(console_runtime)) as client:
+        response = client.post(f"/api/flows/{flow.id}/agent-tasks", headers=console_runtime.issuer.headers(),
+                               json={"instruction": "继续", "request_id": str(uuid4())})
+        assert response.status_code == 409
+    assert len(store.jobs.list_jobs(flow.id)) == 1
+    console_runtime.gateway.wake_all.assert_not_called()
+
+
+def test_append_agent_task_requires_owner_same_origin_and_valid_input(console_runtime, store, flow_ready_for_agent_task):
+    path = f"/api/flows/{flow_ready_for_agent_task.id}/agent-tasks"
+    body = {"instruction": "继续", "request_id": str(uuid4())}
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        assert client.post(path, json=body).status_code == 401
+        assert client.post(path, json=body, headers=console_runtime.issuer.headers(
+            email="other@example.com")).status_code == 403
+        assert client.post(path, json=body, headers=headers | {"Origin": "https://evil.test"}).status_code == 403
+        assert client.post(path, json=body | {"force": True}, headers=headers).status_code == 422
+        assert client.post(path, json=body | {"author": "someone@example.com"}, headers=headers).status_code == 422
+        for text in ("", " \n ", "x" * 16001, "bad\0text"):
+            assert client.post(path, json=body | {"instruction": text}, headers=headers).status_code == 422
+        assert client.post(path, json=body | {"request_id": "invalid"}, headers=headers).status_code == 422
+        assert client.post("/api/flows/99999/agent-tasks", json=body, headers=headers).status_code == 404
+    assert len(store.jobs.list_jobs(flow_ready_for_agent_task.id)) == 1
+
+
+def test_concurrent_agent_task_requests_enqueue_once(console_runtime, store, flow_ready_for_agent_task):
+    # Two browser tabs can submit the same request before either receives a response.
+    barrier = Barrier(2)
+    body = {"instruction": "继续处理边界情况", "request_id": str(uuid4())}
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+
+        def submit():
+            barrier.wait()
+            return client.post(f"/api/flows/{flow_ready_for_agent_task.id}/agent-tasks", json=body, headers=headers)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(pool.map(lambda _: submit(), range(2)))
+        assert [response.status_code for response in responses] == [200, 200]
+    assert len(store.jobs.list_jobs(flow_ready_for_agent_task.id)) == 2
+
+
+def test_append_agent_task_preserves_waiting_questions_and_due_feedback(console_runtime, store, flow_ready_for_agent_task):
+    # Already-relayed feedback keeps its deadline and cannot collide with the owner batch generation.
+    flow = flow_ready_for_agent_task
+    store.reviews.ingest(flow.id, "feedback", "issue_comment", {}, FeedbackUpdate(
+        kind=ReviewItemKind.CONVERSATION, github_id=101, author="alice", body="Which limit?",
+        updated_at=flow.created_at,
+    ), settle_seconds=0, submit_grace_seconds=0)
+    waiting = store.reviews.claim_due()[0]
+    store.reviews.relayed(waiting)
+    store.reviews.complete(waiting.id, BatchState.WAITING, [], ["Which limit?"])
+    with store.connection() as connection:
+        connection.execute("UPDATE review_buffers SET due_at=now(),force_triage=TRUE WHERE flow_id=%s", (flow.id,))
+        before = connection.execute("SELECT due_at,force_triage FROM review_buffers WHERE flow_id=%s", (flow.id,)).fetchone()
+    with TestClient(create_app(console_runtime)) as client:
+        response = client.post(f"/api/flows/{flow.id}/agent-tasks", headers=console_runtime.issuer.headers(),
+                               json={"instruction": "Use 10", "request_id": str(uuid4())})
+        assert response.status_code == 200
+    batch = store.reviews.for_job(store.jobs.list_jobs(flow.id)[-1])
+    assert batch.open_points == ["Which limit?"]
+    assert [item.body for item in store.reviews.pending(flow.id)] == ["Which limit?"]
+    with store.connection() as connection:
+        assert connection.execute("SELECT due_at,force_triage FROM review_buffers WHERE flow_id=%s", (flow.id,)).fetchone() == before
+    store.reviews.complete(batch.id, BatchState.COMPLETED, [], [])
+    resumed = store.reviews.claim_due()[0]
+    assert resumed.id != batch.id and resumed.open_points == ["Which limit?"]
+    assert resumed.generation > batch.generation > waiting.generation
+    assert [item.github_id for item in resumed.feedback] == [101]
+
+
+def test_append_agent_task_rolls_back_when_input_cannot_be_recorded(console_runtime, store, flow_ready_for_agent_task, monkeypatch):
+    path = f"/api/flows/{flow_ready_for_agent_task.id}/agent-tasks"
+    body = {"instruction": "继续", "request_id": str(uuid4())}
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        with monkeypatch.context() as patch:
+            patch.setattr(ActivityStore, "append", Mock(side_effect=RuntimeError("archive unavailable")))
+            with pytest.raises(RuntimeError, match="archive unavailable"):
+                client.post(path, json=body, headers=headers)
+        assert len(store.jobs.list_jobs(flow_ready_for_agent_task.id)) == 1
+        console_runtime.gateway.wake_all.assert_not_called()
+        assert client.post(path, json=body, headers=headers).status_code == 200
 
 
 @pytest.mark.parametrize("command", ["archive", "resume", "retry"])

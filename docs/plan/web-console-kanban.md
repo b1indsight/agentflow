@@ -2173,3 +2173,60 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
 - **Limits:** 本轮没有尝试消除 [064] 已说明并获接受的大跨度跳转短暂留白，也不据此
   声称总元数据内存固定。保留既有构建体积提示；受控 API 与 Chromium 检查不等于
   真实后端、其他浏览器或线上验收。
+
+### [068] — 2026-11-16 — 详情输入同步主线并复用 revision
+
+- **Requirement / scope:** [PR #177](https://github.com/b1indsight/agentflow/pull/177)
+  的反馈 item 19 / version 1 / comment 5920577870 要求先同步代码，并减少 Service
+  之后的专用后端实现。合入主线的六态生命周期、执行绑定和按 JobKind 分组的工作流，
+  保留当前分支及已有交付，不改写历史或创建新 PR。
+- **Implemented decision:** `ControlService.continue_flow` 在已有 workflow 锁内检查
+  当前 PR、Attempt、执行绑定及未完成工作，原子记录输入并排入普通 `REVISION`。
+  删除专用的 `enqueue_continuation`、Job 查询／忙碌检查和 `console` trigger；
+  复用现有 JobStore、停止围栏以及 review 批次的准备、执行、重试和交付校验。
+  GitHub 反馈与详情输入共用 `ReviewStore.create_batch`，集中分配 generation，
+  不改变待处理反馈的 deadline、消费状态和待澄清问题。
+- **Alternatives / complexity:** 直接排入无批次 Job 会破坏现有 revision 的冻结输入和
+  结果身份校验；把本地输入伪装成 GitHub 评论又会引入虚假的远端身份。因此保留现有
+  批次契约，只提取两个调用者共用的创建操作，不新增 worker、结果处理或恢复分支。
+  本次主要删除重复机制和提取既有逻辑，无新增可独立消融的工作流机制。
+- **Shared editor:** 从主线新建表单提取 `FlowTaskInput`，创建与详情共用粘贴换行和
+  光标处理。详情提交包装命名为 `ContinueFlowInput`，避免在大小写不敏感文件系统上
+  与已有 `flowInput.ts` 冲突。沿用直角与雾蓝风格，页签切换保留草稿，未知响应重试
+  复用请求身份，输入法确认不触发发送。
+- **Executed validation:** `uv run ruff check app tests`、`uv run mypy app tests`、
+  PostgreSQL 上的完整 pytest、前端单测、格式、类型／生产构建及完整 Playwright
+  回归通过；`scripts/build_console.py` 与 `uv build --no-sources` 打包通过。
+  API 回归覆盖同 session 修订的准备和结果应用、并发去重、安全拒绝、事务回滚以及
+  待处理反馈／问题保留。手机预取用例改为按既有规则在没有完整可见行时取相交行，
+  保持追加期间像素位置与提前加载断言，未修改生产滚动实现。
+- **Visual evidence / limits:** 已检查桌面／手机输入、错误、提交中、成功及创建表单的
+  实际截图；[交互式截图](https://ampcode.com/artifacts/visuals/flow-41e2d49e-4904-4868-8cc9-aa5c61e7369e)
+  可切换宽度和状态。浏览器使用受控 API，后端使用隔离 PostgreSQL；这些检查不代表
+  真实 Agent、GitHub、Access 或线上验收。保留既有 bundle 体积和 TestClient 弃用提示。
+
+### [069] — 2026-11-16 — 统一为向 Flow 追加 Agent 任务
+
+- **Requirement / scope:** [PR #177 评论 4586641953](https://github.com/b1indsight/agentflow/pull/177#discussion_r4586641953)
+  （item 23 / version 1）要求解释 `author` 并把整条路径表达为向现有 Flow 追加一次
+  Agent 任务。item 22 / version 1 / comment 5921174483 正文为空，未据此推测额外要求。
+- **Implemented decision:** 将 [068] 的 `continue_flow`、`ContinueRequest` 和
+  `ContinueFlowInput` 统一为 `append_agent_task`、`AppendAgentTaskRequest` 和
+  `AgentTaskInput`；HTTP 使用 `POST /api/flows/{id}/agent-tasks`，输入字段为
+  `instruction`、`request_id`，拒绝码使用 `agent_task_*`。共享 `FlowTaskInput`
+  以及现有 revision 的状态检查、批次、执行、事务和通知方式均保持不变。
+- **Attribution / alternatives:** 原 `author` 只用于 Observation 的显示与相邻作者分组，
+  调用方恒传控制台 owner 邮箱，不参与授权或调度。删除此 Service 参数，活动记录使用
+  `agent_task` 来源与固定 `user` 角色，不再新增邮箱记录；保留历史活动原貌。
+  不增加调用者选项、任务种类、worker 分支或新执行层。
+- **Persisted identity:** 新任务保存 `agent_task_request_id`，去重时仍读取历史
+  `console_request_id`，避免升级后重放同一请求再次执行；不迁移历史 Job 或活动。
+  此未合并功能的旧 `/continue` 接口不保留别名，前后端随同一提交更新。
+- **Validation:** 扩展既有 API 回归，覆盖新合同、固定角色、拒绝伪造 author、同 session
+  revision 准备与结果应用，以及新旧持久化请求身份的重放和冲突。旧实现对新接口返回
+  404，修改后针对性回归通过。此次没有新增工作流机制，无额外机制的消融实验。
+  PostgreSQL 完整 pytest、Ruff、Mypy、前端单测、格式、类型／构建、完整 Playwright
+  以及分发包资源检查通过。已检查桌面／手机的输入、异常、提交中和成功截图，保留
+  受控 API、既有 bundle 体积与 TestClient 提示的验收边界。验证日志为本地
+  `.amp/in/agent-task-{targeted,pytest,mypy,e2e,package}.log`；推送前审查结果另记于
+  [审查文档](https://ampcode.com/artifacts/revision-281ae56d-9ae6-442c-9bcc-5e66f0c5dee3)。

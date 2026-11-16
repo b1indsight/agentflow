@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.console import (
     ActivityPage,
+    AppendAgentTaskRequest,
     ArchiveRequest,
     ConsoleFailure,
     ContentPage,
@@ -27,7 +28,7 @@ from app.contracts.console import (
     UpdateSettingsRequest,
 )
 from app.controler.runtime import ServerRuntime
-from app.controler.workflow.service import ControlService, RetryRejected
+from app.controler.workflow.service import AgentTaskRejected, ControlService, RetryRejected
 from app.domain.models import CodingModelSettings
 from app.github import GitHubError, GitHubErrorKind
 from app.persistence.activity import ActivityStore
@@ -285,6 +286,31 @@ async def retry(request: Request, flow_id: FlowId, body: RetryRequest) -> FlowDe
             ) from error
         if not accepted:
             raise ConsoleFailure("retry_no_change")
+        return ConsoleStore(runtime.database).detail(flow_id)
+
+    return await runtime.console.db(command)
+
+
+@router.post("/flows/{flow_id}/agent-tasks", response_model=FlowDetail)
+async def append_agent_task(request: Request, flow_id: FlowId, body: AppendAgentTaskRequest) -> FlowDetail:
+    """Append one Agent task without creating a new Flow, branch, or PR."""
+    _require_same_origin_json(request)
+    runtime: ServerRuntime = request.app.state.runtime
+    loop = asyncio.get_running_loop()
+
+    def notify_jobs() -> None:
+        loop.call_soon_threadsafe(runtime.gateway.wake_all)
+
+    def command() -> FlowDetail:
+        service = ControlService(
+            database=runtime.database,
+            jobs_available=notify_jobs,
+        )
+        try:
+            service.append_agent_task(flow_id, body.instruction, str(body.request_id))
+        except AgentTaskRejected as error:
+            code = str(error)
+            raise ConsoleFailure(code, 404 if code == "flow_not_found" else 409) from error
         return ConsoleStore(runtime.database).detail(flow_id)
 
     return await runtime.console.db(command)

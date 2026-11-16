@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta
+from typing import Literal
 
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
@@ -377,26 +379,17 @@ class ReviewStore(Repository):
             return None
         with self._db.connection() as connection:
             buffer = connection.execute(
-                "SELECT generation,force_triage FROM review_buffers WHERE flow_id=%s AND due_at<=%s",
+                "SELECT force_triage FROM review_buffers WHERE flow_id=%s AND due_at<=%s",
                 (flow_id, self._db.now()),
             ).fetchone()
-            active = connection.execute(
-                "SELECT 1 FROM review_batches WHERE flow_id=%s AND state IN ('ready','processing')",
-                (flow_id,),
-            ).fetchone()
-            if buffer is None or active is not None:
+            if buffer is None or self.has_active_batch(flow_id):
                 return None
             feedback = sorted(self.pending(flow_id, for_batch=True), key=lambda item: item.item_id)
             has_unused_signal = self._has_unused_signal(flow_id, feedback)
             connection.execute("UPDATE review_buffers SET due_at=NULL,force_triage=FALSE WHERE flow_id=%s", (flow_id,))
-            previous = connection.execute(
-                "SELECT open_points FROM review_batches WHERE flow_id=%s AND state='waiting'"
-                " ORDER BY id",
-                (flow_id,),
-            ).fetchall()
             decision = decide_review_batch(
                 feedback, has_unused_signal=has_unused_signal, force_triage=buffer["force_triage"],
-                previous_open_points=[p for row in previous for p in row["open_points"]],
+                previous_open_points=self.waiting_open_points(flow_id),
             )
             if decision is None:
                 return None
@@ -404,25 +397,68 @@ class ReviewStore(Repository):
                 "UPDATE review_batches SET state='completed' WHERE flow_id=%s AND state='waiting'",
                 (flow_id,),
             )
+            batch = self.create_batch(flow, trigger=decision.trigger, feedback=feedback,
+                                      open_points=decision.open_points)
+            if decision.instruction is not None:
+                job = JobStore(self._db).enqueue_job(flow, JobKind.REVISION,
+                    {"batch_id": batch.id, "instruction": decision.instruction, "purpose": "revise"})
+                self.advance(batch.id, job)
+            return self.get_batch(batch.id)
+
+    def has_active_batch(self, flow_id: int) -> bool:
+        """Include Judge prerequisites, which do not yet own a worker job."""
+        with self._db.connection() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM review_batches WHERE flow_id=%s"
+                    " AND state IN ('ready','processing')",
+                    (flow_id,),
+                ).fetchone()
+                is not None
+            )
+
+    def waiting_open_points(self, flow_id: int) -> list[str]:
+        """Carry unresolved questions into the next review or owner-requested revision."""
+        with self._db.connection() as connection:
+            rows = connection.execute(
+                "SELECT open_points FROM review_batches WHERE flow_id=%s AND state='waiting'"
+                " ORDER BY id", (flow_id,),
+            ).fetchall()
+        return list(dict.fromkeys(point for row in rows for point in row["open_points"]))
+
+    def create_batch(
+        self, flow: Flow, *, trigger: Literal["strong", "discussion"],
+        feedback: list[ReviewFeedback], open_points: Sequence[str],
+    ) -> ReviewBatch:
+        """Freeze ordinary revision inputs under the caller's workflow lock.
+
+        Allocate every batch's generation here, so independent inputs cannot collide
+        with a pending GitHub deadline or change which feedback has been consumed.
+        """
+        assert flow.current_attempt_id is not None
+        with self._db.connection() as connection:
+            generation = connection.execute(
+                "INSERT INTO review_buffers(flow_id,generation) VALUES(%s,1)"
+                " ON CONFLICT(flow_id) DO UPDATE SET generation=review_buffers.generation+1"
+                " RETURNING generation",
+                (flow.id,),
+            ).fetchone()
+            assert generation is not None
             row = connection.execute(
                 "INSERT INTO review_batches(flow_id,attempt_id,generation,state,trigger,feedback,"
                 " open_points,created_at) VALUES(%s,%s,%s,'ready',%s,%s,%s,%s) RETURNING id",
                 (
-                    flow_id,
-                    attempt_id,
-                    buffer["generation"],
-                    decision.trigger,
+                    flow.id,
+                    flow.current_attempt_id,
+                    generation["generation"],
+                    trigger,
                     Jsonb([f.model_dump(mode="json") for f in feedback]),
-                    Jsonb(list(decision.open_points)),
+                    Jsonb(list(open_points)),
                     self._db.now(),
                 ),
             ).fetchone()
             assert row is not None
-            if decision.instruction is not None:
-                job = JobStore(self._db).enqueue_job(flow, JobKind.REVISION,
-                    {"batch_id": row["id"], "instruction": decision.instruction, "purpose": "revise"})
-                self.advance(row["id"], job)
-            return self.get_batch(row["id"])
+        return self.get_batch(row["id"])
 
     def pending_triage(self) -> list[ReviewBatch]:
         """Read unfinished prerequisites; they have no job or execution ownership."""

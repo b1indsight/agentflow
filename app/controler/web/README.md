@@ -1,7 +1,7 @@
 # Web 控制台
 
 当前由 `flowtool serve` 在 `/console/` 提供，使用真实同源 `/api/`，**没有生产示例数据或 mock 回退**。
-提供顶栏「新建 Flow」、Flow「结束本轮」、已归档 Flow「恢复推进」及受阻 Flow 的安全重试。
+提供顶栏「新建 Flow」、详情底部「继续工作」、Flow「结束本轮」、已归档 Flow「恢复推进」及受阻 Flow 的安全重试。
 页面、静态资源和 API 均要求 Cloudflare Access 的单 owner 身份；数据库、GitHub 与 Worker
 读取由 control 负责。真实 Access 登录/MFA、GitHub App 全来源回填和目标部署仍待验收。
 架构与持久化边界见[控制台功能记录](../../../docs/plan/web-console-kanban.md)。
@@ -53,6 +53,17 @@ npm run preview -- --port 8767
 `test-results/` 不进入 Python 分发包或版本控制；正式静态产物通过构建脚本单独复制打包。
 
 ## 页面与读取语义
+
+详情各页签底部的 `AgentTaskInput` 与「新建 Flow」共用 `FlowTaskInput` 文本组件，保留粘贴换行及输入光标。
+继续工作支持 Enter 换行、Ctrl / ⌘ + Enter 发送，中文输入法确认不发送；空白不可提交，最多 16000 字。
+切换页签保留草稿，切换 Flow 清空。提交中禁止重复发送；响应不确定时重试沿用 UUID。
+`POST /api/flows/{id}/agent-tasks` 接收 `instruction`、`request_id`，要求 owner 同源 JSON，向现有 Flow 追加一次 Agent 任务。
+仅待审核且具有打开 PR、当前 Attempt 和有效 Worker 绑定的 Flow 可追加任务；未完成任务、结果、停止确认或 triage 会阻止提交。
+`ControlService.append_agent_task` 记录任务指令并排入普通 `REVISION`，复用已有批次、准备、执行、重试与交付校验；不新建 Flow、分支或 PR，
+不伪造 GitHub 评论身份，也不消费待处理反馈或清除待澄清问题。此入口不会主动调用 GitHub 写入 API；
+后续 revision 仍遵循现有交付规则。
+任务契约不接收 `author`；会话记录使用固定 `user` 角色展示输入，不保存 owner 邮箱。
+新任务的幂等标识为 `agent_task_request_id`；读取历史 `console_request_id` 以免升级后重放旧请求重复排队，历史会话记录保持原样。
 
 - `/console/#board`：五列看板、组合查询、服务端分页和各阶段全集计数，PR 优先编号。
 - `/console/#flow/<id>/conversation`：GitHub + Agent 时间线、工具摘要、Review 线程、下滑加载和末尾刷新。

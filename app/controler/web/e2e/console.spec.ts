@@ -250,6 +250,100 @@ test.beforeEach(async ({ page }) => {
 });
 
 for (const width of [1440, 390]) {
+  test(`detail composer appends an Agent task safely at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    let current: FlowDetail = {
+      ...flow,
+      lifecycle: "review",
+      phase: "review",
+      action: "awaiting_review",
+      reason: "等待后续要求",
+      next_condition: "继续工作",
+      sources: [],
+    };
+    await page.route("**/api/flows/42", (route) =>
+      route.fulfill({ json: current }),
+    );
+    const requests: { instruction: string; request_id: string }[] = [];
+    let finish = () => {};
+    const committed = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    await page.route("**/api/flows/42/agent-tasks", async (route) => {
+      expect(route.request().method()).toBe("POST");
+      requests.push(route.request().postDataJSON());
+      if (requests.length === 1) return route.abort("failed");
+      await committed;
+      current = {
+        ...current,
+        lifecycle: "queued",
+        phase: "queued",
+        action: "revision:queued",
+        state_version: 3,
+      };
+      return route.fulfill({ json: current });
+    });
+    await page.goto("/#flow/42/conversation");
+    const composer = page.getByRole("form", { name: "与 Agent 交流" });
+    const input = composer.getByRole("textbox", { name: "补充要求" });
+    const send = composer.getByRole("button", { name: "发送", exact: true });
+    await expect(send).toBeDisabled();
+    await input.fill("   ");
+    await expect(send).toBeDisabled();
+    await input.fill("补充键盘导航\n保留原有行为");
+    await page.getByRole("tab", { name: "执行记录", exact: true }).click();
+    await expect(input).toHaveValue("补充键盘导航\n保留原有行为");
+    await page.getByRole("tab", { name: "会话", exact: true }).click();
+    await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
+    await input.dispatchEvent("keydown", {
+      key: "Enter",
+      ctrlKey: true,
+      isComposing: true,
+    });
+    expect(requests).toHaveLength(0);
+    await expect(send).toBeEnabled();
+    await expect(input).toHaveCSS("border-radius", "0px");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/revision-input-${width}-default.png`,
+    });
+    await input.press("Control+Enter");
+    await expect(composer.getByRole("alert")).toContainText(
+      "无法确认是否已发送",
+    );
+    await expect(input).toHaveValue("补充键盘导航\n保留原有行为");
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/revision-input-${width}-error.png`,
+    });
+    await send.click();
+    await expect(input).toBeDisabled();
+    await expect(
+      composer.getByRole("button", { name: "正在发送…" }),
+    ).toBeDisabled();
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toEqual(requests[1]);
+    expect(requests[0].instruction).toBe("补充键盘导航\n保留原有行为");
+    expect(requests[0].request_id).toMatch(/^[0-9a-f-]{36}$/);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/revision-input-${width}-pending.png`,
+    });
+    finish();
+    await expect(composer.getByRole("status")).toContainText(
+      "Agent 任务已排队",
+    );
+    await expect(input).toHaveValue("");
+    await expect(send).toBeDisabled();
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/revision-input-${width}-success.png`,
+    });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  });
+
   test(`standard tabs keep focus, panels and route history synchronized at ${width}px`, async ({
     page,
   }) => {
@@ -2157,12 +2251,17 @@ for (const width of [1440, 390]) {
         for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
       }
       const bounds = node.getBoundingClientRect();
-      const entry = [
-        ...node.querySelectorAll<HTMLElement>("[data-entry]"),
-      ].find((item) => {
-        const rect = item.getBoundingClientRect();
-        return rect.top >= bounds.top && rect.bottom <= bounds.bottom;
-      })!;
+      const entries = [...node.querySelectorAll<HTMLElement>("[data-entry]")];
+      // The bottom composer can leave only intersecting long messages on mobile.
+      const entry =
+        entries.find((item) => {
+          const rect = item.getBoundingClientRect();
+          return rect.top >= bounds.top && rect.bottom <= bounds.bottom;
+        }) ??
+        entries.find((item) => {
+          const rect = item.getBoundingClientRect();
+          return rect.top < bounds.bottom && rect.bottom > bounds.top;
+        })!;
       return {
         key: entry.dataset.entry!,
         top: entry.getBoundingClientRect().top,
