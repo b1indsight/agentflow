@@ -273,12 +273,203 @@ function Detail({
   onChanged: () => void;
   onBack: () => void;
 }) {
-  const [flow, setFlow] = useState<FlowDetail | null>(null),
-    [error, setError] = useState(""),
-    [collapsed, setCollapsed] = useState(
+  const [collapsed, setCollapsed] = useState(
       () => positions.get("collapsed") === 1,
     ),
     [nav, setNav] = useState(false);
+  const rail = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!nav) return;
+    const before = document.activeElement;
+    focusableControls(rail.current)[0]?.focus();
+    const key = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setNav(false);
+      if (e.key === "Tab") {
+        const controls = focusableControls(rail.current),
+          index = controls.findIndex((x) => x === document.activeElement);
+        if (
+          (e.shiftKey && index <= 0) ||
+          (!e.shiftKey && index === controls.length - 1)
+        ) {
+          e.preventDefault();
+          (e.shiftKey ? controls.at(-1) : controls[0])?.focus();
+        }
+      }
+    };
+    addEventListener("keydown", key);
+    return () => {
+      removeEventListener("keydown", key);
+      if (before instanceof HTMLElement) before.focus();
+    };
+  }, [nav]);
+  return (
+    <div
+      className={`detail-shell${collapsed ? " rail-collapsed" : ""}${nav ? " nav-open" : ""}`}
+    >
+      <aside
+        ref={rail}
+        className="rail"
+        aria-label="Flow 导航"
+        role={nav ? "dialog" : undefined}
+        aria-modal={nav || undefined}
+      >
+        <div className="rail-head">
+          <button
+            className="btn ghost back"
+            aria-label="返回看板"
+            title="返回看板"
+            onClick={onBack}
+          >
+            <ArrowLeft aria-hidden="true" />
+          </button>
+          <button
+            className="btn rail-toggle"
+            aria-label={collapsed ? "展开任务侧栏" : "折叠任务侧栏"}
+            title={collapsed ? "展开任务侧栏" : "折叠任务侧栏"}
+            onClick={() =>
+              setCollapsed((x) => {
+                positions.set("collapsed", x ? 0 : 1);
+                return !x;
+              })
+            }
+          >
+            {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+          </button>
+        </div>
+        <nav className="rail-scroll" data-scroll-root>
+          {sidebarGroups.map(({ key, label, members }) => {
+            const group = members.flatMap(([p]) => columns[p].items);
+            const inbox = key === "inbox";
+            return (
+              <SavedDetails
+                open
+                key={key}
+                stateKey={`rail-group-${key}`}
+                className={`rail-group${inbox ? " rail-inbox" : ` phase-${key}`}`}
+              >
+                <summary>
+                  {inbox && <Inbox aria-hidden="true" />}
+                  {label}
+                  <span className="count">
+                    {members.reduce((total, [p]) => total + counts[p], 0)}
+                  </span>
+                </summary>
+                <WindowList
+                  count={group.length}
+                  label={`侧栏-${key}`}
+                  itemKey={(i) => group[i].id}
+                  estimate={78}
+                >
+                  {(i) => (
+                    <button
+                      className={`flow-tab phase-${group[i].phase}${group[i].id === id ? " active" : ""}`}
+                      aria-current={group[i].id === id ? "page" : undefined}
+                      onClick={() => {
+                        setNav(false);
+                        location.hash = `flow/${group[i].id}/${tab}`;
+                      }}
+                    >
+                      <i className="dot" />
+                      <span className="name">
+                        {name(group[i])}
+                        {inbox && (
+                          <span className="meta">
+                            {group[i].repo} · {ref(group[i])}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                  )}
+                </WindowList>
+                {inbox &&
+                  !group.length &&
+                  members.every(
+                    ([p]) =>
+                      !columns[p].busy && !columns[p].error && !columns[p].more,
+                  ) && (
+                    <p className="inbox-note">当前筛选下暂无待人工处理的任务</p>
+                  )}
+                {members.map(([p, phaseLabel]) => {
+                  const c = columns[p];
+                  const label = c.error
+                    ? `重试读取${phaseLabel}任务`
+                    : `更多${phaseLabel}任务`;
+                  return (
+                    <div key={p}>
+                      {c.busy && (
+                        <p className="inbox-note" role="status">
+                          正在加载{phaseLabel}任务…
+                        </p>
+                      )}
+                      {c.error && (
+                        <p className="inbox-note" role="alert">
+                          {phaseLabel}读取失败：{c.error}
+                        </p>
+                      )}
+                      {(c.more || c.error) && (
+                        <button
+                          className="btn"
+                          aria-label={label}
+                          title={label}
+                          disabled={c.busy}
+                          onClick={() => load(p)}
+                        >
+                          {c.error ? (
+                            <RefreshCw aria-hidden="true" />
+                          ) : (
+                            <ArrowDown aria-hidden="true" />
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </SavedDetails>
+            );
+          })}
+        </nav>
+      </aside>
+      <button
+        className="mobile-shade"
+        aria-label="关闭任务导航"
+        onClick={() => setNav(false)}
+      />
+      <DetailPanel
+        key={id}
+        id={id}
+        tab={tab}
+        columns={columns}
+        refresh={refresh}
+        onChanged={onChanged}
+        onBack={onBack}
+        nav={nav}
+        onNav={() => setNav(true)}
+      />
+    </div>
+  );
+}
+
+function DetailPanel({
+  id,
+  tab,
+  columns,
+  refresh,
+  onChanged,
+  onBack,
+  nav,
+  onNav,
+}: {
+  id: number;
+  tab: Tab;
+  columns: Record<Phase, Column>;
+  refresh: number;
+  onChanged: () => void;
+  onBack: () => void;
+  nav: boolean;
+  onNav: () => void;
+}) {
+  const [flow, setFlow] = useState<FlowDetail | null>(null),
+    [error, setError] = useState("");
   const [pending, setPending] = useState<
     "archive" | "resume" | "retry" | "agent-task" | null
   >(null);
@@ -400,8 +591,7 @@ function Detail({
     [jobNext, setJobNext] = useState<string | null>(null),
     [jobMore, setJobMore] = useState(true),
     [jobError, setJobError] = useState("");
-  const detail = useRef<HTMLDivElement>(null),
-    rail = useRef<HTMLElement>(null);
+  const detail = useRef<HTMLDivElement>(null);
   const jobsRequest = useRef<AbortController | null>(null);
   const jobsBusy = useRef(false);
   useLayoutEffect(() => {
@@ -539,417 +729,270 @@ function Detail({
     if (tab === "jobs") moreJobs(true);
     return () => jobsRequest.current?.abort();
   }, [id, tab, refresh]);
-  useEffect(() => {
-    if (!nav) return;
-    const before = document.activeElement;
-    focusableControls(rail.current)[0]?.focus();
-    const key = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") setNav(false);
-      if (e.key === "Tab") {
-        const controls = focusableControls(rail.current),
-          index = controls.findIndex((x) => x === document.activeElement);
-        if (
-          (e.shiftKey && index <= 0) ||
-          (!e.shiftKey && index === controls.length - 1)
-        ) {
-          e.preventDefault();
-          (e.shiftKey ? controls.at(-1) : controls[0])?.focus();
-        }
-      }
-    };
-    addEventListener("keydown", key);
-    return () => {
-      removeEventListener("keydown", key);
-      if (before instanceof HTMLElement) before.focus();
-    };
-  }, [nav]);
-  if (error)
+  if (error || !flow)
     return (
-      <main className="empty-state">
-        <strong>无法读取 Flow</strong>
-        <span>{error}</span>
-        <button
-          className="btn"
-          aria-label="返回看板"
-          title="返回看板"
-          onClick={onBack}
-        >
-          <ArrowLeft aria-hidden="true" />
-        </button>
+      <main className="detail">
+        <div className="empty-state">
+          <button
+            className="btn mobile-nav"
+            aria-label="切换任务"
+            title="切换任务"
+            aria-expanded={nav}
+            onClick={onNav}
+          >
+            <Menu aria-hidden="true" />
+          </button>
+          {error ? (
+            <>
+              <strong>无法读取 Flow</strong>
+              <span>{error}</span>
+              <button
+                className="btn"
+                aria-label="返回看板"
+                title="返回看板"
+                onClick={onBack}
+              >
+                <ArrowLeft aria-hidden="true" />
+              </button>
+            </>
+          ) : (
+            <p>正在读取 Flow…</p>
+          )}
+        </div>
       </main>
     );
-  if (!flow) return <main className="empty-state">正在读取 Flow…</main>;
   return (
-    <div
-      className={`detail-shell${collapsed ? " rail-collapsed" : ""}${nav ? " nav-open" : ""}`}
+    <Tabs
+      value={selectedTab}
+      onValueChange={(value) => (location.hash = `flow/${id}/${value}`)}
+      asChild
     >
-      <aside
-        ref={rail}
-        className="rail"
-        aria-label="Flow 导航"
-        role={nav ? "dialog" : undefined}
-        aria-modal={nav || undefined}
-      >
-        <div className="rail-head">
-          <button
-            className="btn ghost back"
-            aria-label="返回看板"
-            title="返回看板"
-            onClick={onBack}
-          >
-            <ArrowLeft aria-hidden="true" />
-          </button>
-          <button
-            className="btn rail-toggle"
-            aria-label={collapsed ? "展开任务侧栏" : "折叠任务侧栏"}
-            title={collapsed ? "展开任务侧栏" : "折叠任务侧栏"}
-            onClick={() =>
-              setCollapsed((x) => {
-                positions.set("collapsed", x ? 0 : 1);
-                return !x;
-              })
-            }
-          >
-            {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
-          </button>
-        </div>
-        <nav className="rail-scroll" data-scroll-root>
-          {sidebarGroups.map(({ key, label, members }) => {
-            const group = members.flatMap(([p]) => columns[p].items);
-            const inbox = key === "inbox";
-            return (
-              <SavedDetails
-                open
-                key={key}
-                stateKey={`rail-group-${key}`}
-                className={`rail-group${inbox ? " rail-inbox" : ` phase-${key}`}`}
+      <main className="detail">
+        <header
+          ref={head}
+          className={`detail-head${compactHead ? " compact" : ""}`}
+        >
+          {compactHead && (
+            <div className="compact-detail-bar">
+              <button
+                type="button"
+                className="btn ghost"
+                aria-label="返回看板"
+                title="返回看板"
+                onClick={onBack}
               >
-                <summary>
-                  {inbox && <Inbox aria-hidden="true" />}
+                <ArrowLeft />
+              </button>
+              <span className="compact-detail-ref">{ref(flow)}</span>
+              <span className="compact-detail-title">{name(flow)}</span>
+              <button
+                type="button"
+                className="btn ghost"
+                aria-label="展开详情标题"
+                title="展开详情标题"
+                onClick={() => {
+                  expandedAt.current = detail.current?.scrollTop ?? 0;
+                  headTransition.current = {
+                    height: head.current?.offsetHeight ?? 0,
+                    scroll: detail.current?.scrollTop ?? 0,
+                  };
+                  setCompactHead(false);
+                }}
+              >
+                <ChevronDown />
+              </button>
+            </div>
+          )}
+          <div className="detail-head-full" hidden={compactHead}>
+            <button
+              className="btn mobile-nav"
+              aria-label="切换任务"
+              title="切换任务"
+              aria-expanded={nav}
+              onClick={onNav}
+            >
+              <Menu />
+            </button>
+            <div className="detail-title-row">
+              <h1 id="detail-heading">{name(flow)}</h1>
+              <span className={`badge phase-${flow.phase}`}>
+                <i className="dot" />
+                {flowLabel(flow)}
+              </span>
+            </div>
+            <div className="links">
+              <span>{flow.repo}</span>
+              {flow.issue_number !== null && flow.issue_url && (
+                <a href={flow.issue_url} target="_blank" rel="noreferrer">
+                  Issue #{flow.issue_number} ↗
+                </a>
+              )}
+              {flow.issue_number === null && !flow.pr_number && (
+                <span>Flow #{flow.id}</span>
+              )}
+              {flow.pr_url && (
+                <a href={flow.pr_url} target="_blank" rel="noreferrer">
+                  PR #{flow.pr_number} ↗
+                </a>
+              )}
+            </div>
+            <TabsList aria-label="Flow 详情">
+              {flowTabs.map(({ value, label }) => (
+                <TabsTrigger value={value} key={value}>
                   {label}
-                  <span className="count">
-                    {members.reduce((total, [p]) => total + counts[p], 0)}
-                  </span>
-                </summary>
-                <WindowList
-                  count={group.length}
-                  label={`侧栏-${key}`}
-                  itemKey={(i) => group[i].id}
-                  estimate={78}
-                >
-                  {(i) => (
-                    <button
-                      className={`flow-tab phase-${group[i].phase}${group[i].id === id ? " active" : ""}`}
-                      aria-current={group[i].id === id ? "page" : undefined}
-                      onClick={() => {
-                        setNav(false);
-                        location.hash = `flow/${group[i].id}/${tab}`;
+                </TabsTrigger>
+              ))}
+              {files.map((file) => {
+                const value = `file-${file.id}`;
+                const filename = file.name ?? file.id.slice(0, 8);
+                const duplicate =
+                  file.name !== null &&
+                  files.some(
+                    (other) => other.id !== file.id && other.name === file.name,
+                  );
+                const label = duplicate
+                  ? `${filename} ${file.id.slice(0, 6)}`
+                  : filename;
+                return (
+                  <div
+                    className="file-tab"
+                    data-active={tab === value}
+                    key={file.id}
+                    onFocus={(event) =>
+                      event.currentTarget.scrollIntoView({
+                        block: "nearest",
+                        inline: "nearest",
+                      })
+                    }
+                  >
+                    <TabsTrigger
+                      value={value}
+                      title={filename}
+                      onKeyDown={(event) => {
+                        if (event.key === "Delete") {
+                          event.preventDefault();
+                          closeFile(file.id);
+                        }
                       }}
                     >
-                      <i className="dot" />
-                      <span className="name">
-                        {name(group[i])}
-                        {inbox && (
-                          <span className="meta">
-                            {group[i].repo} · {ref(group[i])}
-                          </span>
-                        )}
-                      </span>
-                    </button>
-                  )}
-                </WindowList>
-                {inbox &&
-                  !group.length &&
-                  members.every(
-                    ([p]) =>
-                      !columns[p].busy && !columns[p].error && !columns[p].more,
-                  ) && (
-                    <p className="inbox-note">当前筛选下暂无待人工处理的任务</p>
-                  )}
-                {members.map(([p, phaseLabel]) => {
-                  const c = columns[p];
-                  const label = c.error
-                    ? `重试读取${phaseLabel}任务`
-                    : `更多${phaseLabel}任务`;
-                  return (
-                    <div key={p}>
-                      {c.busy && (
-                        <p className="inbox-note" role="status">
-                          正在加载{phaseLabel}任务…
-                        </p>
-                      )}
-                      {c.error && (
-                        <p className="inbox-note" role="alert">
-                          {phaseLabel}读取失败：{c.error}
-                        </p>
-                      )}
-                      {(c.more || c.error) && (
-                        <button
-                          className="btn"
-                          aria-label={label}
-                          title={label}
-                          disabled={c.busy}
-                          onClick={() => load(p)}
-                        >
-                          {c.error ? (
-                            <RefreshCw aria-hidden="true" />
-                          ) : (
-                            <ArrowDown aria-hidden="true" />
-                          )}
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </SavedDetails>
-            );
-          })}
-        </nav>
-      </aside>
-      <button
-        className="mobile-shade"
-        aria-label="关闭任务导航"
-        onClick={() => setNav(false)}
-      />
-      <Tabs
-        value={selectedTab}
-        onValueChange={(value) => (location.hash = `flow/${id}/${value}`)}
-        asChild
-      >
-        <main className="detail">
-          <header
-            ref={head}
-            className={`detail-head${compactHead ? " compact" : ""}`}
-          >
-            {compactHead && (
-              <div className="compact-detail-bar">
-                <button
-                  type="button"
-                  className="btn ghost"
-                  aria-label="返回看板"
-                  title="返回看板"
-                  onClick={onBack}
-                >
-                  <ArrowLeft />
-                </button>
-                <span className="compact-detail-ref">{ref(flow)}</span>
-                <span className="compact-detail-title">{name(flow)}</span>
-                <button
-                  type="button"
-                  className="btn ghost"
-                  aria-label="展开详情标题"
-                  title="展开详情标题"
-                  onClick={() => {
-                    expandedAt.current = detail.current?.scrollTop ?? 0;
-                    headTransition.current = {
-                      height: head.current?.offsetHeight ?? 0,
-                      scroll: detail.current?.scrollTop ?? 0,
-                    };
-                    setCompactHead(false);
-                  }}
-                >
-                  <ChevronDown />
-                </button>
-              </div>
-            )}
-            <div className="detail-head-full" hidden={compactHead}>
-              <button
-                className="btn mobile-nav"
-                aria-label="切换任务"
-                title="切换任务"
-                aria-expanded={nav}
-                onClick={() => setNav(true)}
-              >
-                <Menu />
-              </button>
-              <div className="detail-title-row">
-                <h1 id="detail-heading">{name(flow)}</h1>
-                <span className={`badge phase-${flow.phase}`}>
-                  <i className="dot" />
-                  {flowLabel(flow)}
-                </span>
-              </div>
-              <div className="links">
-                <span>{flow.repo}</span>
-                {flow.issue_number !== null && flow.issue_url && (
-                  <a href={flow.issue_url} target="_blank" rel="noreferrer">
-                    Issue #{flow.issue_number} ↗
-                  </a>
-                )}
-                {flow.issue_number === null && !flow.pr_number && (
-                  <span>Flow #{flow.id}</span>
-                )}
-                {flow.pr_url && (
-                  <a href={flow.pr_url} target="_blank" rel="noreferrer">
-                    PR #{flow.pr_number} ↗
-                  </a>
-                )}
-              </div>
-              <TabsList aria-label="Flow 详情">
-                {flowTabs.map(({ value, label }) => (
-                  <TabsTrigger value={value} key={value}>
-                    {label}
-                  </TabsTrigger>
-                ))}
-                {files.map((file) => {
-                  const value = `file-${file.id}`;
-                  const filename = file.name ?? file.id.slice(0, 8);
-                  const duplicate =
-                    file.name !== null &&
-                    files.some(
-                      (other) =>
-                        other.id !== file.id && other.name === file.name,
-                    );
-                  const label = duplicate
-                    ? `${filename} ${file.id.slice(0, 6)}`
-                    : filename;
-                  return (
-                    <div
-                      className="file-tab"
-                      data-active={tab === value}
-                      key={file.id}
-                      onFocus={(event) =>
-                        event.currentTarget.scrollIntoView({
-                          block: "nearest",
-                          inline: "nearest",
-                        })
-                      }
+                      <FileText aria-hidden="true" />
+                      <span className="file-tab-name">{filename}</span>
+                      {duplicate && <small> {file.id.slice(0, 6)}</small>}
+                    </TabsTrigger>
+                    <button
+                      type="button"
+                      className="file-tab-close"
+                      aria-label={`关闭 ${label}`}
+                      tabIndex={-1}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => closeFile(file.id)}
                     >
-                      <TabsTrigger
-                        value={value}
-                        title={filename}
-                        onKeyDown={(event) => {
-                          if (event.key === "Delete") {
-                            event.preventDefault();
-                            closeFile(file.id);
-                          }
-                        }}
-                      >
-                        <FileText aria-hidden="true" />
-                        <span className="file-tab-name">{filename}</span>
-                        {duplicate && <small> {file.id.slice(0, 6)}</small>}
-                      </TabsTrigger>
-                      <button
-                        type="button"
-                        className="file-tab-close"
-                        aria-label={`关闭 ${label}`}
-                        tabIndex={-1}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => closeFile(file.id)}
-                      >
-                        <X aria-hidden="true" />
-                      </button>
-                    </div>
-                  );
-                })}
-              </TabsList>
-            </div>
-          </header>
-          <div className="detail-body" data-scroll-root ref={detail}>
-            <TabsContent value={selectedTab} asChild>
-              <section
-                className={`content${activeFile ? " file-content" : ""}`}
-              >
-                {activeFile ? (
-                  <FileViewer
-                    key={activeFile.id}
-                    linkId={activeFile.id}
-                    filename={activeFile.name}
-                  />
-                ) : (
-                  (
-                    {
-                      overview: (
-                        <>
-                          <section
-                            className={`execution-summary phase-${flow.phase}`}
-                          >
-                            <span className="eyebrow">当前动作</span>
-                            <h2>{actionLabel(flow)}</h2>
-                            <p>{flow.reason}</p>
-                            <div className="next-step">
-                              <span>下一步条件</span>
-                              <p>{flow.next_condition}</p>
-                            </div>
-                            <div className="round-actions">
-                              {flow.lifecycle === "blocked" && (
+                      <X aria-hidden="true" />
+                    </button>
+                  </div>
+                );
+              })}
+            </TabsList>
+          </div>
+        </header>
+        <div className="detail-body" data-scroll-root ref={detail}>
+          <TabsContent value={selectedTab} asChild>
+            <section className={`content${activeFile ? " file-content" : ""}`}>
+              {activeFile ? (
+                <FileViewer
+                  key={activeFile.id}
+                  linkId={activeFile.id}
+                  filename={activeFile.name}
+                />
+              ) : (
+                (
+                  {
+                    overview: (
+                      <>
+                        <section
+                          className={`execution-summary phase-${flow.phase}`}
+                        >
+                          <span className="eyebrow">当前动作</span>
+                          <h2>{actionLabel(flow)}</h2>
+                          <p>{flow.reason}</p>
+                          <div className="next-step">
+                            <span>下一步条件</span>
+                            <p>{flow.next_condition}</p>
+                          </div>
+                          <div className="round-actions">
+                            {flow.lifecycle === "blocked" && (
+                              <Button
+                                className="btn"
+                                aria-label={
+                                  pending === "retry" ? "正在提交重试…" : "重试"
+                                }
+                                title={
+                                  pending === "retry" ? "正在提交重试…" : "重试"
+                                }
+                                disabled={pending !== null}
+                                onClick={() => void submit("retry")}
+                              >
+                                <RefreshCw />
+                                {pending === "retry" && "正在提交重试…"}
+                              </Button>
+                            )}
+                            {flow.lifecycle === "archived" ? (
+                              <>
+                                <p id="resume-hint">
+                                  恢复推进将在同一 Flow
+                                  开启新轮次，从待处理开始并使用新
+                                  PR，保留历史记录；不会重试旧轮次。
+                                </p>
                                 <Button
                                   className="btn"
-                                  aria-label={
-                                    pending === "retry"
-                                      ? "正在提交重试…"
-                                      : "重试"
-                                  }
-                                  title={
-                                    pending === "retry"
-                                      ? "正在提交重试…"
-                                      : "重试"
-                                  }
+                                  aria-describedby="resume-hint"
                                   disabled={pending !== null}
-                                  onClick={() => void submit("retry")}
+                                  onClick={() => void submit("resume")}
                                 >
                                   <RefreshCw />
-                                  {pending === "retry" && "正在提交重试…"}
+                                  {pending === "resume"
+                                    ? "正在恢复推进…"
+                                    : "恢复推进"}
                                 </Button>
-                              )}
-                              {flow.lifecycle === "archived" ? (
-                                <>
-                                  <p id="resume-hint">
-                                    恢复推进将在同一 Flow
-                                    开启新轮次，从待处理开始并使用新
-                                    PR，保留历史记录；不会重试旧轮次。
+                              </>
+                            ) : flow.lifecycle === "finalizing" ? (
+                              <p>
+                                正在结束本轮。停止确认、结果对账及收尾未完成前不会归档，请刷新查看进展。
+                              </p>
+                            ) : endingRound === null ? (
+                              <Button
+                                className="btn"
+                                disabled={pending !== null}
+                                onClick={() => {
+                                  setEndingRound(flow.current_round_no);
+                                  setWriteError("");
+                                  setWriteNotice("");
+                                }}
+                              >
+                                <Archive />
+                                结束本轮
+                              </Button>
+                            ) : (
+                              <form
+                                className="round-form"
+                                aria-label="结束本轮"
+                                onSubmit={(event) => {
+                                  event.preventDefault();
+                                  void submit("archive");
+                                }}
+                              >
+                                <fieldset disabled={pending !== null}>
+                                  <legend>结束第 {endingRound} 轮</legend>
+                                  <p id="archive-hint">
+                                    提交只发起结束本轮；停止确认、结果对账及收尾未完成前不会归档。
                                   </p>
-                                  <Button
-                                    className="btn"
-                                    aria-describedby="resume-hint"
-                                    disabled={pending !== null}
-                                    onClick={() => void submit("resume")}
+                                  <div
+                                    className="round-reasons"
+                                    role="group"
+                                    aria-label="本轮结果"
                                   >
-                                    <RefreshCw />
-                                    {pending === "resume"
-                                      ? "正在恢复推进…"
-                                      : "恢复推进"}
-                                  </Button>
-                                </>
-                              ) : flow.lifecycle === "finalizing" ? (
-                                <p>
-                                  正在结束本轮。停止确认、结果对账及收尾未完成前不会归档，请刷新查看进展。
-                                </p>
-                              ) : endingRound === null ? (
-                                <Button
-                                  className="btn"
-                                  disabled={pending !== null}
-                                  onClick={() => {
-                                    setEndingRound(flow.current_round_no);
-                                    setWriteError("");
-                                    setWriteNotice("");
-                                  }}
-                                >
-                                  <Archive />
-                                  结束本轮
-                                </Button>
-                              ) : (
-                                <form
-                                  className="round-form"
-                                  aria-label="结束本轮"
-                                  onSubmit={(event) => {
-                                    event.preventDefault();
-                                    void submit("archive");
-                                  }}
-                                >
-                                  <fieldset disabled={pending !== null}>
-                                    <legend>结束第 {endingRound} 轮</legend>
-                                    <p id="archive-hint">
-                                      提交只发起结束本轮；停止确认、结果对账及收尾未完成前不会归档。
-                                    </p>
-                                    <div
-                                      className="round-reasons"
-                                      role="group"
-                                      aria-label="本轮结果"
-                                    >
-                                      {(
-                                        ["succeeded", "abandoned"] as const
-                                      ).map((reason) => (
+                                    {(["succeeded", "abandoned"] as const).map(
+                                      (reason) => (
                                         <label key={reason}>
                                           <Input
                                             type="radio"
@@ -963,236 +1006,229 @@ function Detail({
                                           />
                                           {archiveReasonLabels[reason]}
                                         </label>
-                                      ))}
-                                    </div>
-                                    <label htmlFor="archive-summary">
-                                      本轮结论（必填）
-                                    </label>
-                                    <Input
-                                      id="archive-summary"
-                                      required
-                                      value={archiveSummary}
-                                      onChange={(event) =>
-                                        setArchiveSummary(event.target.value)
-                                      }
-                                      aria-describedby="archive-hint"
-                                      placeholder="说明本轮成果或废弃原因"
-                                    />
-                                    <div className="round-buttons">
-                                      <Button
-                                        type="submit"
-                                        className="btn"
-                                        disabled={
-                                          !archiveSummary.trim() ||
-                                          endingRound !== flow.current_round_no
-                                        }
-                                      >
-                                        <Check aria-hidden="true" />
-                                        {pending === "archive"
-                                          ? "正在提交结束请求…"
-                                          : "确认结束本轮"}
-                                      </Button>
-                                      <Button
-                                        type="button"
-                                        variant="ghost"
-                                        aria-label="取消"
-                                        title="取消"
-                                        onClick={() => setEndingRound(null)}
-                                      >
-                                        <X aria-hidden="true" />
-                                      </Button>
-                                    </div>
-                                    {endingRound !== flow.current_round_no && (
-                                      <p role="alert">
-                                        轮次已变化，请关闭表单并核对当前轮次后再操作。
-                                      </p>
+                                      ),
                                     )}
-                                  </fieldset>
-                                </form>
-                              )}
-                            </div>
-                            {writeError && <p role="alert">{writeError}</p>}
-                            {writeNotice && <p role="status">{writeNotice}</p>}
-                          </section>
-                          {flow.task_content && (
-                            <section
-                              className="task-content"
-                              aria-label="原始任务内容"
-                            >
-                              <h2 className="panel-title">原始任务内容</h2>
-                              <ActivityMarkdown
-                                text={flow.task_content}
-                                url={null}
-                              />
-                            </section>
-                          )}
-                          <h2 className="panel-title">任务信息</h2>
-                          <dl className="task-facts">
-                            <dt>生命周期 / 阶段</dt>
-                            <dd>
-                              {flow.lifecycle} /{" "}
-                              {phases.find(([p]) => p === flow.phase)?.[1]}
-                            </dd>
-                            <dt>当前轮次</dt>
-                            <dd>第 {flow.current_round_no} 轮</dd>
-                            {flow.archive_reason && (
-                              <>
-                                <dt>
-                                  {flow.lifecycle === "archived"
-                                    ? "归档结果"
-                                    : "本轮结束目标"}
-                                </dt>
-                                <dd>
-                                  {archiveReasonLabels[flow.archive_reason]}
-                                </dd>
-                              </>
-                            )}
-                            {flow.archive_summary && (
-                              <>
-                                <dt>本轮结论</dt>
-                                <dd className="round-summary">
-                                  {flow.archive_summary}
-                                </dd>
-                              </>
-                            )}
-                            <dt>Worker</dt>
-                            <dd>
-                              {flow.worker_id ?? "尚未绑定"}
-                              {flow.worker_historical ? "（历史归属）" : ""}
-                            </dd>
-                            <dt>分支</dt>
-                            <dd>{flow.branch ?? "尚未创建"}</dd>
-                            <dt>修订轮数</dt>
-                            <dd>{flow.revision_cycles}</dd>
-                            <dt>创建</dt>
-                            <dd>
-                              {new Date(flow.created_at).toLocaleString()}
-                            </dd>
-                            <dt>更新</dt>
-                            <dd>
-                              {new Date(flow.updated_at).toLocaleString()}
-                            </dd>
-                            {flow.archived_at && (
-                              <>
-                                <dt>归档时间</dt>
-                                <dd>
-                                  {new Date(flow.archived_at).toLocaleString()}
-                                </dd>
-                              </>
-                            )}
-                            <dt>当前状态版本</dt>
-                            <dd>{flow.state_version}（与阅读快照独立）</dd>
-                          </dl>
-                          <h2 className="panel-title">数据来源</h2>
-                          <SourceList sources={flow.sources} />
-                        </>
-                      ),
-                      conversation: (
-                        <OpenWorkerFile value={openFile}>
-                          <Conversation
-                            key={id}
-                            id={id}
-                            root={detail}
-                            refresh={refresh}
-                          />
-                        </OpenWorkerFile>
-                      ),
-                      jobs: (
-                        <>
-                          <InferenceNotices key={`${id}:${refresh}`} id={id} />
-                          <h2 className="panel-title">任务执行</h2>
-                          <div className="timeline">
-                            <WindowList
-                              count={jobs.length}
-                              label="执行记录"
-                              itemKey={(i) => jobs[i].id}
-                            >
-                              {(i) => (
-                                <article
-                                  className="timeline-item"
-                                  data-state={jobs[i].state}
-                                >
-                                  <div className="job-top">
-                                    <strong>
-                                      {jobs[i].kind === "inference"
-                                        ? `推理 · 派发次数 ${jobs[i].attempt}`
-                                        : `${jobs[i].kind} #${jobs[i].attempt}`}
-                                    </strong>
-                                    <span className="badge">
-                                      {jobs[i].state}
-                                    </span>
                                   </div>
-                                  <time dateTime={jobs[i].created_at}>
-                                    创建于{" "}
-                                    {new Date(
-                                      jobs[i].created_at,
-                                    ).toLocaleString()}
-                                  </time>
-                                  <p>
-                                    {jobs[i].worker_id ?? "无 Worker"}
-                                    {jobs[i].error_code
-                                      ? ` · ${jobs[i].error_code}`
-                                      : ""}
-                                  </p>
-                                </article>
-                              )}
-                            </WindowList>
+                                  <label htmlFor="archive-summary">
+                                    本轮结论（必填）
+                                  </label>
+                                  <Input
+                                    id="archive-summary"
+                                    required
+                                    value={archiveSummary}
+                                    onChange={(event) =>
+                                      setArchiveSummary(event.target.value)
+                                    }
+                                    aria-describedby="archive-hint"
+                                    placeholder="说明本轮成果或废弃原因"
+                                  />
+                                  <div className="round-buttons">
+                                    <Button
+                                      type="submit"
+                                      className="btn"
+                                      disabled={
+                                        !archiveSummary.trim() ||
+                                        endingRound !== flow.current_round_no
+                                      }
+                                    >
+                                      <Check aria-hidden="true" />
+                                      {pending === "archive"
+                                        ? "正在提交结束请求…"
+                                        : "确认结束本轮"}
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      aria-label="取消"
+                                      title="取消"
+                                      onClick={() => setEndingRound(null)}
+                                    >
+                                      <X aria-hidden="true" />
+                                    </Button>
+                                  </div>
+                                  {endingRound !== flow.current_round_no && (
+                                    <p role="alert">
+                                      轮次已变化，请关闭表单并核对当前轮次后再操作。
+                                    </p>
+                                  )}
+                                </fieldset>
+                              </form>
+                            )}
                           </div>
-                          {jobError && (
-                            <button className="btn" onClick={() => moreJobs()}>
-                              <RefreshCw aria-hidden="true" />
-                              <span>读取失败：{jobError}（重试）</span>
-                            </button>
+                          {writeError && <p role="alert">{writeError}</p>}
+                          {writeNotice && <p role="status">{writeNotice}</p>}
+                        </section>
+                        {flow.task_content && (
+                          <section
+                            className="task-content"
+                            aria-label="原始任务内容"
+                          >
+                            <h2 className="panel-title">原始任务内容</h2>
+                            <ActivityMarkdown
+                              text={flow.task_content}
+                              url={null}
+                            />
+                          </section>
+                        )}
+                        <h2 className="panel-title">任务信息</h2>
+                        <dl className="task-facts">
+                          <dt>生命周期 / 阶段</dt>
+                          <dd>
+                            {flow.lifecycle} /{" "}
+                            {phases.find(([p]) => p === flow.phase)?.[1]}
+                          </dd>
+                          <dt>当前轮次</dt>
+                          <dd>第 {flow.current_round_no} 轮</dd>
+                          {flow.archive_reason && (
+                            <>
+                              <dt>
+                                {flow.lifecycle === "archived"
+                                  ? "归档结果"
+                                  : "本轮结束目标"}
+                              </dt>
+                              <dd>
+                                {archiveReasonLabels[flow.archive_reason]}
+                              </dd>
+                            </>
                           )}
-                          {jobMore && (
-                            <button
-                              className="btn"
-                              aria-label="读取更多执行记录"
-                              title="读取更多执行记录"
-                              onClick={() => moreJobs()}
-                            >
-                              <ArrowDown aria-hidden="true" />
-                            </button>
+                          {flow.archive_summary && (
+                            <>
+                              <dt>本轮结论</dt>
+                              <dd className="round-summary">
+                                {flow.archive_summary}
+                              </dd>
+                            </>
                           )}
-                        </>
-                      ),
-                    } satisfies Record<typeof baseTab, ReactNode>
-                  )[baseTab]
-                )}
-              </section>
-            </TabsContent>
-          </div>
-          <AgentTaskInput
-            disabledReason={
-              pending !== null
-                ? "正在提交，请稍候。"
-                : flow.lifecycle !== "review" || !flow.pr_number
-                  ? "等待当前任务完成并进入待审核后发送，可先填写补充要求。"
-                  : ""
+                          <dt>Worker</dt>
+                          <dd>
+                            {flow.worker_id ?? "尚未绑定"}
+                            {flow.worker_historical ? "（历史归属）" : ""}
+                          </dd>
+                          <dt>分支</dt>
+                          <dd>{flow.branch ?? "尚未创建"}</dd>
+                          <dt>修订轮数</dt>
+                          <dd>{flow.revision_cycles}</dd>
+                          <dt>创建</dt>
+                          <dd>{new Date(flow.created_at).toLocaleString()}</dd>
+                          <dt>更新</dt>
+                          <dd>{new Date(flow.updated_at).toLocaleString()}</dd>
+                          {flow.archived_at && (
+                            <>
+                              <dt>归档时间</dt>
+                              <dd>
+                                {new Date(flow.archived_at).toLocaleString()}
+                              </dd>
+                            </>
+                          )}
+                          <dt>当前状态版本</dt>
+                          <dd>{flow.state_version}（与阅读快照独立）</dd>
+                        </dl>
+                        <h2 className="panel-title">数据来源</h2>
+                        <SourceList sources={flow.sources} />
+                      </>
+                    ),
+                    conversation: (
+                      <OpenWorkerFile value={openFile}>
+                        <Conversation
+                          key={id}
+                          id={id}
+                          root={detail}
+                          refresh={refresh}
+                        />
+                      </OpenWorkerFile>
+                    ),
+                    jobs: (
+                      <>
+                        <InferenceNotices key={`${id}:${refresh}`} id={id} />
+                        <h2 className="panel-title">任务执行</h2>
+                        <div className="timeline">
+                          <WindowList
+                            count={jobs.length}
+                            label="执行记录"
+                            itemKey={(i) => jobs[i].id}
+                          >
+                            {(i) => (
+                              <article
+                                className="timeline-item"
+                                data-state={jobs[i].state}
+                              >
+                                <div className="job-top">
+                                  <strong>
+                                    {jobs[i].kind === "inference"
+                                      ? `推理 · 派发次数 ${jobs[i].attempt}`
+                                      : `${jobs[i].kind} #${jobs[i].attempt}`}
+                                  </strong>
+                                  <span className="badge">{jobs[i].state}</span>
+                                </div>
+                                <time dateTime={jobs[i].created_at}>
+                                  创建于{" "}
+                                  {new Date(
+                                    jobs[i].created_at,
+                                  ).toLocaleString()}
+                                </time>
+                                <p>
+                                  {jobs[i].worker_id ?? "无 Worker"}
+                                  {jobs[i].error_code
+                                    ? ` · ${jobs[i].error_code}`
+                                    : ""}
+                                </p>
+                              </article>
+                            )}
+                          </WindowList>
+                        </div>
+                        {jobError && (
+                          <button className="btn" onClick={() => moreJobs()}>
+                            <RefreshCw aria-hidden="true" />
+                            <span>读取失败：{jobError}（重试）</span>
+                          </button>
+                        )}
+                        {jobMore && (
+                          <button
+                            className="btn"
+                            aria-label="读取更多执行记录"
+                            title="读取更多执行记录"
+                            onClick={() => moreJobs()}
+                          >
+                            <ArrowDown aria-hidden="true" />
+                          </button>
+                        )}
+                      </>
+                    ),
+                  } satisfies Record<typeof baseTab, ReactNode>
+                )[baseTab]
+              )}
+            </section>
+          </TabsContent>
+        </div>
+        <AgentTaskInput
+          disabledReason={
+            pending !== null
+              ? "正在提交，请稍候。"
+              : flow.lifecycle !== "review" || !flow.pr_number
+                ? "等待当前任务完成并进入待审核后发送，可先填写补充要求。"
+                : ""
+          }
+          onSubmit={async (instruction, requestId) => {
+            if (writing.current) throw new Error("正在提交其他操作，请稍候。");
+            writing.current = true;
+            setPending("agent-task");
+            try {
+              const value = await appendAgentTask(id, instruction, requestId);
+              onChanged();
+              if (mounted.current)
+                setFlow((prior) =>
+                  prior && prior.state_version > value.state_version
+                    ? prior
+                    : value,
+                );
+            } finally {
+              writing.current = false;
+              if (mounted.current) setPending(null);
             }
-            onSubmit={async (instruction, requestId) => {
-              if (writing.current)
-                throw new Error("正在提交其他操作，请稍候。");
-              writing.current = true;
-              setPending("agent-task");
-              try {
-                const value = await appendAgentTask(id, instruction, requestId);
-                onChanged();
-                if (mounted.current)
-                  setFlow((prior) =>
-                    prior && prior.state_version > value.state_version
-                      ? prior
-                      : value,
-                  );
-              } finally {
-                writing.current = false;
-                if (mounted.current) setPending(null);
-              }
-            }}
-          />
-        </main>
-      </Tabs>
-    </div>
+          }}
+        />
+      </main>
+    </Tabs>
   );
 }
 
@@ -1647,7 +1683,6 @@ export default function App() {
       />
       {current.settings ? null : current.id ? (
         <Detail
-          key={current.id}
           id={current.id}
           tab={current.tab}
           columns={columns}
