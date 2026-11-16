@@ -783,7 +783,9 @@ test("ordinary images keep file-like paths and fragments across activity sources
   const urls = [
     "https://images.example.test/api/files/preview.png#name=preview.png",
     `https://images.example.test/api/files/${"a".repeat(32)}#amp=preview.png`,
+    `https://images.example.test/api/files/%30${"a".repeat(31)}#name=preview.png`,
     "https://console.example.test/api/files/preview.png#name=preview.png",
+    "https://console.example.test/assets/%FF.png",
   ];
   const body = [
     ...urls.map((url, index) => `![图片 ${index}](${url})`),
@@ -814,11 +816,20 @@ test("only original worker file destinations become detail actions before relati
   mockActivity(t, () => assert.fail("rendering must not fetch a file"));
   const id = "0123456789abcdef0123456789abcdef";
   const path = `/api/files/${id}`;
+  // The server decodes paths and redirects trailing slashes; neither may turn a local file into an automatic image read.
+  const encoded = [
+    `https://console.example.test/api/files/%30${id.slice(1)}#name=private.png`,
+    `https://console.example.test/api/files/%30${id.slice(1)}?raw=1`,
+    `https://console.example.test/%61pi%2ffiles%2f${id}#amp=invalid`,
+    `https://console.example.test/api/files/%30${id.slice(1)}%2F#name=private.png`,
+  ];
   const body = [
     `[文件](${path})`,
     `![图片](https://console.example.test${path})`,
     `[规范化路径](/other/..${path})`,
     `![非文件入口](https://console.example.test${path}?raw=1#name=bad%2Fname.png)`,
+    ...encoded.map((url, i) => `![编码图片 ${i}](${url})`),
+    `[![编码导航](${encoded[0]})](https://example.test/original)`,
     "![外部图片](https://images.example.test/preview.png)",
     "[普通相对](../guide.md)",
   ].join("\n\n");
@@ -860,6 +871,9 @@ test("only original worker file destinations become detail actions before relati
   );
   assert.match(github, /href="https:\/\/github.com\/owner\/repo\/guide.md"/);
   assert.doesNotMatch(github, /<img[^>]*src="https:\/\/console.example.test/);
+  assert.doesNotMatch(github, /<a[^>]*>\s*<a/);
+  for (const destination of encoded)
+    assert.ok(github.includes(`href="${destination}"`), destination);
 });
 
 test("private Amp images keep canonical navigation without falling back to unauthenticated image requests", (t) => {

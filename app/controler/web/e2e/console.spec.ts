@@ -3892,6 +3892,7 @@ test("conversation images load inline and fit the body on desktop and mobile", a
 for (const width of [1440, 390]) {
   test(`private Amp conversation images use authenticated files with retry at ${width}px`, async ({
     page,
+    baseURL,
   }) => {
     // A real Amp URL returns 401 anonymously; only the rewritten file route may load bytes.
     await page.setViewportSize({ width, height: width === 1440 ? 1320 : 1100 });
@@ -3906,6 +3907,8 @@ for (const width of [1440, 390]) {
       `[图片链接](${marker(ids[1], "linked.png")})`,
       `![补充截图](${marker(ids[2], "retry.png")})`,
       `![本地图片](/api/files/${ids[3]}#name=local.png)`,
+      // An encoded ID reaches the same authenticated endpoint but must still require a click.
+      `![编码本地图片](${baseURL}/api/files/%64${ids[3].slice(1)}#name=encoded.png)`,
       `![未登记](${canonical("raw.png")}#amp-media-source=/etc/passwd)`,
       `[原始图片链接](${canonical("raw.png")})`,
       `![不安全](${marker(ids[3], "bad.png").replace("ampcode.com", "other.test")})`,
@@ -3937,7 +3940,9 @@ for (const width of [1440, 390]) {
       return route.abort("blockedbyclient");
     });
     await page.route("**/api/files/*", (route) => {
-      const id = new URL(route.request().url()).pathname.split("/").at(-1)!;
+      const id = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-1)!,
+      );
       reads.push(id);
       if (id === ids[2] && failure && failure !== "decode")
         return route.fulfill({
@@ -3989,6 +3994,10 @@ for (const width of [1440, 390]) {
     await expect(images).toHaveCount(2);
     await expect(images.first()).toHaveJSProperty("naturalWidth", 1200);
     await expect(images.last()).toHaveJSProperty("naturalWidth", 1200);
+    expect(reads.filter((id) => id === ids[3])).toEqual([]);
+    await expect(
+      row.getByRole("link", { name: "图片：编码本地图片", exact: true }),
+    ).toBeVisible();
     const failed = row.locator(".amp-image").filter({
       has: page.getByRole("link", { name: "补充截图", exact: true }),
     });

@@ -27,7 +27,12 @@ import remarkGfm from "remark-gfm";
 import { getContent, getDiff, getThread } from "./api";
 import { AmpImage } from "./AmpImage";
 import { DiffWindow } from "./DiffWindow";
-import { ampAttachmentUrl, workerFileLink, type WorkerFile } from "./files";
+import {
+  ampAttachmentUrl,
+  isWorkerFileRequest,
+  workerFileLink,
+  type WorkerFile,
+} from "./files";
 import type {
   ActivityIdentity,
   ActivityItem,
@@ -181,7 +186,7 @@ export function ActivityMarkdown({
           node?.properties["data-private-image"] ||
           (typeof src === "string" &&
             typeof location !== "undefined" &&
-            workerFileLink(src.split(/[?#]/, 1)[0], location.origin))
+            isWorkerFileRequest(src, location.origin))
         )
           return (
             <MarkdownLink node={node} href={src} onFileOpen={onFileOpen}>
@@ -327,8 +332,9 @@ export function ActivityMarkdown({
             }
             if (
               typeof location !== "undefined" &&
-              workerFileLink(safe.split(/[?#]/, 1)[0], location.origin) &&
-              /(?:^#|&)(?:name|amp)=/.test(destination.hash)
+              (isWorkerFileRequest(destination.href, location.origin) ||
+                (workerFileLink(safe.split(/[?#]/, 1)[0], location.origin) &&
+                  /(?:^#|&)(?:name|amp)=/.test(destination.hash)))
             )
               node.properties["data-private-image"] = true;
             if (key === "src" && !/^https?:$/.test(destination.protocol))

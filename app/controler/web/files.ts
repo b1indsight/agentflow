@@ -60,6 +60,25 @@ export function workerFileLink(
   }
 }
 
+/** Block resolved file requests, including server-decoded paths, without granting canonical file actions. */
+export function isWorkerFileRequest(
+  destination: string,
+  origin: string,
+): boolean {
+  try {
+    const url = new URL(destination);
+    return (
+      url.origin === origin &&
+      workerFileLink(
+        `${origin}${decodeURIComponent(url.pathname).replace(/\/+$/, "")}`,
+        origin,
+      ) !== null
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Read the existing authenticated attachment endpoint, bounding actual bytes rather than trusting headers. */
 export async function readFile(
   linkId: string,
