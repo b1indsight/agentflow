@@ -2,20 +2,20 @@ import { useEffect, useId, useRef, useState } from "react";
 import { Send } from "lucide-react";
 import { FlowTaskInput } from "./FlowTaskInput";
 
-/** Detail-page revision submission; task editing is shared with Flow creation. */
-export function ContinueFlowInput({
+/** Append an Agent task; task editing is shared with Flow creation. */
+export function AgentTaskInput({
   onSubmit,
   disabledReason,
 }: {
-  onSubmit: (message: string, requestId: string) => Promise<void>;
+  onSubmit: (instruction: string, requestId: string) => Promise<void>;
   disabledReason: string;
 }) {
   const id = useId();
-  const [message, setMessage] = useState("");
+  const [instruction, setInstruction] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const request = useRef<{ message: string; id: string } | null>(null);
+  const request = useRef<{ instruction: string; id: string } | null>(null);
   const writing = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -25,7 +25,7 @@ export function ContinueFlowInput({
     };
   }, []);
   const send = async () => {
-    const text = message.trim();
+    const text = instruction.trim();
     if (writing.current || disabledReason || !text) return;
     writing.current = true;
     setPending(true);
@@ -33,13 +33,13 @@ export function ContinueFlowInput({
     setNotice("");
     try {
       // Reuse the identity after a lost response, even if the user switches tabs.
-      if (request.current?.message !== text)
-        request.current = { message: text, id: crypto.randomUUID() };
+      if (request.current?.instruction !== text)
+        request.current = { instruction: text, id: crypto.randomUUID() };
       await onSubmit(text, request.current.id);
       if (mounted.current) {
-        setMessage("");
+        setInstruction("");
         request.current = null;
-        setNotice("已发送，继续任务已排队。可在会话和执行记录中查看进展。");
+        setNotice("已发送，Agent 任务已排队。可在会话和执行记录中查看进展。");
       }
     } catch (error) {
       if (mounted.current)
@@ -68,10 +68,10 @@ export function ContinueFlowInput({
         placeholder="补充要求、回答问题，或告诉 Agent 下一步做什么…"
         rows={2}
         maxLength={16000}
-        value={message}
+        value={instruction}
         disabled={pending}
         onValueChange={(value) => {
-          setMessage(value);
+          setInstruction(value);
           setError("");
           setNotice("");
         }}
@@ -84,7 +84,7 @@ export function ContinueFlowInput({
         <button
           type="submit"
           className="btn"
-          disabled={pending || Boolean(disabledReason) || !message.trim()}
+          disabled={pending || Boolean(disabledReason) || !instruction.trim()}
         >
           <Send />
           {pending ? "正在发送…" : "发送"}

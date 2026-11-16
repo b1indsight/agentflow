@@ -1,7 +1,7 @@
 import { type ComponentProps, useLayoutEffect, useRef } from "react";
 import { replaceTaskText, updateTaskText } from "./flowInput";
 
-/** Controlled task text shared by creation and revision, preserving pasted line endings. */
+/** Task text shared by Flow creation and appended Agent tasks, preserving pasted line endings. */
 export function FlowTaskInput({
   value,
   onValueChange,

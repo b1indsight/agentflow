@@ -59,8 +59,8 @@ class RetryRejected(ValueError):
         self.code = code
 
 
-class ContinuationRejected(ValueError):
-    """A console instruction cannot safely start another revision yet."""
+class AgentTaskRejected(ValueError):
+    """An Agent task cannot safely be appended to the Flow."""
 
 
 class ControlService:
@@ -292,19 +292,21 @@ class ControlService:
             self._fire("on_archived", flow=flow)
         self._jobs_available()
 
-    def continue_flow(self, flow_id: int, message: str, request_id: str, author: str) -> None:
-        """Atomically record owner input and resume the existing Flow's revision pipeline."""
+    def append_agent_task(self, flow_id: int, instruction: str, request_id: str) -> None:
+        """Atomically append an Agent task using the Flow's existing revision pipeline."""
         with self.flows.locked(flow_id) as context:
             tx, fresh = context.database, context.flow
             if fresh is None:
-                raise ContinuationRejected("flow_not_found")
+                raise AgentTaskRejected("flow_not_found")
             jobs = self.jobs.using(tx)
             history = jobs.list_jobs(flow_id)
+            # Preserve idempotency for tasks persisted before the input path was renamed.
             previous = next((job for job in history
-                if (job.payload or {}).get("console_request_id") == request_id), None)
+                if (job.payload or {}).get("agent_task_request_id",
+                    (job.payload or {}).get("console_request_id")) == request_id), None)
             if previous is not None:
-                if (previous.payload or {}).get("instruction") != message:
-                    raise ContinuationRejected("continue_request_conflict")
+                if (previous.payload or {}).get("instruction") != instruction:
+                    raise AgentTaskRejected("agent_task_request_conflict")
                 return
             delivery = self.deliveries.using(tx).get_delivery(flow_id)
             execution = self.flows.using(tx).get_flow_execution(flow_id)
@@ -318,32 +320,32 @@ class ControlService:
                 or execution is None
                 or execution.released_at is not None
             ):
-                raise ContinuationRejected("continue_unavailable")
+                raise AgentTaskRejected("agent_task_unavailable")
             if (
                 self.stops.using(tx).has_pending(flow_id)
                 or any(job.state in {JobState.QUEUED, JobState.RUNNING} for job in history)
                 or jobs.reopen_blocked(flow_id)
                 or reviews.has_active_batch(flow_id)
             ):
-                raise ContinuationRejected("continue_busy")
+                raise AgentTaskRejected("agent_task_busy")
             batch = reviews.create_batch(
                 fresh, trigger="strong", feedback=[],
                 open_points=reviews.waiting_open_points(flow_id),
             )
             job = jobs.enqueue_job(fresh, JobKind.REVISION, {
-                "batch_id": batch.id, "instruction": message,
-                "purpose": "revise", "console_request_id": request_id,
+                "batch_id": batch.id, "instruction": instruction,
+                "purpose": "revise", "agent_task_request_id": request_id,
             })
             reviews.advance(batch.id, job)
             ActivityStore(tx).append(
                 flow_id,
                 Observation(
-                    key=f"console:{request_id}",
-                    source="console",
+                    key=f"agent_task:{request_id}",
+                    source="agent_task",
                     kind="message",
                     round_no=fresh.current_round_no,
-                    author=author,
-                    body=message,
+                    author="user",
+                    body=instruction,
                     occurred_at=tx.now(),
                     updated_at=tx.now(),
                     metadata={"job_id": job.id, "attempt_id": fresh.current_attempt_id},

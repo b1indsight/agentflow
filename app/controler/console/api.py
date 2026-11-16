@@ -10,10 +10,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.console import (
     ActivityPage,
+    AppendAgentTaskRequest,
     ArchiveRequest,
     ConsoleFailure,
     ContentPage,
-    ContinueRequest,
     CreateFlowRequest,
     FlowDetail,
     FlowPage,
@@ -28,7 +28,7 @@ from app.contracts.console import (
     UpdateSettingsRequest,
 )
 from app.controler.runtime import ServerRuntime
-from app.controler.workflow.service import ContinuationRejected, ControlService, RetryRejected
+from app.controler.workflow.service import AgentTaskRejected, ControlService, RetryRejected
 from app.domain.models import CodingModelSettings
 from app.github import GitHubError, GitHubErrorKind
 from app.persistence.activity import ActivityStore
@@ -291,9 +291,9 @@ async def retry(request: Request, flow_id: FlowId, body: RetryRequest) -> FlowDe
     return await runtime.console.db(command)
 
 
-@router.post("/flows/{flow_id}/continue", response_model=FlowDetail)
-async def continue_flow(request: Request, flow_id: FlowId, body: ContinueRequest) -> FlowDetail:
-    """Accept one owner instruction without creating a new Flow, branch, or PR."""
+@router.post("/flows/{flow_id}/agent-tasks", response_model=FlowDetail)
+async def append_agent_task(request: Request, flow_id: FlowId, body: AppendAgentTaskRequest) -> FlowDetail:
+    """Append one Agent task without creating a new Flow, branch, or PR."""
     _require_same_origin_json(request)
     runtime: ServerRuntime = request.app.state.runtime
     loop = asyncio.get_running_loop()
@@ -307,10 +307,8 @@ async def continue_flow(request: Request, flow_id: FlowId, body: ContinueRequest
             jobs_available=notify_jobs,
         )
         try:
-            service.continue_flow(
-                flow_id, body.message, str(body.request_id), str(runtime.settings.access_owner_email),
-            )
-        except ContinuationRejected as error:
+            service.append_agent_task(flow_id, body.instruction, str(body.request_id))
+        except AgentTaskRejected as error:
             code = str(error)
             raise ConsoleFailure(code, 404 if code == "flow_not_found" else 409) from error
         return ConsoleStore(runtime.database).detail(flow_id)

@@ -250,7 +250,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 for (const width of [1440, 390]) {
-  test(`detail composer continues the current Flow safely at ${width}px`, async ({
+  test(`detail composer appends an Agent task safely at ${width}px`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 900 });
@@ -266,12 +266,12 @@ for (const width of [1440, 390]) {
     await page.route("**/api/flows/42", (route) =>
       route.fulfill({ json: current }),
     );
-    const requests: { message: string; request_id: string }[] = [];
+    const requests: { instruction: string; request_id: string }[] = [];
     let finish = () => {};
     const committed = new Promise<void>((resolve) => {
       finish = resolve;
     });
-    await page.route("**/api/flows/42/continue", async (route) => {
+    await page.route("**/api/flows/42/agent-tasks", async (route) => {
       expect(route.request().method()).toBe("POST");
       requests.push(route.request().postDataJSON());
       if (requests.length === 1) return route.abort("failed");
@@ -323,12 +323,15 @@ for (const width of [1440, 390]) {
     ).toBeDisabled();
     expect(requests).toHaveLength(2);
     expect(requests[0]).toEqual(requests[1]);
+    expect(requests[0].instruction).toBe("补充键盘导航\n保留原有行为");
     expect(requests[0].request_id).toMatch(/^[0-9a-f-]{36}$/);
     await page.screenshot({
       path: `../../../.amp/in/artifacts/revision-input-${width}-pending.png`,
     });
     finish();
-    await expect(composer.getByRole("status")).toContainText("继续任务已排队");
+    await expect(composer.getByRole("status")).toContainText(
+      "Agent 任务已排队",
+    );
     await expect(input).toHaveValue("");
     await expect(send).toBeDisabled();
     await page.screenshot({

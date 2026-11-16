@@ -23,8 +23,8 @@ import {
   X,
 } from "lucide-react";
 import {
+  appendAgentTask,
   archiveFlow,
-  continueFlow,
   getFlow,
   getFlows,
   getJobs,
@@ -48,7 +48,7 @@ import {
 import { ConversationSources, SourceList } from "./ConversationSources";
 import { CreateFlow } from "./CreateFlow";
 import { FileViewer } from "./FileViewer";
-import { ContinueFlowInput } from "./ContinueFlowInput";
+import { AgentTaskInput } from "./AgentTaskInput";
 import type { WorkerFile } from "./files";
 import { InferenceNotices } from "./InferenceNotices";
 import { actionLabel, archiveReasonLabels, flowLabel, phases } from "./phases";
@@ -280,7 +280,7 @@ function Detail({
     ),
     [nav, setNav] = useState(false);
   const [pending, setPending] = useState<
-    "archive" | "resume" | "retry" | "continue" | null
+    "archive" | "resume" | "retry" | "agent-task" | null
   >(null);
   const writing = useRef(false);
   const [writeError, setWriteError] = useState("");
@@ -1162,7 +1162,7 @@ function Detail({
               </section>
             </TabsContent>
           </div>
-          <ContinueFlowInput
+          <AgentTaskInput
             disabledReason={
               pending !== null
                 ? "正在提交，请稍候。"
@@ -1170,13 +1170,13 @@ function Detail({
                   ? "等待当前任务完成并进入待审核后发送，可先填写补充要求。"
                   : ""
             }
-            onSubmit={async (message, requestId) => {
+            onSubmit={async (instruction, requestId) => {
               if (writing.current)
                 throw new Error("正在提交其他操作，请稍候。");
               writing.current = true;
-              setPending("continue");
+              setPending("agent-task");
               try {
-                const value = await continueFlow(id, message, requestId);
+                const value = await appendAgentTask(id, instruction, requestId);
                 onChanged();
                 if (mounted.current)
                   setFlow((prior) =>

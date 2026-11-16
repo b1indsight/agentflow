@@ -321,7 +321,7 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
 
 
 @pytest.fixture
-def continuable_flow(store):
+def flow_ready_for_agent_task(store):
     flow = store.flows.create_flow("owner/repo", 7, 42)
     attempt = store.flows.create_attempt(flow.id)
     attempt.codex_session_id = "original-session"
@@ -340,13 +340,14 @@ def continuable_flow(store):
     return apply_flow_event(store, flow, FlowEvent.DELIVERY_APPLIED)
 
 
-async def test_continue_uses_revision_pipeline_and_records_input_once(
-    console_runtime, store, continuable_flow, recording_resources
+@pytest.mark.parametrize("request_key", ["agent_task_request_id", "console_request_id"])
+async def test_append_agent_task_uses_revision_pipeline_and_records_input_once(
+    console_runtime, store, flow_ready_for_agent_task, recording_resources, request_key
 ):
     # A lost response must not duplicate work, including after the ordinary revision completes.
-    flow = continuable_flow
-    path = f"/api/flows/{flow.id}/continue"
-    body = {"message": "  添加键盘导航\n保留现有行为  ", "request_id": str(uuid4())}
+    flow = flow_ready_for_agent_task
+    path = f"/api/flows/{flow.id}/agent-tasks"
+    body = {"instruction": "  添加键盘导航\n保留现有行为  ", "request_id": str(uuid4())}
     notifications = []
     console_runtime.gateway.wake_all = lambda: notifications.append(
         (get_ident(), len(store.jobs.list_jobs(flow.id)))
@@ -359,15 +360,19 @@ async def test_continue_uses_revision_pipeline_and_records_input_once(
         assert response.json()["phase"] == "queued"
         assert response.json()["branch"] == "flow/7"
         assert client.post(path, json=body, headers=headers).status_code == 200
-        assert client.post(path, json=body | {"message": "不同要求"}, headers=headers).status_code == 409
+        conflict = client.post(path, json=body | {"instruction": "不同要求"}, headers=headers)
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"] == "agent_task_request_conflict"
         client.portal.call(lambda: None)
         page = client.get(f"/api/flows/{flow.id}/activity", headers=headers).json()
     assert notifications == [(loop_thread, 2)]
-    messages = [item for item in page["items"] if item["source"] == "console"]
+    messages = [item for item in page["items"] if item["source"] == "agent_task"]
     assert [item["body"] for item in messages] == ["添加键盘导航\n保留现有行为"]
     assert messages[0]["round_no"] == flow.current_round_no
+    assert messages[0]["author"] == "user"
     job = store.jobs.list_jobs(flow.id)[-1]
     assert job.kind is JobKind.REVISION
+    assert job.payload["agent_task_request_id"] == body["request_id"]
     assert store.reviews.for_job(job).trigger == "strong"
     assigned = store.assignments.assign_job("worker-1", "next-token", "epoch")
     assert assigned.id == job.id
@@ -388,8 +393,18 @@ async def test_continue_uses_revision_pipeline_and_records_input_once(
     assert store.reviews.for_job(job).state is BatchState.COMPLETED
     assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
     assert store.flows.get_current_attempt(flow).codex_session_id == "original-session"
+    if request_key == "console_request_id":
+        # Jobs accepted before the rename must still deduplicate after an upgrade.
+        with store.connection() as connection:
+            connection.execute(
+                "UPDATE jobs SET payload=(payload-'agent_task_request_id') || "
+                "jsonb_build_object('console_request_id',payload->'agent_task_request_id') WHERE id=%s",
+                (job.id,),
+            )
     with TestClient(create_app(console_runtime)) as client:
         assert client.post(path, json=body, headers=console_runtime.issuer.headers()).status_code == 200
+        assert client.post(path, json=body | {"instruction": "不同要求"},
+                           headers=console_runtime.issuer.headers()).status_code == 409
     assert len(store.jobs.list_jobs(flow.id)) == 2
 
 
@@ -397,8 +412,8 @@ async def test_continue_uses_revision_pipeline_and_records_input_once(
     "blocked", "archived", "finalizing", "closed", "merged", "no_binding", "no_attempt",
     "queued", "running", "pending_result", "unknown_execution", "triage", "stop",
 ])
-def test_continue_refuses_unsafe_states(console_runtime, store, continuable_flow, scenario):
-    flow = continuable_flow
+def test_append_agent_task_refuses_unsafe_states(console_runtime, store, flow_ready_for_agent_task, scenario):
+    flow = flow_ready_for_agent_task
     with store.connection() as connection:
         if scenario in ("archived", "finalizing"):
             connection.execute(
@@ -430,16 +445,16 @@ def test_continue_refuses_unsafe_states(console_runtime, store, continuable_flow
             store.stops.using(context.database).request(flow.id)
         assert store.stops.has_pending(flow.id)
     with TestClient(create_app(console_runtime)) as client:
-        response = client.post(f"/api/flows/{flow.id}/continue", headers=console_runtime.issuer.headers(),
-                               json={"message": "继续", "request_id": str(uuid4())})
+        response = client.post(f"/api/flows/{flow.id}/agent-tasks", headers=console_runtime.issuer.headers(),
+                               json={"instruction": "继续", "request_id": str(uuid4())})
         assert response.status_code == 409
     assert len(store.jobs.list_jobs(flow.id)) == 1
     console_runtime.gateway.wake_all.assert_not_called()
 
 
-def test_continue_requires_owner_same_origin_and_valid_input(console_runtime, store, continuable_flow):
-    path = f"/api/flows/{continuable_flow.id}/continue"
-    body = {"message": "继续", "request_id": str(uuid4())}
+def test_append_agent_task_requires_owner_same_origin_and_valid_input(console_runtime, store, flow_ready_for_agent_task):
+    path = f"/api/flows/{flow_ready_for_agent_task.id}/agent-tasks"
+    body = {"instruction": "继续", "request_id": str(uuid4())}
     with TestClient(create_app(console_runtime)) as client:
         headers = console_runtime.issuer.headers()
         assert client.post(path, json=body).status_code == 401
@@ -447,33 +462,34 @@ def test_continue_requires_owner_same_origin_and_valid_input(console_runtime, st
             email="other@example.com")).status_code == 403
         assert client.post(path, json=body, headers=headers | {"Origin": "https://evil.test"}).status_code == 403
         assert client.post(path, json=body | {"force": True}, headers=headers).status_code == 422
+        assert client.post(path, json=body | {"author": "someone@example.com"}, headers=headers).status_code == 422
         for text in ("", " \n ", "x" * 16001, "bad\0text"):
-            assert client.post(path, json=body | {"message": text}, headers=headers).status_code == 422
+            assert client.post(path, json=body | {"instruction": text}, headers=headers).status_code == 422
         assert client.post(path, json=body | {"request_id": "invalid"}, headers=headers).status_code == 422
-        assert client.post("/api/flows/99999/continue", json=body, headers=headers).status_code == 404
-    assert len(store.jobs.list_jobs(continuable_flow.id)) == 1
+        assert client.post("/api/flows/99999/agent-tasks", json=body, headers=headers).status_code == 404
+    assert len(store.jobs.list_jobs(flow_ready_for_agent_task.id)) == 1
 
 
-def test_concurrent_continuation_requests_enqueue_once(console_runtime, store, continuable_flow):
+def test_concurrent_agent_task_requests_enqueue_once(console_runtime, store, flow_ready_for_agent_task):
     # Two browser tabs can submit the same request before either receives a response.
     barrier = Barrier(2)
-    body = {"message": "继续处理边界情况", "request_id": str(uuid4())}
+    body = {"instruction": "继续处理边界情况", "request_id": str(uuid4())}
     with TestClient(create_app(console_runtime)) as client:
         headers = console_runtime.issuer.headers()
 
         def submit():
             barrier.wait()
-            return client.post(f"/api/flows/{continuable_flow.id}/continue", json=body, headers=headers)
+            return client.post(f"/api/flows/{flow_ready_for_agent_task.id}/agent-tasks", json=body, headers=headers)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             responses = list(pool.map(lambda _: submit(), range(2)))
         assert [response.status_code for response in responses] == [200, 200]
-    assert len(store.jobs.list_jobs(continuable_flow.id)) == 2
+    assert len(store.jobs.list_jobs(flow_ready_for_agent_task.id)) == 2
 
 
-def test_continue_preserves_waiting_questions_and_due_feedback(console_runtime, store, continuable_flow):
+def test_append_agent_task_preserves_waiting_questions_and_due_feedback(console_runtime, store, flow_ready_for_agent_task):
     # Already-relayed feedback keeps its deadline and cannot collide with the owner batch generation.
-    flow = continuable_flow
+    flow = flow_ready_for_agent_task
     store.reviews.ingest(flow.id, "feedback", "issue_comment", {}, FeedbackUpdate(
         kind=ReviewItemKind.CONVERSATION, github_id=101, author="alice", body="Which limit?",
         updated_at=flow.created_at,
@@ -485,8 +501,8 @@ def test_continue_preserves_waiting_questions_and_due_feedback(console_runtime, 
         connection.execute("UPDATE review_buffers SET due_at=now(),force_triage=TRUE WHERE flow_id=%s", (flow.id,))
         before = connection.execute("SELECT due_at,force_triage FROM review_buffers WHERE flow_id=%s", (flow.id,)).fetchone()
     with TestClient(create_app(console_runtime)) as client:
-        response = client.post(f"/api/flows/{flow.id}/continue", headers=console_runtime.issuer.headers(),
-                               json={"message": "Use 10", "request_id": str(uuid4())})
+        response = client.post(f"/api/flows/{flow.id}/agent-tasks", headers=console_runtime.issuer.headers(),
+                               json={"instruction": "Use 10", "request_id": str(uuid4())})
         assert response.status_code == 200
     batch = store.reviews.for_job(store.jobs.list_jobs(flow.id)[-1])
     assert batch.open_points == ["Which limit?"]
@@ -500,16 +516,16 @@ def test_continue_preserves_waiting_questions_and_due_feedback(console_runtime, 
     assert [item.github_id for item in resumed.feedback] == [101]
 
 
-def test_continue_rolls_back_job_when_message_cannot_be_recorded(console_runtime, store, continuable_flow, monkeypatch):
-    path = f"/api/flows/{continuable_flow.id}/continue"
-    body = {"message": "继续", "request_id": str(uuid4())}
+def test_append_agent_task_rolls_back_when_input_cannot_be_recorded(console_runtime, store, flow_ready_for_agent_task, monkeypatch):
+    path = f"/api/flows/{flow_ready_for_agent_task.id}/agent-tasks"
+    body = {"instruction": "继续", "request_id": str(uuid4())}
     with TestClient(create_app(console_runtime)) as client:
         headers = console_runtime.issuer.headers()
         with monkeypatch.context() as patch:
             patch.setattr(ActivityStore, "append", Mock(side_effect=RuntimeError("archive unavailable")))
             with pytest.raises(RuntimeError, match="archive unavailable"):
                 client.post(path, json=body, headers=headers)
-        assert len(store.jobs.list_jobs(continuable_flow.id)) == 1
+        assert len(store.jobs.list_jobs(flow_ready_for_agent_task.id)) == 1
         console_runtime.gateway.wake_all.assert_not_called()
         assert client.post(path, json=body, headers=headers).status_code == 200
 

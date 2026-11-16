@@ -110,11 +110,11 @@ class RetryRequest(ConsoleModel):
     """Retry the existing Flow without allowing clients to override its safety checks."""
 
 
-class ContinueRequest(ConsoleModel):
-    """An idempotent owner instruction for the existing coding session."""
+class AppendAgentTaskRequest(ConsoleModel):
+    """An idempotent Agent task instruction for an existing Flow."""
 
     request_id: UUID
-    message: Annotated[
+    instruction: Annotated[
         str,
         StringConstraints(
             strip_whitespace=True, min_length=1, max_length=16000, pattern=r"^[^\x00]*$"

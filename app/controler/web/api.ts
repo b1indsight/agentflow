@@ -187,23 +187,31 @@ export const retryFlow = (id: number) =>
     body: "{}",
   });
 
-export async function continueFlow(
+export async function appendAgentTask(
   id: number,
-  message: string,
+  instruction: string,
   requestId: string,
 ) {
   try {
-    return await api<FlowDetail>(`/api/flows/${id}/continue`, {}, undefined, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, request_id: requestId }),
-    });
+    return await api<FlowDetail>(
+      `/api/flows/${id}/agent-tasks`,
+      {},
+      undefined,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction, request_id: requestId }),
+      },
+    );
   } catch (error) {
     if (error instanceof ApiError) {
       const refusals: Record<string, string> = {
-        continue_busy: "Flow 仍有任务、反馈处理或结果待确认，请刷新后再发送。",
-        continue_unavailable: "仅支持已有打开的 PR 和有效执行绑定的活跃 Flow。",
-        continue_request_conflict: "此请求已用于其他内容，请刷新核对后再发送。",
+        agent_task_busy:
+          "Flow 仍有任务、反馈处理或结果待确认，请刷新后再发送。",
+        agent_task_unavailable:
+          "仅支持已有打开的 PR 和有效执行绑定的活跃 Flow。",
+        agent_task_request_conflict:
+          "此请求已用于其他内容，请刷新核对后再发送。",
         flow_not_found: "Flow 不存在，请返回看板。",
       };
       if (error.status === 401 || error.status === 403)
