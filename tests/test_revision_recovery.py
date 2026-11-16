@@ -21,6 +21,7 @@ from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import EffectState, ResultPending
 from app.controler.review.context import build_review_context
 from app.controler.workflow.lifecycle import prove_reopen
+from app.controler.workflow.revisions import verify_revision_result
 from app.controler.workflow.service import ControlService
 from app.domain.models import (
     AddressedComment,
@@ -662,7 +663,11 @@ async def test_durable_result_readers_reject_corrupt_evidence_without_rewriting(
     persisted = store.jobs.get_job(job.id)
     with pytest.raises(ValueError):
         if reader == "revision":
-            await subject.results._check_revision(persisted)
+            await verify_revision_result(
+                persisted, github=github, database=subject.results.database,
+                flows=subject.results.flows, deliveries=subject.results.deliveries,
+                result_store=subject.results.result_store,
+            )
         elif reader == "prepare":
             with store.transaction() as tx:
                 locked = tx.lock_workflow(flow.id)

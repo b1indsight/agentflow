@@ -103,6 +103,12 @@ _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
     ("controler/workflow/lifecycle.py", {"app.controler.workflow.results", "app.controler.workflow.effects",
                                         "app.controler.workflow.service", "app.controler.workflow.tools"}),
     ("controler/workflow/initial.py", {"app.controler"}),
+    ("controler/workflow/preparation.py", {"app.controler"}),
+    ("controler/workflow/plans.py", {"app.controler"}),
+    ("controler/workflow/revisions.py", {"app.controler.workflow.coordinator",
+                                        "app.controler.workflow.results", "app.controler.workflow.service"}),
+    ("controler/workflow/archive.py", {"app.controler.workflow.coordinator",
+                                      "app.controler.workflow.results", "app.controler.workflow.service"}),
     ("controler/workflow/effects.py", {"app.controler.workflow.tools"}),
     ("controler/events", _SERVER_ENTRYPOINTS | {"app.controler.workers", "app.controler.reconciliation"}),
     ("controler/workers", _SERVER_ENTRYPOINTS | {"app.controler.events", "app.controler.reconciliation"}),
@@ -117,6 +123,10 @@ _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
 def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[str]) -> None:
     modules = imported_modules(Path("app") / package)
     assert modules, f"No imports found in {package}; check the package path"
+    if package == "controler/workflow/initial.py":
+        # INITIAL owns preparation and plans; neither leaf may depend on orchestration.
+        leaves = {"app.controler.workflow.preparation", "app.controler.workflow.plans"}
+        modules = {module for module in modules if not contains_forbidden({module}, leaves)}
     assert not contains_forbidden(modules, forbidden)
 
 

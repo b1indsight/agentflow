@@ -108,7 +108,11 @@ WebhookConsumer 已持久化失败退避和重放；PR 对账处理已追踪 PR 
 
 `ControlService` 在显式事务中负责触发、取消和 retry，并由 `lifecycle` 提交合并事实；
 `lifecycle` 也拥有创建 PR 的身份核验、绑定及 close/reopen。`JobCoordinator` 把 INITIAL、REVISION、ARCHIVE
-持久 job 构造成版本化 task，并在创建 revision 前直接处理需要 Judge 判断的反馈批次。
+持久 job 分派到 `initial.py`、`revisions.py`、`archive.py` 准备版本化 task，并在创建 revision 前直接处理需要 Judge 判断的反馈批次。
+三个类型模块同时拥有各自的结果计划构造；INITIAL 的准备与命名共用一个具体准备对象，REVISION
+持有 answer/revise 的远端核验，ARCHIVE 分别处理清理回执与无 worker 的合并通知。
+`preparation.py` 共用有界 GitHub 读取及准备检查，`plans.py` 只共用失败与审核效果等计划构造。
+类型模块不依赖公共编排服务，也不接受它们作为上下文；`retry` 的共同生命周期检查仍归 `ControlService`。
 Runtime 创建并共享的 `ResultApplication` 按 job ID 读取并校验已持久接收的 result，
 冻结一次结果的领域变更和 GitHub 操作，
 由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态和结果确认。

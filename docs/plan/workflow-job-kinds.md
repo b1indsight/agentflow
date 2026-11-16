@@ -2,8 +2,8 @@
 
 建议把 INITIAL、REVISION、ARCHIVE 各自的任务准备和结果转计划逻辑放进对应模块，公共事务和恢复边界留在原入口；`retry` 保留共同的生命周期检查，不按类型拆成三套。
 
-**阶段：** 计划已批准，开始实施；实现与验证进度见时间线。
-**PR：** 正在创建计划草稿，发布后沿用同一 PR 实施。
+**阶段：** 实现与本地验证完成；发布前审查和远端 CI 的最新结果见 PR 与本线程交付记录。
+**PR：** [#175](https://github.com/b1indsight/agentflow/pull/175)，沿用计划草稿。
 **Bookmark：** `refactor/workflow-job-kinds`。
 **需求：** [本线程](https://ampcode.com/threads/T-01a1e42f-8b95-748b-abf5-d8da1f7582c2)，承接[架构审查的第 3 项](https://ampcode.com/threads/T-01a1df4f-9c18-7322-8a3a-1b1153ba4a2d)。
 **规划基线：** 2026-11-16 fetch 后的 `main@origin`，[c73f756c](https://github.com/b1indsight/agentflow/commit/c73f756cb1a0d8f1300e4217bfb523252a71406b)，已含 #171 和 #172。独立 jj workspace：`.amp/in/workflow-job-handlers/workspace`；不改 default workspace 的文件。
@@ -211,4 +211,21 @@ def delivered_pr_number(flow: Flow, *, deliveries: DeliveryStore) -> int: ...
 
 ## 2. PR 变更时间线
 
-<!-- 初始计划待审批；仅在需求或设计发生实质变化、或实现交付时追加条目。 -->
+### [001] — 2026-11-16 — 按任务类型迁移准备与结果计划
+
+- **实际实现：** 扩展原有 `initial.py`、`revisions.py`、`archive.py`，迁入各类任务准备及成功结果计划；INITIAL 命名与等待归 `InitialPreparation`，revision 事务外远端预检归 `verify_revision_result`。`preparation.py` 提供具体有界读取及准备检查，`plans.py` 仅提取多处使用的计划构造。
+- **保留边界：** coordinator 保留配置选择、签发、持久读取重试、签发后的派发复查及失败入库；results 保留逐 job 锁、通知优先、失败批次绑定、退休、冻结计划恢复、effects 执行和原子提交。`service.py` 未改动，没有新增 handler 框架或运行时装配。
+- **测试与依赖：** 迁移一个既有私有核验调用，保留损坏结果拒绝及 inbox 不改写断言。INITIAL 只开放 preparation/plans 两个叶子依赖；叶子禁止运行时反向导入 controller，revision/archive 禁止导入公共编排服务。没有新增永久行为测试。
+- **已运行验证：** 隔离 PostgreSQL 上的原始基线与最终实现全量 pytest 均通过；结果迁移阶段的恢复、修订核验、归档及包边界回归通过。Ruff、Mypy、console 构建、sdist/wheel 构建及 wheel 内 console/plans 文件检查通过。pytest 保留既有跳过项和 Starlette/httpx 弃用提示，构建仍报告现有大 chunk 提示，不涉及 UI 改动。完整输出见本线程 scratch 目录的 `baseline-full.log`、`final-full.log`、`final-ruff.log`、`final-mypy.log`、`final-build.log`。
+- **保真检查：** 通过 AST 比较确认 `_commit`、`_retired_plan`、推理应用和恢复扫描，以及 capability/准备重试/失败方法均未改变；命名 messages、output schema 和推理预算与基线完全相同。`service.py` 字节一致。
+- **交付边界：** 最终审查门禁通过后沿同一 bookmark 推送，PR 保持草稿；不合并、不部署。审查和交付状态以 PR 与本线程后续记录为准。
+
+### [002] — 2026-11-16 — 同场景对照与简化比较
+
+- **设置：** 隔离 PostgreSQL 17，`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55485/postgres`；使用项目既有虚拟环境和 pytest。临时插件观察公共 `prepare`、`retry` 和实际持久化计划，比较 task、异常类型/消息、retry 拒绝码、完整有序 plan/effects 及 Flow/delivery/attempt/binding/job 最终状态。
+- **原始基线：** 从规划基线提交导出干净副本，重跑相同输入，与先前基线记录一致。只归一化 ISO 时间和 UUID；每次先校验原始 plan/inbox digest 对应关系，再用归一化 payload 的 SHA256 比较摘要，保留任务身份、轮次及关联。
+- **比较 A：** 实际运行“仅迁结果”副本和“完整迁移”版本，相同场景输出均与原始基线一致。仅迁结果时 `prepare` 仍有三类任务和 PR 资源构造，完整迁移后只有公共前置和直接分派，因此保留完整迁移以满足职责归组要求，不把减少入口行数当作行为证明。
+- **比较 B：** 在内存把 INITIAL 的三个方法展开成显式传参的模块函数，保留算法并运行相同场景，输出同样一致。入口仍需五项依赖，命名入队/等待两个调用分别额外传四项/七项共享依赖；具体类只在入口绑定一次，保留该类。变体不写回应用源码，不引入运行时选项。
+- **补充对照：** 另对 answer、外部更新后的 fetch 基线、新提交/no-op、Conventional Commits 不同命名形式与干净原始基线比较，输出一致。批次消费及线程处理的细节继续由既有回归断言验证，不把最终状态采样等同于穷尽并发证明。
+- **复现方法：** 在两个版本以 `python -m pytest -q --tb=short -p behavior_probe` 执行 `test_coordinator` 的初始交付与命名截止、`test_preparation_retry` 的 capability 竞争/读取重排/关闭、`test_revision_recovery` 的准备失败后 retry/context 漂移/通知失败/提交重放及上述补充场景、`test_archive_status` 的无 worker 通知/新轮恢复/确定拒绝/未知写入、`test_workflow_transactions::test_retry_rolls_back_with_real_database`。按 pytest node ID 对比 JSON 记录；函数变体额外加载 `-p function_variant`。临时脚本和副本在验证后删除，仅保留日志；不为本次纯重构维护第二套行为测试。
+- **证据：** 本线程 scratch 目录 `.amp/in/workflow-job-handlers/` 的 `comparison.log`、`*-probe.log`、`*-behavior.jsonl`；目录已本地排除，不提交实验工具或数据。对照验证行为保真，不声称性能提升。
