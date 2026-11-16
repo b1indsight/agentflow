@@ -8,6 +8,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -146,6 +147,7 @@ async def run_amp(
     input_text: str | None = None, timeout: float = 1200,
     max_stdout: int = 8 * 1024 * 1024,
     timeout_kind: Literal["total", "idle"] = "total",
+    max_file_bytes: int | None = None,
 ) -> AmpProcessResult:
     """Run Amp with bounded concurrent pipes and TERM-first cancellation/timeout cleanup.
 
@@ -153,9 +155,20 @@ async def run_amp(
     streams have the byte bound; an overflow fails the invocation, never truncates
     it into an apparent success. Coding selects idle time since the last nonempty
     stdout/stderr read; read-only exports retain the default total request limit.
+    Downloads also impose a kernel file-size limit before exec, without running
+    Python's unsafe preexec_fn in this multithreaded worker.
     """
+    command = [AMP_BIN, *args]
+    if max_file_bytes is not None:
+        command = [
+            sys.executable, "-c",
+            ("import os,resource,sys; n=int(sys.argv[1]); "
+            "resource.setrlimit(resource.RLIMIT_FSIZE,(n,n)); "
+            "os.execvpe(sys.argv[2],sys.argv[2:],os.environ)"),
+            str(max_file_bytes), *command,
+        ]
     proc = await asyncio.create_subprocess_exec(
-        AMP_BIN, *args, cwd=cwd, env=env if env is not None else amp_environment(),
+        *command, cwd=cwd, env=env if env is not None else amp_environment(),
         stdin=asyncio.subprocess.PIPE if input_text is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True,
     )

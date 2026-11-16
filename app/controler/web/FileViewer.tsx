@@ -2,80 +2,18 @@ import { useEffect, useState } from "react";
 import { Download, RefreshCw } from "lucide-react";
 import { ApiError } from "./api";
 import { Button } from "./components/ui/button";
-import { readFile } from "./files";
+import {
+  fileFailureMessage,
+  previewFile,
+  readFile,
+  type FilePreview,
+} from "./files";
 import { TextWindow } from "./windowing";
 
-type Preview =
-  | { kind: "text"; text: string }
-  | { kind: "image"; url: string }
-  | { kind: "binary" };
 type FileState =
   | { kind: "loading" }
   | { kind: "error"; error: Error }
-  | { kind: "ready"; preview: Preview; size: number };
-
-/** Only signed, decodable raster formats become images. Everything else is escaped UTF-8 or a download. */
-async function previewFile(bytes: Uint8Array<ArrayBuffer>): Promise<Preview> {
-  const begins = (...signature: number[]) =>
-    signature.every((byte, i) => bytes[i] === byte);
-  const header = new TextDecoder("ascii").decode(bytes.subarray(0, 12));
-  const mime = begins(137, 80, 78, 71, 13, 10, 26, 10)
-    ? "image/png"
-    : begins(255, 216, 255)
-      ? "image/jpeg"
-      : header.startsWith("GIF87a") || header.startsWith("GIF89a")
-        ? "image/gif"
-        : header.startsWith("RIFF") && header.slice(8) === "WEBP"
-          ? "image/webp"
-          : null;
-  if (mime) {
-    try {
-      const bitmap = await createImageBitmap(new Blob([bytes], { type: mime }));
-      bitmap.close();
-    } catch {
-      return { kind: "binary" };
-    }
-    // Bounded data URLs use the existing image CSP, with no object URL lifetime or HTML/SVG execution.
-    const chunks: string[] = [];
-    for (let i = 0; i < bytes.length; i += 8192)
-      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
-    return {
-      kind: "image",
-      url: `data:${mime};base64,${btoa(chunks.join(""))}`,
-    };
-  }
-  try {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    if (!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text))
-      return { kind: "text", text };
-  } catch {
-    // Non-UTF-8 data is not lossy-decoded into misleading source text.
-  }
-  return { kind: "binary" };
-}
-
-function failureMessage(error: Error) {
-  if (error instanceof ApiError) {
-    if (error.status === 401) return "登录已失效，请重新登录后重试。";
-    if (error.status === 403) return "没有文件读取权限，请核对登录身份。";
-    if (error.status === 404)
-      return "文件不存在或已被删除，请返回会话核对链接。";
-    if (error.status === 409)
-      return "文件已被替换，请返回会话获取重新登记的链接。";
-    if (error.status === 413)
-      return "文件超过 512 KiB 上限，无法预览或通过此接口下载。";
-    const messages: Record<string, string> = {
-      worker_unavailable: "Worker 离线或连接不可用，恢复连接后可重试。",
-      query_busy: "文件读取繁忙，请稍后重试。",
-      query_timeout: "Worker 读取超时，请重试。",
-      file_unreadable: "Worker 无法读取文件，请核对文件权限后重试。",
-      invalid_response: "Worker 返回的文件无效，请重试。",
-      database_unavailable: "文件登记服务暂不可用，请重试。",
-    };
-    return `${messages[error.message] ?? "文件读取失败，请重试。"}（${error.message}）`;
-  }
-  return "文件读取失败，请检查网络或重新登录后重试。";
-}
+  | { kind: "ready"; preview: FilePreview; size: number };
 
 /** Only the active document is read; switching or retrying aborts and fences previous reads/decodes. */
 export function FileViewer({
@@ -160,7 +98,7 @@ export function FileViewer({
       <div className="file-editor">
         {state.kind === "loading" && <p role="status">正在读取文件…</p>}
         {state.kind === "error" && (
-          <p role="alert">{failureMessage(state.error)}</p>
+          <p role="alert">{fileFailureMessage(state.error)}</p>
         )}
         {authError && <a href="/console/">重新登录 / 刷新页面</a>}
         {state.kind === "ready" &&

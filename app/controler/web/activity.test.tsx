@@ -3,6 +3,7 @@ import { test, type TestContext } from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  ActivityMarkdown,
   ActivitySummary,
   ActivityView,
   buildConversationRows,
@@ -690,6 +691,7 @@ test("Markdown destinations use the message source, never the console origin", (
     "![相对图片](../assets/status.svg)",
     "![危险图片](javascript:alert%281%29)",
     '![截图](https://example.test/assets/preview "运行截图")',
+    "![外部文件服务](https://images.example.test/api/files/preview.png)",
     "[图片链接](https://example.test/result.WEBP?token=signed#preview)",
     "http://example.test/plain.png",
     "[文档查询](https://example.test/guide?file=example.png)",
@@ -733,14 +735,15 @@ test("Markdown destinations use the message source, never the console origin", (
   for (const destination of [
     "https://github.com/owner/agentflow/assets/status.svg",
     "https://example.test/assets/preview",
+    "https://images.example.test/api/files/preview.png",
     "https://example.test/result.WEBP?token=signed#preview",
     "http://example.test/plain.png",
     "https://example.test/small.gif",
   ])
     assert.ok(html.includes(`src="${destination}"`), destination);
-  assert.equal((html.match(/<img /g) ?? []).length, 5);
-  assert.equal((html.match(/loading="lazy"/g) ?? []).length, 5);
-  assert.equal((html.match(/referrerPolicy="no-referrer"/g) ?? []).length, 5);
+  assert.equal((html.match(/<img /g) ?? []).length, 6);
+  assert.equal((html.match(/loading="lazy"/g) ?? []).length, 6);
+  assert.equal((html.match(/referrerPolicy="no-referrer"/g) ?? []).length, 6);
   assert.match(html, /alt="截图" title="运行截图"/);
   assert.doesNotMatch(html, /(?:href|src)="javascript:|<a[^>]*><a/);
 
@@ -754,6 +757,22 @@ test("Markdown destinations use the message source, never the console origin", (
     assert.match(withoutSource, /图片：相对图片/);
     assert.doesNotMatch(withoutSource, /src="https:\/\/github.com/);
   }
+});
+
+test("ordinary Amp thread and artifact links preserve query strings and fragments", () => {
+  // Only attachment destinations need private-image handling; thread/artifact anchors are navigation.
+  const urls = [
+    "https://ampcode.com/threads/T-example?view=full&mode=source#message-42",
+    "https://ampcode.com/artifacts/A-example?path=src%2Fmain.ts&line=10#L10-L20",
+  ];
+  const html = renderToStaticMarkup(
+    <ActivityMarkdown
+      text={urls.map((url, i) => `[Amp ${i}](${url})`).join("\n\n")}
+      url={null}
+    />,
+  );
+  for (const url of urls)
+    assert.ok(html.includes(`href="${url.replaceAll("&", "&amp;")}"`), url);
 });
 
 test("only original worker file destinations become detail actions before relative URL resolution", (t) => {
@@ -806,6 +825,59 @@ test("only original worker file destinations become detail actions before relati
   );
   assert.match(github, /href="https:\/\/github.com\/owner\/repo\/guide.md"/);
   assert.doesNotMatch(github, /<img[^>]*src="https:\/\/console.example.test/);
+});
+
+test("private Amp images keep canonical navigation without falling back to unauthenticated image requests", (t) => {
+  mockActivity(t, () => assert.fail("static rendering must not read files"));
+  const ampUrl = `https://ampcode.com/user-content/attachments/${"a".repeat(64)}-preview.png`;
+  const marker = `/api/files/${"a".repeat(32)}#name=preview.png&amp=${encodeURIComponent(ampUrl)}`;
+  const body = [
+    `![截图](${marker})`,
+    `[图片链接](${marker})`,
+    `[![导航图片](${marker})](https://example.test/original)`,
+    `![原始私图](${ampUrl}#amp-media-source=/etc/passwd)`,
+    `[原始链接](${ampUrl}#amp-media-source=/etc/passwd)`,
+    `![错误标记](${marker.replace("ampcode.com", "other.test")})`,
+    `![本地图片](/api/files/${"b".repeat(32)}#name=local.png)`,
+    `![矢量](${marker.replaceAll("preview.png", "preview.svg")})`,
+    `![网页](${marker.replaceAll("preview.png", "preview.html")})`,
+  ].join("\n\n");
+  const render = (worker: boolean) =>
+    renderToStaticMarkup(
+      <OpenWorkerFile value={() => undefined}>
+        <ActivityView
+          entry={record("amp-images", {
+            kind: "message",
+            source: worker ? "worker" : "pr.comments",
+            body,
+            url: "https://github.com/owner/repo/issues/1",
+          })}
+        />
+      </OpenWorkerFile>,
+    );
+  const html = render(true);
+  assert.equal((html.match(/class="amp-image"/g) ?? []).length, 3);
+  assert.match(html, /href="https:\/\/example.test\/original"/);
+  assert.ok(
+    html.includes(`href="${ampUrl}" target="_blank" rel="noopener noreferrer"`),
+  );
+  assert.match(html, /图片：本地图片/);
+  assert.doesNotMatch(html, /<img|amp-media-source|<a[^>]*>\s*<(?:a|button)/);
+  assert.doesNotMatch(render(false), /class="amp-image"|<img/);
+  for (const image of [
+    `![同目标图片](${marker})`,
+    `**![加粗图片](${marker})**`,
+  ]) {
+    const nested = renderToStaticMarkup(
+      <ActivityMarkdown
+        text={`[${image}](${marker})`}
+        url={null}
+        onFileOpen={() => undefined}
+      />,
+    );
+    assert.equal((nested.match(/class="amp-image"/g) ?? []).length, 1);
+    assert.match(nested, /打开链接<\/a>/);
+  }
 });
 
 test("CI checks show workflow, job and status beside the app without hiding summaries", () => {

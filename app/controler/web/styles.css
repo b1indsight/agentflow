@@ -1353,6 +1353,21 @@ svg {
   max-width: 100%;
   height: auto;
 }
+.amp-image {
+  display: block;
+  min-width: 0;
+}
+.amp-image > [role="status"],
+.amp-image-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-meta);
+  color: var(--muted);
+}
+.amp-image-error [role="alert"] {
+  color: var(--destructive);
+}
 .markdown-body blockquote {
   border-left: 3px solid var(--line);
   padding-left: 14px;

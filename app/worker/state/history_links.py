@@ -13,6 +13,7 @@ from mdit_py_plugins.footnote import footnote_plugin
 
 from app.contracts.conversation import HistoryPage
 from app.contracts.files import FileFailure
+from app.worker.state.amp_attachments import AmpAttachment
 from app.worker.state.history import MAX_PAGE
 
 MAX_LOCAL_FILES = 16
@@ -35,7 +36,7 @@ def _local_path(destination: str) -> Path | None:
         return None
 
 
-def _destinations(text: str) -> dict[tuple[int, int], Path]:
+def _destinations(text: str) -> dict[tuple[int, int], Path | AmpAttachment]:
     """Use CommonMark rules to collect source spans, including used reference definitions.
 
     markdown-it strips list/quote prefixes from inline tokens. Map those unchanged
@@ -46,17 +47,24 @@ def _destinations(text: str) -> dict[tuple[int, int], Path]:
     md.use(footnote_plugin, inline=False, move_to_end=False)
     validate = md.validateLink
     md.validateLink = lambda url: _local_path(url) is not None or validate(url)  # type: ignore[method-assign]
-    spans: dict[tuple[int, int], Path] = {}
-    definitions: dict[str, tuple[int, int, Path]] = {}
+    spans: dict[tuple[int, int], Path | AmpAttachment] = {}
+    definitions: dict[str, tuple[int, int, Path | AmpAttachment]] = {}
     used: set[str] = set()
     inline_source = ""
     inline_positions: list[int] = []
 
-    def record(source: str, start: int, end: int, positions: list[int]) -> tuple[int, int, Path] | None:
+    def record(
+        source: str, start: int, end: int, positions: list[int],
+    ) -> tuple[int, int, Path | AmpAttachment] | None:
         result = md.helpers.parseLinkDestination(source, start, end)
-        path = _local_path(result.str) if result.ok else None
-        if path is None:
+        if not result.ok:
             return None
+        path: Path | AmpAttachment | None = _local_path(result.str)
+        if path is None:
+            try:
+                path = AmpAttachment(url=result.str)
+            except ValueError:
+                return None
         angled = source[start] == "<"
         return positions[start + angled], positions[result.pos - 1 - angled] + 1, path
 
@@ -161,7 +169,7 @@ def _destinations(text: str) -> dict[tuple[int, int], Path]:
 
 
 async def link_history(
-    page: HistoryPage, register: Callable[[Path], Awaitable[str]], *, deadline: float,
+    page: HistoryPage, register: Callable[[Path | AmpAttachment], Awaitable[str]], *, deadline: float,
 ) -> HistoryPage:
     """Best-effort registration within the history request's remaining time and size budgets."""
     # Amp's page contains shared cache objects, and its cursor hashes their native text.
@@ -172,14 +180,16 @@ async def link_history(
     ]
     paths = dict.fromkeys(path for spans in destinations for path in spans.values())
     paths = dict(list(paths.items())[:MAX_LOCAL_FILES])
-    links: dict[Path, str] = {}
+    links: dict[Path | AmpAttachment, str] = {}
     slots = asyncio.Semaphore(4)
 
-    async def register_one(path: Path) -> None:
+    async def register_one(path: Path | AmpAttachment) -> None:
         async with slots:
             try:
                 # Basename is display-only; fragments never reach the opaque attachment endpoint.
                 links[path] = f"{await register(path)}#name={quote(path.name, safe='')}"
+                if isinstance(path, AmpAttachment):
+                    links[path] += f"&amp={quote(path.url, safe='')}"
             except FileFailure:
                 pass  # Optional attachments must not discard readable conversation text.
 

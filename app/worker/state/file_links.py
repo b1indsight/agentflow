@@ -1,5 +1,6 @@
-"""Worker-private file identities; paths never leave this registry."""
+"""Worker-private file identities; paths and remote credentials stay on the worker."""
 
+import asyncio
 import os
 import stat
 from pathlib import Path
@@ -9,6 +10,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from app.contracts.files import MAX_FILE_BYTES, FileFailure, FileId
+from app.worker.state.amp_attachments import AmpAttachment
 from app.worker.state.files import write_private_record
 
 
@@ -20,7 +22,7 @@ class LocalFile(BaseModel):
     inode: int
 
 
-_RECORDS = TypeAdapter(dict[FileId, LocalFile])
+_RECORDS = TypeAdapter(dict[FileId, LocalFile | AmpAttachment])
 
 
 def _read(path: Path, expected: LocalFile | None = None) -> tuple[LocalFile, bytes]:
@@ -41,7 +43,7 @@ def _read(path: Path, expected: LocalFile | None = None) -> tuple[LocalFile, byt
         return identity, content
 
 
-class LocalFileLinks:
+class FileLinks:
     """Persist explicit registrations independently of the current assignment.
 
     Links follow in-place edits, but replacement files require a new registration:
@@ -52,16 +54,16 @@ class LocalFileLinks:
         self.path = worker_root / "file-links.json"
         self._lock = Lock()
 
-    def _load(self) -> dict[str, LocalFile]:
+    def _load(self) -> dict[str, LocalFile | AmpAttachment]:
         try:
             return _RECORDS.validate_json(self.path.read_bytes())
         except FileNotFoundError:
             return {}
 
-    def register(self, path: Path) -> str:
-        """Validate a readable regular file and durably allocate an opaque handle."""
+    def register(self, source: Path | AmpAttachment) -> str:
+        """Validate a local file or Amp reference and durably allocate an opaque handle."""
         try:
-            identity, _ = _read(path.resolve(strict=True))
+            identity = source if isinstance(source, AmpAttachment) else _read(source.resolve(strict=True))[0]
             with self._lock:
                 records = self._load()
                 for handle, record in records.items():
@@ -76,14 +78,19 @@ class LocalFileLinks:
         except (OSError, ValueError, RuntimeError):
             raise FileFailure("file_unreadable") from None
 
-    def read(self, handle: str) -> bytes:
-        """Read only a registered identity, with a hard byte limit and safe errors."""
+    def _lookup(self, handle: str) -> LocalFile | AmpAttachment | None:
+        with self._lock:
+            return self._load().get(handle)
+
+    async def read(self, handle: str) -> bytes:
+        """Read registered bytes without blocking the driver; cancellation stops remote downloads."""
         try:
-            with self._lock:
-                record = self._load().get(handle)
+            record = await asyncio.to_thread(self._lookup, handle)
             if record is None:
                 raise FileFailure("file_not_found")
-            return _read(record.path, record)[1]
+            if isinstance(record, AmpAttachment):
+                return await record.read(self.path.parent)
+            return (await asyncio.to_thread(_read, record.path, record))[1]
         except FileNotFoundError:
             raise FileFailure("file_not_found") from None
         except (OSError, ValidationError):

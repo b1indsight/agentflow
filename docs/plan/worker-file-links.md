@@ -241,3 +241,76 @@ link = await runtime.register_file(Path("/path/to/report.txt"))
 **验证。** 已通过完整前端浏览器回归、单测、类型和格式检查，以及 Ruff、应用与测试 Mypy、差异空白检查。标准脚本已重建本地控制台静态资源及 wheel/sdist，核对 wheel 静态资源与本地逐字节一致，并包含当前 `history_links.py`。实际查看普通源码、下一段、超长行、多文件、图片、二进制和离线状态的桌面与手机截图；横向溢出、焦点和脚本不执行另由浏览器断言检查。前端日志为 `.amp/in/artifacts/main-sync-browser-final.log`，构建日志为 `main-sync-build.log`，截图为 `main-sync-{numbered-file,editor-file}-*.png`。
 
 首轮后端全量运行的安装 fixture 在复制 `app/` 内前端依赖时，与并行构建的 `npm ci` 删除／重建依赖发生冲突；错误发生在 `tests/test_worker_cli.py` 的准备阶段。没有为此修改产品或放松测试；构建完成后用最终代码重新运行，完整 PostgreSQL 后端回归通过，保留套件自身的一项跳过及 Starlette 既有弃用提示，日志为 `.amp/in/artifacts/main-sync-backend-final.log`。结束前再次 fetch 确认远端 main 未前进，工作副本无剩余冲突。浏览器仍使用 API 拦截，未验证生产 Access 或线上 Worker。所有修改仍仅在本地，未提交、推送或部署；整合前完整快照保留在本地备份 bookmark。
+
+### 011 — 2026-11-16 — Amp 私有附件图片兼容（提案，待批准）
+
+**结论与目标。** Amp 附件需要认证读取。拟由原 Worker 使用已有 Amp 登录态按需下载，通过现有 owner 文件通道返回；详情页内嵌显示经过验证的位图，不依赖浏览器登录 Amp。这里只新增方案，产品代码和测试尚未修改。
+
+#### 已确认的失败与设计基线
+
+- 用户提供的测试链接末尾多了一个 `d`，通过线程搜索确认目标为 [Responsive conversation images](https://ampcode.com/threads/T-01a1e437-80e2-7734-89ef-f51a713c106a)。其最终截图使用 `https://ampcode.com/user-content/attachments/<hash>-<filename>.png#amp-media-source=...&amp-media-width=...&amp-media-height=...`。
+- 对该线程的真实桌面附件执行未认证 `curl -sSI`，返回 `401`、`WWW-Authenticate: Bearer`、`Cache-Control: private, no-store`，响应提示使用 `amp files get` 或已登录浏览器。随后 `amp files get` 成功下载，检查为 1440 × 1200 的 PNG。这证明需要解决认证读取；没有据此宣称详情页已修复。原始响应和文件检测保存在本次线程的 `.amp/in/artifacts/amp-attachment-response.txt`。
+- 已 fetch，按远端 main 的 [详情页输入提交](https://github.com/b1indsight/agentflow/commit/56edd7e) 规划；其中 [内嵌图片提交](https://github.com/b1indsight/agentflow/commit/0e205bd) 已支持普通外图和响应式缩放。当前本地代码基线较旧，实施前整合最新 main，不重新实现该能力。
+- `amp files get -o /dev/stdout` 实测失败：CLI 会在输出目录附近建立临时下载目录，不能把现有 `run_amp(max_stdout=...)` 当作下载文件的大小限制。
+
+#### 拟议行为与最小技术边界
+
+1. **只登记允许的 Amp 附件。** 在 `state/history_links.py` 现有 CommonMark 目的地址提取中增加 Amp 附件识别，继续跳过代码、工具内容和未使用引用。仅接受 HTTPS、精确 `ampcode.com` 主机和合法 `/user-content/attachments/` 对象路径；拒绝 userinfo、非标准端口、query、编码分隔符及路径穿越。忽略 `#amp-media-*`，尤其不能把 `amp-media-source` 当成可读取的本地路径。重复附件按去除片段后的 URL 去重。
+2. **复用登记及传输。** Worker 文件注册表扩展为原有 `LocalFile(path, device, inode)` 与新增 `AmpAttachment(url: str)` 两类；`url` 只存已校验的规范附件地址。保持旧本地记录可读，按附件 URL 幂等分配随机 ID。拟将 `WorkerRuntime.register_file(source: Path | AmpAttachment) -> str` 作为同一登记入口，继续使用 `server.file_register`。HTTP、文件 RPC 和 controller 数据库仍只接收随机 ID，不增加通用 URL 代理、凭据字段或路径读取接口。
+3. **按需认证下载。** 文件读取入口异步处理两类来源：本地文件保留原来的线程读取及 inode 校验；Amp 分支通过 `run_amp` 和 `amp_environment` 调用 `amp files get`，使用 Worker 现有身份。历史改写只登记，不下载，避免下载挤占整页 25 秒预算。下载复用现有文件在途限制，时限与原 10 秒文件查询及取消清理预算对齐；不额外增加排队、共享请求或缓存层。
+4. **临时文件有界且清理。** 复用 512 KiB 文件传输上限。CLI 在私有临时目录下载，必须有进程级写入配额等硬边界，不能只在下载后检查大小或依靠轮询。成功、超限、失败、超时和取消均终止并回收子进程后清理目录；不持久缓存图片副本。配额启动方式及错误分类在实施时先验证，不把 `max_stdout` 冒充落盘限制。
+5. **详情页读取和显示。** 成功登记的 Amp 目的地址改写为现有 `/api/files/<id>` 并携带经校验的原始 Amp 地址显示片段，用于识别预览及保留“在 Amp 中打开”。片段只是显示提示，不作为授权依据；所有字节仍经过 owner 鉴权。`activity.tsx` 对这类图片使用现有 `readFile`，复用 `FileViewer` 的 PNG/JPEG/GIF/WebP 签名及实际解码逻辑，在接近视口时读取并等比显示 data 图片。卸载或切换取消请求，迟到结果不得覆盖新内容；普通本地附件仍按点击打开文件页签。
+6. **失败保留原入口。** Worker 离线、Amp 登录失效、附件缺失、超时、超限或解码失败时保留正文和可点击的原 Amp 地址，提示读取失败并允许重试，不显示成功假象。原始地址移除本地来源元数据。普通外图、文件页签、安全源码预览和 CSP 不扩大范围；HTML/SVG 附件不作为本次内嵌位图执行。
+
+发送页仍深复制，不改原生 Amp 历史、缓存或 cursor。登记沿用每页数量、并发和总时限预算；改写后仍检查单条及整页上限。已有归档通过显式刷新后的分批重读补齐，不重跑编码任务，不引入全库扫描。处理版本沿用既有来源指纹失效机制。
+
+#### 取舍、限制与实施顺序
+
+直接加载已经实测遇到认证门槛，放宽 CSP 或只处理图片后缀无法补上 Worker 登录态。选择登记远程引用、读取时下载，代价是扩展 Worker 私有注册表及异步读取；相比历史采集时下载并长期保存副本，不需要图片缓存、淘汰或历史读取中的下载等待。controller 不新增网络访问职责，不将 Amp token 发送到浏览器，也不公开附件。
+
+Worker 必须能以其自身 Amp 身份访问附件；本机下载成功不代表每个部署 Worker 都已具备该权限。512 KiB 以上图片本次不放宽协议上限，回退原 Amp 入口。每次重新读取可能重新下载；不承诺 Worker 离线时仍可查看。
+
+实施顺序为：整合最新 main；验证 CLI 写入配额和取消清理；扩展 Worker 登记、历史目的地址及按需读取；接入详情位图显示和失败入口；更新文档并运行验证。若硬大小约束无法可靠实现，先修订方案，不交付无界下载。无需预设数据库迁移或 wire 新字段；实现若要求改变此边界，另记修订。
+
+#### 验证与简化对照（尚未执行）
+
+- 扩展现有 Worker 历史和文件端到端回归：真实 Amp 格式及完整片段、图片/链接/引用目的地址、去重、原生缓存与 cursor 不变、旧本地记录兼容、普通外链/代码/本地附件不变；以伪造 `amp-media-source` 指向哨兵文件，确认不读取该路径。
+- 通过现有 Session、owner HTTP 文件 API 验证附件字节一致；覆盖未认证请求、错误登录态、缺失附件、512 KiB 两侧、进程写入超限、并发、超时/取消及临时目录清理。CI 模拟 CLI 下载，不依赖真实 Amp 登录或外网。
+- 前端复用现有图片和文件回归，在 1440px／390px 检查成功图、读取失败及重试；验证自动读取仅用于 Amp 附件提示、普通文件仍需点击、图片比例和正文宽度、无横向溢出、HTML/SVG 不执行、请求取消及迟到隔离。捕获并实际查看对应截图。
+- 本地以测试线程真实附件通过 Worker、controller 和详情页做冒烟检查，浏览器不带 Amp 登录态；该步骤与模拟网络的浏览器回归分别记录。
+- 消融时取消认证读取或恢复原外链，在同样的无 Amp 登录场景确认图片失败；保留认证读取时确认图片正确显示。移除附件 URL 校验时，恶意主机或路径用例必须失败。消融仅作临时验证，不保留改动。
+- 执行受影响的 pytest、Ruff、Mypy、前端单测、类型/格式检查、构建和浏览器回归；若涉及打包资源，按既有构建脚本核对产物。
+
+**待批准范围。** 采用 Worker 登录态、复用受保护文件通道、按需临时下载与内嵌位图、失败保留原 Amp 链接。现有本地文件行为不变，不增加公开分享、通用代理、持久图片缓存或超大文件支持。方案草案由本机 `claude-opus-5-5` 无工具咨询提供，已检查初始化的 tools/MCP 为空并按现有 10 秒查询和 CLI 实测修正；咨询不作为实现验证。当前仅有本地文档修改，未提交、推送、创建 PR 或部署；等待明确方案批准后实施。
+
+### 012 — 2026-11-16 — Worker 按需认证读取 Amp 附件
+
+**实现与边界。** 按已确认的 011，在最新 main 上扩展原文件注册表，没有新增传输接口或协议字段。原 `LocalFileLinks` 改名为 `FileLinks`，记录接纳原 `LocalFile(path, device, inode)` 和冻结的 `AmpAttachment(url)`；原 JSON 本地记录仍可读取。历史消息仅登记经过允许列表验证的 HTTPS Amp 对象地址，去掉片段后按 URL 去重，绝不解析 `amp-media-source` 为本地文件。发送副本的目的地址为 `/api/files/<id>#name=<basename>&amp=<canonical-url>`，片段只提供显示提示；文件 RPC 和 HTTP 读取只传随机句柄，controller 的文件登记表只保存句柄与 Worker 映射。经编码的原附件 URL 随消息正文归档，附件图片内容不落库。沿用数量、并发、时间及响应预算，原生历史、Amp 缓存和 cursor 不变，投影版本更新为 `file-links-v3-amp-attachments`。
+
+**读取与配额的决定。** `FileLinks.read` 直接改为异步，本地注册表及 inode 校验继续在线程内运行，远程分支复用 `run_amp`、`amp_environment` 和 Worker 自己的 Amp 身份。没有增加包装式第二入口、通用 HTTP 代理、凭据字段或图片缓存。下载在私有临时目录内进行，设 5 秒调用期限，为原 10 秒文件查询保留清理时间；成功、失败、超限和取消后均删除副本。复用现有文件在途限制及 Session 关闭回收任务的生命周期。
+
+为下载调用 `run_amp(max_file_bytes=MAX_FILE_BYTES + 1)`，在独立 Python 进程设置 `RLIMIT_FSIZE` 后立即 exec Amp，避免多线程 Worker 使用不安全的 `preexec_fn`。内核限制单文件写入，额外一个哨兵字节用于识别超限；下载后也检查 CLI 暂存文件、最终普通文件和有界读取结果，仍只允许 512 KiB 进入协议。stdout 上限独立保留，不冒充落盘配额。CLI 失败只返回安全错误码，不暴露 stderr、Worker 路径或认证信息。
+
+**已执行验证。** 新回归先在旧实现中因缺少远程登记和下载配额失败；实现后历史、文件与 Amp 进程定向回归通过。真实双端 Session + PostgreSQL + owner HTTP 验证延迟下载、未认证拒绝、逐字节读取、旧本地记录共存、两端重建后继续读取、每次重读重新下载，以及失败后可重试；覆盖精确 512 KiB、暂存文件超限、认证/缺失/超时故障及断线取消清理。URL 用例检查伪造主机、userinfo、端口、query、路径/编码分隔符、控制字符和无效编码。现有本地文件替换、增长及慢磁盘不阻塞执行的回归保持通过。证据为 `.amp/in/artifacts/amp-images-{backend-before,backend-targeted,file-tests}.log`。
+
+实际通过新增下载路径读取测试线程的 PNG，在内核写入限制生效时得到与原附件完全一致的 94,747 字节，临时目录为空；SHA-256 为 `6b82481ee78646d8280e9a88f8a8f1f028f3b3a1a8c17b1d0b00cc04005f0429`。该检查使用本机 Worker 的真实 Amp 身份，不代表部署 Worker 已具备权限，日志见 `.amp/in/artifacts/amp-images-real-cli.log`。
+
+**简化对照。** 在独立 Python 进程用 `inspect.getsource` / `exec` 仅移除 `run_amp` 的落盘配额，原配额用例失败：子进程成功写出大于限制的文件。另只移除 Pydantic 的 Amp 地址校验，非法地址构造用例失败。两个对照均未修改产品文件；保留配额和允许列表，日志为 `.amp/in/artifacts/amp-images-ablation.log`。详情页实际显示、无 Amp 登录的浏览器对照及完整构建验证另记后续结果，不能以这一步的 CLI 下载代替。
+
+### 013 — 2026-11-16 — 详情内嵌、重试与真实附件浏览器验证
+
+**显示与安全。** `activity.tsx` 只在 Worker 文件打开上下文中识别扩展标记；`AmpImage.tsx` 在图片距阅读区 600px 时用已有 `readFile` 读取，并在卸载、替换或切换 Flow 时取消请求，隔离迟到的读取与解码。`files.ts` 接纳原 `FileViewer.tsx` 的位图签名、浏览器实际解码与安全错误消息，供两处共用；没有第二套解码器，也不改变文件页签的源码、二进制、取消或重读行为。经过验证的 PNG/JPEG/GIF/WebP 使用 data 图片，仍受 512 KiB 原始字节限制；不放宽 CSP、不执行 HTML/SVG、不缓存文件内容。
+
+**回退与导航。** 显示时保留已去掉来源元数据的原 Amp 地址；错误状态提供独立、具备名称和 title 的图标重试按钮。未登记私有图片不再直接请求 Amp 而形成破图，本地附件仍需点击才读取。图片被链接或强调包裹时，外层导航与图片自身的原地址及重试控件保持同级，避免嵌套链接/按钮。整合检查发现的普通 Amp thread/artifact 链接被主机级分支删除片段问题已收窄为附件路径分支，新增实际 Markdown 渲染回归保护其 query 和 fragment 原样保留。
+
+**完整回归与打包。** 已通过真实 PostgreSQL 下全量 Python 回归、Ruff 和应用/测试 Mypy，以及前端完整单测、类型、格式和 Playwright 浏览器回归。覆盖近视口才读取、普通文件不预取、签名/坏解码、离线/登录/超限/超时与重试、来源替换后的迟到解码、跨 Flow 取消，以及原有文件页签和普通外图/脚注。浏览器回归的 `/api/files` 响应为确定性测试数据，原 Amp 域被显式拒绝；这些用例与下文真实下载检查分别记录。日志为 `.amp/in/artifacts/amp-images-{backend-full,static-checks,frontend-full}.log`；保留套件原有跳过和 Starlette 弃用提示，没有放松断言。
+
+已运行标准 `uv run python scripts/build_console.py`，再执行 `uv build --no-sources`；wheel 包含 `amp_attachments.py` 与当前正文投影代码，静态资源与当前构建逐字节一致。前端仍只有现有非阻断 chunk 大小提示。日志为 `.amp/in/artifacts/amp-images-{build,package}.log`。两端仍使用原 wire26，无新增数据库结构或迁移。
+
+**真实附件检查。** 另在隔离 PostgreSQL schema 中，以实际附件 URL 构造一条受控 `HistoryPage`，通过正式历史目的地址转换及登记、真实 Worker 双端 Session、controller 的 owner HTTP 文件 API、归档读取和生产构建页面，显示 011 的真实 PNG。浏览器不持有 Amp Cookie，文件请求实际返回 200，原图尺寸为 1440 × 1200；1440px 和 390px 下的渲染分别为 765 × 637.5 和约 320 × 267，浏览器检查比例与无横向溢出。读取接口和 Amp 下载未 mock，仅 owner assertion 使用本地测试签名，Session 传输复用队列 fixture。因此不将其宣称为生产 Cloudflare Access、公网 WebSocket 或目标部署验收。实际线程全文的独立读取触发现有导出输出上限 `history_limit`，本次没有放宽该既有限制，也不将受控消息冒烟描述为全文导入。
+
+同一个无 Amp 登录浏览器中，把已成功显示图片的 src 临时恢复为原始附件地址，图片加载失败；恢复认证取得的 data 图片后重新解码成功。这一进程内浏览器对照未修改产品代码，支持保留认证读取。日志与结果为 `.amp/in/artifacts/amp-images-real-http.log` 和 `amp-images-real-browser.json`。
+
+**视觉与交付。** 桌面/手机的真实附件成功截图及确定性离线错误截图均已实际查看，分别为 `.amp/in/artifacts/amp-images-real-{1440,390}.png` 与 `amp-attachments-error-{1440,390}.png`；位图正常缩放，错误与原入口可见，没有破图或横向撑宽。截图不代替上述 DOM、网络、尺寸和取消断言。Web README、CHANGELOG 与本记录已同步。当前完成本地实现、验证及打包，尚未提交、推送、创建 PR 或部署；部署 Worker 仍须能用自身 Amp 身份读取附件，旧归档沿用刷新后的分批重读。
+
+推送前再整合 main 的[详情导航刷新修复](https://github.com/b1indsight/agentflow/commit/9d0f0186)，保留其仅刷新详情区域的行为；未增加新的产品机制。合并后重新通过完整前端单测与浏览器回归、格式和类型检查，以及 Ruff、Mypy、历史改写和 Amp 进程定向回归；定向后端运行保留未配置数据库时的既有跳过，不能替代前文完整 PostgreSQL 验证。重新执行标准控制台构建与 Python 打包，日志为 `.amp/in/artifacts/amp-images-push-{frontend,backend,build}.log`。
