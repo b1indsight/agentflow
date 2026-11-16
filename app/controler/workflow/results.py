@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Literal
 
 from loguru import logger
 from pluggy import PluginManager
@@ -19,48 +18,34 @@ from app.contracts.protocol import (
 )
 from app.contracts.receipts import MergeArchiveNotice, decode_result_inbox
 from app.contracts.result_models import (
-    CommentEffect,
-    Effect,
-    LabelEffect,
-    PullRequestEffect,
     ResultPending,
     ResultPlan,
-    ReviewersEffect,
     RunUpdate,
     ThreadReplyEffect,
     unique_pull_request_receipt,
 )
 from app.controler.config import ServerSettings
-from app.controler.review.resolution import plan_resolution
-from app.controler.workflow.archive import archive_effects, verify_archive, verify_merge_notice
+from app.controler.workflow.archive import archive_plan, merge_notice_plan, verify_archive
 from app.controler.workflow.effects import ResultEffects
-from app.controler.workflow.initial import initial_delivery_mismatch
-from app.controler.workflow.revisions import (
-    frozen_revision,
-    revision_mismatch,
-    verify_answer_remote,
-    verify_revision_remote,
-)
+from app.controler.workflow.initial import BRANCH_SLUG_PATTERN, initial_plan
+from app.controler.workflow.plans import delivered_pr_number, failed_plan
+from app.controler.workflow.revisions import frozen_revision, revision_plan, verify_revision_result
 from app.domain.flow_policy import FlowEvent
 from app.domain.inference_models import InferenceError, InferenceFailure
 from app.domain.json import strict_json
 from app.domain.models import (
     TERMINAL_STATES,
-    AddressedComment,
-    DeferredComment,
     DeliveryState,
-    FeedbackRef,
     Flow,
     FlowDelivery,
     FlowState,
     Job,
     JobKind,
     JobState,
-    ReviewItemKind,
     TriageVerdict,
 )
 from app.domain.review_models import BatchState
-from app.github import GitHubApp, GitHubError
+from app.github import GitHubApp
 from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
@@ -70,14 +55,6 @@ from app.persistence.jobs import JobStore
 from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
 from app.plugins import emit_hook
-
-# Shared with the naming schema. The final lookahead anchors the absolute end in
-# both Python and JSON Schema regexes, unlike $ which also permits a final newline.
-BRANCH_SLUG_PATTERN = (
-    r"^(?!(?:flow|heads)/)(?!.*-round(?:-[0-9]+)?$)"
-    r"[a-z][a-z0-9]*/"
-    r"[a-z0-9]+(?:-[a-z0-9]+)*(?![\s\S])"
-)
 
 
 class ResultApplication:
@@ -209,7 +186,10 @@ class ResultApplication:
         job = self.jobs.get_job(job_id)
         if job is None:
             raise ValueError(f"job {job_id} disappeared")
-        revision_error = await self._check_revision(job)
+        revision_error = await verify_revision_result(
+            job, github=self.github, database=self.database, flows=self.flows,
+            deliveries=self.deliveries, result_store=self.result_store,
+        )
         with self.flows.locked(job.required_flow_id) as context:
             tx = context.database
             result_store_tx = self.result_store.using(tx)
@@ -299,51 +279,6 @@ class ResultApplication:
             self._after_commit(flow, current, plan, state)
         return state
 
-    async def _check_revision(self, job: Job) -> str | None:
-        """Perform network reads outside the transaction, once per frozen result plan."""
-        if (job.kind is not JobKind.REVISION or job.result_applied_at is not None
-                or job.result_payload is None or self.result_store.get_plan(job.id) is not None):
-            return None
-        flow = self.flows.get_flow(job.required_flow_id)
-        if flow is None or flow.state in TERMINAL_STATES:
-            return None
-        delivery = self.deliveries.get_delivery(flow.id)
-        if flow.retires(job, delivery):
-            return None
-        if job.result_digest is None:
-            raise ValueError("result inbox is missing its digest")
-        message = decode_result_inbox(
-            job.result_payload,
-            job_id=job.id,
-            assignment_token=job.assignment_token,
-            result_digest=job.result_digest,
-        ).terminal
-        if not isinstance(message, Succeeded) or not isinstance(message.result, RevisionTaskResult):
-            return None
-        result = message.result
-        task = frozen_revision(job)
-        mismatch = revision_mismatch(task, result)
-        if mismatch:
-            return mismatch
-        delivery = self.deliveries.get_delivery(flow.id)
-        if delivery is None or delivery.head_sha != (task.previous_head_sha or task.expected_head_sha):
-            return "revision baseline no longer matches delivery"
-        if job.verify_next_at is not None and job.verify_next_at > self.database.now():
-            raise ResultPending(job.verify_last_error or "revision verification backoff")
-        assert result.commit_sha is not None
-        if flow.installation_id is None:
-            return "revision has no open verified delivery"
-        try:
-            repo = self.github.installation(flow.installation_id).repository(flow.repo)
-            if task.purpose == "answer":
-                return await verify_answer_remote(repo, flow, task)
-            return await verify_revision_remote(repo, flow, task, result)
-        except GitHubError as error:
-            if error.retryable:
-                self.result_store.defer_verification(job, error)
-                raise ResultPending(str(error)) from error
-            return str(error)
-
     def _prepare(
         self, tx: Database, flow: Flow, job: Job, revision_error: str | None = None,
     ) -> ResultPlan:
@@ -369,16 +304,13 @@ class ResultApplication:
             state=JobState.DONE,
         )
         if isinstance(message, MergeArchiveNotice):
-            verify_merge_notice(flow, job, message, activity=ActivityStore(tx))
-            return base.model_copy(update={
-                "archive_notice": message,
-                "effects": archive_effects(
-                    flow, message, done_label=self.settings.done_label,
-                    in_review_label=self.settings.in_review_label,
-                ) if flow.installation_id is not None else [],
-            })
+            return merge_notice_plan(
+                base, flow, job, message, activity=ActivityStore(tx),
+                done_label=self.settings.done_label, in_review_label=self.settings.in_review_label,
+            )
         if flow.state in TERMINAL_STATES or job.round_no != flow.current_round_no:
             return self._retired_plan(job, base.attempt_id)
+        # Bind failed results to their review batch too, before handling the terminal kind.
         batch = reviews_tx.for_job(job) if job.kind in {JobKind.REVISION} else None
         if batch is not None:
             base = base.model_copy(update={"attempt_id": batch.attempt_id, "batch_id": batch.id})
@@ -390,176 +322,29 @@ class ResultApplication:
             return base.model_copy(update={"state": JobState.FAILED,
                 "error": "review batch or attempt is no longer current"})
         if isinstance(message, Failed):
-            return self._failure(base, message.error)
+            return failed_plan(base, message.error)
         assert isinstance(message, Succeeded)
         result = message.result
         if result.kind != job.kind.value:
             raise ValueError("result kind does not match persisted job")
         if attempt is None:
-            return self._failure(base, "result has no current attempt")
-        if isinstance(result, RevisionTaskResult):
-            assert batch is not None
-            expected = [(f.item_id, f.version) for f in batch.feedback]
-            received = [(f.item_id, f.version) for f in result.feedback_refs]
-            if result.batch_id != batch.id or received != expected:
-                return base.model_copy(
-                    update={
-                        "state": JobState.FAILED,
-                        "flow_state": FlowState.BLOCKED,
-                        "error": "result does not match its frozen review batch",
-                    }
-                )
+            return failed_plan(base, "result has no current attempt")
         if isinstance(result, InitialTaskResult):
-            base = base.model_copy(
-                update={
-                    "run": RunUpdate(
-                        kind="initial",
-                        session_id=result.session_id,
-                        exit_code=result.exit_code,
-                    )
-                }
+            return initial_plan(
+                base, flow, job, attempt, result, deliveries=deliveries_tx,
+                in_review_label=self.settings.in_review_label, reviewers=self.settings.reviewers,
             )
-            if result.exit_code != 0 or not result.session_id:
-                stage = f"，阶段={result.failure_stage}" if result.failure_stage else ""
-                reason = f"编码失败（exit={result.exit_code}{stage}）"
-                if result.failure_detail:
-                    reason += f"：{result.failure_detail}"
-                return self._failure(base, f"{reason}。未开 PR。")
-            delivery = deliveries_tx.get_delivery(flow.id)
-            call = deliveries_tx.get_tool_call(result.open_pr_call_id) if result.open_pr_call_id else None
-            mismatch = initial_delivery_mismatch(job, attempt, result, delivery, call)
-            if mismatch is not None:
-                return self._failure(
-                    base,
-                    f"编码结果与已验证的 Flow delivery 不一致：{mismatch}。",
-                )
-            assert delivery is not None
-            if (
-                not delivery.base_branch
-                or not delivery.head_sha
-                or not delivery.title
-                or delivery.body is None
-            ):
-                return self._failure(
-                    base, "Flow delivery has no complete prepared PR intent"
-                )
-            effects: list[Effect] = [
-                PullRequestEffect(
-                    key="open-pr",
-                    installation_id=self._installation(flow),
-                    repo=flow.repo,
-                    branch=delivery.branch,
-                    base_branch=delivery.base_branch,
-                    head_sha=delivery.head_sha,
-                    title=delivery.title,
-                    body=delivery.body,
-                ),
-                *self._review_effects(flow, "created_pr"),
-            ]
-            return base.model_copy(update={"delivery": delivery, "effects": effects})
         if isinstance(result, RevisionTaskResult):
             assert batch is not None
-            base = base.model_copy(
-                update={
-                    "run": RunUpdate(
-                        kind="revision",
-                        session_id=result.session_id,
-                        exit_code=result.exit_code,
-                    )
-                }
-            )
-            if result.exit_code != 0:
-                return self._failure(
-                    base,
-                    f"修订失败（exit={result.exit_code}, stage={result.failure_stage}）："
-                    f"{result.failure_detail or '执行结果不确定'}。反馈保留，需核对工作区和远端。",
-                )
-            task = frozen_revision(job)
-            delivery = deliveries_tx.get_delivery(flow.id)
-            execution = flows_tx.get_flow_execution(flow.id)
-            mismatch = revision_error or revision_mismatch(task, result)
-            if mismatch:
-                return self._failure(base, mismatch)
-            if (delivery is None or delivery.head_sha != (task.previous_head_sha or task.expected_head_sha)
-                    or delivery.state is not DeliveryState.OPEN
-                    or delivery.pr_number != task.pr_number or delivery.branch != task.branch
-                    or attempt.codex_session_id != task.session_id
-                    or attempt.session_generation != task.session_generation
-                    or execution is None or execution.released_at is not None
-                    or execution.repo_identity != task.repo_identity):
-                return self._failure(base, "revision assignment is no longer current")
-            assert result.output is not None
-            number = self._pr_number(flow, deliveries=deliveries_tx)
-            members = {(f.item_id, f.version): f for f in batch.feedback}
-            reported: list[AddressedComment | DeferredComment] = [
-                *result.output.addressed, *result.output.deferred,
-            ]
-            keys = [(f.item_id, f.version) for f in reported]
-            if (len(keys) != len(set(keys)) or any(
-                key not in members or members[key].github_id != item.comment_id
-                for key, item in zip(keys, reported, strict=True)
-            )):
-                return self._failure(base, "revision reported unknown or conflicting feedback")
-            consumed = [FeedbackRef(item_id=f.item_id, version=f.version) for f in result.output.addressed]
-            # Empty review summaries carry metadata, not an additional coding request.
-            reported_keys = set(keys)
-            consumed.extend(
-                FeedbackRef(item_id=f.item_id, version=f.version) for f in batch.feedback
-                if not f.body.strip()
-                and (f.kind is ReviewItemKind.REVIEW_BODY or f.signal == "request_changes")
-                and (f.item_id, f.version) not in reported_keys
-            )
-            unresolved = (len(consumed) != len(batch.feedback)
-                          or bool(result.output.needs_clarification))
-            notes = plan_resolution(flow, number, batch, result,
-                                    reviews_tx.addressed(flow.id, attempt.id), purpose=task.purpose)
-            blocked = {(f.item_id, f.version) for f in notes.blocked}
-            consumed = [f for f in consumed if (f.item_id, f.version) not in blocked]
-            unresolved |= bool(notes.problems)
-            effects = notes.effects
-            new_commit = task.purpose == "revise" and result.commit_sha != (
-                result.baseline_sha or task.expected_head_sha
-            )
-            if result.output.summary:
-                effects.append(
-                    self._comment(
-                        flow, number, "summary",
-                        f"问题答复：{result.output.summary}" if task.purpose == "answer" else
-                        f"修订交付（{'已核验新提交' if new_commit else '无新提交'}）：{result.output.summary}"
-                    )
-                )
-            if not unresolved and new_commit:
-                effects.extend(self._review_effects(flow, number))
-            return base.model_copy(
-                update={
-                    "effects": effects,
-                    "delivery": delivery,
-                    "revision": result,
-                    "revision_purpose": task.purpose,
-                    "batch_state": BatchState.WAITING if unresolved else BatchState.COMPLETED,
-                    "consumed": consumed,
-                    "open_points": [*notes.problems, *result.output.needs_clarification,
-                                    *(item.reason for item in result.output.deferred)],
-                }
+            return revision_plan(
+                base, flow, job, attempt, batch, result, revision_error,
+                deliveries=deliveries_tx, flows=flows_tx, reviews=reviews_tx,
+                in_review_label=self.settings.in_review_label, reviewers=self.settings.reviewers,
             )
         if isinstance(result, ArchiveResult):
-            try:
-                verify_archive(
-                    flow, job, result, deliveries=deliveries_tx, flows=flows_tx, jobs=jobs_tx
-                )
-            except ValueError as error:
-                return self._failure(base, str(error))
-            delivery = deliveries_tx.get_delivery(flow.id)
-            assert delivery is not None
-            return base.model_copy(
-                update={
-                    "flow_state": FlowState.ARCHIVED,
-                    "archive": result,
-                    "effects": archive_effects(
-                        flow, delivery, done_label=self.settings.done_label,
-                        in_review_label=self.settings.in_review_label,
-                    ),
-                }
+            return archive_plan(
+                base, flow, job, result, deliveries=deliveries_tx, flows=flows_tx, jobs=jobs_tx,
+                done_label=self.settings.done_label, in_review_label=self.settings.in_review_label,
             )
         raise TypeError(f"unsupported result: {type(result).__name__}")
 
@@ -707,61 +492,6 @@ class ResultApplication:
         current.version += 1
         deliveries.update_delivery(current)
 
-    @staticmethod
-    def _failure(base: ResultPlan, reason: str) -> ResultPlan:
-        return base.model_copy(
-            update={
-                "state": JobState.FAILED,
-                "flow_state": FlowState.BLOCKED,
-                "error": reason,
-            }
-        )
-
-    def _review_effects(self, flow: Flow, number: int | Literal["created_pr"]) -> list[Effect]:
-        effects: list[Effect] = [
-            LabelEffect(
-                key="labels",
-                installation_id=self._installation(flow),
-                repo=flow.repo,
-                number=number,
-                label=self.settings.in_review_label,
-                present=True,
-            )
-        ]
-        if self.settings.reviewers:
-            effects.append(
-                ReviewersEffect(
-                    key="reviewers",
-                    installation_id=self._installation(flow),
-                    repo=flow.repo,
-                    number=number,
-                    reviewers=list(self.settings.reviewers),
-                )
-            )
-        return effects
-
-    @staticmethod
-    def _installation(flow: Flow) -> int:
-        if flow.installation_id is None:
-            raise ValueError("Flow has no GitHub installation")
-        return flow.installation_id
-
-    def _comment(self, flow: Flow, number: int, key: str, body: str) -> CommentEffect:
-        return CommentEffect(
-            key=key,
-            installation_id=self._installation(flow),
-            repo=flow.repo,
-            number=number,
-            body=body,
-        )
-
-    @staticmethod
-    def _pr_number(flow: Flow, *, deliveries: DeliveryStore) -> int:
-        delivery = deliveries.get_delivery(flow.id)
-        if delivery is None or delivery.pr_number is None:
-            raise ValueError("Flow has no delivered PR")
-        return delivery.pr_number
-
     def _after_commit(self, flow: Flow, job: Job, plan: ResultPlan, state: JobState) -> None:
         if state is not JobState.DONE or flow.state is FlowState.BLOCKED:
             return
@@ -772,5 +502,5 @@ class ResultApplication:
                 self.plugins,
                 "on_pr_opened",
                 flow=flow,
-                pr_number=self._pr_number(flow, deliveries=self.deliveries),
+                pr_number=delivered_pr_number(flow, deliveries=self.deliveries),
             )

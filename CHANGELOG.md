@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- INITIAL、REVISION、ARCHIVE 的任务准备与结果计划构造分别归入对应 workflow 模块；命名跟随 INITIAL，
+  answer/revise 的远端核验跟随 REVISION，共用有界读取和计划构造。公共入口保留派发复查、失败批次绑定、
+  冻结计划恢复及原子提交，`retry` 的共同生命周期检查不变；不改数据库、wire、结果格式或副作用顺序。
 - 推理调用的取消、结算（退避、三次上限、结束原因、worker 避让）、单次尝试与候选 worker 选择，以及准备阶段的
   重试预算改由 domain 纯函数决定。`WorkerStore` 按职责拆开：保留会话与库存，领取与租约归新的
   `AssignmentStore`，推理调用归新的 `InferenceStore`，Flow 执行绑定的读取与释放归 `FlowStore`；

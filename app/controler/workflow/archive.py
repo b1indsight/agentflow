@@ -1,16 +1,80 @@
-"""The archive command and receipt share one frozen ownership contract."""
+"""Prepare archive work and convert cleanup receipts or merge notices to frozen plans."""
 
 from datetime import UTC
 
 from app.contracts.protocol import ArchiveResult, ArchiveTask
 from app.contracts.receipts import MergeArchiveNotice
-from app.contracts.result_models import CommentEffect, Effect, EffectState, LabelEffect
+from app.contracts.result_models import CommentEffect, Effect, EffectState, LabelEffect, ResultPlan
+from app.controler.workflow.plans import failed_plan
+from app.controler.workflow.preparation import FailJob
 from app.domain.models import DeliveryState, Flow, FlowDelivery, FlowState, Job, JobKind, JobState
 from app.persistence.activity import ActivityStore
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.results import ResultStore
+
+
+async def prepare_archive(
+    job: Job, flow: Flow, *, flows: FlowStore, deliveries: DeliveryStore,
+    jobs: JobStore, fail: FailJob,
+) -> ArchiveTask | JobState:
+    """Freeze cleanup under the workflow lock, reporting failure after the transaction exits."""
+    try:
+        with flows.locked(flow.id) as locked:
+            tx = locked.database
+            deliveries_tx = deliveries.using(tx)
+            jobs_tx = jobs.using(tx)
+            flows_tx = flows.using(tx)
+            fresh = locked.flow
+            current = tx.lock_job(job.id)
+            if fresh is None or current is None:
+                raise ValueError("archive workflow disappeared")
+            archive = archive_task(
+                fresh, current, deliveries=deliveries_tx, flows=flows_tx, jobs=jobs_tx
+            )
+            jobs_tx.freeze_archive(current, archive)
+            return archive
+    except ValueError as error:
+        await fail(job, str(error))
+        return JobState.FAILED
+
+
+def merge_notice_plan(
+    base: ResultPlan, flow: Flow, job: Job, notice: MergeArchiveNotice, *,
+    activity: ActivityStore, done_label: str, in_review_label: str,
+) -> ResultPlan:
+    """Build control notification intent independently of worker cleanup and retirement."""
+    verify_merge_notice(flow, job, notice, activity=activity)
+    return base.model_copy(update={
+        "archive_notice": notice,
+        "effects": archive_effects(
+            flow, notice, done_label=done_label, in_review_label=in_review_label,
+        ) if flow.installation_id is not None else [],
+    })
+
+
+def archive_plan(
+    base: ResultPlan, flow: Flow, job: Job, result: ArchiveResult, *,
+    deliveries: DeliveryStore, flows: FlowStore, jobs: JobStore,
+    done_label: str, in_review_label: str,
+) -> ResultPlan:
+    """Convert a verified cleanup receipt into its local outcome and ordered notifications."""
+    try:
+        verify_archive(flow, job, result, deliveries=deliveries, flows=flows, jobs=jobs)
+    except ValueError as error:
+        return failed_plan(base, str(error))
+    delivery = deliveries.get_delivery(flow.id)
+    assert delivery is not None
+    return base.model_copy(
+        update={
+            "flow_state": FlowState.ARCHIVED,
+            "archive": result,
+            "effects": archive_effects(
+                flow, delivery, done_label=done_label, in_review_label=in_review_label,
+            ),
+        }
+    )
 
 
 def archive_task(
