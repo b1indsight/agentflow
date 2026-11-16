@@ -7,22 +7,23 @@ import asyncio
 from loguru import logger
 
 from app.controler.workflow.lifecycle import (
+    close_delivery,
     pause_delivery,
     prove_reopen,
     record_merge,
-    resume_delivery,
+    record_reopen,
 )
 from app.controler.workflow.service import ControlService
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequestMerge, retry_delay
+from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
 from app.persistence.reconciliation import ReconcileState, ReconcileStore
-from app.persistence.reviews import ReviewStore
 from app.persistence.stops import StopStore
-from app.persistence.workers import WorkerStore
 
 
 class Reconciler:
@@ -36,7 +37,6 @@ class Reconciler:
         interval: float = 300.0,
         batch_size: int = 64,
         concurrency: int = 4,
-        settle_seconds: float = 75,
         database: Database,
     ) -> None:
         self.database = database
@@ -44,13 +44,11 @@ class Reconciler:
         self.flows = FlowStore(database)
         self.jobs = JobStore(database)
         self.reconcile_store = ReconcileStore(database)
-        self.reviews = ReviewStore(database)
         self.stops = StopStore(database)
-        self.workers = WorkerStore(database)
+        self.assignments = AssignmentStore(database)
         self.github = github
         self.service = service
         self.interval, self.batch_size, self.concurrency = interval, batch_size, concurrency
-        self.settle_seconds = settle_seconds
         self._stop = asyncio.Event()
         self._sweep_lock = asyncio.Lock()
 
@@ -68,6 +66,29 @@ class Reconciler:
 
     async def _sweep(self) -> None:
         async with self._sweep_lock:
+            for flow_id in self.reconcile_store.merged_backlog(self.batch_size):
+                try:
+                    with self.flows.locked(flow_id) as context:
+                        tx, flow = context.database, context.flow
+                        delivery = self.deliveries.using(tx).get_delivery(flow_id)
+                        if (flow is None or flow.state is FlowState.ARCHIVED
+                                or delivery is None or delivery.state is not DeliveryState.MERGED):
+                            continue
+                        merge = PullRequestMerge.model_validate({
+                            "number": delivery.pr_number, "merged": True,
+                            "merged_at": delivery.merged_at,
+                            "merge_commit_sha": delivery.merge_commit_sha,
+                        })
+                        archived = record_merge(
+                            flow, delivery, merge, deliveries=self.deliveries.using(tx),
+                            flows=self.flows.using(tx), jobs=self.jobs.using(tx),
+                            stops=self.stops.using(tx), assignments=self.assignments.using(tx),
+                            origin="merged_backlog",
+                        )
+                    if archived:
+                        self.service.notify_merge(flow)
+                except Exception:  # noqa: BLE001 -- retain corrupt historical facts without starving the sweep
+                    logger.exception("merged backlog recovery failed for flow {}", flow_id)
             self.reconcile_store.seed(self.batch_size)
             checks = self.reconcile_store.due(self.batch_size)
             pending = iter(checks)
@@ -86,13 +107,18 @@ class Reconciler:
 
     async def _check(self, check: ReconcileState) -> None:
         try:
-            with self.database.transaction() as tx:
+            with self.flows.locked(check.flow_id) as context:
+                tx = context.database
                 deliveries_tx = self.deliveries.using(tx)
                 jobs_tx = self.jobs.using(tx)
-                flow = tx.lock_workflow(check.flow_id)
+                flow = context.flow
                 delivery = deliveries_tx.get_delivery(check.flow_id)
-                if (flow is None or delivery is None or delivery.pr_number is None
-                        or flow.state is FlowState.SUCCEEDED or delivery.state is DeliveryState.MERGED):
+                if (
+                    flow is None
+                    or delivery is None
+                    or delivery.pr_number is None
+                    or delivery.state is DeliveryState.MERGED
+                ):
                     return
                 if flow.installation_id is None:
                     raise ValueError("missing installation")
@@ -104,8 +130,12 @@ class Reconciler:
                     or remote.head_repository != flow.repo):
                 raise ValueError("PR observation identity mismatch")
             proof, diagnostic = None, None
-            if (flow.state is FlowState.ACTIVE and delivery.state is DeliveryState.CLOSED
-                    and remote.state == "open" and not remote.merged):
+            if (
+                flow.archive_reason is None
+                and delivery.state is DeliveryState.CLOSED
+                and remote.state == "open"
+                and not remote.merged
+            ):
                 if blocked:
                     diagnostic = "old executor or result must settle before reopening"
                 else:
@@ -119,20 +149,25 @@ class Reconciler:
                         flows=self.flows,
                     )
             merged = False
-            with self.database.transaction() as tx:
+            with self.flows.locked(flow.id) as context:
+                tx = context.database
                 deliveries_tx = self.deliveries.using(tx)
                 flows_tx = self.flows.using(tx)
                 jobs_tx = self.jobs.using(tx)
                 reconcile_store_tx = self.reconcile_store.using(tx)
-                reviews_tx = self.reviews.using(tx)
                 stops_tx = self.stops.using(tx)
-                workers_tx = self.workers.using(tx)
-                fresh = tx.lock_workflow(flow.id)
+                fresh = context.flow
                 current = deliveries_tx.get_delivery(flow.id)
-                if (fresh is None or current is None
-                        or fresh.current_attempt_id != flow.current_attempt_id
-                        or fresh.state != flow.state or fresh.installation_id != flow.installation_id
-                        or current.version != delivery.version or current.pr_number != delivery.pr_number):
+                if (
+                    fresh is None
+                    or current is None
+                    or not context.matches(round_no=flow.current_round_no,
+                                           attempt_id=flow.current_attempt_id)
+                    or fresh.state != flow.state
+                    or fresh.installation_id != flow.installation_id
+                    or current.version != delivery.version
+                    or current.pr_number != delivery.pr_number
+                ):
                     reconcile_store_tx.defer(flow.id)
                     return
                 if remote.merged:
@@ -150,35 +185,42 @@ class Reconciler:
                         flows=flows_tx,
                         jobs=jobs_tx,
                         stops=stops_tx,
-                        workers=workers_tx,
+                        assignments=self.assignments.using(tx),
+                        origin="reconciliation",
                     )
-                elif fresh.state is FlowState.ACTIVE:
+                elif fresh.state is not FlowState.ARCHIVED:
                     if remote.state == "closed":
-                        pause_delivery(current, deliveries=deliveries_tx, jobs=jobs_tx)
-                        diagnostic = "PR closed; binding retained until a verified reopen"
+                        close_delivery(
+                            fresh,
+                            current,
+                            deliveries=deliveries_tx,
+                            flows=flows_tx,
+                            stops=stops_tx,
+                            assignments=self.assignments.using(tx),
+                        )
+                        diagnostic = "PR closed; round finalization requested"
+                    elif fresh.archive_reason is not None:
+                        diagnostic = "PR reopened; explicit resume after archive is required"
                     elif current.state is DeliveryState.CLOSED:
                         if (proof is not None and not jobs_tx.reopen_blocked(flow.id)
                                 and jobs_tx.lifecycle_job(flow.id) == coding):
-                            resume_delivery(
+                            record_reopen(
                                 fresh,
                                 current,
                                 proof,
-                                self.settle_seconds,
                                 deliveries=deliveries_tx,
                                 flows=flows_tx,
-                                jobs=jobs_tx,
-                                reviews=reviews_tx,
                             )
                         elif diagnostic is None:
                             diagnostic = "old executor or result changed during reopen verification"
-                    elif (current.head_sha and remote.head_sha != current.head_sha
-                          or remote.head_branch != current.branch
-                          or current.base_branch and remote.base_branch != current.base_branch):
+                    elif remote.head_branch != current.branch:
                         if coding is not None and coding.result_applied_at is None:
                             diagnostic = "in-flight coding delivery awaits its original result verification"
                         else:
-                            pause_delivery(current, deliveries=deliveries_tx, jobs=jobs_tx)
-                            diagnostic = "PR head/base changed; verified delivery is unchanged"
+                            pause_delivery(
+                                current, deliveries=deliveries_tx, assignments=self.assignments.using(tx))
+                            flows_tx.transition(fresh, FlowEvent.DELIVERY_BASELINE_REJECTED)
+                            diagnostic = "PR source branch changed; verified delivery is unchanged"
                 delay = max(1800.0, self.interval) if fresh.state in TERMINAL_STATES else self.interval
                 reconcile_store_tx.succeeded(flow.id, delay, diagnostic, hint_version=check.hint_version)
             if merged:

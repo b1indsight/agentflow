@@ -1,14 +1,12 @@
 import base64
 import json
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 
 from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.controler.workers.conversation import ConversationService
-from app.domain.models import Attempt
-from app.persistence.database import Database
+from app.persistence.records import required
 from app.worker.state import history
 from app.worker.state.history import CodexHistory
 from tests.test_conversation_history import SESSION, message, rollout
@@ -36,52 +34,52 @@ def test_single_session_query_validates_before_reading(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_control_owns_session_order_attribution_and_tail(tmp_path):
+async def test_control_owns_session_order_attribution_and_tail(store, completed_open_initial, tmp_path):
     first_path = rollout(tmp_path, [message("user", "one")])
     second_path = first_path.with_name(first_path.name.replace(SESSION, OTHER))
     second_path.write_text(json.dumps({"type": "session_meta", "payload": {"id": OTHER}}) + "\n"
                            + json.dumps(message("assistant", "two")) + "\n")
-    attempts = [Attempt(id=7, flow_id=42, codex_session_id=SESSION),
-                Attempt(id=8, flow_id=42, codex_session_id=OTHER, session_generation=1)]
-    store = SimpleNamespace(
-        flows=SimpleNamespace(get_flow=lambda _: object(), list_attempts=lambda _: attempts),
-        workers=SimpleNamespace(get_flow_execution=lambda _: SimpleNamespace(worker_id="worker")),
-    )
+    flow, *_ = completed_open_initial
+    attempts = [required(store.flows.get_current_attempt(flow)), store.flows.create_attempt(flow.id)]
+    for attempt, session, generation in zip(attempts, (SESSION, OTHER), (0, 1), strict=True):
+        attempt.codex_session_id, attempt.session_generation = session, generation
+        store.flows.update_attempt(attempt)
     calls = []
     reader = CodexHistory(tmp_path)
 
     async def query(worker_id, request):
+        assert worker_id == "worker-a"
         calls.append(request)
         return reader.query(request)
 
     service = ConversationService(
-        SimpleNamespace(query=query), database=Mock(spec=Database),
+        SimpleNamespace(query=query), database=store.database,
     )
-    service.flows = store.flows
-    service.workers = store.workers
-    first = await service.read(42, None, 100)
+    first = await service.read(flow.id, None, 100)
     assert len(calls) == 1 and first.has_more
-    second = await service.read(42, first.next_cursor, 100)
+    second = await service.read(flow.id, first.next_cursor, 100)
     assert len(calls) == 2 and not second.has_more
     assert len(second.sessions) == 1 and second.sessions[0].session_id == OTHER
     with second_path.open("a") as file:
         file.write(json.dumps(message("assistant", "tail")) + "\n")
-    tail = await service.read(42, second.next_cursor, 100)
+    tail = await service.read(flow.id, second.next_cursor, 100)
     assert [i.content.text for i in tail.items] == ["tail"]
     assert len(tail.next_cursor) <= 2048
+    other_flow = store.flows.create_flow(flow.repo, flow.issue_number + 1, flow.installation_id)
     with pytest.raises(ConversationFailure, match="cursor_invalid"):
-        await service.read(43, tail.next_cursor, 100)
+        await service.read(other_flow.id, tail.next_cursor, 100)
     attempts[1].session_generation += 1
+    store.flows.update_attempt(attempts[1])
     with pytest.raises(ConversationFailure, match="cursor_invalid"):
-        await service.read(42, tail.next_cursor, 100)
+        await service.read(flow.id, tail.next_cursor, 100)
     first_path.unlink()
-    missing = await service.read(42, None, 100)
+    missing = await service.read(flow.id, None, 100)
     assert missing.items == [] and missing.has_more
     assert missing.sessions[0].status == "not_found"
-    resumed = await service.read(42, missing.next_cursor, 100)
+    resumed = await service.read(flow.id, missing.next_cursor, 100)
     assert resumed.items[0].session_id == OTHER
     with pytest.raises(ConversationFailure, match="cursor_invalid"):
-        await service.read(42, base64.urlsafe_b64encode(b'{"index":0}').decode(), 100)
+        await service.read(flow.id, base64.urlsafe_b64encode(b'{"index":0}').decode(), 100)
 
 
 def test_byte_budget_does_not_skip_record(tmp_path, monkeypatch):

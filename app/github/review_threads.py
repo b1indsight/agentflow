@@ -164,10 +164,10 @@ class ReviewThread(BaseModel):
 
     async def find_reply(self, marker: str) -> int | None:
         """Find an exact bot marker; incomplete coverage cannot prove absence."""
+        bot_login = (await self.pull_request.repository.installation.app.resolve_bot_login()).casefold()
         observed = await self.refetch()
-        bot_login = self.pull_request.repository.installation.app.bot_login
         for comment in observed.comments.items:
-            if (comment.is_bot and comment.author == bot_login
+            if (comment.is_bot and comment.author.casefold() == bot_login
                     and marker in comment.body.splitlines()):
                 return comment.github_id
         if not observed.complete:

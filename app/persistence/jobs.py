@@ -2,63 +2,70 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
-from app.contracts.protocol import ArchiveTask
+from app.contracts.protocol import ArchiveTask, Failed, terminal_digest
+from app.contracts.receipts import MergeArchiveNotice, ResultInbox, merge_notice_digest
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import (
+    Flow,
+    FlowDelivery,
     Job,
     JobKind,
     JobState,
     WorkerStatus,
 )
+from app.persistence.flows import FlowStore
 from app.persistence.records import required
 from app.persistence.repository import Repository
+from app.persistence.results import RESOURCE_JOB_SQL
+
+# Proof that a job may have run, for unaliased jobs. A frozen archive may have started
+# deleting before its Started message reached serve.
+MAY_HAVE_EXECUTED_SQL = (
+    "(started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL OR (kind='archive' AND payload->'archive' IS NOT NULL))"
+)
+
+# New live operations require the immutable assignment's exact current claim (unaliased jobs).
+# Historical terminal receipt replays are validated against their stored digest instead.
+CURRENT_WORKSPACE_SQL = (
+    " EXISTS (SELECT 1 FROM workers slot WHERE slot.worker_id=jobs.assigned_worker_id"
+    " AND slot.workspace=jobs.workspace AND slot.generation=jobs.generation"
+    " AND ((jobs.kind='inference' AND slot.current_inference_job_id=jobs.id)"
+    " OR (jobs.kind<>'inference' AND slot.current_job_id=jobs.id)))"
+)
 
 
 class JobStore(Repository):
     """Durable jobs, lifecycle checks, and accepted-result application."""
 
-    def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None:
-        """Retire queued/never-dispatched preparation; actual execution requires stop proof."""
-        # Like FlowStore.update_flow, cancellation reuses reviews without an import cycle.
-        from app.persistence.reviews import ReviewStore
-
-        ReviewStore(self._db).cancel(flow_id)
-        with self._db.connection() as connection:
-            connection.execute(
-                "WITH retired AS (UPDATE jobs SET state=%s, last_error=%s, updated_at=%s WHERE flow_id=%s"
-                " AND (state=%s OR (state='running' AND started_at IS NULL AND dispatch_authorized_at IS NULL"
-                " AND EXISTS (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.state='cancelled')))"
-                " AND result_received_at IS NULL RETURNING id)"
-                " UPDATE workers SET current_job_id=NULL,status=CASE WHEN status='busy' THEN 'online' ELSE status END"
-                " WHERE current_job_id IN (SELECT id FROM retired)",
-                (
-                    JobState.FAILED,
-                    reason,
-                    self._db.now(),
-                    flow_id,
-                    JobState.QUEUED,
-                ),
-            )
-
     def lifecycle_job(self, flow_id: int) -> Job | None:
         """Latest coding execution, excluding jobs cancelled before they could run."""
         with self._db.connection() as connection:
-            return connection.cursor(row_factory=class_row(Job)).execute(
-                "SELECT * FROM jobs WHERE flow_id=%s AND kind IN ('initial','revision')"
-                " AND (state='running' OR started_at IS NOT NULL OR result_received_at IS NOT NULL)"
-                " AND NOT (started_at IS NULL AND COALESCE(result_payload->>'connection_epoch','')='control')"
-                " ORDER BY id DESC LIMIT 1", (flow_id,),
-            ).fetchone()
+            return (
+                connection.cursor(row_factory=class_row(Job))
+                .execute(
+                    "SELECT * FROM jobs WHERE flow_id=%s AND kind IN ('initial','revision')"
+                    " AND (state='running' OR started_at IS NOT NULL OR result_received_at IS NOT NULL)"
+                    " AND NOT (started_at IS NULL AND COALESCE("
+                    " (jsonb_typeof(result_payload->'version')='number'"
+                    " AND result_payload->>'version'='1' AND result_payload->>'source'='control')"
+                    " OR (NOT (result_payload ? 'version')"
+                    " AND jsonb_typeof(result_payload->'protocol_version')='number'"
+                    " AND result_payload->>'protocol_version' IN ('14','15')"
+                    " AND result_payload->>'connection_epoch'='control'),false))"
+                    " ORDER BY id DESC LIMIT 1",
+                    (flow_id,),
+                )
+                .fetchone()
+            )
 
     def reopen_blocked(self, flow_id: int) -> bool:
         """A timeout cannot prove that an executor exited or a dispatched effect settled."""
         with self._db.connection() as connection:
             return connection.execute(
-                "SELECT 1 FROM jobs WHERE flow_id=%s AND (state='running'"
+                "SELECT 1 FROM jobs WHERE flow_id=%s AND kind<>'inference' AND (state='running'"
                 " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL)"
                 " OR (started_at IS NOT NULL AND result_received_at IS NULL)) LIMIT 1", (flow_id,),
             ).fetchone() is not None
@@ -67,8 +74,9 @@ class JobStore(Repository):
         with self._db.connection() as connection:
             return (
                 connection.execute(
-                    "SELECT 1 FROM jobs WHERE flow_id=%s AND result_received_at IS NOT NULL"
-                    " AND result_applied_at IS NULL LIMIT 1",
+                    "SELECT 1 FROM jobs j WHERE flow_id=%s AND kind<>'inference' AND result_received_at IS NOT NULL"
+                    " AND result_applied_at IS NULL"
+                    f" AND {RESOURCE_JOB_SQL} LIMIT 1",
                     (flow_id,),
                 ).fetchone()
                 is not None
@@ -78,37 +86,49 @@ class JobStore(Repository):
         """Check for another executor or unapplied result without loading job payloads."""
         with self._db.connection() as connection:
             return connection.execute(
-                "SELECT 1 FROM jobs WHERE flow_id=%s AND id<>%s"
+                "SELECT 1 FROM jobs j WHERE flow_id=%s AND id<>%s AND kind<>'inference'"
+                f" AND {RESOURCE_JOB_SQL}"
                 " AND (state=%s OR (result_received_at IS NOT NULL"
-                " AND result_applied_at IS NULL)) LIMIT 1",
+                " AND result_applied_at IS NULL) OR EXISTS (SELECT 1 FROM workers w"
+                " WHERE w.current_job_id=j.id)) LIMIT 1",
                 (flow_id, excluding_job_id, JobState.RUNNING),
             ).fetchone() is not None
 
     def enqueue_job(
         self,
-        flow_id: int,
+        flow: Flow,
         kind: JobKind,
         payload: dict | None = None,
         *,
         source_job_id: int | None = None,
         source_key: str | None = None,
     ) -> Job:
+        """Queue with fresh Flow facts in the caller's workflow transaction.
+
+        The caller locks the workflow before any job writes, or supplies a Flow
+        created in the same transaction. This method never reacquires those locks.
+        """
+        if kind is JobKind.INFERENCE:
+            raise ValueError("use enqueue_inference to freeze an inference call")
         if (source_job_id is None) != (source_key is None):
             raise ValueError("derived jobs require both source job and purpose")
+        if self._db._bound_connection is None:
+            raise ValueError("enqueue requires the current Flow in its workflow transaction")
         now = self._db.now()
         with (
             self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             row = cursor.execute(
-                "INSERT INTO jobs(flow_id, kind, state, attempt, payload, created_at,"
-                " updated_at,source_job_id,source_key) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                "INSERT INTO jobs(flow_id,round_no,kind,state,attempt,payload,created_at,"
+                " updated_at,source_job_id,source_key) VALUES (%s,(SELECT current_round_no FROM flows WHERE id=%s),%s,%s,%s,%s,%s,%s,%s,%s)"
                 " ON CONFLICT(source_job_id,source_key) WHERE source_job_id IS NOT NULL"
                 " DO UPDATE SET source_key=excluded.source_key"
                 " WHERE jobs.flow_id=excluded.flow_id AND jobs.kind=excluded.kind"
                 " AND jobs.payload IS NOT DISTINCT FROM excluded.payload RETURNING *",
                 (
-                    flow_id,
+                    flow.id,
+                    flow.id,
                     kind,
                     JobState.QUEUED,
                     0,
@@ -119,7 +139,30 @@ class JobStore(Repository):
                     source_key,
                 ),
             ).fetchone()
+            if kind is not JobKind.ARCHIVE:
+                FlowStore(self._db).transition(flow, FlowEvent.JOB_ENQUEUED, now=now)
         return required(row)
+
+    def record_merge_notice(self, flow: Flow, delivery: FlowDelivery) -> Job:
+        """Persist local notification intent in the merge transaction, never the dispatch queue."""
+        if (delivery.flow_id != flow.id or delivery.pr_number is None
+                or delivery.merged_at is None or delivery.merge_commit_sha is None):
+            raise ValueError("merge notice requires the current delivery's complete merge facts")
+        job = self.enqueue_job(flow, JobKind.ARCHIVE)
+        notice = MergeArchiveNotice(
+            job_id=job.id, flow_id=flow.id, round_no=flow.current_round_no, repo=flow.repo,
+            pr_number=delivery.pr_number, merged_at=delivery.merged_at,
+            merge_commit_sha=delivery.merge_commit_sha,
+        )
+        inbox = ResultInbox(version=2, source="control", terminal=notice)
+        with self._db.connection() as connection:
+            connection.execute(
+                "UPDATE jobs SET state='running',result_payload=%s,result_digest=%s,"
+                " result_received_at=%s WHERE id=%s",
+                (Jsonb(inbox.model_dump(mode="json")), merge_notice_digest(notice),
+                 self._db.now(), job.id),
+            )
+        return required(self.get_job(job.id))
 
     def get_job(self, job_id: int) -> Job | None:
         with (
@@ -127,6 +170,25 @@ class JobStore(Repository):
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute("SELECT * FROM jobs WHERE id=%s", (job_id,)).fetchone()
+
+    def retire_preparation(self, job: Job) -> None:
+        """Retire undispatched work under the caller's workflow/job locks, without an inbox."""
+        now = self._db.now()
+        with self._db.connection() as connection:
+            retired = connection.execute(
+                "UPDATE jobs SET state='done',result_applied_at=%s,updated_at=%s"
+                " WHERE id=%s AND kind<>'inference' AND state='running'"
+                " AND started_at IS NULL AND dispatch_authorized_at IS NULL"
+                " AND result_received_at IS NULL AND result_payload IS NULL",
+                (now, now, job.id),
+            )
+            if retired.rowcount != 1:
+                raise ValueError("cannot retire an executing preparation")
+            connection.execute(
+                "UPDATE workers w SET current_job_id=NULL FROM jobs j WHERE j.id=%s"
+                " AND w.worker_id=j.assigned_worker_id AND w.workspace=j.workspace"
+                " AND w.generation=j.generation AND w.current_job_id=j.id", (job.id,),
+            )
 
     def list_jobs(self, flow_id: int) -> list[Job]:
         with (
@@ -136,32 +198,6 @@ class JobStore(Repository):
             return cursor.execute(
                 "SELECT * FROM jobs WHERE flow_id=%s ORDER BY id", (flow_id,)
             ).fetchall()
-
-    def continuation_request(self, flow_id: int, request_id: str) -> Job | None:
-        """Find an accepted console request, including after retry or result completion."""
-        with self._db.connection() as connection:
-            return (
-                connection.cursor(row_factory=class_row(Job))
-                .execute(
-                    "SELECT * FROM jobs WHERE flow_id=%s AND payload->>'console_request_id'=%s"
-                    " ORDER BY id LIMIT 1",
-                    (flow_id, request_id),
-                )
-                .fetchone()
-            )
-
-    def has_unfinished_work(self, flow_id: int) -> bool:
-        """Continuation must not overlap queued work, execution, or unknown outcomes."""
-        with self._db.connection() as connection:
-            return (
-                connection.execute(
-                    "SELECT 1 FROM jobs WHERE flow_id=%s AND (state IN ('queued','running')"
-                    " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL)"
-                    " OR (started_at IS NOT NULL AND result_received_at IS NULL)) LIMIT 1",
-                    (flow_id,),
-                ).fetchone()
-                is not None
-            )
 
     def freeze_archive(self, job: Job, task: ArchiveTask) -> None:
         """Persist the command under the caller's workflow/job locks before dispatch."""
@@ -178,7 +214,7 @@ class JobStore(Repository):
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute(
-                "SELECT * FROM (SELECT * FROM jobs WHERE flow_id=%s ORDER BY id DESC LIMIT 1)"
+                "SELECT * FROM (SELECT * FROM jobs WHERE flow_id=%s AND kind<>'inference' ORDER BY id DESC LIMIT 1)"
                 " latest WHERE state=%s",
                 (flow_id, JobState.FAILED),
             ).fetchone()
@@ -211,66 +247,85 @@ class JobStore(Repository):
             ).fetchall()
 
     def complete_persisted_result(self, job_id: int, state: JobState) -> bool:
-        """Complete an inbox item after recovery applies its stored domain result."""
+        """Commit an inbox item and clear only claims with durable writer-exit evidence."""
 
         if state not in (JobState.DONE, JobState.FAILED):
             raise ValueError("persisted results can only complete terminal jobs")
         now = self._db.now()
-        with self._db.connection() as connection, connection.transaction():
-            owner = connection.execute(
-                "SELECT assigned_worker_id FROM jobs WHERE id=%s",
-                (job_id,),
-            ).fetchone()
-            if owner and owner["assigned_worker_id"]:
-                self._db._lock_worker(connection, owner["assigned_worker_id"])
+        candidate = self.get_job(job_id)
+        if candidate is None or candidate.kind is JobKind.INFERENCE:
+            return False
+        with self._db.transaction() as tx, tx.connection() as connection:
+            tx.lock_workflow(candidate.required_flow_id)
             completed = connection.execute(
                 "UPDATE jobs SET state=%s, result_applied_at=%s, updated_at=%s"
                 " WHERE id=%s AND state=%s AND result_received_at IS NOT NULL"
-                " AND result_applied_at IS NULL RETURNING assigned_worker_id",
+                " AND kind<>'inference' AND result_applied_at IS NULL"
+                " AND (assigned_worker_id IS NULL OR EXISTS (SELECT 1 FROM workers w"
+                " WHERE w.worker_id=jobs.assigned_worker_id AND w.workspace=jobs.workspace"
+                " AND w.generation=jobs.generation AND (w.current_job_id=jobs.id"
+                " OR (w.current_job_id IS NULL AND EXISTS (SELECT 1 FROM execution_stops s"
+                " WHERE s.job_id=jobs.id AND s.assignment_token=jobs.assignment_token"
+                " AND s.state IN ('stopped','confirmed'))))))"
+                " RETURNING assigned_worker_id",
                 (state, now, now, job_id, JobState.RUNNING),
             ).fetchone()
             if completed is not None:
+                # Unstarted control outcomes are preparation failures or explicit
+                # request-validation refusals, neither of which has a worker journal.
+                # A worker terminal proves exit; a started control failure does not.
                 connection.execute(
-                    "UPDATE workers SET status=CASE WHEN status IN (%s,%s) THEN %s"
-                    " ELSE %s END, current_job_id=NULL, last_seen_at=%s"
-                    " WHERE worker_id=%s AND current_job_id=%s",
-                    (
-                        WorkerStatus.OFFLINE,
-                        WorkerStatus.RECOVERING,
-                        WorkerStatus.OFFLINE,
-                        WorkerStatus.ONLINE,
-                        now,
-                        completed["assigned_worker_id"],
-                        job_id,
-                    ),
+                    "UPDATE workers w SET current_job_id=NULL FROM jobs j WHERE j.id=%s"
+                    " AND w.worker_id=j.assigned_worker_id AND w.workspace=j.workspace"
+                    " AND w.generation=j.generation AND w.current_job_id=j.id"
+                    " AND (j.result_payload->>'source'='worker' OR (j.started_at IS NULL"
+                    " AND j.result_payload->>'source'='control'))", (job_id,),
                 )
-                connection.execute(
-                    "UPDATE flow_executions SET recovery_deadline=CASE WHEN EXISTS"
-                    " (SELECT 1 FROM workers WHERE worker_id=%s AND status=%s) THEN NULL ELSE %s END"
-                    " WHERE flow_id=(SELECT flow_id FROM jobs WHERE id=%s) AND released_at IS NULL",
-                    (
-                        completed["assigned_worker_id"],
-                        WorkerStatus.ONLINE,
-                        now + self._db.recovery_grace,
-                        job_id,
-                    ),
-                )
+                if completed["assigned_worker_id"] is not None:
+                    connection.execute(
+                        "UPDATE flow_executions SET recovery_deadline=CASE WHEN EXISTS"
+                        " (SELECT 1 FROM workers WHERE repository IS NULL AND worker_id=%s AND status=%s) THEN NULL ELSE %s END"
+                        " WHERE flow_id=(SELECT flow_id FROM jobs WHERE id=%s) AND released_at IS NULL",
+                        (
+                            completed["assigned_worker_id"],
+                            WorkerStatus.ONLINE,
+                            now + self._db.recovery_grace,
+                            job_id,
+                        ),
+                    )
         return completed is not None
 
     def record_control_result(
         self,
         job_id: int,
-        payload: Mapping[str, object],
-        digest: str,
+        terminal: Failed,
         reason: str,
     ) -> None:
         """Record a control-generated terminal outcome while holding the workflow/job locks."""
+        job = self.get_job(job_id)
+        if (
+            job is None
+            or job.kind is JobKind.INFERENCE
+            or terminal.job_id != job_id
+            or terminal.assignment_token
+            != (job.assignment_token if job.assignment_token is not None else "control")
+        ):
+            raise ValueError("control terminal does not match its assignment")
+        inbox = ResultInbox(source="control", terminal=terminal)
+        digest = terminal_digest(terminal)
         with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET result_payload=%s,result_digest=%s,result_received_at=%s,"
                 " last_error=%s WHERE id=%s AND state=%s"
                 " AND result_received_at IS NULL",
-                (Jsonb(dict(payload)), digest, self._db.now(), reason, job_id, JobState.RUNNING),
+                (
+                    Jsonb(inbox.model_dump(mode="json")),
+                    digest,
+                    self._db.now(),
+                    reason,
+                    job_id,
+                    JobState.RUNNING,
+                ),
             )
 
     def set_job_error(self, job_id: int, reason: str) -> None:

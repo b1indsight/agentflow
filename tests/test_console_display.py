@@ -1,14 +1,65 @@
-"""Effect receipt markers are hidden from conversation display reads."""
+"""Conversation display reads hide transport wrappers without changing archived evidence."""
 
+import json
 from datetime import timedelta
 
 import pytest
 
 from app.contracts.console import ConsoleFailure
+from app.controler.workflow.service import ControlService
+from app.domain.models import ArchiveReason
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
+from app.persistence.console import ConsoleStore
 
 MARKER = "<!-- flowtool:effect:" + "a" * 64 + " -->"
+
+
+def test_direct_task_title_overrides_remote_cache_and_body_is_only_loaded_in_detail(store):
+    # Generated titles override remote caches; original requirements stay detail-only.
+    task = "Private original requirements 😀"
+    flow = store.flows.create_flow("octo/repo", None, 1, task_content=task)
+    console = ConsoleStore(store.database)
+    with store.connection() as connection:
+        connection.execute("UPDATE flows SET title='推理任务标题' WHERE id=%s", (flow.id,))
+        connection.execute("UPDATE console_flows SET title='Stale remote title' WHERE flow_id=%s", (flow.id,))
+        facts = connection.execute("SELECT facts FROM console_flows WHERE flow_id=%s", (flow.id,)).fetchone()["facts"]
+        history = connection.execute("SELECT body FROM console_activity WHERE flow_id=%s", (flow.id,)).fetchall()
+    assert facts["task_title"] == "推理任务标题"
+    assert "task_content" not in facts and task not in json.dumps(facts, ensure_ascii=False)
+    assert all(task not in row["body"] for row in history)
+    page = console.flows(q="推理任务标题")
+    assert [item.id for item in page.items] == [flow.id]
+    assert page.items[0].title == "推理任务标题"
+    assert page.items[0].issue_number is page.items[0].issue_url is None
+    assert not console.flows(q="Stale remote title").items
+    assert "task_content" not in page.model_dump_json()
+    detail = console.detail(flow.id)
+    assert detail.task_content == task and detail.issue_url is None
+    issue = store.flows.create_flow("octo/repo", 7, 1)
+    assert console.detail(issue.id).task_content is None
+    assert console.detail(issue.id).issue_url == "https://github.com/octo/repo/issues/7"
+
+
+@pytest.mark.parametrize("generated,cached,pr,expected", [
+    ("Generated", "Issue", "PR", "Generated"),
+    (None, "Issue", "PR", "Issue"),
+    (None, None, "PR", "PR"),
+    (None, None, None, None),
+])
+def test_display_title_and_search_share_fallback_precedence(store, generated, cached, pr, expected):
+    flow = store.flows.create_flow("octo/repo", 7, 1)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery.title = pr
+    store.deliveries.update_delivery(delivery)
+    with store.connection() as connection:
+        connection.execute("UPDATE flows SET title=%s WHERE id=%s", (generated, flow.id))
+        connection.execute("UPDATE console_flows SET title=%s WHERE flow_id=%s", (cached, flow.id))
+    console = ConsoleStore(store.database)
+    assert console.detail(flow.id).title == expected
+    assert console.flows().items[0].title == expected
+    if expected is not None:
+        assert console.flows(q=expected).items[0].id == flow.id
 
 
 def test_effect_markers_are_hidden_from_preview_content_and_diffs(store):
@@ -92,6 +143,14 @@ def test_effect_markers_are_hidden_from_preview_content_and_diffs(store):
     assert archive.page(flow.id, since=deleted_snapshot - 1).changes == {"deleted": 1}
     assert archive.page(flow.id, since=deleted_snapshot).changes == {}
 
+    # Opening another round must not rewrite prior reading versions or expose receipt markers.
+    service = ControlService(database=store.database)
+    service.finish(flow, reason=ArchiveReason.SUCCEEDED, summary="调查完成", expected_round_no=1)
+    service.resume(store.flows.get_flow(flow.id), expected_round_no=1)
+    assert store.flows.get_flow(flow.id).current_round_no == 2
+    assert archive.content(flow.id, changed.key, changed.version, 0, compare=True) == diff
+    assert archive.page(flow.id, since=deleted_snapshot).changes == {}
+
 
 def test_display_preserves_worker_literals_and_unrelated_html(store):
     flow = store.flows.create_flow("octo/repo", 7, 1)
@@ -114,3 +173,119 @@ def test_display_preserves_worker_literals_and_unrelated_html(store):
         )
     displayed = {item.key: item.body for item in archive.page(flow.id, limit=20).items}
     assert displayed == {"worker:1": literal, "comment:1": unrelated}
+
+
+@pytest.mark.parametrize("revision", [False, True])
+def test_coding_summary_display_preserves_archives_paging_and_version_comparisons(store, revision):
+    # Existing archives contain the coding-result envelope, often longer than the preview.
+    flow = store.flows.create_flow("octo/repo", 7, 1)
+    archive = ActivityStore(store._db)
+    summary = "## 完成\n\n- **修复** JSON 展示\n\n" + "中文😀带引号\"和反斜线\\\n" * 210
+    payload: dict[str, object] = {"summary": summary, "vcs_backend_used": "jj" if revision else "git"}
+    if revision:
+        payload.update(addressed=[], deferred=[], needs_clarification=[])
+    raw = json.dumps(payload)
+    original = Observation(
+        key="worker:summary",
+        source="worker",
+        kind="message",
+        author="assistant",
+        body=raw,
+        occurred_at=flow.created_at,
+        updated_at=flow.created_at,
+    )
+    assert archive.append(flow.id, original)
+    page = archive.page(flow.id)
+    item = page.items[0]
+    assert item.body == summary[:2000]
+    assert item.body_length == len(summary)
+    text, offset = "", 0
+    while True:
+        part = archive.content(flow.id, item.key, item.version, offset, 997)
+        assert part.total == len(summary)
+        text += part.text
+        if part.next_offset is None:
+            break
+        offset = part.next_offset
+    assert text == summary
+    assert archive.versions(flow.id, item.key).items == page.items
+    with store._db.connection() as connection:
+        row = connection.execute(
+            "SELECT body FROM console_activity WHERE flow_id=%s AND key=%s AND version=%s",
+            (flow.id, item.key, item.version),
+        ).fetchone()
+    assert row["body"] == raw
+
+    # Envelope formatting/backend changes do not make an unchanged summary look edited.
+    payload["vcs_backend_used"] = "git" if revision else "jj"
+    assert archive.append(
+        flow.id,
+        original.model_copy(update={
+            "body": json.dumps(payload, ensure_ascii=False, indent=2),
+            "updated_at": flow.created_at + timedelta(seconds=1),
+        }),
+    )
+    unchanged = archive.page(flow.id, since=page.snapshot)
+    assert unchanged.changes == {}
+    assert unchanged.items[0].previous_version is None
+
+    payload["summary"] = summary.replace("JSON 展示", "摘要展示")
+    assert archive.append(
+        flow.id,
+        original.model_copy(update={
+            "body": json.dumps(payload, ensure_ascii=False),
+            "updated_at": flow.created_at + timedelta(seconds=2),
+        }),
+    )
+    changed = archive.page(flow.id, since=unchanged.snapshot)
+    assert changed.changes == {"edited": 1}
+    diff = archive.content(flow.id, item.key, changed.items[0].version, 0, compare=True)
+    assert diff.previous_version == unchanged.items[0].version
+    assert "-- **修复** JSON 展示" in diff.text and "+- **修复** 摘要展示" in diff.text
+    assert "vcs_backend_used" not in diff.text
+    assert archive.page(flow.id, snapshot=page.snapshot).items == page.items
+
+
+def test_summary_display_leaves_user_tool_and_non_result_json_unchanged(store):
+    flow = store.flows.create_flow("octo/repo", 7, 1)
+    archive = ActivityStore(store._db)
+    result = json.dumps({"summary": "完成", "vcs_backend_used": "git"})
+    cases = [
+        ("worker", "user", "message", result),
+        ("worker", "system", "message", result),
+        ("worker", "assistant", "tool_call", result),
+        ("worker", "tool", "tool_result", result),
+        ("issue.comments", "assistant", "message", result),
+    ]
+    # Invalid or incomplete native output must remain readable, never fail a whole page.
+    cases.extend(("worker", "assistant", "message", body) for body in (
+        result[:-1],
+        "## 普通 Markdown",
+        '{"summary":"普通数据"}',
+        '{"summary":42,"vcs_backend_used":"git"}',
+        '{"summary":null,"vcs_backend_used":"git"}',
+        '{"summary":"data","vcs_backend_used":"unknown"}',
+        r'{"summary":"\u0000","vcs_backend_used":"git"}',
+        r'{"summary":"\ud800","vcs_backend_used":"git"}',
+        '[]',
+        'null',
+    ))
+    expected = {}
+    for i, (source, author, kind, body) in enumerate(cases):
+        key = f"record:{i}"
+        expected[key] = body
+        assert archive.append(flow.id, Observation(
+            key=key,
+            source=source,
+            kind=kind,
+            author=author,
+            body=body,
+            occurred_at=flow.created_at,
+            updated_at=flow.created_at,
+        ))
+    page = archive.page(flow.id)
+    assert {item.key: item.body for item in page.items} == expected
+    for item in page.items:
+        content = archive.content(flow.id, item.key, item.version, 0)
+        assert content.text == expected[item.key]
+        assert item.body_length == content.total == len(content.text)

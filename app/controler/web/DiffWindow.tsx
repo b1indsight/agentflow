@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import {
   Decoration,
   Diff,
@@ -9,7 +10,7 @@ import {
 } from "react-diff-view";
 import { CODE_LINES, useReadingState } from "./windowing";
 
-/** Parse a complete patch once; window parsed rows without breaking patch syntax or line numbers. */
+/** Parse a patch or standalone GitHub hunk; window rows without losing their original line numbers. */
 export function DiffWindow({
   text,
   stateKey,
@@ -17,7 +18,14 @@ export function DiffWindow({
   text: string;
   stateKey: string;
 }) {
-  const file = useMemo(() => parseDiff(text)[0], [text]);
+  const file = useMemo(
+    // GitHub's diffHunk omits the file headers required by the patch parser.
+    () =>
+      parseDiff(
+        text.startsWith("@@ ") ? `--- a/code\n+++ b/code\n${text}` : text,
+      )[0],
+    [text],
+  );
   const tokens = useMemo(
     () => file && tokenize(file.hunks, { enhancers: [markEdits(file.hunks)] }),
     [file],
@@ -68,20 +76,24 @@ export function DiffWindow({
         >
           <button
             type="button"
+            aria-label="上一段差异"
+            title="上一段差异"
             disabled={!start}
             onClick={() => setStart(Math.max(0, start - CODE_LINES))}
           >
-            上一段差异
+            <ArrowLeft aria-hidden="true" />
           </button>
           <span>
             差异行 {start + 1}–{end} / {total}
           </span>
           <button
             type="button"
+            aria-label="下一段差异"
+            title="下一段差异"
             disabled={end === total}
             onClick={() => setStart(end)}
           >
-            下一段差异
+            <ArrowRight aria-hidden="true" />
           </button>
         </div>
       )}
