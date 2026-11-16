@@ -3569,7 +3569,10 @@ test("conversation images load inline and fit the body on desktop and mobile", a
     const small = route.request().url().endsWith("small.svg");
     return route.fulfill({
       contentType: "image/svg+xml",
-      body: `<svg xmlns="http://www.w3.org/2000/svg" width="${small ? 120 : 1800}" height="${small ? 60 : 480}"><rect width="100%" height="100%" rx="12" fill="#edf5ee"/><path d="M24 100h1752M24 200h1752M24 300h1752" stroke="#b7d7c1" stroke-width="3"/><text x="24" y="${small ? 36 : 80}" font-family="sans-serif" font-size="${small ? 16 : 40}" fill="#27653f">${small ? "Thumbnail" : "Conversation image · 1800 × 480"}</text></svg>`,
+      // A plain illustration tests natural sizing without resembling a console button.
+      body: small
+        ? '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><path fill="#e7f0f6" d="M0 0h120v60H0z"/><circle cx="94" cy="15" r="8" fill="#e8c76b"/><path fill="#638f83" d="m0 60 36-42 30 30 18-18 36 30z"/></svg>'
+        : '<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="480"><rect width="100%" height="100%" rx="12" fill="#edf5ee"/><path d="M24 100h1752M24 200h1752M24 300h1752" stroke="#b7d7c1" stroke-width="3"/><text x="24" y="80" font-family="sans-serif" font-size="40" fill="#27653f">Conversation image · 1800 × 480</text></svg>',
     });
   });
   await page.route("**/api/flows/42/activity?**", (route) =>
@@ -3607,6 +3610,9 @@ test("conversation images load inline and fit the body on desktop and mobile", a
     "href",
     "https://example.test/full.png",
   );
+  await expect(row.locator(".markdown-body").getByRole("button")).toHaveCount(
+    0,
+  );
   await expect(row.locator(".markdown-body a a")).toHaveCount(0);
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 1200 });
@@ -3641,13 +3647,23 @@ test("conversation images load inline and fit the body on desktop and mobile", a
       ),
     ).toBe(true);
     await page.screenshot({
-      path: `../../../.amp/in/artifacts/conversation-images-and-files-${width}.png`,
+      path: `../../../.amp/in/artifacts/conversation-images-no-controls-${width}.png`,
       fullPage: true,
     });
   }
   expect(referrers).toHaveLength(4);
   expect(referrers.every((referrer) => !referrer)).toBe(true);
   expect(privateReads).toBe(0);
+  await page
+    .context()
+    .route("https://example.test/full.png", (route) =>
+      route.fulfill({ body: "Original image destination" }),
+    );
+  const destination = page.waitForEvent("popup");
+  await row.getByRole("link", { name: "小图" }).click();
+  const original = await destination;
+  await expect(original).toHaveURL("https://example.test/full.png");
+  await original.close();
   await row.getByRole("link", { name: "图片：私有图片" }).press("Enter");
   await expect(
     page.getByRole("tab", { name: "private.png", exact: true }),
