@@ -12,6 +12,25 @@ from app.domain.models import Job
 from app.github import GitHubError, retry_delay
 from app.persistence.repository import Repository
 
+# Settlement predicate for result_effects AS e, shared by archive, stop, and binding release.
+# Skipped display labels retain uncertain-write evidence without blocking business settlement.
+UNCONFIRMED_EFFECT_SQL = (
+    "e.dispatched_at IS NOT NULL AND e.receipt IS NULL"
+    " AND (e.state<>'skipped' OR e.payload->>'kind' IS DISTINCT FROM 'label')"
+)
+
+# Only an unassigned v2 Control notice owns no executor or directory. Keep
+# unknown/corrupt inboxes resource-blocking; terminal.type alone grants nothing.
+# Shared settlement queries use jobs AS j.
+RESOURCE_JOB_SQL = (
+    "NOT COALESCE(j.kind='archive' AND j.assigned_worker_id IS NULL"
+    " AND j.assignment_token IS NULL AND j.workspace IS NULL AND j.generation IS NULL"
+    " AND j.started_at IS NULL AND j.dispatch_authorized_at IS NULL"
+    " AND jsonb_typeof(j.result_payload->'version')='number'"
+    " AND j.result_payload->>'version'='2' AND j.result_payload->>'source'='control'"
+    " AND j.result_payload->'terminal'->>'type'='merge_archive',FALSE)"
+)
+
 
 class ResultStore(Repository):
     """Share the database context's connection, including its explicit transaction when preparing."""
@@ -27,7 +46,7 @@ class ResultStore(Repository):
     def defer_verification(self, job: Job, error: GitHubError) -> None:
         """Retain a server deadline only while this accepted result still needs verification."""
         with self._db.transaction() as tx:
-            tx.lock_workflow(job.flow_id)
+            tx.lock_workflow(job.required_flow_id)
             current = tx.lock_job(job.id)
             if (current is None or current.result_digest != job.result_digest
                     or current.result_applied_at is not None or ResultStore(tx).get_plan(job.id) is not None):
@@ -185,7 +204,7 @@ class ResultStore(Repository):
         with self._db.connection() as connection:
             jobs = connection.execute(
                 "SELECT id FROM jobs WHERE flow_id=%s AND result_received_at IS NOT NULL"
-                " AND result_applied_at IS NULL FOR UPDATE",
+                " AND kind<>'inference' AND result_applied_at IS NULL FOR UPDATE",
                 (flow_id,),
             ).fetchall()
             return self.get_plan(jobs[0]["id"]) if len(jobs) == 1 else None

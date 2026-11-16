@@ -191,7 +191,8 @@ def test_conversation_expected_errors(runtime, code, status) -> None:
 
 
 @pytest.mark.asyncio
-async def test_http_disconnect_cancels_pending_query(runtime) -> None:
+@pytest.mark.parametrize("path", ["/api/flows/42/conversation", "/api/files/" + "a" * 32])
+async def test_http_disconnect_cancels_pending_query(runtime, path) -> None:
     started, cancelled = asyncio.Event(), asyncio.Event()
 
     async def read(*args):
@@ -202,6 +203,7 @@ async def test_http_disconnect_cancels_pending_query(runtime) -> None:
             cancelled.set()
 
     runtime.conversations.read = read
+    runtime.files = SimpleNamespace(read=read)
     app = create_app(runtime)
     app.state.runtime = runtime
 
@@ -212,8 +214,8 @@ async def test_http_disconnect_cancels_pending_query(runtime) -> None:
     async def send(message):
         pass
 
-    scope = {"type": "http", "method": "GET", "scheme": "http", "path": "/api/flows/42/conversation",
-             "raw_path": b"/api/flows/42/conversation", "query_string": b"", "http_version": "1.1",
+    scope = {"type": "http", "method": "GET", "scheme": "http", "path": path,
+             "raw_path": path.encode(), "query_string": b"", "http_version": "1.1",
              "headers": [(b"cf-access-jwt-assertion", runtime.issuer.token().encode())], "server": ("test", 80)}
     await asyncio.wait_for(app(scope, receive, send), 2)
     assert cancelled.is_set()

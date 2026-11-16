@@ -1,15 +1,14 @@
 import asyncio
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
-import app.controler.runtime as server_runtime
+import app.controler.runtime as runtime_module
 import app.worker.health as worker_health
 from app.controler.api import create_app
+from app.github import Batch
 from app.persistence import readiness
 from app.persistence.readiness import database_ready
-from app.telemetry.metrics import Metrics
 from app.worker.health import HealthFile, healthy
 
 
@@ -17,17 +16,16 @@ async def test_database_readiness_is_read_only(postgresql_url):
     assert await database_ready(postgresql_url)
 
 
-async def test_database_failure_is_not_liveness_failure(monkeypatch):
+async def test_database_failure_is_not_liveness_failure(monkeypatch, server_runtime):
     async def fail(*args, **kwargs):
         raise OSError('private DSN secret')
 
     monkeypatch.setattr(readiness.psycopg.AsyncConnection, 'connect', fail)
     assert not await database_ready('unused')
 
-    runtime = Mock(spec=server_runtime.ServerRuntime,
-                   settings=SimpleNamespace(host="test", port=0, metrics_token=None),
-                   metrics=Metrics(), startup=Mock(), shutdown=AsyncMock(),
-                   ready=AsyncMock(return_value=False))
+    runtime = server_runtime()
+    monkeypatch.setattr(type(runtime.coordinator.github), "fetch_installations",
+                        AsyncMock(return_value=Batch()))
     with TestClient(create_app(runtime)) as client:
         assert client.get('/healthz').status_code == 200
         response = client.get('/readyz')
@@ -60,18 +58,19 @@ def test_worker_probe_is_connection_freshness_not_job_idleness(tmp_path, monkeyp
     assert not healthy(path)
 
 
-async def test_shutdown_during_probe_cannot_return_ready(monkeypatch):
+async def test_shutdown_during_probe_cannot_return_ready(monkeypatch, server_runtime):
     entered, release = asyncio.Event(), asyncio.Event()
     async def probe(_):
         entered.set()
         await release.wait()
         return True
-    monkeypatch.setattr(server_runtime, 'database_ready', probe)
-    runtime = server_runtime.ServerRuntime.__new__(server_runtime.ServerRuntime)
-    runtime.settings = SimpleNamespace(database_url='unused')
-    runtime._ready, runtime._readiness_lock = True, asyncio.Lock()
+    monkeypatch.setattr(runtime_module, 'database_ready', probe)
+    runtime = server_runtime()
+    monkeypatch.setattr(type(runtime.coordinator.github), "fetch_installations",
+                        AsyncMock(return_value=Batch()))
+    runtime.startup()
     task = asyncio.create_task(runtime.ready())
     await entered.wait()
-    runtime._ready = False
+    await runtime.shutdown()
     release.set()
     assert not await task

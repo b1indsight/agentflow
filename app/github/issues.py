@@ -33,6 +33,7 @@ async def _comment(target: Issue | PullRequest, body: str) -> int:
 async def _find_comment(target: Issue | PullRequest, marker: str) -> int | None:
     """Scan all pages for an exact recovery marker authored by this App's bot."""
     repo = target.repository
+    bot_login = (await repo.installation.app.resolve_bot_login()).casefold()
     client = repo.installation._client()
 
     with translate_errors("find_comment"):
@@ -44,7 +45,7 @@ async def _find_comment(target: Issue | PullRequest, marker: str) -> int | None:
             for comment in comments:
                 if (
                     comment.user is not None
-                    and comment.user.login == repo.installation.app.bot_login
+                    and comment.user.login.casefold() == bot_login
                     and comment.user.type == "Bot"
                     and marker in (comment.body or "").splitlines()
                 ):
@@ -58,10 +59,10 @@ _COMMENTS = """
 query($owner:String!,$name:String!,$number:Int!,$cursor:String,$limit:Int!){
   repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){
     ... on Issue { comments(first:$limit,after:$cursor) { nodes {
-      fullDatabaseId body updatedAt author {login __typename}
+      fullDatabaseId body createdAt updatedAt author {login __typename}
     } pageInfo {hasNextPage endCursor} } }
     ... on PullRequest { comments(first:$limit,after:$cursor) { nodes {
-      fullDatabaseId body updatedAt author {login __typename}
+      fullDatabaseId body createdAt updatedAt author {login __typename}
     } pageInfo {hasNextPage endCursor} } }
   }}
 }
@@ -183,6 +184,8 @@ class Issue(BaseModel):
             )).parsed_data
             if data.number != self.number:
                 raise ValueError("Issue response does not match its bound number")
+            if data.pull_request:
+                raise GitHubError(GitHubErrorKind.VALIDATION, "get_issue")
             return Issue(
                 repo, data.number, title=data.title, body=data.body or "", state=data.state,
             )

@@ -1,0 +1,339 @@
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { ArrowDown, Plus, RefreshCw, X } from "lucide-react";
+import { createFailure, createFlow, getFlowTargets } from "./api";
+import { Button } from "./components/ui/button";
+import {
+  replaceTaskText,
+  taskContentFromText,
+  updateTaskText,
+} from "./flowInput";
+import type { FlowTarget } from "./types";
+
+const targetKey = (target: FlowTarget) =>
+  `${target.installation_id}:${target.repo}`;
+
+/** Drafts and uncertain writes survive closing; only confirmed creation clears the form. */
+export function CreateFlow({
+  onCreated,
+  onVerify,
+}: {
+  onCreated: (id: number) => void;
+  onVerify: () => void;
+}) {
+  const id = useId();
+  const dialog = useRef<HTMLDialogElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const pastedCursor = useRef<number | null>(null);
+  const request = useRef<AbortController | null>(null);
+  const submitting = useRef(false);
+  const [targets, setTargets] = useState<FlowTarget[]>([]);
+  const [selected, setSelected] = useState<FlowTarget | null>(null);
+  const [body, setBody] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [next, setNext] = useState<string | null>(null);
+  const [more, setMore] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [readError, setReadError] = useState<{
+    message: string;
+    reset: boolean;
+  } | null>(null);
+  const [pending, setPending] = useState(false);
+  const [failure, setFailure] = useState<ReturnType<
+    typeof createFailure
+  > | null>(null);
+  const content = taskContentFromText(body);
+  const uncertain = failure?.unknown ?? false;
+  const options =
+    selected &&
+    !targets.some((target) => targetKey(target) === targetKey(selected))
+      ? [selected, ...targets]
+      : targets;
+
+  useEffect(() => () => request.current?.abort(), []);
+  useLayoutEffect(() => {
+    if (pastedCursor.current !== null) {
+      textarea.current?.setSelectionRange(
+        pastedCursor.current,
+        pastedCursor.current,
+      );
+      pastedCursor.current = null;
+    }
+  }, [body]);
+
+  const read = async (reset = false) => {
+    if (request.current) return;
+    const controller = new AbortController();
+    request.current = controller;
+    setLoading(true);
+    setReadError(null);
+    try {
+      const page = await getFlowTargets(reset ? null : next, controller.signal);
+      if (controller.signal.aborted) return;
+      setTargets((prior) => {
+        const merged = new Map(
+          (reset ? [] : prior).map((target) => [targetKey(target), target]),
+        );
+        page.items.forEach((target) => merged.set(targetKey(target), target));
+        return [...merged.values()];
+      });
+      setNext(page.next_cursor);
+      setMore(page.has_more);
+      setLoaded(true);
+    } catch (error) {
+      if (!controller.signal.aborted)
+        setReadError({
+          message: error instanceof Error ? error.message : "项目读取失败",
+          reset,
+        });
+    } finally {
+      if (request.current === controller) {
+        request.current = null;
+        setLoading(false);
+      }
+    }
+  };
+  const close = () => {
+    if (!submitting.current) dialog.current?.close();
+  };
+  const submit = async () => {
+    if (submitting.current || uncertain || !selected || !content.ok) return;
+    // The synchronous guard also covers repeated Enter/click events before React renders disabled controls.
+    submitting.current = true;
+    setPending(true);
+    setFailure(null);
+    try {
+      const flow = await createFlow(selected, content.task);
+      setBody("");
+      setSelected(null);
+      dialog.current?.close();
+      onCreated(flow.id);
+    } catch (error) {
+      setFailure(createFailure(error));
+    } finally {
+      submitting.current = false;
+      setPending(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        ref={trigger}
+        type="button"
+        className="btn ghost"
+        aria-label="新建 Flow"
+        title="新建 Flow"
+        onClick={() => {
+          dialog.current?.showModal();
+          if (!loaded && !request.current) void read();
+        }}
+      >
+        <Plus />
+      </button>
+      <dialog
+        ref={dialog}
+        className="create-flow-dialog"
+        aria-labelledby={`${id}-heading`}
+        onCancel={(event) => {
+          if (submitting.current) event.preventDefault();
+        }}
+        onClose={() => trigger.current?.focus()}
+      >
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
+          }}
+          aria-busy={pending}
+        >
+          <h2 id={`${id}-heading`}>新建 Flow</h2>
+          <p className="create-flow-intro">
+            选择 GitHub 代码仓库，输入任务内容即可开启，无需 Issue。
+          </p>
+          <label htmlFor={`${id}-project`}>Project（代码仓库）</label>
+          <select
+            id={`${id}-project`}
+            required
+            autoFocus
+            value={selected ? targetKey(selected) : ""}
+            disabled={pending || uncertain}
+            aria-describedby={`${id}-targets`}
+            onChange={(event) => {
+              setSelected(
+                options.find(
+                  (target) => targetKey(target) === event.target.value,
+                ) ?? null,
+              );
+              setFailure(null);
+            }}
+          >
+            <option value="" disabled>
+              请选择 owner/name
+            </option>
+            {options.map((target) => (
+              <option key={targetKey(target)} value={targetKey(target)}>
+                {target.repo}
+              </option>
+            ))}
+          </select>
+          <p id={`${id}-targets`} className="create-flow-hint" role="status">
+            {loading
+              ? "正在读取项目…"
+              : !loaded
+                ? "项目清单尚未读取完成。"
+                : more
+                  ? targets.length
+                    ? `已读取 ${targets.length} 个项目，仍有更多项目。`
+                    : "尚未读取到可用项目，请继续读取后续页面。"
+                  : targets.length
+                    ? `已读取全部 ${targets.length} 个项目。`
+                    : "暂无可用项目。请检查 GitHub App 授权及仓库状态。"}
+          </p>
+          {selected &&
+            loaded &&
+            !loading &&
+            !more &&
+            !targets.some(
+              (target) => targetKey(target) === targetKey(selected),
+            ) && (
+              <p className="create-flow-hint">
+                保留了之前选择的项目，但当前清单中未找到；创建时将重新校验访问权限。
+              </p>
+            )}
+          {readError && (
+            <p className="create-flow-error" role="alert">
+              项目读取失败：{readError.message}
+              。可重试读取，或重新读取项目清单。
+            </p>
+          )}
+          <div className="create-flow-read-actions">
+            {(more || readError) && (
+              <Button
+                type="button"
+                className="btn"
+                aria-label={readError ? "重试读取项目" : "读取更多项目"}
+                title={readError ? "重试读取项目" : "读取更多项目"}
+                disabled={loading || pending}
+                onClick={() => void read(readError?.reset ?? false)}
+              >
+                {readError ? (
+                  <RefreshCw aria-hidden="true" />
+                ) : (
+                  <ArrowDown aria-hidden="true" />
+                )}
+                {readError && "重试读取项目"}
+              </Button>
+            )}
+            <Button
+              type="button"
+              className="btn"
+              aria-label="重新读取项目"
+              title="重新读取项目"
+              disabled={loading || pending}
+              onClick={() => void read(true)}
+            >
+              <RefreshCw aria-hidden="true" />
+            </Button>
+          </div>
+          <label htmlFor={`${id}-body`}>任务内容</label>
+          <textarea
+            ref={textarea}
+            id={`${id}-body`}
+            required
+            rows={7}
+            value={body.replace(/\r\n?/g, "\n")}
+            disabled={pending || uncertain}
+            aria-invalid={Boolean(body && !content.ok)}
+            aria-describedby={`${id}-body-hint${body && !content.ok ? ` ${id}-validation` : ""}`}
+            placeholder="描述任务要求、背景和验收方式…"
+            onChange={(event) => {
+              setBody(
+                updateTaskText(
+                  body,
+                  event.target.value,
+                  event.target.selectionStart,
+                ),
+              );
+              setFailure(null);
+            }}
+            onPaste={(event) => {
+              // Native textarea paste normalizes CRLF before onChange can observe it.
+              event.preventDefault();
+              const input = event.currentTarget;
+              const pasted = event.clipboardData.getData("text/plain");
+              const nextBody = replaceTaskText(
+                body,
+                input.selectionStart,
+                input.selectionEnd,
+                pasted,
+              );
+              const cursor =
+                input.selectionStart + pasted.replace(/\r\n?/g, "\n").length;
+              if (nextBody === body) input.setSelectionRange(cursor, cursor);
+              else pastedCursor.current = cursor;
+              setBody(nextBody);
+              setFailure(null);
+            }}
+          />
+          <p id={`${id}-body-hint`} className="create-flow-hint">
+            全文原样保存，最多 32 KiB
+            UTF-8。创建后由服务器生成标题；暂无标题时显示 Flow 编号。
+          </p>
+          {body && !content.ok && (
+            <p
+              id={`${id}-validation`}
+              className="create-flow-error"
+              role="alert"
+            >
+              {content.error}
+            </p>
+          )}
+          {failure && (
+            <p className="create-flow-error" role="alert">
+              {failure.message}
+            </p>
+          )}
+          {pending && (
+            <p className="create-flow-hint" role="status">
+              正在提交，请勿关闭；关闭表单不能撤销创建。
+            </p>
+          )}
+          <div className="create-flow-actions">
+            <Button
+              type="button"
+              className="btn"
+              aria-label={uncertain ? "安全关闭" : "取消"}
+              title={uncertain ? "安全关闭" : "取消"}
+              disabled={pending}
+              onClick={close}
+            >
+              <X aria-hidden="true" />
+            </Button>
+            {uncertain && (
+              <Button
+                type="button"
+                className="btn create-flow-verify"
+                onClick={() => {
+                  close();
+                  onVerify();
+                }}
+              >
+                <RefreshCw aria-hidden="true" />
+                关闭并清空筛选、刷新看板核对
+              </Button>
+            )}
+            <Button
+              type="submit"
+              className="btn create-flow-submit"
+              disabled={pending || uncertain || !selected || !content.ok}
+            >
+              <Plus aria-hidden="true" />
+              {pending ? "正在开启 Flow…" : "开启 Flow"}
+            </Button>
+          </div>
+        </form>
+      </dialog>
+    </>
+  );
+}

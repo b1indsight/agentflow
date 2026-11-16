@@ -85,7 +85,7 @@ class _PullRequestRead(BaseModel):
     base: _PullRequestRef
     merged: bool
     merged_at: AwareDatetime | None
-    merge_commit_sha: str | None
+    merge_commit_sha: str | None = None
 
 
 class PullRequest(BaseModel):

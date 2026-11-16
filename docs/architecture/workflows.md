@@ -7,12 +7,12 @@
   → FastAPI 持久化 webhook inbox 并返回 202
   → 后台消费者 → Event Router 去重 / 授权 / 写 PostgreSQL
   → flow + queued job
-  → serve 通过认证 WebSocket 向公平选中的空闲 worker assign
-  → FlowExecution 固定单槽 worker/repo，prepare 读取真实 Issue/default branch
+  → worker 按仓库需求补充并登记 workspace，serve 领取具体 (worker_id, workspace)
+  → FlowExecution 独占该位置与 generation，prepare 读取真实 Issue/default branch
   → Started / Heartbeat；INITIAL 获得临发 scoped push capability
   → Codex commit/push → worker-local flow.open_pr MCP → control tool ledger
   → worker 核验本地 VCS/remote；Result 与持久 tool outcome 核对
-  → control 再核对 GitHub ref → find-or-open 唯一 PR → ResultAccepted；保留 ACTIVE 与 binding
+  → control 再核对 GitHub ref → find-or-open 唯一 PR → AcceptResultResponse；保留 ACTIVE 与 binding
   → review/comment → 持久反馈与 settle → 冻结下一批
   → control 本地 Judge 判定 revise/answer/wait/ignore；授权 Request Changes 经 grace 直达 revise
   → revise：同 repo/branch/PR resume 或一次性 session 兜底 → 双端交付核验
@@ -47,7 +47,7 @@
 回写失败保留 ACTIVE Flow 和原 binding，成功后才原子完成并 ACK。真实 M3 闭环待验收，见
 [F3 实施与验收](../plan/m3-archive-status.md)。
 
-## 6. 对账、取消与旁路查询
+## 6. 对账、取消与会话查询
 
 - **PR / 反馈对账**：独立循环读取已追踪 PR 的 merge/close/reopen，以及 Issue/PR 普通评论、
   review 正文和行内线程；持久化分页进度和退避。close 保留绑定并暂挂，reopen 核验基线后
@@ -59,6 +59,8 @@
 - **Projects**：独立投影循环把本地业务状态同步到可选组织看板，失败不改变 Flow。
 - **会话历史**：HTTP 请求经 control 验证 Flow/session 身份，通过现有 WS 查询原 worker，
   control 负责跨 session 游标与可信归属，不把全文存入 PostgreSQL。
+  worker.history 由 WorkerBusinessCallbacks 注册，请求、回复和验证拒收均走共同 FIFO；
+  慢业务回调与 history 互相等待，不另设查询旁路。
 
 依据：[PR 对账](../../app/controler/reconciliation/pull_requests.py)、
 [反馈对账](../../app/controler/reconciliation/feedback.py)、
