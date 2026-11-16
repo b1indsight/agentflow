@@ -107,6 +107,121 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+test("switching flows keeps navigation stable while only the detail panel loads or fails", async ({
+  page,
+}) => {
+  // Keying the whole detail view used to remove the sidebar during every Flow read.
+  const other = { ...flow, id: 43, title: "另一条 Flow" };
+  const flows = [
+    flow,
+    ...Array.from({ length: 20 }, (_, i) => ({
+      ...flow,
+      id: 50 + i,
+      title: `其他任务 ${i}`,
+    })),
+    other,
+  ];
+  const listReads: string[] = [];
+  await page.route("**/api/flows?**", (route) => {
+    const phase = new URL(route.request().url()).searchParams.get("phase")!;
+    listReads.push(phase);
+    return route.fulfill({
+      json: {
+        items: phase === "running" ? flows : [],
+        counts: {
+          queued: 0,
+          running: flows.length,
+          review: 0,
+          blocked: 0,
+          done: 0,
+        },
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+  let finish = () => {};
+  let pending = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  await page.route("**/api/flows/43", async (route) => {
+    await pending;
+    return route.fulfill({ status: 503, json: { detail: "详情暂不可用" } });
+  });
+  await page.goto("/#flow/42/conversation");
+  await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
+  const rail = page.getByRole("complementary", { name: "Flow 导航" });
+  const target = rail.getByRole("button", { name: other.title, exact: true });
+  await expect(target).toBeVisible();
+  await page.waitForLoadState("networkidle");
+  listReads.length = 0;
+  await target.scrollIntoViewIfNeeded();
+  const scrollTop = await rail
+    .locator(".rail-scroll")
+    .evaluate((x) => x.scrollTop);
+  expect(scrollTop).toBeGreaterThan(0);
+  await target.click();
+  await expect(page.locator(".detail")).toContainText("正在读取 Flow…");
+  await expect(rail).toBeVisible();
+  await expect(target).toBeFocused();
+  await expect(target).toHaveClass(/active/);
+  expect(await rail.locator(".rail-scroll").evaluate((x) => x.scrollTop)).toBe(
+    scrollTop,
+  );
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/flow-panel-loading.png",
+  });
+  finish();
+  await expect(page.locator(".detail")).toContainText("详情暂不可用");
+  await expect(target).toBeFocused();
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/flow-panel-error.png",
+  });
+  await rail.getByRole("button", { name: flow.title, exact: true }).click();
+  await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
+  await page.goBack();
+  await expect(page.locator(".detail")).toContainText("详情暂不可用");
+  await page.goForward();
+  await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/flow-panel-ready.png",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  pending = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const menu = page.getByRole("button", { name: "切换任务" });
+  const mobileRail = page.getByRole("dialog", { name: "Flow 导航" });
+  await menu.click();
+  await mobileRail
+    .getByRole("button", { name: other.title, exact: true })
+    .click();
+  await expect(page.locator(".detail")).toContainText("正在读取 Flow…");
+  await expect(mobileRail).toHaveCount(0);
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/flow-panel-loading-mobile.png",
+  });
+  await menu.click();
+  await expect(
+    mobileRail.getByRole("button", { name: other.title, exact: true }),
+  ).toHaveClass(/active/);
+  await page.keyboard.press("Escape");
+  finish();
+  await expect(page.locator(".detail")).toContainText("详情暂不可用");
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/flow-panel-error-mobile.png",
+  });
+  await menu.click();
+  await mobileRail
+    .getByRole("button", { name: flow.title, exact: true })
+    .click();
+  await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/flow-panel-ready-mobile.png",
+  });
+  expect(listReads).toHaveLength(0);
+});
+
 test("archived column distinguishes closed unmerged PRs from completed archives", async ({
   page,
 }) => {

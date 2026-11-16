@@ -219,12 +219,144 @@ function Detail({
   onChanged: () => void;
   onBack: () => void;
 }) {
-  const [flow, setFlow] = useState<FlowDetail | null>(null),
-    [error, setError] = useState(""),
-    [collapsed, setCollapsed] = useState(
+  const [collapsed, setCollapsed] = useState(
       () => positions.get("collapsed") === 1,
     ),
     [nav, setNav] = useState(false);
+  const rail = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!nav) return;
+    const before = document.activeElement;
+    focusableControls(rail.current)[0]?.focus();
+    const key = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setNav(false);
+      if (e.key === "Tab") {
+        const controls = focusableControls(rail.current),
+          index = controls.findIndex((x) => x === document.activeElement);
+        if (
+          (e.shiftKey && index <= 0) ||
+          (!e.shiftKey && index === controls.length - 1)
+        ) {
+          e.preventDefault();
+          (e.shiftKey ? controls.at(-1) : controls[0])?.focus();
+        }
+      }
+    };
+    addEventListener("keydown", key);
+    return () => {
+      removeEventListener("keydown", key);
+      if (before instanceof HTMLElement) before.focus();
+    };
+  }, [nav]);
+  return (
+    <div
+      className={`detail-shell${collapsed ? " rail-collapsed" : ""}${nav ? " nav-open" : ""}`}
+    >
+      <aside
+        ref={rail}
+        className="rail"
+        aria-label="Flow 导航"
+        role={nav ? "dialog" : undefined}
+        aria-modal={nav || undefined}
+      >
+        <div className="rail-head">
+          <button className="btn ghost back" onClick={onBack}>
+            返回看板
+          </button>
+          <button
+            className="btn rail-toggle"
+            aria-label={collapsed ? "展开任务侧栏" : "折叠任务侧栏"}
+            onClick={() =>
+              setCollapsed((x) => {
+                positions.set("collapsed", x ? 0 : 1);
+                return !x;
+              })
+            }
+          >
+            {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+          </button>
+        </div>
+        <nav className="rail-scroll" data-scroll-root>
+          {phases.map(([p, l]) => {
+            const group = all.filter((f) => f.phase === p);
+            return (
+              <SavedDetails
+                open
+                key={p}
+                stateKey={`rail-group-${p}`}
+                className={`rail-group phase-${p}`}
+              >
+                <summary>
+                  {l}
+                  <span className="count">{counts[p]}</span>
+                </summary>
+                <WindowList
+                  count={group.length}
+                  label={`侧栏-${p}`}
+                  itemKey={(i) => group[i].id}
+                  estimate={78}
+                >
+                  {(i) => (
+                    <button
+                      className={`flow-tab${group[i].id === id ? " active" : ""}`}
+                      onClick={() => {
+                        setNav(false);
+                        location.hash = `flow/${group[i].id}/${tab}`;
+                      }}
+                    >
+                      <i className="dot" />
+                      <span className="name">{name(group[i])}</span>
+                    </button>
+                  )}
+                </WindowList>
+                {group.length < counts[p] && (
+                  <button className="btn" onClick={() => load(p)}>
+                    更多{l}任务
+                  </button>
+                )}
+              </SavedDetails>
+            );
+          })}
+        </nav>
+      </aside>
+      <button
+        className="mobile-shade"
+        aria-label="关闭任务导航"
+        onClick={() => setNav(false)}
+      />
+      <DetailPanel
+        key={id}
+        id={id}
+        tab={tab}
+        refresh={refresh}
+        onChanged={onChanged}
+        onBack={onBack}
+        nav={nav}
+        onNav={() => setNav(true)}
+      />
+    </div>
+  );
+}
+
+function DetailPanel({
+  id,
+  tab,
+  refresh,
+  onChanged,
+  onBack,
+  nav,
+  onNav,
+}: {
+  id: number;
+  tab: Tab;
+  refresh: number;
+  onChanged: () => void;
+  onBack: () => void;
+  nav: boolean;
+  onNav: () => void;
+}) {
+  const [flow, setFlow] = useState<FlowDetail | null>(null),
+    [error, setError] = useState("");
   const [pending, setPending] = useState<"archive" | "retry" | null>(null);
   const writing = useRef(false);
   const [archiveError, setArchiveError] = useState("");
@@ -280,8 +412,7 @@ function Detail({
     [jobNext, setJobNext] = useState<string | null>(null),
     [jobMore, setJobMore] = useState(true),
     [jobError, setJobError] = useState("");
-  const detail = useRef<HTMLDivElement>(null),
-    rail = useRef<HTMLElement>(null);
+  const detail = useRef<HTMLDivElement>(null);
   const jobsRequest = useRef<AbortController | null>(null);
   const jobsBusy = useRef(false);
   useLayoutEffect(() => {
@@ -398,41 +529,32 @@ function Detail({
     if (tab === "jobs") moreJobs(true);
     return () => jobsRequest.current?.abort();
   }, [id, tab, refresh]);
-  useEffect(() => {
-    if (!nav) return;
-    const before = document.activeElement;
-    focusableControls(rail.current)[0]?.focus();
-    const key = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") setNav(false);
-      if (e.key === "Tab") {
-        const controls = focusableControls(rail.current),
-          index = controls.findIndex((x) => x === document.activeElement);
-        if (
-          (e.shiftKey && index <= 0) ||
-          (!e.shiftKey && index === controls.length - 1)
-        ) {
-          e.preventDefault();
-          (e.shiftKey ? controls.at(-1) : controls[0])?.focus();
-        }
-      }
-    };
-    addEventListener("keydown", key);
-    return () => {
-      removeEventListener("keydown", key);
-      if (before instanceof HTMLElement) before.focus();
-    };
-  }, [nav]);
-  if (error)
+  if (error || !flow)
     return (
-      <main className="empty-state">
-        <strong>无法读取 Flow</strong>
-        <span>{error}</span>
-        <button className="btn" onClick={onBack}>
-          返回看板
-        </button>
+      <main className="detail">
+        <div className="empty-state">
+          <button
+            className="btn mobile-nav"
+            aria-expanded={nav}
+            onClick={onNav}
+          >
+            <Menu />
+            切换任务
+          </button>
+          {error ? (
+            <>
+              <strong>无法读取 Flow</strong>
+              <span>{error}</span>
+              <button className="btn" onClick={onBack}>
+                返回看板
+              </button>
+            </>
+          ) : (
+            <p>正在读取 Flow…</p>
+          )}
+        </div>
       </main>
     );
-  if (!flow) return <main className="empty-state">正在读取 Flow…</main>;
   const switchTab = (t: Tab) => (location.hash = `flow/${id}/${t}`);
   const tabs = (e: KeyboardEvent) => {
     if (!["ArrowLeft", "ArrowRight"].includes(e.key)) return;
@@ -442,278 +564,202 @@ function Detail({
     switchTab(x[n]);
   };
   return (
-    <div
-      className={`detail-shell${collapsed ? " rail-collapsed" : ""}${nav ? " nav-open" : ""}`}
-    >
-      <aside
-        ref={rail}
-        className="rail"
-        aria-label="Flow 导航"
-        role={nav ? "dialog" : undefined}
-        aria-modal={nav || undefined}
+    <main className="detail">
+      <header
+        ref={head}
+        className={`detail-head${compactHead ? " compact" : ""}`}
       >
-        <div className="rail-head">
-          <button className="btn ghost back" onClick={onBack}>
-            返回看板
-          </button>
+        {compactHead && (
+          <div className="compact-detail-bar">
+            <button
+              type="button"
+              className="btn ghost"
+              aria-label="返回看板"
+              onClick={onBack}
+            >
+              <ArrowLeft />
+            </button>
+            <span className="compact-detail-ref">{ref(flow)}</span>
+            <span className="compact-detail-title">{name(flow)}</span>
+            <button
+              type="button"
+              className="btn ghost"
+              aria-label="展开详情标题"
+              onClick={() => {
+                expandedAt.current = detail.current?.scrollTop ?? 0;
+                headTransition.current = {
+                  height: head.current?.offsetHeight ?? 0,
+                  scroll: detail.current?.scrollTop ?? 0,
+                };
+                setCompactHead(false);
+              }}
+            >
+              <ChevronDown />
+            </button>
+          </div>
+        )}
+        <div className="detail-head-full" hidden={compactHead}>
           <button
-            className="btn rail-toggle"
-            aria-label={collapsed ? "展开任务侧栏" : "折叠任务侧栏"}
-            onClick={() =>
-              setCollapsed((x) => {
-                positions.set("collapsed", x ? 0 : 1);
-                return !x;
-              })
-            }
+            className="btn mobile-nav"
+            aria-expanded={nav}
+            onClick={onNav}
           >
-            {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+            <Menu />
+            切换任务
           </button>
-        </div>
-        <nav className="rail-scroll" data-scroll-root>
-          {phases.map(([p, l]) => {
-            const group = all.filter((f) => f.phase === p);
-            return (
-              <SavedDetails
-                open
-                key={p}
-                stateKey={`rail-group-${p}`}
-                className={`rail-group phase-${p}`}
+          <div className="detail-title-row">
+            <h1 id="detail-heading">{name(flow)}</h1>
+            <span className={`badge phase-${flow.phase}`}>
+              <i className="dot" />
+              {actionLabel(flow)}
+            </span>
+          </div>
+          <div className="links">
+            <span>{flow.repo}</span>
+            <a href={flow.issue_url} target="_blank" rel="noreferrer">
+              Issue #{flow.issue_number} ↗
+            </a>
+            {flow.pr_url && (
+              <a href={flow.pr_url} target="_blank" rel="noreferrer">
+                PR #{flow.pr_number} ↗
+              </a>
+            )}
+            <span className="tag">支持归档与安全重试</span>
+          </div>
+          <div className="tabs" role="tablist" onKeyDown={tabs}>
+            {(
+              [
+                ["overview", "概览"],
+                ["conversation", "会话"],
+                ["jobs", "执行记录"],
+              ] as [Tab, string][]
+            ).map(([t, l]) => (
+              <button
+                role="tab"
+                id={`tab-${t}`}
+                aria-selected={tab === t}
+                tabIndex={tab === t ? 0 : -1}
+                onClick={() => switchTab(t)}
+                key={t}
               >
-                <summary>
-                  {l}
-                  <span className="count">{counts[p]}</span>
-                </summary>
-                <WindowList
-                  count={group.length}
-                  label={`侧栏-${p}`}
-                  itemKey={(i) => group[i].id}
-                  estimate={78}
-                >
-                  {(i) => (
-                    <button
-                      className={`flow-tab${group[i].id === id ? " active" : ""}`}
-                      onClick={() => {
-                        setNav(false);
-                        location.hash = `flow/${group[i].id}/${tab}`;
-                      }}
-                    >
-                      <i className="dot" />
-                      <span className="name">{name(group[i])}</span>
-                    </button>
-                  )}
-                </WindowList>
-                {group.length < counts[p] && (
-                  <button className="btn" onClick={() => load(p)}>
-                    更多{l}任务
+                {l}
+              </button>
+            ))}
+          </div>
+        </div>
+      </header>
+      <div className="detail-body" data-scroll-root ref={detail}>
+        <section className="content" role="tabpanel">
+          {tab === "overview" ? (
+            <>
+              <section className={`execution-summary phase-${flow.phase}`}>
+                <span className="eyebrow">当前动作</span>
+                <h2>{actionLabel(flow)}</h2>
+                <p>{flow.reason}</p>
+                <div className="next-step">
+                  <span>下一步条件</span>
+                  <p>{flow.next_condition}</p>
+                </div>
+                {flow.phase === "blocked" && (
+                  <button
+                    className="btn"
+                    disabled={pending !== null}
+                    onClick={() => void submit("retry")}
+                  >
+                    <RefreshCw />
+                    {pending === "retry" ? "正在提交重试…" : "重试"}
                   </button>
                 )}
-              </SavedDetails>
-            );
-          })}
-        </nav>
-      </aside>
-      <button
-        className="mobile-shade"
-        aria-label="关闭任务导航"
-        onClick={() => setNav(false)}
-      />
-      <main className="detail">
-        <header
-          ref={head}
-          className={`detail-head${compactHead ? " compact" : ""}`}
-        >
-          {compactHead && (
-            <div className="compact-detail-bar">
-              <button
-                type="button"
-                className="btn ghost"
-                aria-label="返回看板"
-                onClick={onBack}
-              >
-                <ArrowLeft />
-              </button>
-              <span className="compact-detail-ref">{ref(flow)}</span>
-              <span className="compact-detail-title">{name(flow)}</span>
-              <button
-                type="button"
-                className="btn ghost"
-                aria-label="展开详情标题"
-                onClick={() => {
-                  expandedAt.current = detail.current?.scrollTop ?? 0;
-                  headTransition.current = {
-                    height: head.current?.offsetHeight ?? 0,
-                    scroll: detail.current?.scrollTop ?? 0,
-                  };
-                  setCompactHead(false);
-                }}
-              >
-                <ChevronDown />
-              </button>
-            </div>
-          )}
-          <div className="detail-head-full" hidden={compactHead}>
-            <button
-              className="btn mobile-nav"
-              aria-expanded={nav}
-              onClick={() => setNav(true)}
-            >
-              <Menu />
-              切换任务
-            </button>
-            <div className="detail-title-row">
-              <h1 id="detail-heading">{name(flow)}</h1>
-              <span className={`badge phase-${flow.phase}`}>
-                <i className="dot" />
-                {actionLabel(flow)}
-              </span>
-            </div>
-            <div className="links">
-              <span>{flow.repo}</span>
-              <a href={flow.issue_url} target="_blank" rel="noreferrer">
-                Issue #{flow.issue_number} ↗
-              </a>
-              {flow.pr_url && (
-                <a href={flow.pr_url} target="_blank" rel="noreferrer">
-                  PR #{flow.pr_number} ↗
-                </a>
-              )}
-              <span className="tag">支持归档与安全重试</span>
-            </div>
-            <div className="tabs" role="tablist" onKeyDown={tabs}>
-              {(
-                [
-                  ["overview", "概览"],
-                  ["conversation", "会话"],
-                  ["jobs", "执行记录"],
-                ] as [Tab, string][]
-              ).map(([t, l]) => (
-                <button
-                  role="tab"
-                  id={`tab-${t}`}
-                  aria-selected={tab === t}
-                  tabIndex={tab === t ? 0 : -1}
-                  onClick={() => switchTab(t)}
-                  key={t}
-                >
-                  {l}
-                </button>
-              ))}
-            </div>
-          </div>
-        </header>
-        <div className="detail-body" data-scroll-root ref={detail}>
-          <section className="content" role="tabpanel">
-            {tab === "overview" ? (
-              <>
-                <section className={`execution-summary phase-${flow.phase}`}>
-                  <span className="eyebrow">当前动作</span>
-                  <h2>{actionLabel(flow)}</h2>
-                  <p>{flow.reason}</p>
-                  <div className="next-step">
-                    <span>下一步条件</span>
-                    <p>{flow.next_condition}</p>
-                  </div>
-                  {flow.phase === "blocked" && (
+                {flow.lifecycle === "cancelled" && flow.phase !== "done" && (
+                  <>
+                    <p className="muted">
+                      归档只调整展示分组，保留取消状态和全部历史。
+                    </p>
                     <button
                       className="btn"
                       disabled={pending !== null}
-                      onClick={() => void submit("retry")}
+                      onClick={() => void submit("archive")}
                     >
-                      <RefreshCw />
-                      {pending === "retry" ? "正在提交重试…" : "重试"}
+                      <Archive />
+                      {pending === "archive" ? "正在归档…" : "归档"}
                     </button>
-                  )}
-                  {flow.lifecycle === "cancelled" && flow.phase !== "done" && (
-                    <>
-                      <p className="muted">
-                        归档只调整展示分组，保留取消状态和全部历史。
-                      </p>
-                      <button
-                        className="btn"
-                        disabled={pending !== null}
-                        onClick={() => void submit("archive")}
-                      >
-                        <Archive />
-                        {pending === "archive" ? "正在归档…" : "归档"}
-                      </button>
-                    </>
-                  )}
-                  {archiveError && (
-                    <p role="alert">归档失败：{archiveError}，请重试。</p>
-                  )}
-                  {retryError && <p role="alert">{retryError}</p>}
-                  {retryNotice && <p role="status">{retryNotice}</p>}
-                </section>
-                <h2 className="panel-title">任务信息</h2>
-                <dl className="task-facts">
-                  <dt>生命周期 / 阶段</dt>
-                  <dd>
-                    {flow.lifecycle === "cancelled" ? "已取消" : flow.lifecycle}{" "}
-                    / {phases.find(([p]) => p === flow.phase)?.[1]}
-                  </dd>
-                  <dt>Worker</dt>
-                  <dd>
-                    {flow.worker_id ?? "尚未绑定"}
-                    {flow.worker_historical ? "（历史归属）" : ""}
-                  </dd>
-                  <dt>分支</dt>
-                  <dd>{flow.branch ?? "尚未创建"}</dd>
-                  <dt>修订轮数</dt>
-                  <dd>{flow.revision_cycles}</dd>
-                  <dt>创建</dt>
-                  <dd>{new Date(flow.created_at).toLocaleString()}</dd>
-                  <dt>更新</dt>
-                  <dd>{new Date(flow.updated_at).toLocaleString()}</dd>
-                  {flow.archived_at && (
-                    <>
-                      <dt>手动归档</dt>
-                      <dd>{new Date(flow.archived_at).toLocaleString()}</dd>
-                    </>
-                  )}
-                  <dt>当前状态版本</dt>
-                  <dd>{flow.state_version}（与阅读快照独立）</dd>
-                </dl>
-                <h2 className="panel-title">数据来源</h2>
-                <SourceList sources={flow.sources} />
-              </>
-            ) : tab === "conversation" ? (
-              <Conversation key={id} id={id} root={detail} refresh={refresh} />
-            ) : (
-              <>
-                <WindowList
-                  count={jobs.length}
-                  label="执行记录"
-                  itemKey={(i) => jobs[i].id}
-                >
-                  {(i) => (
-                    <article className="job">
-                      <strong>
-                        {jobs[i].kind} #{jobs[i].attempt}
-                      </strong>
-                      <span className="badge">{jobs[i].state}</span>
-                      <p>
-                        {jobs[i].worker_id ?? "无 Worker"}
-                        {jobs[i].error_code ? ` · ${jobs[i].error_code}` : ""}
-                      </p>
-                    </article>
-                  )}
-                </WindowList>
-                {jobError && (
-                  <button className="btn" onClick={() => moreJobs()}>
-                    读取失败：{jobError}（重试）
-                  </button>
+                  </>
                 )}
-                {jobMore && (
-                  <button className="btn" onClick={() => moreJobs()}>
-                    读取更多执行记录
-                  </button>
+                {archiveError && (
+                  <p role="alert">归档失败：{archiveError}，请重试。</p>
                 )}
-              </>
-            )}
-          </section>
-        </div>
-      </main>
-    </div>
+                {retryError && <p role="alert">{retryError}</p>}
+                {retryNotice && <p role="status">{retryNotice}</p>}
+              </section>
+              <h2 className="panel-title">任务信息</h2>
+              <dl className="task-facts">
+                <dt>生命周期 / 阶段</dt>
+                <dd>
+                  {flow.lifecycle === "cancelled" ? "已取消" : flow.lifecycle} /{" "}
+                  {phases.find(([p]) => p === flow.phase)?.[1]}
+                </dd>
+                <dt>Worker</dt>
+                <dd>
+                  {flow.worker_id ?? "尚未绑定"}
+                  {flow.worker_historical ? "（历史归属）" : ""}
+                </dd>
+                <dt>分支</dt>
+                <dd>{flow.branch ?? "尚未创建"}</dd>
+                <dt>修订轮数</dt>
+                <dd>{flow.revision_cycles}</dd>
+                <dt>创建</dt>
+                <dd>{new Date(flow.created_at).toLocaleString()}</dd>
+                <dt>更新</dt>
+                <dd>{new Date(flow.updated_at).toLocaleString()}</dd>
+                {flow.archived_at && (
+                  <>
+                    <dt>手动归档</dt>
+                    <dd>{new Date(flow.archived_at).toLocaleString()}</dd>
+                  </>
+                )}
+                <dt>当前状态版本</dt>
+                <dd>{flow.state_version}（与阅读快照独立）</dd>
+              </dl>
+              <h2 className="panel-title">数据来源</h2>
+              <SourceList sources={flow.sources} />
+            </>
+          ) : tab === "conversation" ? (
+            <Conversation key={id} id={id} root={detail} refresh={refresh} />
+          ) : (
+            <>
+              <WindowList
+                count={jobs.length}
+                label="执行记录"
+                itemKey={(i) => jobs[i].id}
+              >
+                {(i) => (
+                  <article className="job">
+                    <strong>
+                      {jobs[i].kind} #{jobs[i].attempt}
+                    </strong>
+                    <span className="badge">{jobs[i].state}</span>
+                    <p>
+                      {jobs[i].worker_id ?? "无 Worker"}
+                      {jobs[i].error_code ? ` · ${jobs[i].error_code}` : ""}
+                    </p>
+                  </article>
+                )}
+              </WindowList>
+              {jobError && (
+                <button className="btn" onClick={() => moreJobs()}>
+                  读取失败：{jobError}（重试）
+                </button>
+              )}
+              {jobMore && (
+                <button className="btn" onClick={() => moreJobs()}>
+                  读取更多执行记录
+                </button>
+              )}
+            </>
+          )}
+        </section>
+      </div>
+    </main>
   );
 }
 
@@ -998,7 +1044,6 @@ export default function App() {
       </header>
       {current.id ? (
         <Detail
-          key={current.id}
           id={current.id}
           tab={current.tab}
           all={all}
