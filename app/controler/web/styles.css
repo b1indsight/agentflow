@@ -960,6 +960,11 @@ svg {
   text-decoration: underline;
   text-underline-offset: 3px;
 }
+.markdown-body img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
 .markdown-body blockquote {
   border-left: 3px solid var(--line);
   padding-left: 14px;

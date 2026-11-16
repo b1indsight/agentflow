@@ -5,12 +5,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ActivityView } from "./activity";
 import type { ActivityItem } from "./types";
 
-test("GitHub and Agent content cannot inject HTML, unsafe links or remote images", () => {
+test("GitHub and Agent content cannot inject HTML or unsafe destinations", () => {
   // Reviews, tool output and identity attributes all carry untrusted repository text.
   const payload =
     '\"><img src=x onerror="alert(1)"><script>alert(2)</script>&\n\n' +
     '<svg onload="alert(3)"></svg>\n\n' +
-    "[危险](javascript:alert%281%29)\n\n![图片](https://example.test/track.png)";
+    "[危险](javascript:alert%281%29)\n\n![图片](javascript:alert%281%29)\n\n" +
+    "![内联图片](data:image/svg+xml;base64,PHN2Zz4=)\n\n![邮件](mailto:owner@example.test)";
   const kinds = [
     "comment",
     "message",
@@ -72,6 +73,12 @@ test("Markdown destinations use the message source, never the console origin", (
     "[危险](javascript:alert%281%29)",
     "![相对图片](../assets/status.svg)",
     "![危险图片](javascript:alert%281%29)",
+    '![截图](https://example.test/assets/preview "运行截图")',
+    "[图片链接](https://example.test/result.WEBP?token=signed#preview)",
+    "http://example.test/plain.png",
+    "[文档查询](https://example.test/guide?file=example.png)",
+    "`https://example.test/code.png`",
+    "[![小图](https://example.test/small.gif)](https://example.test/full.png)",
   ].join("\n\n");
   const entry: ActivityItem = {
     key: "source-links",
@@ -98,12 +105,27 @@ test("Markdown destinations use the message source, never the console origin", (
     "https://github.com/owner/agentflow/pull/98",
     "https://github.com/owner/agentflow/issues/85?page=2",
     "https://github.com/owner/agentflow/issues/85#issuecomment-456",
-    "https://github.com/owner/agentflow/assets/status.svg",
     "https://example.test/guide",
     "mailto:owner@example.test",
+    "https://example.test/result.WEBP?token=signed#preview",
+    "http://example.test/plain.png",
+    "https://example.test/guide?file=example.png",
+    "https://example.test/full.png",
   ])
     assert.ok(html.includes(`href="${destination}"`), destination);
-  assert.doesNotMatch(html, /<img|href="javascript:/);
+  for (const destination of [
+    "https://github.com/owner/agentflow/assets/status.svg",
+    "https://example.test/assets/preview",
+    "https://example.test/result.WEBP?token=signed#preview",
+    "http://example.test/plain.png",
+    "https://example.test/small.gif",
+  ])
+    assert.ok(html.includes(`src="${destination}"`), destination);
+  assert.equal((html.match(/<img /g) ?? []).length, 5);
+  assert.equal((html.match(/loading="lazy"/g) ?? []).length, 5);
+  assert.equal((html.match(/referrerPolicy="no-referrer"/g) ?? []).length, 5);
+  assert.match(html, /alt="截图" title="运行截图"/);
+  assert.doesNotMatch(html, /(?:href|src)="javascript:|<a[^>]*><a/);
 
   for (const url of [null, "invalid source"]) {
     const withoutSource = renderToStaticMarkup(
@@ -113,6 +135,7 @@ test("Markdown destinations use the message source, never the console origin", (
     assert.match(withoutSource, /href="https:\/\/example.test\/guide"/);
     assert.match(withoutSource, /相关/);
     assert.match(withoutSource, /图片：相对图片/);
+    assert.doesNotMatch(withoutSource, /src="https:\/\/github.com/);
   }
 });
 

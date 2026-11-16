@@ -1540,6 +1540,103 @@ test("consecutive authors share identity while conversation bodies render safe M
   });
 });
 
+test("conversation images load inline and fit the body on desktop and mobile", async ({
+  page,
+}) => {
+  // Large screenshots, signed links and linked thumbnails must retain their aspect ratios.
+  const body = [
+    "## 图片预览",
+    '![运行截图](https://images.example.test/assets/preview "运行截图")',
+    "[图片链接](https://images.example.test/result.WEBP?token=signed#preview)",
+    "https://images.example.test/conversation-screenshot-with-a-long-file-name.JPG?raw=1",
+    "[![小图](https://images.example.test/small.svg)](https://example.test/full.png)",
+    "[普通文档](https://example.test/guide?file=sample.png)",
+    "`https://images.example.test/code.png`",
+    "图片随正文列宽调整。",
+  ].join("\n\n");
+  const referrers: (string | undefined)[] = [];
+  await page.route("https://images.example.test/**", (route) => {
+    referrers.push(route.request().headers().referer);
+    const small = route.request().url().endsWith("small.svg");
+    return route.fulfill({
+      contentType: "image/svg+xml",
+      body: `<svg xmlns="http://www.w3.org/2000/svg" width="${small ? 120 : 1800}" height="${small ? 60 : 480}"><rect width="100%" height="100%" rx="12" fill="#edf5ee"/><path d="M24 100h1752M24 200h1752M24 300h1752" stroke="#b7d7c1" stroke-width="3"/><text x="24" y="${small ? 36 : 80}" font-family="sans-serif" font-size="${small ? 16 : 40}" fill="#27653f">${small ? "Thumbnail" : "Conversation image · 1800 × 480"}</text></svg>`,
+    });
+  });
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            ...activity,
+            body,
+            body_length: Array.from(body).length,
+            previous_version: null,
+          },
+        ],
+        snapshot: 2,
+        total: 1,
+        has_more: false,
+        next_cursor: null,
+        sources: [],
+        changes: {},
+      },
+    }),
+  );
+  await page.goto("/#flow/42/conversation");
+  const row = page.locator("article[data-entry='comment-1']");
+  const images = row.locator(".markdown-body img");
+  await expect(images).toHaveCount(4);
+  await expect(row.getByRole("img", { name: "运行截图" })).toHaveAttribute(
+    "title",
+    "运行截图",
+  );
+  await expect(row.getByRole("link", { name: "小图" })).toHaveAttribute(
+    "href",
+    "https://example.test/full.png",
+  );
+  await expect(row.locator(".markdown-body a a")).toHaveCount(0);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1200 });
+    for (const image of await images.all()) {
+      await image.scrollIntoViewIfNeeded();
+      await expect
+        .poll(() =>
+          image.evaluate((element: HTMLImageElement) => element.naturalWidth),
+        )
+        .toBeGreaterThan(0);
+      expect(
+        await image.evaluate((element: HTMLImageElement) => {
+          const box = element.getBoundingClientRect();
+          const body = element
+            .closest(".markdown-body")!
+            .getBoundingClientRect();
+          return (
+            box.width <= Math.min(body.width, element.naturalWidth) + 1 &&
+            box.left >= body.left &&
+            box.right <= body.right + 1 &&
+            Math.abs(
+              box.height -
+                (box.width * element.naturalHeight) / element.naturalWidth,
+            ) < 1
+          );
+        }),
+      ).toBe(true);
+    }
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/conversation-images-${width}.png`,
+      fullPage: true,
+    });
+  }
+  expect(referrers).toHaveLength(4);
+  expect(referrers.every((referrer) => !referrer)).toBe(true);
+});
+
 test("footnotes navigate within their own message without replacing the conversation route", async ({
   page,
 }) => {

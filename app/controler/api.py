@@ -98,7 +98,8 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
             response.headers["Referrer-Policy"] = "no-referrer"
         if request.url.path.startswith("/console"):
             response.headers["Content-Security-Policy"] = (
-                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+                "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "img-src 'self' data: https: http:; "
                 "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
             )
         if request.url.path == "/webhook":

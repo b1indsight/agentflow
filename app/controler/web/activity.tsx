@@ -1,4 +1,11 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+} from "react";
 import { Info } from "lucide-react";
 import type { Nodes, Root } from "mdast";
 import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
@@ -15,13 +22,22 @@ import {
   useReadingState,
 } from "./windowing";
 
+function MarkdownImage({ src, alt, title }: ComponentProps<"img">) {
+  return src ? (
+    <img
+      src={src}
+      alt={alt ?? "图片"}
+      title={title}
+      loading="lazy"
+      referrerPolicy="no-referrer"
+    />
+  ) : (
+    <>图片：{alt || "查看图片"}</>
+  );
+}
+
 const markdownComponents: Components = {
-  // Archived content must not make automatic requests to repository-supplied image URLs.
-  img: ({ src, alt }) => (
-    <a href={src} target="_blank" rel="noopener noreferrer">
-      图片：{alt || "查看图片"}
-    </a>
-  ),
+  img: MarkdownImage,
   pre: ({ children }) => <pre tabIndex={0}>{children}</pre>,
   table: ({ children }) => (
     <div className="markdown-table" tabIndex={0} aria-label="Markdown 表格">
@@ -95,8 +111,20 @@ function ActivityMarkdown({
               onAuxClick={(event) => event.preventDefault()}
             />
           );
+        const image =
+          href &&
+          /^https?:/i.test(href) &&
+          !node?.children.some(
+            (child) => child.type === "element" && child.tagName === "img",
+          ) &&
+          /\.(?:apng|avif|bmp|gif|ico|jpe?g|png|svg|webp)$/i.test(
+            new URL(href).pathname,
+          );
         return (
-          <a {...props} href={href} target="_blank" rel="noopener noreferrer" />
+          <a {...props} href={href} target="_blank" rel="noopener noreferrer">
+            {props.children}
+            {image && <MarkdownImage src={href} alt="" />}
+          </a>
         );
       },
     }),
@@ -107,7 +135,7 @@ function ActivityMarkdown({
       <Markdown
         remarkPlugins={[remarkGfm, numberFootnoteIdentifiers]}
         remarkRehypeOptions={{ clobberPrefix: `${id}-` }}
-        urlTransform={(url, _key, node) => {
+        urlTransform={(url, key, node) => {
           const safe = defaultUrlTransform(url);
           if (!safe) return undefined;
           if (
@@ -115,12 +143,13 @@ function ActivityMarkdown({
             node.properties.dataFootnoteBackref !== undefined
           )
             return safe;
-          if (/^[a-z][a-z\d+.-]*:/i.test(safe)) return safe;
           try {
-            return (
-              defaultUrlTransform(new URL(safe, sourceUrl ?? undefined).href) ||
-              undefined
-            );
+            const destination = /^[a-z][a-z\d+.-]*:/i.test(safe)
+              ? new URL(safe)
+              : new URL(safe, sourceUrl ?? undefined);
+            if (key === "src" && !/^https?:$/.test(destination.protocol))
+              return undefined;
+            return defaultUrlTransform(destination.href) || undefined;
           } catch {
             // Missing or malformed source URLs must not send relative links to the console.
             return undefined;

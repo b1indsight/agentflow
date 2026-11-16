@@ -87,6 +87,11 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
             ).status_code
             == 200
         )
+        console = client.get("/console/", headers=headers)
+        policy = console.headers["content-security-policy"]
+        assert "img-src 'self' data: https: http:;" in policy
+        assert "script-src 'self';" in policy and "connect-src 'self';" in policy
+        assert console.headers["referrer-policy"] == "no-referrer"
         console_runtime.settings.access_owner_email = None
         assert client.get("/console/", headers=headers).status_code == 503
 
