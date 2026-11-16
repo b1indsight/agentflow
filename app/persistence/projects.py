@@ -70,12 +70,13 @@ class ProjectStore(Repository):
             connection.execute(
                 "INSERT INTO project_projections(repo,issue_number,project_id,flow_id,config_key,desired_status,next_at)"
                 " SELECT lower(repo),issue_number,%s,id,%s,'todo',%s FROM ("
-                " SELECT DISTINCT ON (f.issue_number) f.* FROM flows f JOIN project_destinations d"
+                " SELECT f.* FROM flows f JOIN issue_flow_owners owner ON owner.flow_id=f.id"
+                " JOIN project_destinations d"
                 " ON d.repo=%s AND d.project_id=%s WHERE lower(f.repo)=d.repo"
-                " AND (f.state='active' OR f.updated_at>=d.enabled_at)"
+                " AND (f.state<>'archived' OR f.updated_at>=d.enabled_at)"
                 " AND NOT EXISTS (SELECT 1 FROM project_projections p WHERE p.repo=d.repo"
                 " AND p.project_id=d.project_id AND p.issue_number=f.issue_number)"
-                " ORDER BY f.issue_number,(f.state='active') DESC,f.id DESC) owners"
+                " ORDER BY f.issue_number) owners"
                 " ORDER BY id LIMIT %s ON CONFLICT DO NOTHING",
                 (config.project_id, config_key(config), now, repo, config.project_id, limit),
             )
@@ -112,14 +113,15 @@ class ProjectStore(Repository):
                 "SELECT * FROM project_projections WHERE id=%s FOR UPDATE", (identity,),
             ).fetchone()
             assert row is not None
-            # Console archives also include closed unmerged PRs; Projects Done still means success.
+            # Projects and the console share the same Flow-only phase projection.
             fact = connection.execute(
                 "SELECT f.id,f.installation_id,CASE"
-                " WHEN c.delivery_state='closed' AND f.state<>'succeeded' THEN 'blocked'"
+                " WHEN c.phase='archived' THEN 'done'"
                 " WHEN c.phase='queued' THEN 'todo' WHEN c.phase='running' THEN 'in_progress'"
                 " WHEN c.phase='review' THEN 'in_review' ELSE c.phase END AS status"
                 " FROM flows f JOIN console_facts c ON c.id=f.id"
-                " WHERE lower(f.repo)=%s AND f.issue_number=%s ORDER BY (f.state='active') DESC,f.id DESC LIMIT 1",
+                " JOIN issue_flow_owners owner ON owner.flow_id=f.id"
+                " WHERE lower(f.repo)=%s AND f.issue_number=%s",
                 (row.repo, row.issue_number),
             ).fetchone()
             assert fact is not None

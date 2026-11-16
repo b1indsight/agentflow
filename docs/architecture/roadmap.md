@@ -13,10 +13,12 @@ flowtool/
       repository.py   # 保留具体类型的显式事务绑定
       schema.py       # 按依赖顺序初始化的完整建表 SQL
       records.py      # 原生行类型与必需记录回读校验
-      flows.py        # Flow/Attempt
+      flows.py        # Flow/Attempt/执行绑定
       deliveries.py   # 交付与 tool-call 账本
       jobs.py         # Job 生命周期与原始结果 inbox
-      workers.py      # Worker/binding/assignment/准备/租约/drain
+      workers.py      # Worker 会话、库存与 drain
+      assignments.py  # 领取、租约、准备重试与到期恢复
+      inference.py    # 推理调用的入队、取消、结算与恢复
       stops.py        # 停止意图、授权与回执
       results.py      # 冻结结果计划与副作用回执
       reviews.py      # 反馈版本、批次、上下文与线程事实

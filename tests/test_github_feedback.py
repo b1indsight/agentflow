@@ -26,6 +26,7 @@ def adapter(tmp_path, monkeypatch, client):
 async def test_graphql_comments_preserve_full_body_and_native_cursor(tmp_path, monkeypatch, source):
     body = "long discussion " * 500
     rows = [{"fullDatabaseId": str(2**33 + i), "body": body,
+             "createdAt": "2026-09-07T12:00:00Z",
              "updatedAt": datetime.now(UTC).isoformat(),
              "author": {"login": "human", "__typename": "User"}} for i in range(2)]
     endpoint = AsyncEndpoint({"repository": {"issueOrPullRequest": {"comments": {
@@ -38,8 +39,10 @@ async def test_graphql_comments_preserve_full_body_and_native_cursor(tmp_path, m
     assert page.next_cursor is None and len(page.items) == 2
     assert page.items[0].body == body
     assert page.items[0].github_id == 2**33
+    assert page.items[0].created_at == datetime(2026, 9, 7, 12, tzinfo=UTC)
+    assert page.items[0].updated_at > page.items[0].created_at
     query, variables = endpoint.calls[0][0]
-    assert "comments(first:$limit,after:$cursor)" in query
+    assert "comments(first:$limit,after:$cursor)" in query and "createdAt" in query
     assert variables == {"owner": "owner", "name": "repo", "number": 17, "cursor": "previous", "limit": 2}
 
 

@@ -6,6 +6,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -17,6 +18,7 @@ from app.worker.execution.vcs import (
     VcsVerificationError,
     _remote_sha,
     _run,
+    prepare_revision_context,
     prepare_vcs_context,
     verify_pushed_outcome,
     verify_vcs_outcome,
@@ -54,27 +56,6 @@ async def _jj(*args: str, cwd: Path, env: dict[str, str]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_git_outcome_requires_new_clean_commit_on_target_remote_branch(
-    tmp_path: Path,
-) -> None:
-    repo, _ = _git_fixture(tmp_path)
-    context = await prepare_vcs_context(repo, "flow/one")
-
-    _git("checkout", "-b", "flow/one", cwd=repo)
-    (repo / "README.md").write_text("changed\n")
-    _git("add", "README.md", cwd=repo)
-    _git("commit", "-m", "change", cwd=repo)
-    _git("push", "-u", "origin", "flow/one", cwd=repo)
-
-    outcome = await verify_vcs_outcome(context, VcsKind.GIT)
-
-    assert outcome.backend is VcsKind.GIT
-    assert outcome.branch == "flow/one"
-    assert outcome.commit_sha == outcome.remote_sha
-    assert outcome.commit_sha != context.git_base_sha
-
-
-@pytest.mark.asyncio
 async def test_git_outcome_rejects_a_branch_without_a_new_commit(tmp_path: Path) -> None:
     repo, _ = _git_fixture(tmp_path)
     context = await prepare_vcs_context(repo, "flow/one")
@@ -100,20 +81,24 @@ async def test_declared_backend_must_match_repository_metadata(tmp_path: Path) -
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(shutil.which("jj") is None, reason="jj is not installed")
-async def test_jj_outcome_is_verified_from_a_colocated_repository(tmp_path: Path) -> None:
+@pytest.mark.parametrize("branch", ["flow/jj", "feat/remove-login", "feat/remove-login-round-2"])
+async def test_jj_outcome_is_verified_from_a_colocated_repository(tmp_path: Path, branch: str) -> None:
     repo, _ = _git_fixture(tmp_path)
     env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
     await _jj("git", "init", "--colocate", cwd=repo, env=env)
-    context = await prepare_vcs_context(repo, "flow/jj")
+    context = await prepare_vcs_context(repo, branch)
     (repo / "README.md").write_text("changed by jj\n")
     await _jj("commit", "-m", "change", cwd=repo, env=env)
-    await _jj("bookmark", "set", "flow/jj", "-r", "@-", cwd=repo, env=env)
-    await _jj("git", "push", "-b", "flow/jj", cwd=repo, env=env)
+    await _jj("bookmark", "set", branch, "-r", "@-", cwd=repo, env=env)
+    await _jj("git", "push", "-b", branch, cwd=repo, env=env)
 
     outcome = await verify_vcs_outcome(context, VcsKind.JJ)
 
     assert outcome.backend is VcsKind.JJ
     assert outcome.commit_sha == outcome.remote_sha
+    # Naming must work in the jj revsets used for both delivery and the next revision.
+    revision = await prepare_revision_context(repo, branch, outcome.commit_sha)
+    assert revision.branch == branch and revision.jj_base_sha is not None
 
 
 async def test_remote_verification_uses_only_current_push_token(monkeypatch, tmp_path):
@@ -208,9 +193,14 @@ async def test_pushed_outcome_discovers_the_single_backend(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_git_outcome_rejects_unrelated_history(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("missing_base", "detail"), [
+    (False, "does not descend"), (True, "ancestry query failed with exit 128"),
+])
+async def test_git_outcome_rejects_unrelated_history(tmp_path: Path, missing_base, detail) -> None:
     repo, _ = _git_fixture(tmp_path)
     context = await prepare_vcs_context(repo, "flow/one")
+    if missing_base:
+        context = replace(context, git_base_sha="f" * 40)
     _git("checkout", "--orphan", "flow/one", cwd=repo)
     _git("rm", "-rf", ".", cwd=repo)
     (repo / "README.md").write_text("unrelated\n")
@@ -218,7 +208,7 @@ async def test_git_outcome_rejects_unrelated_history(tmp_path: Path) -> None:
     _git("commit", "-m", "unrelated", cwd=repo)
     _git("push", "-u", "origin", "flow/one", cwd=repo)
 
-    with pytest.raises(VcsVerificationError, match="descend") as error:
+    with pytest.raises(VcsVerificationError, match=detail) as error:
         await verify_vcs_outcome(context, VcsKind.GIT)
 
     assert error.value.stage == "commit"

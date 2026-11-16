@@ -1,1 +1,1 @@
-"""Persistent worker sessions and conversation history."""
+"""Persistent execution state and conversation history."""

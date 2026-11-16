@@ -10,6 +10,7 @@ import pytest
 from githubkit import GitHub
 from githubkit.exception import RequestFailed
 from githubkit.response import Response
+from githubkit_schemas.latest.models import Issue as SDKIssue
 from pydantic import BaseModel, SecretStr, ValidationError
 
 from app.controler.config import ServerSettings
@@ -47,6 +48,38 @@ def install_client(monkeypatch, factory):
 
 def app_client(monkeypatch, factory):
     monkeypatch.setattr(GitHubApp, "_client", lambda self, **kwargs: factory(**kwargs))
+
+
+@pytest.mark.parametrize("identity", [
+    None, SimpleNamespace(id=124, slug="flowtool-bot"),
+    SimpleNamespace(id=123, slug=None), SimpleNamespace(id=123, slug=""),
+])
+async def test_app_bot_identity_retries_failures_and_shares_success(tmp_path, monkeypatch, identity):
+    # A fresh process resolves its own App slug; failed lookups must not poison later work.
+    calls = []
+
+    async def get_app():
+        calls.append(identity)
+        await asyncio.sleep(0)
+        return response(identity)
+
+    client = SimpleNamespace(rest=SimpleNamespace(apps=SimpleNamespace(async_get_authenticated=get_app)))
+    app_client(monkeypatch, lambda **kwargs: client)
+    github = GitHubApp(settings(tmp_path))
+    with pytest.raises(RuntimeError):
+        _ = github.bot_login
+    with pytest.raises(GitHubError) as caught:
+        await github.resolve_bot_login()
+    assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
+    with pytest.raises(RuntimeError):
+        _ = github.bot_login
+
+    identity = SimpleNamespace(id=123, slug="flowtool-bot")
+    assert await asyncio.gather(*(github.resolve_bot_login() for _ in range(3))) == [
+        "flowtool-bot[bot]",
+    ] * 3
+    assert await github.resolve_bot_login() == github.bot_login == "flowtool-bot[bot]"
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("method,target", [("fetch_issue", 7), ("fetch_ref", "flow/7")])
@@ -172,6 +205,7 @@ def test_push_capability_never_represents_or_serializes_secret() -> None:
         repository="octo/repo",
         permissions={"contents": "write"},
         expires_at=datetime(2026, 9, 5, 10, tzinfo=UTC),
+        bot_login="flowtool[bot]", bot_user_id=7654321,
     )
 
     assert capability.token.get_secret_value() == token
@@ -225,14 +259,15 @@ def test_both_github_auth_clients_use_finite_timeouts(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("issue_fields", [{}, {"pull_request": None}])
 async def test_fetches_issue_repository_and_remote_ref(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, issue_fields
 ) -> None:
     issue = AsyncEndpoint(
-        response(SimpleNamespace(number=7, title="Ship it", body=None, state="open"))
+        response(SDKIssue.model_construct(number=7, title="Ship it", body=None, state="open", **issue_fields))
     )
     repository = AsyncEndpoint(
-        response(SimpleNamespace(full_name="octo/repo", default_branch="trunk"))
+        response(SimpleNamespace(full_name="octo/repo", default_branch="trunk", archived=False))
     )
     get_ref = AsyncEndpoint(
         response(SimpleNamespace(ref="refs/heads/topic", object_=SimpleNamespace(sha="abc123")))
@@ -260,6 +295,7 @@ async def test_fetches_issue_repository_and_remote_ref(
     assert observed_repository.model_dump() == {
         "full_name": "octo/repo",
         "default_branch": "trunk",
+        "archived": False,
     }
     assert remote_ref.model_dump() == {"branch": "topic", "sha": "abc123"}
     assert issue.calls == [(("octo", "repo", 7), {})]
@@ -270,7 +306,7 @@ async def test_fetches_issue_repository_and_remote_ref(
 @pytest.mark.parametrize("full_name", ["other/repo", "OCTO/REPO"])
 async def test_repository_refetch_keeps_identity_and_observed_casing(tmp_path, monkeypatch, full_name):
     # A redirected response must not retarget a resource; casing remains an observed fact.
-    endpoint = AsyncEndpoint(response(SimpleNamespace(full_name=full_name, default_branch="trunk")))
+    endpoint = AsyncEndpoint(response(SimpleNamespace(full_name=full_name, default_branch="trunk", archived=False)))
     sdk = SimpleNamespace(rest=SimpleNamespace(repos=SimpleNamespace(async_get=endpoint)))
     install_client(monkeypatch, lambda _, **kwargs: sdk)
     installation = GitHubApp(settings(tmp_path)).installation(42)
@@ -312,11 +348,14 @@ async def test_full_pr_read_preserves_merge_sha_even_when_sdk_schema_omits_it(tm
     assert observed.merge_commit_sha == "c" * 40
     assert observed.head_repository == "octo/repo" and observed.body == ""
     assert len(calls) == 1
-    # Missing merge evidence must fail closed, never manufacture a merge or null observation.
+    # GitHub may omit a test-merge SHA for an unmerged PR (for example with conflicts).
     del payload["merge_commit_sha"]
-    with pytest.raises(GitHubError) as error:
-        await repo.fetch_pull_request(17)
-    assert error.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
+    if merged:
+        with pytest.raises(GitHubError) as error:
+            await repo.fetch_pull_request(17)
+        assert error.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
+    else:
+        assert (await repo.fetch_pull_request(17)).merge_commit_sha is None
 
 
 def test_partial_pull_request_distinguishes_unobserved_nullable_facts_from_null():
@@ -399,13 +438,30 @@ async def test_creates_repository_scoped_contents_push_capability(
             )
         )
     )
+    bot = {
+        "login": "Flowtool-bot[bot]", "type": "Bot", "id": 7654321, "node_id": "bot-node",
+        "avatar_url": "", "url": "", "html_url": "", "followers_url": "", "following_url": "",
+        "gists_url": "", "starred_url": "", "subscriptions_url": "", "organizations_url": "",
+        "repos_url": "", "events_url": "", "received_events_url": "", "site_admin": False,
+        "gravatar_id": None, "name": None, "company": None, "blog": None, "location": None,
+        "email": None, "hireable": None, "bio": None, "public_repos": 0, "public_gists": 0,
+        "followers": 0, "following": 0,
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+    }
+    get_app = AsyncEndpoint(response(SimpleNamespace(id=123, slug="flowtool-bot")))
     client = SimpleNamespace(
         rest=SimpleNamespace(
-            apps=SimpleNamespace(async_create_installation_access_token=create_token)
+            apps=SimpleNamespace(async_create_installation_access_token=create_token,
+                                 async_get_authenticated=get_app),
         )
     )
     github = GitHubApp(settings(tmp_path))
     app_client(monkeypatch, lambda **kwargs: client)
+    # Job preparation uses fresh clones; SDK namespaces only weakly reference their client.
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=bot))
+    install_client(monkeypatch, lambda _, **kwargs: GitHub(
+        "test-token", auto_retry=False, async_transport=transport,
+    ))
 
     if not accepted:
         with pytest.raises(GitHubError) as caught:
@@ -419,9 +475,18 @@ async def test_creates_repository_scoped_contents_push_capability(
     assert capability.permissions == permissions
     assert capability.expires_at == datetime(2026, 9, 5, 11, 30, tzinfo=UTC)
     assert capability.token.get_secret_value() == "ghs_scoped"
+    assert (capability.bot_login, capability.bot_user_id) == ("flowtool-bot[bot]", 7654321)
     assert create_token.calls == [
         ((42,), {"repositories": ["repo"], "permissions": {"contents": "write"}})
     ]
+    # A valid scoped token must never authorize guessing a missing or different bot identity.
+    for login, kind, user_id in (("other[bot]", "Bot", 7654321),
+                                ("flowtool-bot[bot]", "User", 7654321),
+                                ("flowtool-bot[bot]", "Bot", 0)):
+        bot.update(login=login, type=kind, id=user_id)
+        with pytest.raises(GitHubError) as caught:
+            await github.installation(42).repository("octo/repo").create_push_capability()
+        assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
 
 
 @pytest.mark.asyncio
@@ -505,7 +570,7 @@ async def test_comment_recovery_checks_author_and_paginates(tmp_path, monkeypatc
                 SimpleNamespace(
                     id=700,
                     body=f"Done.\n\n{marker}",
-                    user=SimpleNamespace(login="flowtool[bot]", type="Bot"),
+                    user=SimpleNamespace(login="Flowtool-bot[bot]", type="Bot"),
                 )
             ]
         )
@@ -519,6 +584,10 @@ async def test_comment_recovery_checks_author_and_paginates(tmp_path, monkeypatc
         )
     )
     github = GitHubApp(settings(tmp_path))
+    get_app = AsyncEndpoint(response(SimpleNamespace(id=123, slug="flowtool-bot")))
+    app_client(monkeypatch, lambda **kwargs: SimpleNamespace(
+        rest=SimpleNamespace(apps=SimpleNamespace(async_get_authenticated=get_app)),
+    ))
     install_client(monkeypatch, lambda _, **kwargs: client)
     assert await PullRequest(github.installation(42).repository("octo/repo"), 10).find_comment(marker) == 700
     assert pages == [1, 2]

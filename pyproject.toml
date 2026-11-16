@@ -20,6 +20,8 @@ dependencies = [
     "loguru>=0.7",
     "websockets>=14",
     "prometheus-client==0.24.1",
+    "markdown-it-py>=4,<5",
+    "mdit-py-plugins>=0.6,<0.7",
 ]
 
 [project.scripts]
@@ -29,6 +31,7 @@ flowtool = "app.cli:app"
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "pytest-testmon>=2.3,<3",
     "ruff>=0.6",
     "mypy>=1.11",
 ]

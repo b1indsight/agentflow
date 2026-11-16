@@ -1,44 +1,68 @@
 import {
-  type KeyboardEvent,
+  type ReactNode,
+  useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import {
   Archive,
+  ArrowDown,
   ArrowLeft,
+  Check,
   ChevronDown,
+  FileText,
+  Inbox,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
+  Settings,
+  X,
 } from "lucide-react";
 import {
+  appendAgentTask,
   archiveFlow,
   getFlow,
   getFlows,
   getJobs,
   getRepos,
+  resumeFlow,
   retryFlow,
   retryFailureMessage,
+  roundFailureMessage,
 } from "./api";
 import {
+  ActivityMarkdown,
+  ActivitySummary,
   ActivityView,
-  isToolActivity,
+  buildConversationRows,
+  conversationProvenanceRange,
+  conversationRecordKey,
+  conversationRowKey,
+  OpenWorkerFile,
   sameActivityGroup,
-  type ToolActivityGroup,
 } from "./activity";
 import { ConversationSources, SourceList } from "./ConversationSources";
-import { actionLabel, phases } from "./phases";
+import { CreateFlow } from "./CreateFlow";
+import { FileViewer } from "./FileViewer";
+import { AgentTaskInput } from "./AgentTaskInput";
+import type { WorkerFile } from "./files";
+import { InferenceNotices } from "./InferenceNotices";
+import { actionLabel, archiveReasonLabels, flowLabel, phases } from "./phases";
 import { SearchBox } from "./SearchBox";
+import { SettingsPage } from "./SettingsPage";
+import { Button } from "./components/ui/button";
+import { Input } from "./components/ui/input";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
 import type {
-  ActivityItem,
+  ArchiveReason,
   FlowDetail,
   FlowSummary,
   JobSummary,
   Phase,
-  Tab,
 } from "./types";
 import { useConversation } from "./useConversation";
 import { SavedDetails, WindowList } from "./windowing";
@@ -63,42 +87,69 @@ const blank = (): Record<Phase, Column> => ({
   running: column(),
   review: column(),
   blocked: column(),
-  done: column(),
+  archived: column(),
 });
+const sidebarGroups: {
+  key: string;
+  label: string;
+  members: (readonly [Phase, string])[];
+}[] = [
+  {
+    key: "inbox",
+    label: "Inbox",
+    members: phases.filter(([p]) => p === "blocked" || p === "review"),
+  },
+  ...phases.map((phase) => ({
+    key: phase[0],
+    label: phase[1],
+    members: [phase],
+  })),
+];
+const flowTabs = [
+  { value: "overview", label: "概览" },
+  { value: "conversation", label: "会话" },
+  { value: "jobs", label: "执行记录" },
+] as const;
+type Tab = (typeof flowTabs)[number]["value"] | `file-${string}`;
 const positions = new Map<string, number>();
 const route = () => {
-  const m = location.hash.match(
-    /^#flow\/(\d+)(?:\/(overview|conversation|jobs))?$/,
+  const m = location.hash.match(/^#flow\/(\d+)(?:\/([^/]+))?$/);
+  const base = flowTabs.find(
+    ({ value }) => value === (m?.[2] ?? "conversation"),
   );
+  const fileId = m?.[2]?.match(/^file-([0-9a-f]{32})$/)?.[1];
+  const tab: Tab = fileId ? `file-${fileId}` : (base?.value ?? "conversation");
   return {
-    id: m ? Number(m[1]) : null,
-    tab: (m?.[2] ?? "conversation") as Tab,
+    settings: location.hash === "#settings",
+    id: m && (base || fileId) ? Number(m[1]) : null,
+    tab,
   };
 };
-const name = (f: FlowSummary) => f.title ?? `Issue #${f.issue_number}`;
+const name = (f: FlowSummary) => f.title ?? `Flow #${f.id}`;
 const ref = (f: FlowSummary) =>
-  f.pr_number ? `PR #${f.pr_number}` : `Issue #${f.issue_number}`;
+  f.pr_number
+    ? `PR #${f.pr_number}`
+    : f.issue_number !== null
+      ? `Issue #${f.issue_number}`
+      : `Flow #${f.id}`;
 
 function Board({
   columns,
   counts,
   load,
   go,
+  mobile,
+  onMobile,
 }: {
   columns: ReturnType<typeof blank>;
   counts: Record<Phase, number>;
   load: (p: Phase) => void;
   go: (id: number) => void;
+  mobile: Phase;
+  onMobile: (phase: Phase) => void;
 }) {
-  const [mobile, setMobile] = useState<Phase>("running");
   const host = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
-    const roots = [
-      ...(host.current?.querySelectorAll<HTMLElement>("[data-phase]") ?? []),
-    ];
-    roots.forEach((x) => {
-      x.scrollTop = positions.get(x.dataset.phase!) ?? 0;
-    });
     const frame = requestAnimationFrame(() => {
       host.current
         ?.querySelector<HTMLElement>(
@@ -106,10 +157,7 @@ function Board({
         )
         ?.focus({ preventScroll: true });
     });
-    return () => {
-      cancelAnimationFrame(frame);
-      roots.forEach((x) => positions.set(x.dataset.phase!, x.scrollTop));
-    };
+    return () => cancelAnimationFrame(frame);
   }, []);
   return (
     <main ref={host} className="board-page" aria-label="工作看板">
@@ -118,7 +166,7 @@ function Board({
           <button
             key={p}
             className={`phase-${p}${mobile === p ? " active" : ""}`}
-            onClick={() => setMobile(p)}
+            onClick={() => onMobile(p)}
           >
             <i className="dot" />
             {l}
@@ -154,6 +202,7 @@ function Board({
                   label={`看板-${phase}`}
                   itemKey={(i) => c.items[i].id}
                   estimate={250}
+                  reading={{ key: `board:${phase}`, resolve: () => null }}
                 >
                   {(i) => {
                     const f = c.items[i];
@@ -166,16 +215,20 @@ function Board({
                           go(f.id);
                         }}
                       >
-                        <div className="card-top">
-                          <span>{ref(f)}</span>
+                        <div className="card-title">
+                          <span
+                            className="dot card-status"
+                            role="img"
+                            aria-label={flowLabel(f)}
+                            title={flowLabel(f)}
+                          />
+                          <h2>{name(f)}</h2>
                         </div>
-                        <h2>{name(f)}</h2>
-                        <div className="repo-label">{f.repo}</div>
-                        <div className="card-foot">
-                          <span className="current-action">
-                            <i className="dot" />
-                            {actionLabel(f)}
+                        <div className="card-meta">
+                          <span className="repo-label" title={f.repo}>
+                            {f.repo}
                           </span>
+                          <span className="card-ref">{ref(f)}</span>
                         </div>
                       </button>
                     );
@@ -183,7 +236,8 @@ function Board({
                 </WindowList>
                 {c.error && (
                   <button className="btn" onClick={() => load(phase)}>
-                    读取失败：{c.error}（重试）
+                    <RefreshCw aria-hidden="true" />
+                    <span>读取失败：{c.error}（重试）</span>
                   </button>
                 )}
                 {c.busy && <p>正在加载…</p>}
@@ -203,7 +257,7 @@ function Board({
 function Detail({
   id,
   tab,
-  all,
+  columns,
   counts,
   load,
   refresh,
@@ -212,7 +266,7 @@ function Detail({
 }: {
   id: number;
   tab: Tab;
-  all: FlowSummary[];
+  columns: Record<Phase, Column>;
   counts: Record<Phase, number>;
   load: (p: Phase) => void;
   refresh: number;
@@ -260,12 +314,18 @@ function Detail({
         aria-modal={nav || undefined}
       >
         <div className="rail-head">
-          <button className="btn ghost back" onClick={onBack}>
-            返回看板
+          <button
+            className="btn ghost back"
+            aria-label="返回看板"
+            title="返回看板"
+            onClick={onBack}
+          >
+            <ArrowLeft aria-hidden="true" />
           </button>
           <button
             className="btn rail-toggle"
             aria-label={collapsed ? "展开任务侧栏" : "折叠任务侧栏"}
+            title={collapsed ? "展开任务侧栏" : "折叠任务侧栏"}
             onClick={() =>
               setCollapsed((x) => {
                 positions.set("collapsed", x ? 0 : 1);
@@ -277,43 +337,93 @@ function Detail({
           </button>
         </div>
         <nav className="rail-scroll" data-scroll-root>
-          {phases.map(([p, l]) => {
-            const group = all.filter((f) => f.phase === p);
+          {sidebarGroups.map(({ key, label, members }) => {
+            const group = members.flatMap(([p]) => columns[p].items);
+            const inbox = key === "inbox";
             return (
               <SavedDetails
                 open
-                key={p}
-                stateKey={`rail-group-${p}`}
-                className={`rail-group phase-${p}`}
+                key={key}
+                stateKey={`rail-group-${key}`}
+                className={`rail-group${inbox ? " rail-inbox" : ` phase-${key}`}`}
               >
                 <summary>
-                  {l}
-                  <span className="count">{counts[p]}</span>
+                  {inbox && <Inbox aria-hidden="true" />}
+                  {label}
+                  <span className="count">
+                    {members.reduce((total, [p]) => total + counts[p], 0)}
+                  </span>
                 </summary>
                 <WindowList
                   count={group.length}
-                  label={`侧栏-${p}`}
+                  label={`侧栏-${key}`}
                   itemKey={(i) => group[i].id}
                   estimate={78}
                 >
                   {(i) => (
                     <button
-                      className={`flow-tab${group[i].id === id ? " active" : ""}`}
+                      className={`flow-tab phase-${group[i].phase}${group[i].id === id ? " active" : ""}`}
+                      aria-current={group[i].id === id ? "page" : undefined}
                       onClick={() => {
                         setNav(false);
                         location.hash = `flow/${group[i].id}/${tab}`;
                       }}
                     >
                       <i className="dot" />
-                      <span className="name">{name(group[i])}</span>
+                      <span className="name">
+                        {name(group[i])}
+                        {inbox && (
+                          <span className="meta">
+                            {group[i].repo} · {ref(group[i])}
+                          </span>
+                        )}
+                      </span>
                     </button>
                   )}
                 </WindowList>
-                {group.length < counts[p] && (
-                  <button className="btn" onClick={() => load(p)}>
-                    更多{l}任务
-                  </button>
-                )}
+                {inbox &&
+                  !group.length &&
+                  members.every(
+                    ([p]) =>
+                      !columns[p].busy && !columns[p].error && !columns[p].more,
+                  ) && (
+                    <p className="inbox-note">当前筛选下暂无待人工处理的任务</p>
+                  )}
+                {members.map(([p, phaseLabel]) => {
+                  const c = columns[p];
+                  const label = c.error
+                    ? `重试读取${phaseLabel}任务`
+                    : `更多${phaseLabel}任务`;
+                  return (
+                    <div key={p}>
+                      {c.busy && (
+                        <p className="inbox-note" role="status">
+                          正在加载{phaseLabel}任务…
+                        </p>
+                      )}
+                      {c.error && (
+                        <p className="inbox-note" role="alert">
+                          {phaseLabel}读取失败：{c.error}
+                        </p>
+                      )}
+                      {(c.more || c.error) && (
+                        <button
+                          className="btn"
+                          aria-label={label}
+                          title={label}
+                          disabled={c.busy}
+                          onClick={() => load(p)}
+                        >
+                          {c.error ? (
+                            <RefreshCw aria-hidden="true" />
+                          ) : (
+                            <ArrowDown aria-hidden="true" />
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </SavedDetails>
             );
           })}
@@ -328,6 +438,7 @@ function Detail({
         key={id}
         id={id}
         tab={tab}
+        columns={columns}
         refresh={refresh}
         onChanged={onChanged}
         onBack={onBack}
@@ -341,6 +452,7 @@ function Detail({
 function DetailPanel({
   id,
   tab,
+  columns,
   refresh,
   onChanged,
   onBack,
@@ -349,6 +461,7 @@ function DetailPanel({
 }: {
   id: number;
   tab: Tab;
+  columns: Record<Phase, Column>;
   refresh: number;
   onChanged: () => void;
   onBack: () => void;
@@ -357,11 +470,16 @@ function DetailPanel({
 }) {
   const [flow, setFlow] = useState<FlowDetail | null>(null),
     [error, setError] = useState("");
-  const [pending, setPending] = useState<"archive" | "retry" | null>(null);
+  const [pending, setPending] = useState<
+    "archive" | "resume" | "retry" | "agent-task" | null
+  >(null);
   const writing = useRef(false);
-  const [archiveError, setArchiveError] = useState("");
-  const [retryError, setRetryError] = useState("");
-  const [retryNotice, setRetryNotice] = useState("");
+  const [writeError, setWriteError] = useState("");
+  const [writeNotice, setWriteNotice] = useState("");
+  const [endingRound, setEndingRound] = useState<number | null>(null);
+  const [archiveReason, setArchiveReason] =
+    useState<ArchiveReason>("succeeded");
+  const [archiveSummary, setArchiveSummary] = useState("");
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -369,32 +487,56 @@ function DetailPanel({
       mounted.current = false;
     };
   }, []);
-  const submit = async (action: "archive" | "retry") => {
-    // Fence both writes synchronously, before React renders disabled buttons.
-    if (writing.current) return;
+  const submit = async (action: "archive" | "resume" | "retry") => {
+    // Fence all writes synchronously, before React renders disabled buttons.
+    if (writing.current || !flow) return;
+    if (action === "archive") {
+      if (endingRound !== flow.current_round_no) {
+        setWriteError("轮次已变化，请关闭表单并核对当前轮次后再操作。");
+        return;
+      }
+      if (!archiveSummary.trim()) {
+        setWriteError("请填写本轮结论。");
+        return;
+      }
+    }
     writing.current = true;
     setPending(action);
-    setArchiveError("");
-    setRetryError("");
-    setRetryNotice("");
+    setWriteError("");
+    setWriteNotice("");
     try {
       // Let the write finish after navigation so the board can refresh its committed outcome.
       const value = await (action === "retry"
         ? retryFlow(id)
-        : archiveFlow(id));
+        : action === "resume"
+          ? resumeFlow(id, flow.current_round_no)
+          : archiveFlow(id, {
+              reason: archiveReason,
+              summary: archiveSummary.trim(),
+              expected_round_no: flow.current_round_no,
+            }));
       onChanged();
       if (mounted.current) {
         setFlow((prior) =>
           prior && prior.state_version > value.state_version ? prior : value,
         );
-        if (action === "retry")
-          setRetryNotice("重试请求已受理，请查看当前动作及执行记录。");
+        setEndingRound(null);
+        setArchiveSummary("");
+        setWriteNotice(
+          action === "retry"
+            ? "重试请求已受理，请查看当前动作及执行记录。"
+            : action === "resume"
+              ? "恢复推进请求已受理；同一 Flow 开始新轮次，后续将使用新 PR。"
+              : "结束本轮请求已受理；请以当前状态为准，停止确认、结果对账及收尾未完成前不会归档。",
+        );
       }
     } catch (error) {
       if (mounted.current) {
-        if (action === "retry") setRetryError(retryFailureMessage(error));
-        else
-          setArchiveError(error instanceof Error ? error.message : "请求失败");
+        setWriteError(
+          action === "retry"
+            ? retryFailureMessage(error)
+            : roundFailureMessage(action, error),
+        );
       }
     } finally {
       writing.current = false;
@@ -402,6 +544,43 @@ function DetailPanel({
     }
   };
   const [compactHead, setCompactHead] = useState(false);
+  const [files, setFiles] = useState<WorkerFile[]>([]);
+  const activeFile = files.find((file) => `file-${file.id}` === tab);
+  const baseTab =
+    flowTabs.find(({ value }) => value === tab)?.value ?? "conversation";
+  const selectedTab = activeFile ? tab : baseTab;
+  const focusTab = useRef<string | null>(null);
+  const openFile = useCallback(
+    (file: WorkerFile) => {
+      setFiles((prior) =>
+        prior.some(({ id }) => id === file.id) ? prior : [...prior, file],
+      );
+      focusTab.current = `file-${file.id}`;
+      location.hash = `flow/${id}/file-${file.id}`;
+    },
+    [id],
+  );
+  const closeFile = (fileId: string) => {
+    const index = files.findIndex((file) => file.id === fileId);
+    const remaining = files.filter((file) => file.id !== fileId);
+    focusTab.current = selectedTab;
+    if (activeFile?.id === fileId) {
+      const next = remaining[index] ?? remaining[index - 1];
+      focusTab.current = next ? `file-${next.id}` : "conversation";
+      location.hash = `flow/${id}/${focusTab.current}`;
+    }
+    setFiles(remaining);
+  };
+  useEffect(() => {
+    // Open documents are local to this Flow visit; stale history entries return to the conversation.
+    // Check each render: rapid Back can revisit the same tab prop before hashchange settles.
+    if (
+      tab.startsWith("file-") &&
+      !activeFile &&
+      location.hash.endsWith(`/${tab}`)
+    )
+      location.replace(`#flow/${id}/conversation`);
+  });
   const head = useRef<HTMLElement>(null);
   const expandedHeight = useRef(0);
   const headTransition = useRef<{ height: number; scroll: number } | null>(
@@ -416,8 +595,23 @@ function DetailPanel({
   const jobsRequest = useRef<AbortController | null>(null);
   const jobsBusy = useRef(false);
   useLayoutEffect(() => {
+    if (compactHead || focusTab.current !== selectedTab) return;
+    // A clicked message or closed tab unmounts; hand focus to the current editor tab.
+    const trigger = head.current?.querySelector<HTMLButtonElement>(
+      '[role="tab"][data-state="active"]',
+    );
+    if (!trigger) return;
+    focusTab.current = null;
+    trigger.focus({ preventScroll: true });
+  }, [selectedTab, files, Boolean(flow), compactHead]);
+  useLayoutEffect(() => {
     const node = detail.current;
     if (!node) return;
+    if (tab === "conversation") {
+      // The conversation restores a logical row after its groups remount folded.
+      node.scrollTop = 0;
+      return;
+    }
     const key = `detail:${id}:${tab}`;
     node.scrollTop = positions.get(key) ?? 0;
     return () => {
@@ -433,6 +627,7 @@ function DetailPanel({
         0,
         before.scroll + header.offsetHeight - before.height,
       );
+      node.dispatchEvent(new Event("window-list-navigation"));
       if (expandedAt.current !== null) expandedAt.current = node.scrollTop;
     }
     if (
@@ -492,13 +687,18 @@ function DetailPanel({
     const c = new AbortController();
     setError("");
     void getFlow(id, c.signal)
-      .then(
-        (value) =>
-          !c.signal.aborted &&
-          setFlow((prior) =>
-            prior && prior.state_version > value.state_version ? prior : value,
-          ),
-      )
+      .then((value) => {
+        if (c.signal.aborted) return;
+        setFlow((prior) =>
+          prior && prior.state_version > value.state_version ? prior : value,
+        );
+        // Revalidate changed summaries without resetting unchanged list pages.
+        const summary = columns[value.phase].items.find(
+          (item) => item.id === value.id,
+        );
+        if (!summary || summary.state_version < value.state_version)
+          onChanged();
+      })
       .catch((e) => !c.signal.aborted && setError(e.message));
     return () => c.abort();
   }, [id, refresh]);
@@ -535,18 +735,24 @@ function DetailPanel({
         <div className="empty-state">
           <button
             className="btn mobile-nav"
+            aria-label="切换任务"
+            title="切换任务"
             aria-expanded={nav}
             onClick={onNav}
           >
-            <Menu />
-            切换任务
+            <Menu aria-hidden="true" />
           </button>
           {error ? (
             <>
               <strong>无法读取 Flow</strong>
               <span>{error}</span>
-              <button className="btn" onClick={onBack}>
-                返回看板
+              <button
+                className="btn"
+                aria-label="返回看板"
+                title="返回看板"
+                onClick={onBack}
+              >
+                <ArrowLeft aria-hidden="true" />
               </button>
             </>
           ) : (
@@ -555,211 +761,474 @@ function DetailPanel({
         </div>
       </main>
     );
-  const switchTab = (t: Tab) => (location.hash = `flow/${id}/${t}`);
-  const tabs = (e: KeyboardEvent) => {
-    if (!["ArrowLeft", "ArrowRight"].includes(e.key)) return;
-    e.preventDefault();
-    const x: Tab[] = ["overview", "conversation", "jobs"],
-      n = (x.indexOf(tab) + (e.key === "ArrowRight" ? 1 : 2)) % 3;
-    switchTab(x[n]);
-  };
   return (
-    <main className="detail">
-      <header
-        ref={head}
-        className={`detail-head${compactHead ? " compact" : ""}`}
-      >
-        {compactHead && (
-          <div className="compact-detail-bar">
-            <button
-              type="button"
-              className="btn ghost"
-              aria-label="返回看板"
-              onClick={onBack}
-            >
-              <ArrowLeft />
-            </button>
-            <span className="compact-detail-ref">{ref(flow)}</span>
-            <span className="compact-detail-title">{name(flow)}</span>
-            <button
-              type="button"
-              className="btn ghost"
-              aria-label="展开详情标题"
-              onClick={() => {
-                expandedAt.current = detail.current?.scrollTop ?? 0;
-                headTransition.current = {
-                  height: head.current?.offsetHeight ?? 0,
-                  scroll: detail.current?.scrollTop ?? 0,
-                };
-                setCompactHead(false);
-              }}
-            >
-              <ChevronDown />
-            </button>
-          </div>
-        )}
-        <div className="detail-head-full" hidden={compactHead}>
-          <button
-            className="btn mobile-nav"
-            aria-expanded={nav}
-            onClick={onNav}
-          >
-            <Menu />
-            切换任务
-          </button>
-          <div className="detail-title-row">
-            <h1 id="detail-heading">{name(flow)}</h1>
-            <span className={`badge phase-${flow.phase}`}>
-              <i className="dot" />
-              {actionLabel(flow)}
-            </span>
-          </div>
-          <div className="links">
-            <span>{flow.repo}</span>
-            <a href={flow.issue_url} target="_blank" rel="noreferrer">
-              Issue #{flow.issue_number} ↗
-            </a>
-            {flow.pr_url && (
-              <a href={flow.pr_url} target="_blank" rel="noreferrer">
-                PR #{flow.pr_number} ↗
-              </a>
-            )}
-            <span className="tag">支持归档与安全重试</span>
-          </div>
-          <div className="tabs" role="tablist" onKeyDown={tabs}>
-            {(
-              [
-                ["overview", "概览"],
-                ["conversation", "会话"],
-                ["jobs", "执行记录"],
-              ] as [Tab, string][]
-            ).map(([t, l]) => (
+    <Tabs
+      value={selectedTab}
+      onValueChange={(value) => (location.hash = `flow/${id}/${value}`)}
+      asChild
+    >
+      <main className="detail">
+        <header
+          ref={head}
+          className={`detail-head${compactHead ? " compact" : ""}`}
+        >
+          {compactHead && (
+            <div className="compact-detail-bar">
               <button
-                role="tab"
-                id={`tab-${t}`}
-                aria-selected={tab === t}
-                tabIndex={tab === t ? 0 : -1}
-                onClick={() => switchTab(t)}
-                key={t}
+                type="button"
+                className="btn ghost"
+                aria-label="返回看板"
+                title="返回看板"
+                onClick={onBack}
               >
-                {l}
+                <ArrowLeft />
               </button>
-            ))}
-          </div>
-        </div>
-      </header>
-      <div className="detail-body" data-scroll-root ref={detail}>
-        <section className="content" role="tabpanel">
-          {tab === "overview" ? (
-            <>
-              <section className={`execution-summary phase-${flow.phase}`}>
-                <span className="eyebrow">当前动作</span>
-                <h2>{actionLabel(flow)}</h2>
-                <p>{flow.reason}</p>
-                <div className="next-step">
-                  <span>下一步条件</span>
-                  <p>{flow.next_condition}</p>
-                </div>
-                {flow.phase === "blocked" && (
-                  <button
-                    className="btn"
-                    disabled={pending !== null}
-                    onClick={() => void submit("retry")}
-                  >
-                    <RefreshCw />
-                    {pending === "retry" ? "正在提交重试…" : "重试"}
-                  </button>
-                )}
-                {flow.lifecycle === "cancelled" && flow.phase !== "done" && (
-                  <>
-                    <p className="muted">
-                      归档只调整展示分组，保留取消状态和全部历史。
-                    </p>
-                    <button
-                      className="btn"
-                      disabled={pending !== null}
-                      onClick={() => void submit("archive")}
-                    >
-                      <Archive />
-                      {pending === "archive" ? "正在归档…" : "归档"}
-                    </button>
-                  </>
-                )}
-                {archiveError && (
-                  <p role="alert">归档失败：{archiveError}，请重试。</p>
-                )}
-                {retryError && <p role="alert">{retryError}</p>}
-                {retryNotice && <p role="status">{retryNotice}</p>}
-              </section>
-              <h2 className="panel-title">任务信息</h2>
-              <dl className="task-facts">
-                <dt>生命周期 / 阶段</dt>
-                <dd>
-                  {flow.lifecycle === "cancelled" ? "已取消" : flow.lifecycle} /{" "}
-                  {phases.find(([p]) => p === flow.phase)?.[1]}
-                </dd>
-                <dt>Worker</dt>
-                <dd>
-                  {flow.worker_id ?? "尚未绑定"}
-                  {flow.worker_historical ? "（历史归属）" : ""}
-                </dd>
-                <dt>分支</dt>
-                <dd>{flow.branch ?? "尚未创建"}</dd>
-                <dt>修订轮数</dt>
-                <dd>{flow.revision_cycles}</dd>
-                <dt>创建</dt>
-                <dd>{new Date(flow.created_at).toLocaleString()}</dd>
-                <dt>更新</dt>
-                <dd>{new Date(flow.updated_at).toLocaleString()}</dd>
-                {flow.archived_at && (
-                  <>
-                    <dt>手动归档</dt>
-                    <dd>{new Date(flow.archived_at).toLocaleString()}</dd>
-                  </>
-                )}
-                <dt>当前状态版本</dt>
-                <dd>{flow.state_version}（与阅读快照独立）</dd>
-              </dl>
-              <h2 className="panel-title">数据来源</h2>
-              <SourceList sources={flow.sources} />
-            </>
-          ) : tab === "conversation" ? (
-            <Conversation key={id} id={id} root={detail} refresh={refresh} />
-          ) : (
-            <>
-              <WindowList
-                count={jobs.length}
-                label="执行记录"
-                itemKey={(i) => jobs[i].id}
+              <span className="compact-detail-ref">{ref(flow)}</span>
+              <span className="compact-detail-title">{name(flow)}</span>
+              <button
+                type="button"
+                className="btn ghost"
+                aria-label="展开详情标题"
+                title="展开详情标题"
+                onClick={() => {
+                  expandedAt.current = detail.current?.scrollTop ?? 0;
+                  headTransition.current = {
+                    height: head.current?.offsetHeight ?? 0,
+                    scroll: detail.current?.scrollTop ?? 0,
+                  };
+                  setCompactHead(false);
+                }}
               >
-                {(i) => (
-                  <article className="job">
-                    <strong>
-                      {jobs[i].kind} #{jobs[i].attempt}
-                    </strong>
-                    <span className="badge">{jobs[i].state}</span>
-                    <p>
-                      {jobs[i].worker_id ?? "无 Worker"}
-                      {jobs[i].error_code ? ` · ${jobs[i].error_code}` : ""}
-                    </p>
-                  </article>
-                )}
-              </WindowList>
-              {jobError && (
-                <button className="btn" onClick={() => moreJobs()}>
-                  读取失败：{jobError}（重试）
-                </button>
-              )}
-              {jobMore && (
-                <button className="btn" onClick={() => moreJobs()}>
-                  读取更多执行记录
-                </button>
-              )}
-            </>
+                <ChevronDown />
+              </button>
+            </div>
           )}
-        </section>
-      </div>
-    </main>
+          <div className="detail-head-full" hidden={compactHead}>
+            <button
+              className="btn mobile-nav"
+              aria-label="切换任务"
+              title="切换任务"
+              aria-expanded={nav}
+              onClick={onNav}
+            >
+              <Menu />
+            </button>
+            <div className="detail-title-row">
+              <h1 id="detail-heading">{name(flow)}</h1>
+              <span className={`badge phase-${flow.phase}`}>
+                <i className="dot" />
+                {flowLabel(flow)}
+              </span>
+            </div>
+            <div className="links">
+              <span>{flow.repo}</span>
+              {flow.issue_number !== null && flow.issue_url && (
+                <a href={flow.issue_url} target="_blank" rel="noreferrer">
+                  Issue #{flow.issue_number} ↗
+                </a>
+              )}
+              {flow.issue_number === null && !flow.pr_number && (
+                <span>Flow #{flow.id}</span>
+              )}
+              {flow.pr_url && (
+                <a href={flow.pr_url} target="_blank" rel="noreferrer">
+                  PR #{flow.pr_number} ↗
+                </a>
+              )}
+            </div>
+            <TabsList aria-label="Flow 详情">
+              {flowTabs.map(({ value, label }) => (
+                <TabsTrigger value={value} key={value}>
+                  {label}
+                </TabsTrigger>
+              ))}
+              {files.map((file) => {
+                const value = `file-${file.id}`;
+                const filename = file.name ?? file.id.slice(0, 8);
+                const duplicate =
+                  file.name !== null &&
+                  files.some(
+                    (other) => other.id !== file.id && other.name === file.name,
+                  );
+                const label = duplicate
+                  ? `${filename} ${file.id.slice(0, 6)}`
+                  : filename;
+                return (
+                  <div
+                    className="file-tab"
+                    data-active={tab === value}
+                    key={file.id}
+                    onFocus={(event) =>
+                      event.currentTarget.scrollIntoView({
+                        block: "nearest",
+                        inline: "nearest",
+                      })
+                    }
+                  >
+                    <TabsTrigger
+                      value={value}
+                      title={filename}
+                      onKeyDown={(event) => {
+                        if (event.key === "Delete") {
+                          event.preventDefault();
+                          closeFile(file.id);
+                        }
+                      }}
+                    >
+                      <FileText aria-hidden="true" />
+                      <span className="file-tab-name">{filename}</span>
+                      {duplicate && <small> {file.id.slice(0, 6)}</small>}
+                    </TabsTrigger>
+                    <button
+                      type="button"
+                      className="file-tab-close"
+                      aria-label={`关闭 ${label}`}
+                      tabIndex={-1}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => closeFile(file.id)}
+                    >
+                      <X aria-hidden="true" />
+                    </button>
+                  </div>
+                );
+              })}
+            </TabsList>
+          </div>
+        </header>
+        <div className="detail-body" data-scroll-root ref={detail}>
+          <TabsContent value={selectedTab} asChild>
+            <section className={`content${activeFile ? " file-content" : ""}`}>
+              {activeFile ? (
+                <FileViewer
+                  key={activeFile.id}
+                  linkId={activeFile.id}
+                  filename={activeFile.name}
+                />
+              ) : (
+                (
+                  {
+                    overview: (
+                      <>
+                        <section
+                          className={`execution-summary phase-${flow.phase}`}
+                        >
+                          <span className="eyebrow">当前动作</span>
+                          <h2>{actionLabel(flow)}</h2>
+                          <p>{flow.reason}</p>
+                          <div className="next-step">
+                            <span>下一步条件</span>
+                            <p>{flow.next_condition}</p>
+                          </div>
+                          <div className="round-actions">
+                            {flow.lifecycle === "blocked" && (
+                              <Button
+                                className="btn"
+                                aria-label={
+                                  pending === "retry" ? "正在提交重试…" : "重试"
+                                }
+                                title={
+                                  pending === "retry" ? "正在提交重试…" : "重试"
+                                }
+                                disabled={pending !== null}
+                                onClick={() => void submit("retry")}
+                              >
+                                <RefreshCw />
+                                {pending === "retry" && "正在提交重试…"}
+                              </Button>
+                            )}
+                            {flow.lifecycle === "archived" ? (
+                              <>
+                                <p id="resume-hint">
+                                  恢复推进将在同一 Flow
+                                  开启新轮次，从待处理开始并使用新
+                                  PR，保留历史记录；不会重试旧轮次。
+                                </p>
+                                <Button
+                                  className="btn"
+                                  aria-describedby="resume-hint"
+                                  disabled={pending !== null}
+                                  onClick={() => void submit("resume")}
+                                >
+                                  <RefreshCw />
+                                  {pending === "resume"
+                                    ? "正在恢复推进…"
+                                    : "恢复推进"}
+                                </Button>
+                              </>
+                            ) : flow.lifecycle === "finalizing" ? (
+                              <p>
+                                正在结束本轮。停止确认、结果对账及收尾未完成前不会归档，请刷新查看进展。
+                              </p>
+                            ) : endingRound === null ? (
+                              <Button
+                                className="btn"
+                                disabled={pending !== null}
+                                onClick={() => {
+                                  setEndingRound(flow.current_round_no);
+                                  setWriteError("");
+                                  setWriteNotice("");
+                                }}
+                              >
+                                <Archive />
+                                结束本轮
+                              </Button>
+                            ) : (
+                              <form
+                                className="round-form"
+                                aria-label="结束本轮"
+                                onSubmit={(event) => {
+                                  event.preventDefault();
+                                  void submit("archive");
+                                }}
+                              >
+                                <fieldset disabled={pending !== null}>
+                                  <legend>结束第 {endingRound} 轮</legend>
+                                  <p id="archive-hint">
+                                    提交只发起结束本轮；停止确认、结果对账及收尾未完成前不会归档。
+                                  </p>
+                                  <div
+                                    className="round-reasons"
+                                    role="group"
+                                    aria-label="本轮结果"
+                                  >
+                                    {(["succeeded", "abandoned"] as const).map(
+                                      (reason) => (
+                                        <label key={reason}>
+                                          <Input
+                                            type="radio"
+                                            className="round-choice"
+                                            name="archive-reason"
+                                            value={reason}
+                                            checked={archiveReason === reason}
+                                            onChange={() =>
+                                              setArchiveReason(reason)
+                                            }
+                                          />
+                                          {archiveReasonLabels[reason]}
+                                        </label>
+                                      ),
+                                    )}
+                                  </div>
+                                  <label htmlFor="archive-summary">
+                                    本轮结论（必填）
+                                  </label>
+                                  <Input
+                                    id="archive-summary"
+                                    required
+                                    value={archiveSummary}
+                                    onChange={(event) =>
+                                      setArchiveSummary(event.target.value)
+                                    }
+                                    aria-describedby="archive-hint"
+                                    placeholder="说明本轮成果或废弃原因"
+                                  />
+                                  <div className="round-buttons">
+                                    <Button
+                                      type="submit"
+                                      className="btn"
+                                      disabled={
+                                        !archiveSummary.trim() ||
+                                        endingRound !== flow.current_round_no
+                                      }
+                                    >
+                                      <Check aria-hidden="true" />
+                                      {pending === "archive"
+                                        ? "正在提交结束请求…"
+                                        : "确认结束本轮"}
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      aria-label="取消"
+                                      title="取消"
+                                      onClick={() => setEndingRound(null)}
+                                    >
+                                      <X aria-hidden="true" />
+                                    </Button>
+                                  </div>
+                                  {endingRound !== flow.current_round_no && (
+                                    <p role="alert">
+                                      轮次已变化，请关闭表单并核对当前轮次后再操作。
+                                    </p>
+                                  )}
+                                </fieldset>
+                              </form>
+                            )}
+                          </div>
+                          {writeError && <p role="alert">{writeError}</p>}
+                          {writeNotice && <p role="status">{writeNotice}</p>}
+                        </section>
+                        {flow.task_content && (
+                          <section
+                            className="task-content"
+                            aria-label="原始任务内容"
+                          >
+                            <h2 className="panel-title">原始任务内容</h2>
+                            <ActivityMarkdown
+                              text={flow.task_content}
+                              url={null}
+                            />
+                          </section>
+                        )}
+                        <h2 className="panel-title">任务信息</h2>
+                        <dl className="task-facts">
+                          <dt>生命周期 / 阶段</dt>
+                          <dd>
+                            {flow.lifecycle} /{" "}
+                            {phases.find(([p]) => p === flow.phase)?.[1]}
+                          </dd>
+                          <dt>当前轮次</dt>
+                          <dd>第 {flow.current_round_no} 轮</dd>
+                          {flow.archive_reason && (
+                            <>
+                              <dt>
+                                {flow.lifecycle === "archived"
+                                  ? "归档结果"
+                                  : "本轮结束目标"}
+                              </dt>
+                              <dd>
+                                {archiveReasonLabels[flow.archive_reason]}
+                              </dd>
+                            </>
+                          )}
+                          {flow.archive_summary && (
+                            <>
+                              <dt>本轮结论</dt>
+                              <dd className="round-summary">
+                                {flow.archive_summary}
+                              </dd>
+                            </>
+                          )}
+                          <dt>Worker</dt>
+                          <dd>
+                            {flow.worker_id ?? "尚未绑定"}
+                            {flow.worker_historical ? "（历史归属）" : ""}
+                          </dd>
+                          <dt>分支</dt>
+                          <dd>{flow.branch ?? "尚未创建"}</dd>
+                          <dt>修订轮数</dt>
+                          <dd>{flow.revision_cycles}</dd>
+                          <dt>创建</dt>
+                          <dd>{new Date(flow.created_at).toLocaleString()}</dd>
+                          <dt>更新</dt>
+                          <dd>{new Date(flow.updated_at).toLocaleString()}</dd>
+                          {flow.archived_at && (
+                            <>
+                              <dt>归档时间</dt>
+                              <dd>
+                                {new Date(flow.archived_at).toLocaleString()}
+                              </dd>
+                            </>
+                          )}
+                          <dt>当前状态版本</dt>
+                          <dd>{flow.state_version}（与阅读快照独立）</dd>
+                        </dl>
+                        <h2 className="panel-title">数据来源</h2>
+                        <SourceList sources={flow.sources} />
+                      </>
+                    ),
+                    conversation: (
+                      <OpenWorkerFile value={openFile}>
+                        <Conversation
+                          key={id}
+                          id={id}
+                          root={detail}
+                          refresh={refresh}
+                        />
+                      </OpenWorkerFile>
+                    ),
+                    jobs: (
+                      <>
+                        <InferenceNotices key={`${id}:${refresh}`} id={id} />
+                        <h2 className="panel-title">任务执行</h2>
+                        <div className="timeline">
+                          <WindowList
+                            count={jobs.length}
+                            label="执行记录"
+                            itemKey={(i) => jobs[i].id}
+                          >
+                            {(i) => (
+                              <article
+                                className="timeline-item"
+                                data-state={jobs[i].state}
+                              >
+                                <div className="job-top">
+                                  <strong>
+                                    {jobs[i].kind === "inference"
+                                      ? `推理 · 派发次数 ${jobs[i].attempt}`
+                                      : `${jobs[i].kind} #${jobs[i].attempt}`}
+                                  </strong>
+                                  <span className="badge">{jobs[i].state}</span>
+                                </div>
+                                <time dateTime={jobs[i].created_at}>
+                                  创建于{" "}
+                                  {new Date(
+                                    jobs[i].created_at,
+                                  ).toLocaleString()}
+                                </time>
+                                <p>
+                                  {jobs[i].worker_id ?? "无 Worker"}
+                                  {jobs[i].error_code
+                                    ? ` · ${jobs[i].error_code}`
+                                    : ""}
+                                </p>
+                              </article>
+                            )}
+                          </WindowList>
+                        </div>
+                        {jobError && (
+                          <button className="btn" onClick={() => moreJobs()}>
+                            <RefreshCw aria-hidden="true" />
+                            <span>读取失败：{jobError}（重试）</span>
+                          </button>
+                        )}
+                        {jobMore && (
+                          <button
+                            className="btn"
+                            aria-label="读取更多执行记录"
+                            title="读取更多执行记录"
+                            onClick={() => moreJobs()}
+                          >
+                            <ArrowDown aria-hidden="true" />
+                          </button>
+                        )}
+                      </>
+                    ),
+                  } satisfies Record<typeof baseTab, ReactNode>
+                )[baseTab]
+              )}
+            </section>
+          </TabsContent>
+        </div>
+        <AgentTaskInput
+          disabledReason={
+            pending !== null
+              ? "正在提交，请稍候。"
+              : flow.lifecycle !== "review" || !flow.pr_number
+                ? "等待当前任务完成并进入待审核后发送，可先填写补充要求。"
+                : ""
+          }
+          onSubmit={async (instruction, requestId) => {
+            if (writing.current) throw new Error("正在提交其他操作，请稍候。");
+            writing.current = true;
+            setPending("agent-task");
+            try {
+              const value = await appendAgentTask(id, instruction, requestId);
+              onChanged();
+              if (mounted.current)
+                setFlow((prior) =>
+                  prior && prior.state_version > value.state_version
+                    ? prior
+                    : value,
+                );
+            } finally {
+              writing.current = false;
+              if (mounted.current) setPending(null);
+            }
+          }}
+        />
+      </main>
+    </Tabs>
   );
 }
 
@@ -772,7 +1241,72 @@ function Conversation({
   root: React.RefObject<HTMLElement | null>;
   refresh: number;
 }) {
-  const { state, load, onRange, retry } = useConversation(id, root);
+  const { state, load, onRange, onAnchor, readProvenance, retry } =
+    useConversation(id);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const sentinel = useRef<HTMLDivElement>(null);
+  const automaticBoundary = useRef<string | null>(null);
+  const rows = useMemo(
+    () => buildConversationRows(state.records, expanded),
+    [state.records, expanded],
+  );
+  const rowByKey = useMemo(
+    () => new Map(rows.map((row) => [row.key, row])),
+    [rows],
+  );
+  const mountedRange = useCallback(
+    (indexes: number[]) => {
+      onRange(
+        indexes.flatMap((index) => {
+          const row = rows[index];
+          return row.kind === "body" ? [row.rawIndex] : [];
+        }),
+      );
+    },
+    [rows, onRange],
+  );
+  const visibleRange = useCallback(
+    (keys: readonly (string | number)[], anchorKey: string | number | null) => {
+      const members = new Map<string, string[]>();
+      const summaries = new Set<string>();
+      for (const key of keys) {
+        const row = typeof key === "string" ? rowByKey.get(key) : undefined;
+        const group = row?.kind === "summary" ? row.group.key : row?.groupKey;
+        if (!row || !group) continue;
+        const index = row.kind === "summary" ? row.group.first : row.rawIndex;
+        const visible = members.get(group) ?? [];
+        visible.push(state.records[index].key);
+        members.set(group, visible);
+        if (row.kind === "summary") summaries.add(group);
+      }
+      setExpanded((before) => {
+        const next = new Set<string>();
+        // A late visibility report must not reopen a group the user has just collapsed.
+        for (const key of before) {
+          const row = rowByKey.get(conversationRowKey("body", key));
+          const group = row?.kind === "body" ? row.groupKey : null;
+          const visible = group ? members.get(group) : undefined;
+          if (!group || !visible) continue;
+          visible.forEach((member) => next.add(member));
+          if (summaries.has(group)) next.add(key);
+        }
+        if (
+          before.size === next.size &&
+          [...before].every((key) => next.has(key))
+        )
+          return before;
+        return next;
+      });
+      const anchor =
+        typeof anchorKey === "string" ? rowByKey.get(anchorKey) : undefined;
+      const index =
+        anchor?.kind === "summary" ? anchor.group.first : anchor?.rawIndex;
+      onAnchor(index === undefined ? null : state.records[index].key);
+    },
+    [rowByKey, state.records, onAnchor],
+  );
   const previousRefresh = useRef(refresh);
   useEffect(() => {
     if (previousRefresh.current !== refresh) {
@@ -780,6 +1314,49 @@ function Conversation({
       load(true);
     }
   }, [refresh, load]);
+  useEffect(() => {
+    if (state.snapshot === null || state.busy || state.error || !state.has_more)
+      return;
+    const node = sentinel.current;
+    const viewport = root.current;
+    if (!node || !viewport) return;
+    // Folded groups can absorb a whole page without adding display rows or moving the sentinel.
+    const boundary = `${state.snapshot}:${state.next_cursor}`;
+    if (automaticBoundary.current === boundary) return;
+    let observer: IntersectionObserver | undefined;
+    // Keep two screens ready, including when the mobile header changes the reading viewport.
+    const resize = new ResizeObserver(() => {
+      observer?.disconnect();
+      observer = new IntersectionObserver(
+        (entries) => {
+          if (
+            entries.some((entry) => entry.isIntersecting) &&
+            automaticBoundary.current !== boundary &&
+            load()
+          )
+            automaticBoundary.current = boundary;
+        },
+        {
+          root: viewport,
+          rootMargin: `0px 0px ${viewport.clientHeight * 2}px 0px`,
+        },
+      );
+      observer.observe(node);
+    });
+    resize.observe(viewport);
+    return () => {
+      resize.disconnect();
+      observer?.disconnect();
+    };
+  }, [
+    load,
+    root,
+    state.snapshot,
+    state.busy,
+    state.error,
+    state.has_more,
+    state.next_cursor,
+  ]);
   return (
     <>
       <ConversationSources
@@ -797,106 +1374,111 @@ function Conversation({
         </p>
       )}
       <div className="conversation-stream">
-        <WindowList
-          count={state.keys.length}
-          label="会话活动"
-          itemKey={(i) => state.keys[i] ?? `${id}-${i}`}
-          onRange={onRange}
-          estimate={220}
-        >
-          {(i, mounted) => {
-            const e = state.items.get(i);
-            const previous = mounted.has(i - 1)
-              ? state.items.get(i - 1)
-              : undefined;
-            // Keep raw rows virtualized; only their compact activity bar and open state are shared.
-            let toolGroup: ToolActivityGroup | undefined;
-            const toolResults: ActivityItem[] = [];
-            let mergedIntoCall = false;
-            if (e?.source === "worker" && isToolActivity(e)) {
-              let start = i;
-              while (
-                isToolActivity(state.items.get(start - 1)) &&
-                sameActivityGroup(state.items.get(start - 1), e)
-              )
-                start--;
-              let first = i,
-                end = i;
-              while (mounted.has(first - 1) && first > start) first--;
-              while (
-                mounted.has(end + 1) &&
-                isToolActivity(state.items.get(end + 1)) &&
-                sameActivityGroup(e, state.items.get(end + 1))
-              )
-                end++;
-              let calls = 0,
-                results = 0;
-              const callIndexes = new Map<string, number>();
-              for (let index = first; index <= end; index++) {
-                const item = state.items.get(index);
-                if (!item) continue;
-                const callId = item.metadata.call_id;
-                if (item.kind === "tool_call") {
-                  calls++;
-                  if (typeof callId === "string" && callId)
-                    callIndexes.set(callId, index);
-                } else {
-                  results++;
-                  const callIndex =
-                    typeof callId === "string" && callId
-                      ? callIndexes.get(callId)
-                      : undefined;
-                  if (callIndex !== undefined) {
-                    if (callIndex === i) toolResults.push(item);
-                    if (index === i) mergedIntoCall = true;
+        {state.snapshot !== null && (
+          <WindowList
+            count={rows.length}
+            label="会话活动"
+            itemKey={(i) => rows[i].key}
+            onRange={mountedRange}
+            onVisibleRange={visibleRange}
+            reading={{
+              key: `conversation:${id}`,
+              resolve: (key) => {
+                if (typeof key !== "string") return null;
+                const rawKey = conversationRecordKey(key);
+                const index = state.records.findIndex(
+                  (entry) => entry.key === rawKey,
+                );
+                return (
+                  rows.find(
+                    (row) =>
+                      row.kind === "summary" &&
+                      row.group.first <= index &&
+                      index <= row.group.last,
+                  )?.key ?? null
+                );
+              },
+            }}
+            estimate={220}
+          >
+            {(i) => {
+              const row = rows[i];
+              if (row.kind === "summary") {
+                const entry = state.records[row.group.first];
+                return (
+                  <ActivitySummary
+                    entry={entry}
+                    group={row.group}
+                    expanded={row.expanded}
+                    continuation={sameActivityGroup(
+                      state.records[row.group.first - 1],
+                      entry,
+                    )}
+                    onToggle={() =>
+                      setExpanded((before) => {
+                        const next = new Set(before);
+                        if (row.expanded)
+                          for (
+                            let index = row.group.first;
+                            index <= row.group.last;
+                            index++
+                          )
+                            next.delete(state.records[index].key);
+                        else next.add(entry.key);
+                        return next;
+                      })
+                    }
+                  />
+                );
+              }
+              const e = state.items.get(row.rawIndex);
+              const identity = state.records[row.rawIndex];
+              const provenance = conversationProvenanceRange(
+                state.records,
+                row.rawIndex,
+              );
+              return e ? (
+                <ActivityView
+                  key={`${e.key}-${e.version}`}
+                  entry={e}
+                  flowId={id}
+                  snapshot={state.snapshot ?? 0}
+                  continuation={sameActivityGroup(
+                    state.records[row.rawIndex - 1],
+                    identity,
+                  )}
+                  groupKey={row.groupKey}
+                  pairedCallKey={row.pairedCallKey}
+                  provenance={
+                    provenance
+                      ? { ...provenance, read: readProvenance }
+                      : undefined
                   }
-                }
-              }
-              toolGroup = {
-                key: state.keys[start],
-                leader: i === first,
-                calls,
-                results,
-                partial:
-                  first > start ||
-                  (isToolActivity(state.items.get(end + 1)) &&
-                    sameActivityGroup(e, state.items.get(end + 1))),
-              };
-            }
-            const provenance: ActivityItem[] = [];
-            if (e && !sameActivityGroup(previous, e)) {
-              provenance.push(e);
-              for (let index = i + 1; mounted.has(index); index++) {
-                const following = state.items.get(index);
-                if (!following || !sameActivityGroup(e, following)) break;
-                provenance.push(following);
-              }
-            }
-            return e ? (
-              <ActivityView
-                key={`${e.key}-${e.version}`}
-                entry={e}
-                flowId={id}
-                snapshot={state.snapshot ?? 0}
-                continuation={sameActivityGroup(previous, e)}
-                toolGroup={toolGroup}
-                toolResults={toolResults}
-                mergedIntoCall={mergedIntoCall}
-                provenance={provenance}
-              />
-            ) : (
-              <div className="history-placeholder">正在读取历史交互…</div>
-            );
-          }}
-        </WindowList>
+                />
+              ) : (
+                <div className="history-placeholder">正在读取历史交互…</div>
+              );
+            }}
+          </WindowList>
+        )}
       </div>
       {state.error ? (
         <button className="btn" onClick={retry}>
-          读取失败：{state.error.message}（重试）
+          <RefreshCw aria-hidden="true" />
+          <span>读取失败：{state.error.message}（重试）</span>
         </button>
       ) : state.has_more ? (
-        <div className="load-sentinel" role="status">
-          {state.busy ? "正在加载更多交互…" : "向下滚动，继续读取交互"}
+        <div className="load-sentinel" role="status" ref={sentinel}>
+          <button
+            className="btn"
+            aria-label={state.busy ? "正在加载更多交互…" : "读取更多交互"}
+            title={state.busy ? "正在加载更多交互…" : "读取更多交互"}
+            aria-disabled={state.busy}
+            onClick={() => load()}
+          >
+            <ArrowDown aria-hidden="true" />
+            {state.busy && "正在加载更多交互…"}
+          </button>
         </div>
       ) : (
         <button
@@ -904,6 +1486,7 @@ function Conversation({
           disabled={state.busy}
           onClick={() => void load(true)}
         >
+          <RefreshCw aria-hidden="true" />
           {state.busy ? "正在检查更新…" : "已到当前本地快照末尾 · 点击刷新"}
         </button>
       )}
@@ -920,6 +1503,9 @@ export default function App() {
     [repoNext, setRepoNext] = useState<string | null>(null),
     [repoError, setRepoError] = useState(""),
     [refresh, setRefresh] = useState(0),
+    [settingsRefresh, setSettingsRefresh] = useState(0),
+    [boardStarted, setBoardStarted] = useState(!current.settings),
+    [mobilePhase, setMobilePhase] = useState<Phase>("running"),
     [boardRevision, setBoardRevision] = useState(0),
     [columns, setColumns] = useState(blank),
     [counts, setCounts] = useState(
@@ -927,11 +1513,22 @@ export default function App() {
     );
   const boardRequests = useRef(new Map<Phase, AbortController>());
   useEffect(() => {
-    const sync = () => setCurrent(route());
+    const sync = () => {
+      setCurrent(route());
+      setQuery(new URL(location.href).searchParams.get("q") ?? "");
+    };
     addEventListener("hashchange", sync);
-    return () => removeEventListener("hashchange", sync);
+    addEventListener("popstate", sync);
+    return () => {
+      removeEventListener("hashchange", sync);
+      removeEventListener("popstate", sync);
+    };
   }, []);
   useEffect(() => {
+    if (!current.settings) setBoardStarted(true);
+  }, [current.settings]);
+  useEffect(() => {
+    if (!boardStarted) return;
     const c = new AbortController();
     void getRepos(null, c.signal)
       .then((page) => {
@@ -942,7 +1539,7 @@ export default function App() {
       })
       .catch((e) => !c.signal.aborted && setRepoError(e.message));
     return () => c.abort();
-  }, []);
+  }, [boardStarted]);
   const load = (phase: Phase, reset = false) => {
     const prior = columns[phase];
     if ((prior.busy || !prior.more) && !reset) return;
@@ -993,24 +1590,30 @@ export default function App() {
       );
   };
   useEffect(() => {
+    if (!boardStarted) return;
     phases.forEach(([p]) => load(p, true));
+    return () => boardRequests.current.forEach((c) => c.abort());
+  }, [query, boardRevision, boardStarted]);
+  const changeQuery = (value: string) => {
+    // Hash navigation in the same action must already see the new query in the URL.
     const url = new URL(location.href);
-    if (query) url.searchParams.set("q", query);
+    if (value) url.searchParams.set("q", value);
     else url.searchParams.delete("q");
     history.replaceState(null, "", url);
-    return () => boardRequests.current.forEach((c) => c.abort());
-  }, [query, boardRevision]);
-  const all = phases.flatMap(([p]) => columns[p].items);
+    setQuery(value);
+  };
   return (
     <>
       <header className="workspace-bar">
         <nav className="bar-path">
           <span>工作空间</span>
           <span>/</span>
-          <strong>{current.id ? `任务详情` : "看板"}</strong>
+          <strong>
+            {current.settings ? "设置" : current.id ? "任务详情" : "看板"}
+          </strong>
         </nav>
-        <div className="bar-filters">
-          <SearchBox query={query} repos={repos} onQuery={setQuery} />
+        <div className="bar-filters" hidden={current.settings}>
+          <SearchBox query={query} repos={repos} onQuery={changeQuery} />
           {(repoNext || repoError) && (
             <button
               className="btn"
@@ -1024,29 +1627,65 @@ export default function App() {
                   .catch((e) => setRepoError(e.message));
               }}
             >
-              {repoError ? `仓库读取失败：${repoError}（重试）` : "更多仓库"}
+              {repoError ? (
+                <RefreshCw aria-hidden="true" />
+              ) : (
+                <ArrowDown aria-hidden="true" />
+              )}
+              <span>
+                {repoError ? `仓库读取失败：${repoError}（重试）` : "更多仓库"}
+              </span>
             </button>
           )}
         </div>
         <div className="bar-status">
-          <span>本地档案</span>
+          <Button asChild className="btn ghost">
+            <a
+              href="#settings"
+              aria-current={current.settings ? "page" : undefined}
+              aria-label="设置"
+              title="设置"
+            >
+              <Settings aria-hidden="true" />
+            </a>
+          </Button>
+          <CreateFlow
+            onCreated={(id) => {
+              setBoardRevision((x) => x + 1);
+              location.hash = `flow/${id}/overview`;
+            }}
+            onVerify={() => {
+              changeQuery("");
+              setBoardRevision((x) => x + 1);
+              location.hash = "board";
+            }}
+          />
           <button
             className="btn ghost"
             aria-label="刷新当前视图"
+            title="刷新当前视图"
             onClick={() => {
-              if (current.id) setRefresh((x) => x + 1);
-              else phases.forEach(([p]) => load(p, true));
+              if (current.settings) setSettingsRefresh((x) => x + 1);
+              else {
+                if (current.id) setRefresh((x) => x + 1);
+                phases.forEach(([p]) => load(p, true));
+              }
             }}
           >
             <RefreshCw />
           </button>
         </div>
       </header>
-      {current.id ? (
+      <SettingsPage
+        active={current.settings}
+        refresh={settingsRefresh}
+        onBack={() => (location.hash = "board")}
+      />
+      {current.settings ? null : current.id ? (
         <Detail
           id={current.id}
           tab={current.tab}
-          all={all}
+          columns={columns}
           counts={counts}
           load={load}
           refresh={refresh}
@@ -1059,6 +1698,8 @@ export default function App() {
           counts={counts}
           load={load}
           go={(id) => (location.hash = `flow/${id}/conversation`)}
+          mobile={mobilePhase}
+          onMobile={setMobilePhase}
         />
       )}
     </>

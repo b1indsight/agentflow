@@ -35,20 +35,22 @@ FROM runtime AS worker
 ARG CODEX_VERSION=0.153.4
 ARG JJ_VERSION=0.45.1
 ARG JJ_SHA256=f35438350b5d61963aac5dd74ede510b31d6b9690769d1a6268cf058cc825f72
-ARG AMP_VERSION=0.0.1792555249-g702cd1
-ARG AMP_SHA256=41a2e3680c63091d7c0293e2ad702af95772f9f35d977b74c7794fa40e45b5c9
+ARG AMP_VERSION=0.0.1794672034-g01d6fa
+ARG AMP_SHA256=0a8e4858ba97cf3fac9bcc551b67e32139a5de99740febfee70d639bbed650af
 RUN test "$(dpkg --print-architecture)" = amd64 \
     && apt-get update && apt-get install -y --no-install-recommends git gh curl gzip procps nodejs npm \
     && gh --version \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global --ignore-scripts --no-audit --no-fund "@openai/codex@${CODEX_VERSION}" \
     && npm cache clean --force \
-    && curl -fsSL "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" -o /tmp/jj.tar.gz \
+    && curl -fsSL --retry 3 --retry-max-time 120 --connect-timeout 15 --max-time 120 \
+        "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" -o /tmp/jj.tar.gz \
     && echo "${JJ_SHA256}  /tmp/jj.tar.gz" | sha256sum -c - \
     && mkdir /tmp/jj && tar -xzf /tmp/jj.tar.gz -C /tmp/jj \
     && install -m 0755 /tmp/jj/jj /usr/local/bin/jj \
     && rm -rf /tmp/jj /tmp/jj.tar.gz \
-    && curl -fsSL "https://static.ampcode.com/cli/${AMP_VERSION}/amp-linux-x64.gz" -o /tmp/amp.gz \
+    && curl -fsSL --retry 3 --retry-max-time 120 --connect-timeout 15 --max-time 120 \
+        "https://static.ampcode.com/cli/${AMP_VERSION}/amp-linux-x64.gz" -o /tmp/amp.gz \
     && gzip -dc /tmp/amp.gz > /tmp/amp \
     && echo "${AMP_SHA256}  /tmp/amp" | sha256sum -c - \
     && install -m 0755 /tmp/amp /usr/local/bin/amp \

@@ -11,6 +11,7 @@ from app.controler.config import ServerSettings
 from app.controler.workflow.service import ControlService
 from app.domain.models import ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
+from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
 from app.persistence.flows import FlowStore
 from app.persistence.reconciliation import ReconcileStore
@@ -24,6 +25,7 @@ class EventRouter:
         service: ControlService,
         settings: ServerSettings,
         *,
+        bot_login: str,
         database: Database,
     ) -> None:
         self.database = database
@@ -33,6 +35,7 @@ class EventRouter:
         self.webhook_store = WebhookStore(database)
         self.service = service
         self.settings = settings
+        self.bot_login = bot_login.casefold()
 
     def dispatch(self, event_type: str, delivery_id: str, payload: dict) -> None:
         """Apply DB-only event transitions; callers may bind one outer transaction."""
@@ -41,7 +44,7 @@ class EventRouter:
             self._on_pull_request(delivery_id, payload)
             return
         sender = (payload.get("sender") or {}).get("login", "")
-        if sender == self.settings.bot_login or (payload.get("sender") or {}).get("type") == "Bot":
+        if sender.casefold() == self.bot_login or (payload.get("sender") or {}).get("type") == "Bot":
             return
         if event_type in {"issue_comment", "pull_request_review", "pull_request_review_comment"}:
             self._on_feedback(event_type, delivery_id, payload)
@@ -66,7 +69,7 @@ class EventRouter:
             if actor not in self.settings.allowlist:
                 logger.warning("trigger by non-allowlisted user {} ignored", actor)
                 return
-            self.service.on_trigger(repo, issue_number, installation_id)
+            self.service.create_flow(repo, issue_number, installation_id)
         elif action == "unlabeled" and trigger:
             flow = self.flows.get_active_flow(repo, issue_number)
             if flow:
@@ -91,7 +94,7 @@ class EventRouter:
             flow is None
             or action not in allowed
             or author.get("type") == "Bot"
-            or author.get("login") == self.settings.bot_login
+            or (author.get("login") or "").casefold() == self.bot_login
         ):
             self.webhook_store.record_event(delivery_id, event_type, flow.id if flow else None, payload)
             return
@@ -143,9 +146,16 @@ class EventRouter:
         pull_request = payload.get("pull_request") or {}
         if payload.get("action") not in {"closed", "reopened", "synchronize"}:
             return
-        flow = self.flows.get_flow_by_pr(payload["repository"]["full_name"], pull_request["number"])
+        repo = payload["repository"]["full_name"]
+        flow = self.flows.get_flow_by_pr(repo, pull_request["number"])
+        if flow is None and pull_request.get("merged") is True:
+            historical = ActivityStore(self.database).archived_pr(repo, pull_request["number"])
+            if historical is not None:
+                flow = self.flows.get_flow(historical[0])
         if flow and payload.get("action") == "closed" and pull_request.get("merged") is True:
             self.service.on_merged(flow, delivery_id, payload)
+        elif flow and payload.get("action") == "closed":
+            self.service.on_closed(flow, delivery_id, payload)
         elif flow:
             with self.database.transaction() as tx:
                 reconcile_store_tx = self.reconcile_store.using(tx)
