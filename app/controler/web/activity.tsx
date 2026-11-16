@@ -326,7 +326,8 @@ export function ActivityMarkdown({
               );
             }
             if (
-              /^\/api\/files\//.test(destination.pathname) &&
+              typeof location !== "undefined" &&
+              workerFileLink(safe.split(/[?#]/, 1)[0], location.origin) &&
               /(?:^#|&)(?:name|amp)=/.test(destination.hash)
             )
               node.properties["data-private-image"] = true;

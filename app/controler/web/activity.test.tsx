@@ -775,6 +775,41 @@ test("ordinary Amp thread and artifact links preserve query strings and fragment
     assert.ok(html.includes(`href="${url.replaceAll("&", "&amp;")}"`), url);
 });
 
+test("ordinary images keep file-like paths and fragments across activity sources", (t) => {
+  // External image services can reuse the file route and display fragment without becoming Worker files.
+  mockActivity(t, () =>
+    assert.fail("rendering ordinary images must not read Worker files"),
+  );
+  const urls = [
+    "https://images.example.test/api/files/preview.png#name=preview.png",
+    `https://images.example.test/api/files/${"a".repeat(32)}#amp=preview.png`,
+    "https://console.example.test/api/files/preview.png#name=preview.png",
+  ];
+  const body = [
+    ...urls.map((url, index) => `![图片 ${index}](${url})`),
+    `[图片链接](${urls[0]})`,
+  ].join("\n\n");
+  for (const source of ["worker", "pr.comments"]) {
+    const html = renderToStaticMarkup(
+      <OpenWorkerFile value={() => assert.fail("rendering activated a file")}>
+        <ActivityView
+          entry={record("ordinary-images", {
+            kind: source === "worker" ? "message" : "comment",
+            source,
+            body,
+            url: "https://github.com/owner/repo/issues/1",
+          })}
+        />
+      </OpenWorkerFile>,
+    );
+    for (const url of urls)
+      assert.ok(html.includes(`<img src="${url}"`), `${source}: ${url}`);
+    assert.equal((html.match(/<img /g) ?? []).length, urls.length + 1);
+    assert.ok(html.includes(`href="${urls[0]}"`));
+    assert.doesNotMatch(html, /class="amp-image"/);
+  }
+});
+
 test("only original worker file destinations become detail actions before relative URL resolution", (t) => {
   mockActivity(t, () => assert.fail("rendering must not fetch a file"));
   const id = "0123456789abcdef0123456789abcdef";

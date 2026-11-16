@@ -3762,8 +3762,8 @@ test("conversation images load inline and fit the body on desktop and mobile", a
   const privateId = "0123456789abcdef0123456789abcdef";
   const body = [
     "## 图片预览",
-    '![运行截图](https://images.example.test/assets/preview "运行截图")',
-    "[图片链接](https://images.example.test/result.WEBP?token=signed#preview)",
+    '![运行截图](https://images.example.test/api/files/preview.png#name=preview.png "运行截图")',
+    "[图片链接](https://images.example.test/api/files/result.WEBP?token=signed#name=result.WEBP)",
     "https://images.example.test/conversation-screenshot-with-a-long-file-name.JPG?raw=1",
     "[![小图](https://images.example.test/small.svg)](https://example.test/full.png)",
     "[普通文档](https://example.test/guide?file=sample.png)",
