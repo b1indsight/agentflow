@@ -15,6 +15,7 @@ from app.persistence.console import ConsoleStore
 MARKER = "<!-- flowtool:effect:" + "a" * 64 + " -->"
 
 
+@pytest.mark.ledger_unverified
 def test_direct_task_title_overrides_remote_cache_and_body_is_only_loaded_in_detail(store):
     # Generated titles override remote caches; original requirements stay detail-only.
     task = "Private original requirements 😀"
@@ -47,6 +48,7 @@ def test_direct_task_title_overrides_remote_cache_and_body_is_only_loaded_in_det
     (None, None, "PR", "PR"),
     (None, None, None, None),
 ])
+@pytest.mark.ledger_unverified
 def test_display_title_and_search_share_fallback_precedence(store, generated, cached, pr, expected):
     flow = store.flows.create_flow("octo/repo", 7, 1)
     delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)

@@ -67,3 +67,34 @@
 [取消与停机](../operations/cancel-drain.md)、[Projects 同步](../../app/controler/reconciliation/projects.py)、
 [会话查询](conversation-api.md)。冲突自动处理、跨 worker 迁移和每 Flow 动态强隔离仍未实现；
 真实部署与故障恢复待验收，具体边界见[组件职责](components.md)和[已知短板](decisions.md)。
+
+## 7. 流程中的 Flow 事实
+
+每一步在改变 Flow 状态时，同一事务内追加一条事实，`kind` 即 `FlowEvent` 的值；
+设计见 [Flow 事实账本与状态表](flow-ledger.md)。
+
+| 步骤 | 触发 | 事实 `kind` | Flow 状态 |
+|---|---|---|---|
+| 1–2 | 标签触发或控制台创建 | `created` | `queued` |
+| 3 | Job 派发给 Worker | `job_claimed` | `running` |
+| 3 | 命名推理结果应用 | `titled` | 不变 |
+| 4 | INITIAL 结果核验并应用 | `delivery_applied` | `review` |
+| 5–6 | 反馈批次创建修订 Job | `job_enqueued` | `queued` |
+| 7 | 修订 Job 派发、结果应用 | `job_claimed`，随后 `delivery_applied` | `review` |
+| 9 | 合并事件或对账发现合并 | `finalization_requested`，收尾条件满足后 `archive` | `archived` |
+| 10 | 原 Worker 清理结果应用 | `cleanup_applied`，随后 `archive` | `archived` |
+
+异常与运维路径：
+
+| 情形 | 事实 `kind` | Flow 状态 |
+|---|---|---|
+| 未授权派发的任务租约到期或被拒绝 | `assignment_requeued` | `queued` |
+| 已启动的执行无法确认结果 | `execution_uncertain` | `blocked` |
+| 结果失败或核验未通过 | `result_failed` | `blocked` |
+| PR 来源分支被改动 | `delivery_baseline_rejected` | `blocked` |
+| 显式 retry | `retry_requested` | `queued`，已有归档结论时 `finalizing` |
+| 取消、结束本轮、`/flow stop`、未合并关闭 PR | `finalization_requested`，收尾完成后 `archive` | `archived` |
+| 显式恢复新轮次 | `round_resumed` | `queued` |
+| 归档后发现此前已合并 | `merge`，必要时 `archive_correction` | 不变 |
+
+Job、交付和反馈批次自身的变化不写 Flow 事实；事件名说明 Flow 为什么变化，细节仍在对应的表里。

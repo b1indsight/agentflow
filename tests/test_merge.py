@@ -60,7 +60,7 @@ def merge_flow(store: Store) -> Flow:
     flow = store.flows.create_flow("owner/repo", 7, 42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow_metadata(flow)
+    store.flows.set_current_attempt(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
     delivery.head_sha = "b" * 40  # A squash/rebase merge need not equal the PR head.

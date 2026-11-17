@@ -73,7 +73,7 @@ def test_locked_flow_reads_state_and_attempt_committed_while_waiting(store, monk
             assert waiting.wait(5) and not reader.done()
             fresh, tx = context.flow, context.database
             fresh.current_attempt_id = store.flows.using(tx).create_attempt(flow.id).id
-            store.flows.using(tx).update_flow_metadata(fresh)
+            store.flows.using(tx).set_current_attempt(fresh)
             store.flows.using(tx).transition(fresh, FlowEvent.RESULT_FAILED)
         current, matches = reader.result(timeout=5)
     assert current.state is FlowState.BLOCKED
@@ -289,7 +289,7 @@ def bound_review_flow(store: Store):
     attempt.codex_session_id = "session"
     store.flows.update_attempt(attempt)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow_metadata(flow)
+    store.flows.set_current_attempt(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.state, delivery.base_branch, delivery.pr_number = DeliveryState.OPEN, "trunk", 17
     delivery.head_sha = "abc123"

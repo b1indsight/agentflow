@@ -225,7 +225,7 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
     flow = store.flows.create_flow("owner/repo", 8, 42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow_metadata(flow)
+    store.flows.set_current_attempt(flow)
     from tests.github import RecordingGitHub
 
     github = RecordingGitHub()

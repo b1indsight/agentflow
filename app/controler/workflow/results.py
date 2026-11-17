@@ -134,7 +134,7 @@ class ResultApplication:
             failure = error.failure
         except ValueError:
             failure = InferenceFailure(code="invalid_response")
-        with self.database.transaction() as tx, tx.connection() as connection:
+        with self.database.transaction() as tx:
             self.inference.using(tx).complete_inference_result(job.id, failure=failure)
             current = self.jobs.using(tx).get_job(job.id)
             assert current is not None
@@ -145,10 +145,7 @@ class ResultApplication:
                         and flow.current_round_no == job.round_no
                         and flow.current_attempt_id == inference.source_attempt_id):
                     assert isinstance(title, str)
-                    connection.execute(
-                        "UPDATE flows SET title=%s WHERE id=%s AND title_job_id=%s",
-                        (title.strip(), flow.id, job.id),
-                    )
+                    self.flows.using(tx).set_title(flow.id, job.id, title.strip())
         return current.state
 
     async def recover_pending_results(self, *, concurrency: int = 4, batch_size: int = 64) -> None:

@@ -400,9 +400,31 @@ def flow_resume(flow_id: int, expected_round: int = typer.Option(..., min=1)) ->
     typer.echo(f"flow {flow_id} round {resumed.current_round_no}: queued")
 
 
+@flow_app.command("verify")
+def flow_verify(flow_id: Annotated[int | None, typer.Argument()] = None) -> None:
+    """重放 Flow 事实账本并与 flows 当前行比较；只报告差异，不修改数据。"""
+    with _store() as store:
+        ids = [flow_id] if flow_id is not None else [f.id for f in store.flows.list_flows()]
+        failed = False
+        for identity in sorted(ids):
+            try:
+                differences = store.flows.verify(identity)
+            except ValueError as error:
+                typer.echo(f"flow {identity}: {error}", err=True)
+                failed = True
+                continue
+            for column, (replayed, stored) in differences.items():
+                typer.echo(f"flow {identity} {column}: ledger={replayed!r} stored={stored!r}",
+                           err=True)
+            failed = failed or bool(differences)
+    if failed:
+        raise typer.Exit(1)
+    typer.echo(f"{len(ids)} flow(s) match their ledger")
+
+
 @flow_app.command("history")
 def flow_history(flow_id: int, round_no: int = typer.Option(..., "--round", min=1)) -> None:
-    """按轮次显示状态、归档、合并证据与自动更正的原始活动记录。"""
+    """按轮次显示 Flow 事实账本、状态快照与通知的原始活动记录。"""
     from app.persistence.activity import ActivityStore
 
     with _store() as store:

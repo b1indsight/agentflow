@@ -25,6 +25,10 @@ flowtool/
       webhooks.py     # 持久 Webhook 消费与事件审计
       reconciliation.py # PR/反馈对账进度
       projects.py     # Projects 投影与同步检查点
+      activity.py     # console_activity：Flow 事实账本、时间线快照与版本对比
+      console.py      # 控制台卡片、详情与执行记录查询
+      console_sync.py # 控制台采集的来源 claim 与检查点
+      console_schema.py # 控制台投影、归档表与触发器
       metrics.py      # 数据库指标读取
       readiness.py    # 只读就绪探针
     github/           # githubkit App 认证、GraphQL 分页与远端数据解码
@@ -111,6 +115,12 @@ flowtool/
    例：合并后总结插件——归纳上一段对话里的代码风格偏好、更新仓库的 skill 文件。
    - **已接线（2026-08-02）**：五个生命周期 hook（`on_flow_start / on_pr_opened / on_review / on_merged / on_archived`）已在 engine 的对应状态转移处触发，插件可订阅；插件异常被隔离（不掀翻 core）。
      待实现：示例插件 `post-merge-summary` 的插件体（读会话 + diff → 提炼风格偏好 → 提 PR 更新 repo 的 skill），目前只打日志。
+
+8. **Flow 事实账本** —— 以 `console_activity` 的 Flow 事实为 Flow 状态的唯一可信来源，`flows` 为同事务状态表。
+   - **已实现（2026-11-17，自动化验证）**：数据分类、事实目录、写入路径和重放校验见
+     [Flow 事实账本与状态表](flow-ledger.md)，实施记录见 [feature record](../plan/flow-activity-ledger.md)。
+   - 首期只覆盖 `flows` 表。事实引用 Job/PR、交付与 Job 的粗粒度事实、独立的事实表、停止生成触发器快照，
+     以及可派生 Flow 的关系与结果事实，均属后续计划。
 
 control 直接依赖具体 GitHub 资源，由 App/Installation 绑定身份并调用 Repository、Issue、PR、Thread 和 Project/Item。
 GitHub 不预留 adapter 或替代协议。`CodingAgent` / `Judge` 保留已有接口，插件使用生命周期 hooks；

@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- Flow 事实账本：`flows` 的每次账本列变化在同一事务内向 `console_activity` 追加一条不可变事实，
+  状态转换以 `FlowEvent` 命名，另有创建、归档、归档后合并、归档更正和标题事实；标题与两类指针的写入
+  收进 `FlowStore`，边界测试禁止其他模块写 `flows`。新增 `flowtool flow verify [FLOW_ID]` 重放并报告差异，
+  不自动修复；存量 Flow 在启动时补一条快照作为起点。任务原文不进入活动正文，只记录摘要。
+  设置当前 attempt 不再推进 Flow 的 `updated_at`。不新增表或列，不改 wire、API 或控制台展示。
 - Worker 兼容 Amp 私有附件：将允许的附件地址转换为原有文件链接，使用自身 Amp 登录态按需读取，
   经现有 owner 文件 API 和文件页签预览；前端与 controller 保持不变，不增加 Amp 专用显示标记。
   保留 512 KiB 上限、进程写入配额及临时文件清理，不读取 `amp-media-source` 本地路径，

@@ -39,7 +39,7 @@ def review_flow(store, monkeypatch):
     flow = store.flows.create_flow("owner/repo", 7, 42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow_metadata(flow)
+    store.flows.set_current_attempt(flow)
     flow = apply_flow_event(store, flow, FlowEvent.DELIVERY_APPLIED)
     delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN

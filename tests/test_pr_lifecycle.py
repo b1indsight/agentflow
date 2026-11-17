@@ -477,7 +477,7 @@ async def test_initial_close_before_final_commit_keeps_identity_without_authoriz
     job = store.assignments.assign_job("worker", "token", "epoch")
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow_metadata(flow)
+    store.flows.set_current_attempt(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     delivery.state, delivery.head_sha, delivery.base_branch = DeliveryState.OPENING, "abc123", "trunk"
     delivery.title, delivery.body = "Title", "Body\n\nCloses #8"

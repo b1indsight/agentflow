@@ -1,6 +1,6 @@
 """Complete PostgreSQL schema in dependency order; no historical migrations."""
 
-from app.persistence.console_schema import CONSOLE_SCHEMA
+from app.persistence.console_schema import CONSOLE_SCHEMA, FLOW_LEDGER_BACKFILL
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runtime_settings (
@@ -407,4 +407,5 @@ SCHEMAS = (
     PROJECT_SCHEMA,
     CONSOLE_SCHEMA,
     INFERENCE_SCHEMA,
+    FLOW_LEDGER_BACKFILL,
 )
