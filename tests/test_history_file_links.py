@@ -84,12 +84,12 @@ async def test_amp_repeat_and_next_page_keep_native_cursor_and_cache(worker, mon
     monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
     monkeypatch.setattr(worker, "register_file", AsyncMock(return_value=LINK))
     query = HistoryQuery(session_id=AMP_SESSION, limit=1)
-    native = await asyncio.to_thread(worker._history_agents["amp"].read_history, query)
+    native = await asyncio.to_thread(worker._agents["amp"].read_history, query)
     page = await worker.read_history(query)
     assert page.items[0].content.text == f"[报告]({LINK}#name=report%23draft.md)"
     assert page.next_cursor == native.next_cursor
     assert native.items[0].content.text == first_text
-    assert await asyncio.to_thread(worker._history_agents["amp"].read_history, query) == native
+    assert await asyncio.to_thread(worker._agents["amp"].read_history, query) == native
     assert await worker.read_history(query) == page
     following = await worker.read_history(HistoryQuery(session_id=AMP_SESSION, cursor=page.next_cursor))
     assert following.items[0].content.text == "second"
@@ -119,7 +119,7 @@ async def test_private_amp_images_register_without_downloading_or_trusting_sourc
 
     monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
     monkeypatch.setattr(worker, "register_file", register)
-    native = await asyncio.to_thread(worker._history_agents["amp"].read_history, HistoryQuery(session_id=AMP_SESSION))
+    native = await asyncio.to_thread(worker._agents["amp"].read_history, HistoryQuery(session_id=AMP_SESSION))
     page = await worker.read_history(HistoryQuery(session_id=AMP_SESSION))
     named = f"{LINK}#name=screen.png"
     assert page.items[0].content.text == text.replace(f"<{full}>", f"<{named}>").replace(
@@ -164,7 +164,7 @@ async def test_expanding_short_links_never_overflows_item_or_page(worker, tmp_pa
     body = "中" * 2600 + " [x](/x)" * 35
     rollout(tmp_path / "codex", [message("assistant", body)] * 40)
     query = HistoryQuery(session_id=SESSION)
-    native = await asyncio.to_thread(worker._history_agents["codex"].read_history, query)
+    native = await asyncio.to_thread(worker._agents["codex"].read_history, query)
     page = await worker.read_history(query)
     assert [item.id for item in page.items] == [item.id for item in native.items]
     assert page.next_cursor == native.next_cursor

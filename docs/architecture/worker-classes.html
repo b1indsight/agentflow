@@ -76,7 +76,7 @@
 <body>
   <header>
     <h1>Worker 全量类关系图</h1>
-    <p class="subtitle"><code>app/worker/</code> · <strong id="count">48</strong> 个类 · 2026-11-17 工作树（<code>f6eb85c</code> + Agent 收敛改动）</p>
+    <p class="subtitle"><code>app/worker/</code> · <strong id="count">48</strong> 个类 · 2026-11-17 checkout（编码与历史共享 Agent 实例）</p>
     <p class="subtitle">按当前实现绘制。包含私有类、Protocol、模型、异常和自更新分支；点选类可查看直接关系及源码，放大后可在画布内横纵滚动。</p>
     <div class="controls">
       <label for="focus">定位类</label>
@@ -111,7 +111,7 @@
     <aside aria-labelledby="detail-title">
       <h2 id="detail-title">从 WorkerRuntime 开始</h2>
       <p id="detail-meta" class="muted">点选图中任意类，或使用上方下拉框。Tab / Enter 也可操作节点。</p>
-      <p id="detail-role">Runtime 持有按 Flow 分组的 WorkerExecution、共享目录池和历史 Agent；连接回调借用执行对象，ExecutionState 只管理持久证据。</p>
+      <p id="detail-role">Runtime 按后端持有共享 Agent，编码执行与历史查询复用同一实例；每个 Flow 的执行状态独立，推理另用小输出预算实例。</p>
       <p id="detail-source"></p>
       <ul id="detail-relations"></ul>
       <h3>范围与读法</h3>
@@ -124,22 +124,23 @@
     <div class="note-grid">
       <div>
         <h3>执行所有权与可替换连接</h3>
-        <p>WorkerExecution 持有本 Flow 的执行 Task、工具 Future 和停止任务，与 WorkerExecutor 共用 ExecutionState。多个 Flow 共用 Runtime 的目录池。</p>
+        <p>WorkerExecution 持有本 Flow 的执行 Task、工具 Future 和停止任务，与 WorkerExecutor 共用 ExecutionState。多个 Flow 共用 Runtime 的目录池及配置后端的 Agent；会话、工作目录、凭据与子进程仍属于各次调用。</p>
         <p>Gateway / Session / Dispatcher 属于共享通信包；连接回调管理握手、消息关联及观察者。断线不取消编码执行，推理任务则由该连接的回调拥有。</p>
       </div>
       <div>
-        <h3>Agent 内聚与独立历史路由</h3>
-        <p>CodingAgent 提供 start / resume / read_history。每个具体 Agent 拥有自己的 History；Runtime 的 _history_agents 按 T- 前缀选择 Amp，其余选择 Codex，与当前任务和配置后端无关。</p>
+        <h3>编码与历史共享后端实例</h3>
+        <p>CodingAgent 提供 start / resume / read_history。Runtime 的 _agents 为 Codex、Amp 各持有一个实例，每个 Agent 拥有自己的 History；编码按配置取同一实例，历史按 T- 前缀选择 Amp，其余选择 Codex，不依赖活动 Flow。</p>
         <p>AmpCodingAgent.run_process() 共用于编码、历史 export 和 AmpAttachment 下载。两个 _OutputLimit 分别属于 Codex 和 Amp；已无 _Init / _Result 类。</p>
         <p class="muted">实现文件：<code>coding_agent.py</code>、<code>execution/codex.py</code>、<code>execution/amp_agent.py</code>。</p>
       </div>
       <div>
         <h3>持久证据、文件与推理</h3>
         <p>ExecutionRecord 与 WorkspaceSlot 共享 WorkspaceBinding 身份。journal v5 与 manifest v3 分别记录执行证据和目录库存；私有旧格式类只用于兼容读取。</p>
-        <p>历史出站副本经 link_history() 登记文件，FileLinks 保存本地文件或 Amp 附件身份。NativeAgentInference 仅 start 独立会话；自更新仍是独立 CLI 分支。</p>
+        <p>历史出站副本经 link_history() 登记文件，FileLinks 保存本地文件或 Amp 附件身份。NativeAgentInference 因输出预算更小保留独立 Agent，仅 start 独立会话；自更新仍是独立 CLI 分支。</p>
       </div>
     </div>
-    <p class="muted">图为当前工作树的手工关系快照，类清单与行号经 AST 核对；不把尚未提交的内容标成不可变 GitHub 快照。配套说明：<a href="worker-classes.md">类清单、函数模块与维护方法</a>。</p>
+    <p class="muted">数量沿革：旧图 33 类 → 合入 main 后 49 类 → 删除 _Init / _Result、移入 CodingAgent 后 48 类。本次共享实例不改变类数量；编码与历史相关 Agent 从每 Flow 一份再加两份历史专用实例，变为固定两份。图中包外类和函数另计节点。</p>
+    <p class="muted">图为当前 checkout 的手工关系快照，类清单与行号经 AST 核对；源码链接随仓库版本一起检出。配套说明：<a href="worker-classes.md">类清单、函数模块与维护方法</a>。</p>
   </section>
   <script>
     // Only ClassDef entries under app/worker count toward the inventory.
@@ -147,7 +148,7 @@
     // use module-qualified IDs while retaining their exact AST name.
     const nodes = [
       {id:"WorkerSettings",file:"config.py",line:12,x:40,y:82,kind:"model",base:"BaseSettings",role:"配置 / 隔离与安全约束"},
-      {id:"WorkerRuntime",file:"runtime.py",line:149,x:385,y:82,role:"组装 / 多 Flow / 历史路由"},
+      {id:"WorkerRuntime",file:"runtime.py",line:149,x:385,y:82,role:"多 Flow / 共享 Agent / 路由"},
       {id:"WorkerRootLock",file:"runtime.py",line:108,x:730,y:82,role:"根目录独占与身份锁"},
       {id:"HealthFile",file:"health.py",line:12,x:1075,y:82,role:"写入本地连接状态探针"},
       {id:"Connection",file:"runtime.py",line:69,x:1420,y:82,kind:"protocol",base:"Protocol",role:"WebSocket send / recv / close"},
@@ -221,11 +222,11 @@
       ["WorkerRuntime","NativeAgentInference","ref","inference；独立 Agent 与无仓库目录"],
       ["WorkerRuntime","Gateway","ref","gateway；路由当前 server 连接"],
       ["WorkerRuntime","FileLinks","ref","files；跨任务持久登记"],
-      ["WorkerRuntime","CodingAgent","ref","_history_agents: dict[str, CodingAgent]"],
-      ["WorkerRuntime","CodexAgent","use","创建历史 Agent、选定后端的执行 / 推理 Agent"],
-      ["WorkerRuntime","AmpCodingAgent","use","创建历史 Agent、选定后端的执行 / 推理 Agent"],
+      ["WorkerRuntime","CodingAgent","ref","_agents；每后端一个，编码与历史共享实例"],
+      ["WorkerRuntime","CodexAgent","use","创建共享编码 / 历史 Agent；选中时另建小预算推理实例"],
+      ["WorkerRuntime","AmpCodingAgent","use","创建共享编码 / 历史 Agent；选中时另建小预算推理实例"],
       ["WorkerRuntime","ExecutionState","use","scan()；每个 Flow 创建一个状态对象"],
-      ["WorkerRuntime","WorkerExecutor","use","每个 Flow 创建，注入 state 与共享目录池"],
+      ["WorkerRuntime","WorkerExecutor","use","每个 Flow 创建，注入 state、共享 Agent 与目录池"],
       ["WorkerRuntime","HealthFile","use","_report_health() 创建"],
       ["WorkerRuntime","WebSocketTransport","use","每次连接创建 IO 适配器"],
       ["WebSocketTransport","Connection","ref","connection（注入）"],
@@ -270,7 +271,7 @@
       ["FlowToolCallError","WorkerProtocolError","inherit","继承"],
       ["WorkerExecutor","TaskExecutor","realize","结构化满足"],
       ["WorkerExecution","FlowToolCaller","realize","tool_caller=self；不依赖当前连接"],
-      ["WorkerExecutor","CodingAgent","ref","code_agent（注入）"],
+      ["WorkerExecutor","CodingAgent","ref","code_agent；注入 Runtime 共享实例，与同后端历史查询共用"],
       ["CodexAgent","CodingAgent","realize","结构化满足"],
       ["AmpCodingAgent","CodingAgent","realize","结构化满足"],
       ["WorkerExecutor","ExecutionState","ref","state；与 WorkerExecution 共用"],
@@ -328,7 +329,7 @@
       ["FileLinks","LocalFile","use","读写持久 path / inode / device 身份"],
       ["FileLinks","AmpAttachment","use","读写持久 URL 身份；read() 按需下载"],
       ["AmpAttachment","AmpCodingAgent","use","静态 run_process() 下载；限制时间 / 输出 / 文件"],
-      ["NativeAgentInference","CodingAgent","ref","agent；独立于各 Flow 执行 Agent"],
+      ["NativeAgentInference","CodingAgent","ref","agent；更小输出预算，独立于共享编码 / 历史实例"],
       ["NativeAgentInference","InferenceTask","use","infer(task)；冻结输入与预算"],
       ["NativeAgentInference","InferenceOutput","use","返回且 validate_for(task)"],
       ["NativeAgentInference","CodingExecutionResult","use","仅 agent.start(context=None)；核验回答"],
@@ -478,7 +479,7 @@
       document.querySelector("#status").textContent = id ? `${id} · ${related.length} 条直接关系` : `全部 ${classCount} 个类 · ${edges.length} 条关系 · 选择类后高亮一跳关系`;
       document.querySelector("#detail-title").textContent = id || "从 WorkerRuntime 开始";
       document.querySelector("#detail-meta").textContent = id ? (byId.get(id).base || "普通类，无自定义基类") : "点选图中任意类，或使用上方下拉框。Tab / Enter 也可操作节点。";
-      document.querySelector("#detail-role").textContent = id ? byId.get(id).role : "Runtime 持有按 Flow 分组的 WorkerExecution、共享目录池和历史 Agent；连接回调借用执行对象，ExecutionState 只管理持久证据。";
+      document.querySelector("#detail-role").textContent = id ? byId.get(id).role : "Runtime 按后端持有共享 Agent，编码执行与历史查询复用同一实例；每个 Flow 的执行状态独立，推理另用小输出预算实例。";
       if (!id) return;
       const node = byId.get(id), link = document.createElement("a");
       const path = node.file.startsWith("app/") ? node.file : `app/worker/${node.file}`;
@@ -532,7 +533,7 @@
       const rules = [...document.styleSheets[0].cssRules]
         .filter(rule => rule.selectorText && /\.(node|edge|group-)/.test(rule.selectorText));
       svg("style",{},copy,"svg { background:white; font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif; --accent:#1f6fe0; }\n" + rules.map(rule => rule.cssText).join("\n"));
-      svg("text",{x:20,y:-48,"font-size":23,fill:"#172231"},copy,`Worker 全量类关系图 · ${classCount} 个类 · 2026-11-17 工作树（f6eb85c + Agent 收敛）`);
+      svg("text",{x:20,y:-48,"font-size":23,fill:"#172231"},copy,`Worker 全量类关系图 · ${classCount} 个类 · 2026-11-17 checkout（编码与历史共享 Agent）`);
       svg("text",{x:20,y:-18,fill:"#526276"},copy,`实线 → 持有 / 字段 · 虚线 → 使用 · 实线 ▷ 继承 · 虚线 ▷ Protocol · 灰色节点不计数 · ${edges.length} 条关系`);
       return new XMLSerializer().serializeToString(copy);
     }

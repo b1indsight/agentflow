@@ -1,9 +1,9 @@
 # Worker 全量类关系图
 
-> 核对范围：2026-11-17 工作树（`f6eb85c` 合入 `origin/main`，含本轮 Agent 收敛改动）。
+> 核对范围：2026-11-17 checkout，含编码与历史共享 Agent 实例的调整。
 > `app/worker/**/*.py` 的全部 **48 个 AST `ClassDef`**，包括私有类、Protocol、模型、dataclass 和异常。
 > 递归核对也包含枚举及嵌套类；当前 worker 内未定义枚举或嵌套类。不含测试替身和包外同名概念。
-> 这是当前实现的关系快照；尚未提交的源码不能由某个已有 Git commit 精确代表。
+> 源码链接使用仓库相对路径；文档与源码应一起检出到同一版本。
 
 [打开交互图](worker-classes.html)：直接用浏览器打开，无需构建、联网或安装依赖。
 保留下拉定位、点击/键盘选择、一跳关系高亮、侧栏跳转、缩放和适应宽度；可用“导出 SVG”同步静态图。
@@ -20,7 +20,8 @@ GitHub 文件页不执行 HTML；下方静态 SVG 可直接预览、放大。
 `nodes` / `edges` 的手工定义和布局位于 [HTML](worker-classes.html)。
 
 - **实线箭头**：对象持有引用或模型字段。共享引用不表示独占所有权：每个 Flow 的
-  `WorkerExecution.state` 和 `WorkerExecutor.state` 是同一个 `ExecutionState`；所有 Flow 共用目录池。
+  `WorkerExecution.state` 和 `WorkerExecutor.state` 是同一个 `ExecutionState`；所有 Flow 共用目录池和配置后端的 Agent。
+  同后端编码与历史查询共用一个 Agent；推理因输出预算更小保留独立实例。
 - **虚线箭头**：创建、临时参数、函数/静态方法调用、持久模型读写或异常抛出/捕获。
   侧栏逐条注明；间接调用会标出中间函数或 Runtime，避免把 import 画成持有关系。
 - **实线空心三角**：显式 Python 继承，指向基类。worker 内有
@@ -76,7 +77,8 @@ GitHub 文件页不执行 HTML；下方静态 SVG 可直接预览、放大。
 执行对象持有工具队列和原调用者 Future；MCP 经 `FlowToolCaller(WorkerExecution)` 提交工具调用。
 `WorkerBusinessCallbacks.pending` 只借用同一调用，注册回复关联，不接管执行 Task/Future。
 Runtime 创建一个共享 `RepositoryWorkspaces`，为每个 Flow 创建一份 `ExecutionState` 并同时注入执行对象和 Executor。
-见 [Runtime](../../app/worker/runtime.py#L197-L210)、[工具队列](../../app/worker/execution/lifecycle.py#L284-L370)、
+Executor 的 `code_agent` 来自 Runtime 的共享后端实例；会话、cwd、临时凭据和子进程保持为每次调用的局部状态。
+见 [Runtime](../../app/worker/runtime.py#L200-L210)、[工具队列](../../app/worker/execution/lifecycle.py#L284-L370)、
 [借用与回复](../../app/worker/transport/business.py#L90-L172)。
 
 每条连接通过 `WebSocketTransport → Transport` 进入共享 `Session`，`Gateway.serve()` 创建 `Dispatcher`，
@@ -86,13 +88,16 @@ Runtime 创建一个共享 `RepositoryWorkspaces`，为每个 Flow 创建一份 
 见 [连接装配与关闭](../../app/worker/runtime.py#L348-L391)、
 [共享 driver](../../app/communication/gateway.py#L39-L105)、[推理回调](../../app/inference/transport.py#L29)。
 
-### 历史跟随请求 session，与 assignment journal 分离
+### 编码与历史共用 Agent，历史仍跟随请求 session
 
-`WorkerBusinessCallbacks → WorkerRuntime.read_history() → _history_agents[prefix] → CodingAgent.read_history()`。
-Runtime 为历史长期保留两个 Agent；`T-` 前缀选择 Amp，其余选择 Codex，不依赖当前配置的后端或活动 Flow。
+`WorkerBusinessCallbacks → WorkerRuntime.read_history() → _agents[prefix] → CodingAgent.read_history()`。
+Runtime 的 `_agents` 为 Codex、Amp 各持有一个实例；所有 Executor 按配置后端复用其中同一对象，不为每个 Flow 再创建 Agent。
+历史查询复用这个集合，`T-` 前缀选择 Amp，其余选择 Codex，不依赖当前配置的后端或活动 Flow。
 每个 Agent 自己创建 History，历史读取不要求 trusted-host 编码授权；同步 reader 被卸载到线程，保留各自限流和缓存。
 `ExecutionState` 只负责执行持久证据，无 History 引用或历史入口。
-见 [历史路由](../../app/worker/runtime.py#L167-L170)、[读取与超时](../../app/worker/runtime.py#L255-L264)、
+编码与历史相关 Agent 固定为两个，不随 Flow 数量增长；推理仍另用一个小输出预算实例。
+见 [共享后端与推理装配](../../app/worker/runtime.py#L165-L181)、[Executor 注入](../../app/worker/runtime.py#L200-L210)、
+[读取与超时](../../app/worker/runtime.py#L255-L264)、
 [Codex Agent](../../app/worker/execution/codex.py#L119-L131)、[Amp Agent](../../app/worker/execution/amp_agent.py#L235-L247)。
 
 Amp 的编码、历史导出和附件下载共用静态 `AmpCodingAgent.run_process()`；`AmpHistory → AmpCodingAgent`
@@ -112,8 +117,8 @@ Amp 的编码、历史导出和附件下载共用静态 `AmpCodingAgent.run_proc
 [登记与读取](../../app/worker/state/file_links.py#L46-L97)、[文件回调](../../app/worker/transport/files.py#L21-L70)。
 
 Runtime 的 `NativeAgentInference` 持有独立 Agent，在目录池提供的无仓库目录里运行新会话，
-仅调用 `start(context=None)`，验证 `InferenceTask → InferenceOutput`，不续用编码 session。
-见 [推理装配](../../app/worker/runtime.py#L171-L190)、[推理适配](../../app/worker/execution/inference.py#L31-L115)。
+保留比编码更小的输出预算，仅调用 `start(context=None)`，验证 `InferenceTask → InferenceOutput`，不续用编码 session。
+见 [推理装配](../../app/worker/runtime.py#L173-L193)、[推理适配](../../app/worker/execution/inference.py#L31-L115)。
 
 ## 类图之外的函数与共享模型
 
@@ -155,11 +160,21 @@ Runtime 的 `NativeAgentInference` 持有独立 Agent，在目录池提供的无
 
 ## 历史沿革与保留边界
 
-旧图停留在 33 类时期。执行生命周期拆分见 [`bbf8504`](https://github.com/b1indsight/agentflow/commit/bbf85048c432bf3d0e2960d36adde758eaeba9ea)，
+同一口径递归统计 `app/worker/**/*.py` 的 AST `ClassDef`：
+
+| 版本 | Worker 类数量 | 变化 |
+| --- | ---: | --- |
+| [最初类图](https://github.com/b1indsight/agentflow/commit/8fa8fa3193c865a31cecb38c7dcaa38994d39d37) | 33 | 旧代码基线 |
+| [合入 main](https://github.com/b1indsight/agentflow/commit/f6eb85c369cc054e4c41a75166514bb03dfe0dac) | 49 | 多 Flow 执行、共享通信、文件、推理和兼容模型等变更 |
+| [Agent 职责收拢](https://github.com/b1indsight/agentflow/commit/6a1fa5cb188ca75b8bd5cd9adcbec8d620764726) | 48 | 删除 `_Init` / `_Result`，原包外 `CodingAgent` 移入统计范围 |
+| 当前实例共享调整 | 48 | 只改变对象装配，不新增或删除类 |
+
+图中的 64 个节点包含 14 个包外类和 2 个函数，不等于 Worker 类数量。
+执行生命周期拆分见 [`bbf8504`](https://github.com/b1indsight/agentflow/commit/bbf85048c432bf3d0e2960d36adde758eaeba9ea)，
 共享 Session / callbacks 与 `transport/client.py` 移除见
 [`4d9f37e`](https://github.com/b1indsight/agentflow/commit/4d9f37edf74726c89bda073d3a8c60674fbc5bec)，
 并发目录库存见 [`fadf3c1`](https://github.com/b1indsight/agentflow/commit/fadf3c1fe1d77d1c96b22cf259e385710fc50bbd)。
-本轮图继续对齐已落在工作树中的 worker-local Agent 接口、Agent 自有 History 与静态 Amp 进程监督。
+本轮图对齐 worker-local Agent 接口、编码与历史共享后端实例、Agent 自有 History 与静态 Amp 进程监督。
 
 简化后仍需按实际生命周期读图：执行对象跨重连存活；连接回调只借用编码执行；历史 reader 不依赖 journal；
 journal 和目录 manifest 分别证明执行状态和目录身份；文件 ID 独立于当前 assignment。
@@ -177,8 +192,8 @@ journal 和目录 manifest 分别证明执行状态和目录身份；文件 ID �
    与排除 `kind=external/function` 后的图节点逐项比较 `(文件, 类名, lineno)` 的有序多重集。
    同时核对限定身份、唯一 ID 和清单表，不允许只比较总数；当前核对结果为 **48 对 48，缺失/多余/行号差异均为 0**。
    灰色类与两个函数锚点的定义行也须核对，所有边端点须存在。
-3. 工作树改动还未提交，本文和 HTML 使用同目录源码相对链接与实际行号，不伪称固定到 `f6eb85c` 的源码快照。
-   后续若改用 GitHub 固定链接，须等包含这些源码的提交产生后，再一起更新核对基线和静态图。
+3. 本文和 HTML 使用同目录源码相对链接与实际行号，应与源码一起检出和更新。
+   若改用 GitHub 固定链接，须等包含对应源码的提交产生后，再一起更新核对基线和静态图。
 4. 用浏览器打开 `docs/architecture/worker-classes.html`，点击 **“导出 SVG”**，用下载结果覆盖同目录
    `worker-classes.svg`。导出直接复用 `serializeGraph()`：嵌入图形 CSS，移除聚焦/淡化和缩放状态，
    保留全部节点、关系、标题和图例；输出 **2140 × 2180**，无需 Graphviz、构建或网络。

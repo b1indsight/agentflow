@@ -121,9 +121,9 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
         serve_ws_url="wss://unused", worker_root=root,
         coding_agent=getattr(request, "param", "codex"),
     ))
-    # Runtime's history readers stay real; only subsequently created coding agents are scripted.
-    monkeypatch.setattr("app.worker.runtime.CodexAgent", lambda **kwargs: agent)
-    monkeypatch.setattr("app.worker.runtime.AmpCodingAgent", lambda **kwargs: agent)
+    # Script coding on the shared backend instance while keeping native history reads real.
+    monkeypatch.setattr(agent, "read_history", worker._agents[worker.settings.coding_agent].read_history)
+    monkeypatch.setitem(worker._agents, worker.settings.coding_agent, agent)
     worker.inference = NamingInference()
     worker.root_lock.acquire()
     worker.initialize()

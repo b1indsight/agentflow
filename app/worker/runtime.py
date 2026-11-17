@@ -162,14 +162,17 @@ class WorkerRuntime:
         self.executions: dict[int, WorkerExecution] = {}
         self._changed = asyncio.Event()
         self._initialized = False
-        # History follows the requested session, not the configured backend or active Flow.
-        # Worker-lifetime agents retain each backend's cache and concurrency budget.
-        self._history_agents: dict[str, CodingAgent] = {
-            "codex": CodexAgent(), "amp": AmpCodingAgent(),
+        # Coding and history share backend instances; per-run state stays in each call.
+        self._agents: dict[str, CodingAgent] = {
+            "codex": CodexAgent(trusted_host=self.settings.trusted_host_execution,
+                                timeout=self.settings.codex_run_timeout_seconds),
+            "amp": AmpCodingAgent(trusted_host=self.settings.trusted_host_execution,
+                                  timeout=self.settings.amp_run_timeout_seconds),
         }
         timeout = (self.settings.amp_run_timeout_seconds if self.settings.coding_agent == "amp"
                    else self.settings.codex_run_timeout_seconds)
         agent_type = AmpCodingAgent if self.settings.coding_agent == "amp" else CodexAgent
+        # Answer-only inference keeps its smaller output budget separate from coding.
         self.inference = NativeAgentInference(
             agent_type(trusted_host=self.settings.trusted_host_execution, timeout=timeout,
                        max_output_bytes=MAX_OUTPUT_BYTES),
@@ -196,12 +199,9 @@ class WorkerRuntime:
 
     def _create_execution(self, flow_id: int) -> WorkerExecution:
         state = ExecutionState(self.settings.worker_root, flow_id)
-        agent_type = AmpCodingAgent if self.settings.coding_agent == "amp" else CodexAgent
-        timeout = (self.settings.amp_run_timeout_seconds if self.settings.coding_agent == "amp"
-                   else self.settings.codex_run_timeout_seconds)
         executor = WorkerExecutor(
             self.settings.worker_root,
-            agent_type(trusted_host=self.settings.trusted_host_execution, timeout=timeout),
+            self._agents[self.settings.coding_agent],
             worker_id=self.settings.worker_id, state=state, workspaces=self.workspaces,
         )
         return WorkerExecution(
@@ -255,7 +255,7 @@ class WorkerRuntime:
     async def read_history(self, query: HistoryQuery) -> HistoryPage:
         """Page native history first, then register destinations only in its outbound copy."""
         deadline = asyncio.get_running_loop().time() + HISTORY_TIMEOUT
-        source = self._history_agents["amp" if query.session_id.startswith("T-") else "codex"]
+        source = self._agents["amp" if query.session_id.startswith("T-") else "codex"]
         try:
             async with asyncio.timeout_at(deadline):
                 page = await asyncio.to_thread(source.read_history, query)

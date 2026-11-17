@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
+from app.contracts.conversation import HistoryPage, HistoryQuery
+from app.domain.inference_models import MAX_OUTPUT_BYTES
 from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
@@ -58,7 +60,11 @@ def test_worker_root_rejects_sequential_identity_reuse(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("backend,expected,timeout", [(None, CodexAgent, 23), ("amp", AmpCodingAgent, 47)])
-def test_runtime_selects_agent_and_its_idle_timeout(tmp_path, monkeypatch, backend, expected, timeout):
+@pytest.mark.parametrize("trusted_host", [False, True])
+async def test_runtime_shares_configured_agent_for_coding_and_history(
+    tmp_path, monkeypatch, backend, expected, timeout, trusted_host,
+):
+    # Sharing must include history requests and multiple Flows, without changing coding authorization.
     monkeypatch.setattr("app.worker.runtime.configure_logging", lambda *args: None)
     if backend is None:
         monkeypatch.delenv("FLOWTOOL_CODING_AGENT", raising=False)
@@ -66,14 +72,30 @@ def test_runtime_selects_agent_and_its_idle_timeout(tmp_path, monkeypatch, backe
         monkeypatch.setenv("FLOWTOOL_CODING_AGENT", backend)
     settings = WorkerSettings(worker_id="worker", worker_token=SecretStr("secret"),
                               worker_root=tmp_path, serve_ws_url="wss://control.example/connect",
-                              codex_run_timeout_seconds=23, amp_run_timeout_seconds=47)
+                              codex_run_timeout_seconds=23, amp_run_timeout_seconds=47,
+                              trusted_host_execution=trusted_host, execution_isolation="container")
     runtime = WorkerRuntime(settings)
     execution = runtime._create_execution(3)
+    other = runtime._create_execution(4)
+    agent = execution.executor.code_agent
     assert runtime.executions == {}
     assert execution.state.flow_id == 3
     assert execution.executor.workspaces is runtime.workspaces
-    assert isinstance(execution.executor.code_agent, expected)
-    assert execution.executor.code_agent.timeout == timeout
+    assert isinstance(agent, expected)
+    assert agent.timeout == timeout
+    assert agent.trusted_host is trusted_host
+    assert agent.max_output_bytes == 8 * 1024 * 1024
+    assert runtime.inference.agent is not agent
+    assert runtime.inference.agent.max_output_bytes == MAX_OUTPUT_BYTES
+
+    session_id = ("T-" if backend == "amp" else "") + "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    page = HistoryPage(session_id=session_id, status="unsupported")
+    monkeypatch.setattr(expected, "read_history", lambda self, query: HistoryPage(
+        session_id=query.session_id, status="not_found",
+    ))
+    monkeypatch.setattr(agent, "read_history", lambda query: page)
+    assert await runtime.read_history(HistoryQuery(session_id=session_id)) == page
+    assert other.executor.code_agent is agent
 
 
 @pytest.mark.parametrize("shutdown", ["stop", "cancel"])
