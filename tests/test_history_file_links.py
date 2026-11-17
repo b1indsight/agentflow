@@ -56,8 +56,9 @@ async def test_only_message_markdown_destinations_are_registered(worker, tmp_pat
     )
     source = rollout(tmp_path / "codex", [message("assistant", text), message("system", "[系统](/tmp/system)")])
 
-    async def register(path):
+    async def register(path, backend):
         assert path == target
+        assert backend == "codex"
         return LINK
 
     monkeypatch.setattr(worker, "register_file", register)
@@ -95,7 +96,10 @@ async def test_amp_repeat_and_next_page_keep_native_cursor_and_cache(worker, mon
     assert following.items[0].content.text == "second"
 
 
-async def test_private_amp_images_register_without_downloading_or_trusting_source(worker, tmp_path, monkeypatch):
+@pytest.mark.parametrize("history_backend", ["codex", "amp"])
+async def test_private_amp_images_register_without_downloading_or_trusting_source(
+    worker, tmp_path, monkeypatch, history_backend,
+):
     # The published URL needs Amp auth; amp-media-source is only metadata, not file authority.
     url = "https://ampcode.com/user-content/attachments/" + "b" * 64 + "-screen.png"
     sentinel = tmp_path / "do-not-expose.txt"
@@ -109,18 +113,18 @@ async def test_private_amp_images_register_without_downloading_or_trusting_sourc
     async def export(*args, **kwargs):
         return AmpProcessResult(stdout=json.dumps(payload).encode(), stderr=b"", exit_code=0)
 
-    from app.worker.state.amp_attachments import AmpAttachment
-
-    async def register(source):
-        assert isinstance(source, AmpAttachment)
-        assert source.url == url
-        assert source.name == "screen.png"
+    async def register(source, backend):
+        assert source == url and backend == "amp"
         return LINK
 
     monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
     monkeypatch.setattr(worker, "register_file", register)
-    native = await asyncio.to_thread(worker._agents["amp"].read_history, HistoryQuery(session_id=AMP_SESSION))
-    page = await worker.read_history(HistoryQuery(session_id=AMP_SESSION))
+    if history_backend == "codex":
+        rollout(tmp_path / "codex", [message("assistant", text)])
+    session_id = AMP_SESSION if history_backend == "amp" else SESSION
+    query = HistoryQuery(session_id=session_id)
+    native = await asyncio.to_thread(worker._agents[history_backend].read_history, query)
+    page = await worker.read_history(query)
     named = f"{LINK}#name=screen.png"
     assert page.items[0].content.text == text.replace(f"<{full}>", f"<{named}>").replace(
         f"<{url}>", f"<{named}>",
@@ -135,7 +139,7 @@ async def test_registration_deadline_and_failure_keep_partial_text(worker, tmp_p
     rollout(tmp_path / "codex", [message("assistant", text)])
     cancelled = asyncio.Event()
 
-    async def register(path):
+    async def register(path, backend):
         if path.name == "missing":
             raise FileFailure("file_not_found")
         if path.name == "slow":

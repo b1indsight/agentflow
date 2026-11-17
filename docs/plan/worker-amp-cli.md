@@ -549,3 +549,55 @@ HTML、Markdown 与递归 AST 按 `(文件, 类名, 定义行)` 精确一致，�
 没有调用真实模型或 GitHub 业务工具，不以 fixture 测试声称真实外部链路已验收。
 
 不改 wire、journal、数据库、调度、凭据来源或部署；不重试现有 Flow，也不重启运行中的 worker。
+
+### [007] — 2026-11-17 — 共享 Agent 的原位推理与文件协议
+
+**触发与决定：** 用户要求推理复用编码 API、文件注册和读取归入通用 Agent 协议，并放弃旧
+workspace manifest 兼容；明确推理直接使用已登记 workspace、只返回结果暂靠 prompt。
+按用户批准的[新版方案](https://ampcode.com/artifacts/worker-d3ac0ceb-b247-4aac-b760-f38a35f5d5f1)
+实施。本条替代 [006] 中保留独立推理实例的决定；基于随后已共享编码/历史实例的代码继续收拢，
+保留各 Flow 的执行状态、通信回调、domain 合同和既有 trusted-host 前提。
+
+#### 实际实现与取舍
+
+- 删除 `NativeAgentInference` 及额外 Agent，Runtime 实现现有 `Inference.infer` 端口，
+  调用 `execution/inference.py` 的无状态函数。每次调用现有后端的 `start`，保持新会话、
+  `context=None`，cwd 精确等于 `workspaces.inference_path`。能力探测与 schema 使用该目录内
+  的独占临时文件，进程回收后只删除本次文件，不建请求子目录或清空 workspace。
+- 两种后端的 `start` 增加调用级最终答案预算，不改共享实例字段和原生事件流预算，
+  `resume` 及普通编码默认行为不变。动作限制仅在 prompt 内表达；没有新增强制禁用工具，
+  目录和 prompt 不能代替外部隔离。保留总超时、取消回收、结果关联和严格 JSON 校验。
+- `CodingAgent` 保留 Protocol，同时给出本地文件注册/读取默认方法；Codex/Amp 显式继承。
+  将原 `LocalFile` 和有界读取移到接口所在模块，`AmpAttachment` 整体移入 Amp 后端，
+  删除搬空模块。附件仍保留 URL/name/read 行为，由 Amp 覆盖相同 API，其余调用默认实现。
+- `FileLinks` 只持久化后端归属和 Agent 校验后的来源、去重与查询，不导入具体后端。
+  Runtime 用既有 `_agents` 恢复原登记归属，`WorkerFileCallbacks` 调用选定对象的
+  `read_file`，不解析 Amp URL 或下载文件。旧无归属记录只在 Runtime 兼容路由，旧 ID 不变；
+  同一本地文件跨后端去重，重启或切换默认后端不改变新登记的读取归属。
+- 历史只改出站副本，保留缓存和游标。普通路径归历史所在后端，Amp 附件保持 Amp 归属，
+  包括复制到 Codex 历史中的附件；不能直接用历史后端覆盖文件来源。该边界已用先红后绿的
+  参数化用例检查，两种历史都不下载附件、不信任媒体片段里的本地路径。
+- 删除 `_LegacyManifest`、`_LegacySlot` 和 manifest v1 转换。旧格式直接拒绝，原文件内容、
+  修改时间和目录保持不变；当前 manifest v3、assignment journal 和文件链接兼容保留。
+  完整类图按真实源码同步，不新增推理 Agent、本地文件 Agent、Mixin 或文件服务。
+
+#### 验证与复杂度检查
+
+本地文件读取函数的 AST 与搬动前一致，`AmpAttachment` 的 AST 仅将临时目录构造改为模块限定名。
+扩展现有公开行为测试，覆盖共享实例、精确 cwd、两后端并发预算、超时/取消后的 schema 与
+进程清理、跨后端文件归属、真实旧文件记录、下载限额与断连、旧 manifest 非破坏性拒绝。
+
+在独立进程内分别去掉调用级预算、丢弃持久归属并改用当前编码后端，同一组 Codex/Amp
+回归用例均失败；原实现通过。因此保留这两个有实际调用差异的机制。其余主要是删除或搬动，
+不引入替代状态机。比较通过内存替换执行，没有把临时变体写入产品源码；日志保存在
+`.amp/in/artifacts/worker-simplified-ablation-{budget,ownership}.log`。
+
+Ruff、全局 Mypy、控制台格式检查及测试、控制台构建和 wheel/sdist 打包通过；wheel 含通用
+接口、不含已删除附件模块。补齐跨历史来源的附件归属后，在独立 PostgreSQL 实例上重跑
+全量测试通过；仅当前 Git checkout 不适用的 jj 元数据保护用例跳过。类清单与源码定义位置
+逐项一致，桌面、推理/Amp 聚焦、窄屏及放大状态的渲染和 SVG 导出检查通过。最终验证日志与
+截图保存在 `.amp/in/artifacts/worker-simplified-*`。现有构建大 chunk 提示与 Starlette/httpx
+弃用警告不在本次修改范围。
+
+没有执行真实外部模型、部署、重启或已有 Flow 重试。代码和测试的最终交付状态见本线程，
+不以先前提交的 CI 代替本轮验证。旧提案已由新版方案完整替换，不在方案正文恢复旧修订。

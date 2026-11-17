@@ -8,6 +8,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -18,9 +19,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import unquote, urlsplit
 
 from loguru import logger
-from pydantic import JsonValue, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError, field_validator
 
 from app.contracts.conversation import (
     ConversationContent,
@@ -30,10 +32,13 @@ from app.contracts.conversation import (
     HistoryQuery,
     SessionId,
 )
+from app.contracts.files import MAX_FILE_BYTES, FileFailure
 from app.domain.models import CodingExecutionContext, CodingExecutionResult
+from app.worker.coding_agent import CodingAgent
 from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 from app.worker.execution.gh import github_environment
 from app.worker.execution.idle import wait_for_inactivity
+from app.worker.state.file_links import FileLinks
 
 _SESSION_ID = TypeAdapter(SessionId)
 AMP_BIN = "amp"
@@ -232,8 +237,10 @@ def _outcome(process: AmpProcessResult, expected: str | None, timeout: float) ->
         )
 
 
-class AmpCodingAgent:
+class AmpCodingAgent(CodingAgent):
     """Adapt coding requests to Amp threads; executor retains schema and VCS authority."""
+
+    backend = "amp"
 
     def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0,
                  max_output_bytes: int = 8 * 1024 * 1024):
@@ -245,6 +252,26 @@ class AmpCodingAgent:
     def read_history(self, query: HistoryQuery) -> HistoryPage:
         """Read a native thread without granting permission to execute coding tasks."""
         return self._history.query(query)
+
+    def register_file(self, source: Path | str, files: FileLinks) -> str:
+        """Register native attachments lazily; local paths use the common identity checks."""
+        if isinstance(source, Path):
+            return super().register_file(source, files)
+        try:
+            attachment = AmpAttachment(url=source)
+            return files.register(self.backend, attachment.model_dump(mode="json"))
+        except ValidationError:
+            raise FileFailure("file_unreadable") from None
+
+    async def read_file(self, source: dict[str, JsonValue], *, root: Path) -> bytes:
+        """Read a native attachment with this backend's sign-in, or use the local default."""
+        if "url" not in source:
+            return await super().read_file(source, root=root)
+        try:
+            attachment = AmpAttachment.model_validate(source)
+        except ValidationError:
+            raise FileFailure("file_unreadable") from None
+        return await attachment.read(root)
 
     @staticmethod
     async def run_process(
@@ -354,9 +381,10 @@ class AmpCodingAgent:
     async def start(
         self, task: str, cwd: Path, *, output_schema: Path | None = None,
         context: CodingExecutionContext | None = None, model: str | None = None,
-        effort: str | None = None,
+        effort: str | None = None, max_output_bytes: int | None = None,
     ) -> CodingExecutionResult:
-        return await self._run(task, cwd, output_schema=output_schema, context=context, model=model, effort=effort)
+        return await self._run(task, cwd, output_schema=output_schema, context=context, model=model,
+                               effort=effort, max_output_bytes=max_output_bytes)
 
     async def resume(
         self, session_id: str, prompt: str, *, cwd: Path, output_schema: Path | None = None,
@@ -374,7 +402,7 @@ class AmpCodingAgent:
     async def _run(
         self, prompt: str, cwd: Path, *, session_id: str | None = None,
         output_schema: Path | None = None, context: CodingExecutionContext | None = None,
-        model: str | None = None, effort: str | None = None,
+        model: str | None = None, effort: str | None = None, max_output_bytes: int | None = None,
     ) -> CodingExecutionResult:
         if not self.trusted_host:
             raise RuntimeError("Amp trusted-host execution requires FLOWTOOL_TRUSTED_HOST_EXECUTION=true")
@@ -407,7 +435,8 @@ class AmpCodingAgent:
             process = await AmpCodingAgent.run_process(args, cwd=cwd, env=environment, input_text=prompt,
                                                        timeout=self.timeout, timeout_kind="idle")
             result = _outcome(process, session_id, self.timeout)
-            if len(result.last_message.encode()) > self.max_output_bytes:
+            limit = self.max_output_bytes if max_output_bytes is None else max_output_bytes
+            if len(result.last_message.encode()) > limit:
                 return CodingExecutionResult(session_id=result.session_id, last_message="", exit_code=1,
                     failure_detail="Amp final answer exceeded byte limit", failure_kind="output_limit")
             # No SessionUnavailable fallback: the observed CLI stderr alone has not
@@ -418,6 +447,62 @@ class AmpCodingAgent:
             if result.failure_detail:
                 result.failure_detail = redact_amp_text(result.failure_detail, secrets)[-4000:]
             return result
+
+
+class AmpAttachment(BaseModel):
+    """A remote file identity; media-source fragments never grant local file access."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str
+
+    @field_validator("url")
+    @classmethod
+    def canonical_url(cls, value: str) -> str:
+        url = value.split("#", 1)[0]
+        match = re.fullmatch(
+            r"https://ampcode\.com/user-content/attachments/[0-9a-f]{64}-"
+            r"((?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)", url,
+        )
+        if len(url) > 1024 or match is None:
+            raise ValueError("invalid Amp attachment URL")
+        name = unquote(match[1], errors="strict")
+        if name in {".", ".."} or re.search(r"[/\\\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069]", name):
+            raise ValueError("invalid Amp attachment name")
+        return url
+
+    @property
+    def name(self) -> str:
+        return unquote(urlsplit(self.url).path.rsplit("/", 1)[1][65:])
+
+    async def read(self, worker_root: Path) -> bytes:
+        """Download on demand, bound disk writes before exec, and always remove the copy."""
+        try:
+            with tempfile.TemporaryDirectory(prefix=".amp-attachment-", dir=worker_root) as directory:
+                target = Path(directory) / "attachment"
+                result = await AmpCodingAgent.run_process(
+                    ["files", "get", self.url, "-o", str(target), "--log-file", os.devnull],
+                    env=amp_environment(), timeout=5, max_stdout=65536,
+                    # One sentinel byte distinguishes oversize writes from an exact-limit file.
+                    max_file_bytes=MAX_FILE_BYTES + 1,
+                )
+                # Amp stages downloads next to the destination before renaming them.
+                if any(path.is_file() and path.stat().st_size > MAX_FILE_BYTES
+                       for path in Path(directory).rglob("*")):
+                    raise FileFailure("file_too_large")
+                if result.timed_out:
+                    raise FileFailure("query_timeout")
+                if result.exit_code or result.overflow:
+                    raise FileFailure("file_unreadable")
+                if not stat.S_ISREG(target.lstat().st_mode):
+                    raise FileFailure("file_unreadable")
+                with target.open("rb") as stream:
+                    content = stream.read(MAX_FILE_BYTES + 1)
+                if len(content) > MAX_FILE_BYTES:
+                    raise FileFailure("file_too_large")
+                return content
+        except OSError:
+            raise FileFailure("file_unreadable") from None
 
 
 @dataclass

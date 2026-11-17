@@ -27,7 +27,7 @@
     .legend b { color:var(--ink); font:16px ui-monospace,monospace; }
     main { display:grid; grid-template-columns:minmax(0,1fr) 330px; align-items:start; gap:18px; padding:20px; }
     .canvas, aside, .notes { background:var(--surface); border:1px solid var(--line); border-radius:8px; }
-    .canvas { overflow:auto; }
+    .canvas { overflow:auto; max-height:80vh; }
     #graph { display:block; width:100%; min-width:900px; height:auto; }
     aside { position:sticky; top:16px; padding:20px; max-height:calc(100vh - 32px); overflow:auto; }
     #detail-title { overflow-wrap:anywhere; }
@@ -67,7 +67,7 @@
       main { display:block; padding:0; }
       aside, .controls { display:none; }
       #graph { min-width:0 !important; width:100% !important; }
-      .canvas { border:0; overflow:visible; }
+      .canvas { border:0; overflow:visible; max-height:none; }
       .node.dim, .edge.dim { opacity:1; }
       .notes { break-before:page; }
     }
@@ -76,7 +76,7 @@
 <body>
   <header>
     <h1>Worker 全量类关系图</h1>
-    <p class="subtitle"><code>app/worker/</code> · <strong id="count">48</strong> 个类 · 2026-11-17 checkout（编码与历史共享 Agent 实例）</p>
+    <p class="subtitle"><code>app/worker/</code> · <strong id="count">45</strong> 个类 · 2026-11-17 checkout（编码 / 推理 / 历史 / 文件共用 Agent）</p>
     <p class="subtitle">按当前实现绘制。包含私有类、Protocol、模型、异常和自更新分支；点选类可查看直接关系及源码，放大后可在画布内横纵滚动。</p>
     <div class="controls">
       <label for="focus">定位类</label>
@@ -98,7 +98,7 @@
   </header>
   <main>
     <div class="canvas" tabindex="0" role="region" aria-label="可横纵滚动的全量关系图">
-      <svg id="graph" viewBox="0 0 2140 2100" role="group" aria-label="Worker 的全部 48 个类及其直接关系">
+      <svg id="graph" viewBox="0 0 2140 2100" role="group" aria-label="Worker 的全部 45 个类及其直接关系">
         <defs>
           <marker id="arrow" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#96a5b8"/></marker>
           <marker id="triangle" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="white" stroke="#64748b"/></marker>
@@ -111,11 +111,11 @@
     <aside aria-labelledby="detail-title">
       <h2 id="detail-title">从 WorkerRuntime 开始</h2>
       <p id="detail-meta" class="muted">点选图中任意类，或使用上方下拉框。Tab / Enter 也可操作节点。</p>
-      <p id="detail-role">Runtime 按后端持有共享 Agent，编码执行与历史查询复用同一实例；每个 Flow 的执行状态独立，推理另用小输出预算实例。</p>
+      <p id="detail-role">Runtime 按后端持有共享 Agent，编码、推理、历史和文件复用同一实例；每个 Flow 的执行状态独立，最终答案预算按推理调用传入。</p>
       <p id="detail-source"></p>
       <ul id="detail-relations"></ul>
       <h3>范围与读法</h3>
-      <p class="muted">48 个类精确对应 app/worker/**/*.py 的全部 ClassDef。两个 _OutputLimit 按模块区分；CodingAgent 是 worker 内接口。灰色边界类和函数锚点不计入。</p>
+      <p class="muted">45 个类精确对应 app/worker/**/*.py 的全部 ClassDef。两个 _OutputLimit 按模块区分；CodingAgent 含本地文件默认实现，两个后端显式继承。灰色边界类和函数锚点不计入。</p>
       <p class="muted">箭头表达静态关系，不表达调用时间顺序或独占所有权。源码链接指向同一 checkout 的相对路径及核对行号；未展开全部共享模型。</p>
     </aside>
   </main>
@@ -128,18 +128,18 @@
         <p>Gateway / Session / Dispatcher 属于共享通信包；连接回调管理握手、消息关联及观察者。断线不取消编码执行，推理任务则由该连接的回调拥有。</p>
       </div>
       <div>
-        <h3>编码与历史共享后端实例</h3>
-        <p>CodingAgent 提供 start / resume / read_history。Runtime 的 _agents 为 Codex、Amp 各持有一个实例，每个 Agent 拥有自己的 History；编码按配置取同一实例，历史按 T- 前缀选择 Amp，其余选择 Codex，不依赖活动 Flow。</p>
+        <h3>四类操作共用后端实例</h3>
+        <p>CodingAgent 提供 start / resume / read_history / register_file / read_file。CodexAgent、AmpCodingAgent 显式继承它，backend 标识负责文件路由。Runtime 的 _agents 固定持有两个实例；编码与推理按配置选取，历史按 T- 前缀选 Amp，其余选 Codex，文件按登记后端解析。本地 Path 沿用历史后端，Amp 附件 URI 即使出现在 Codex 历史中也始终交给 Amp 登记。</p>
         <p>AmpCodingAgent.run_process() 共用于编码、历史 export 和 AmpAttachment 下载。两个 _OutputLimit 分别属于 Codex 和 Amp；已无 _Init / _Result 类。</p>
         <p class="muted">实现文件：<code>coding_agent.py</code>、<code>execution/codex.py</code>、<code>execution/amp_agent.py</code>。</p>
       </div>
       <div>
         <h3>持久证据、文件与推理</h3>
-        <p>ExecutionRecord 与 WorkspaceSlot 共享 WorkspaceBinding 身份。journal v5 与 manifest v3 分别记录执行证据和目录库存；私有旧格式类只用于兼容读取。</p>
-        <p>历史出站副本经 link_history() 登记文件，FileLinks 保存本地文件或 Amp 附件身份。NativeAgentInference 因输出预算更小保留独立 Agent，仅 start 独立会话；自更新仍是独立 CLI 分支。</p>
+        <p>ExecutionRecord 与 WorkspaceSlot 共享 WorkspaceBinding 身份。journal v5 保留 v4 只读转换；目录 manifest 只读写 v3，已删除 _LegacyManifest / _LegacySlot 和 v1 迁移。</p>
+        <p>FileLinks 只保存通用 backend / source、去重与 lookup，不导入后端。Agent 校验并读取 LocalFile 或 AmpAttachment；后者仍有 URL / name / read 行为。Runtime 自身满足 Inference，调用无状态 capability() / infer()；共享 Agent 仅 start 新会话，cwd 来自 inference_path、context=None、最终答案预算按调用传入。自更新仍是独立 CLI 分支。</p>
       </div>
     </div>
-    <p class="muted">数量沿革：旧图 33 类 → 合入 main 后 49 类 → 删除 _Init / _Result、移入 CodingAgent 后 48 类。本次共享实例不改变类数量；编码与历史相关 Agent 从每 Flow 一份再加两份历史专用实例，变为固定两份。图中包外类和函数另计节点。</p>
+    <p class="muted">数量沿革：旧图 33 类 → 合入 main 后 49 类 → Agent 职责收拢 48 类 → c0da88d 共享编码 / 历史实例仍为 48 类 → 本轮删除 NativeAgentInference / _LegacyManifest / _LegacySlot 后 45 类。LocalFile、AmpAttachment 仅迁移，无新增包装类；四类操作共用固定两个 Agent。图中包外类和函数另计节点。</p>
     <p class="muted">图为当前 checkout 的手工关系快照，类清单与行号经 AST 核对；源码链接随仓库版本一起检出。配套说明：<a href="worker-classes.md">类清单、函数模块与维护方法</a>。</p>
   </section>
   <script>
@@ -148,14 +148,14 @@
     // use module-qualified IDs while retaining their exact AST name.
     const nodes = [
       {id:"WorkerSettings",file:"config.py",line:12,x:40,y:82,kind:"model",base:"BaseSettings",role:"配置 / 隔离与安全约束"},
-      {id:"WorkerRuntime",file:"runtime.py",line:149,x:385,y:82,role:"多 Flow / 共享 Agent / 路由"},
+      {id:"WorkerRuntime",file:"runtime.py",line:149,x:385,y:82,role:"多 Flow / 共享 Agent / 推理端口"},
       {id:"WorkerRootLock",file:"runtime.py",line:108,x:730,y:82,role:"根目录独占与身份锁"},
       {id:"HealthFile",file:"health.py",line:12,x:1075,y:82,role:"写入本地连接状态探针"},
       {id:"Connection",file:"runtime.py",line:69,x:1420,y:82,kind:"protocol",base:"Protocol",role:"WebSocket send / recv / close"},
       {id:"WebSocketTransport",file:"runtime.py",line:75,x:1765,y:82,role:"映射为共享 Transport IO"},
       {id:"WorkerStateCallbacks",file:"transport/state.py",line:90,x:40,y:300,role:"注册 / 库存 / 恢复与停止握手"},
       {id:"WorkerBusinessCallbacks",file:"transport/business.py",line:29,x:282,y:300,role:"历史查询 / 借用工具 Future"},
-      {id:"WorkerFileCallbacks",file:"transport/files.py",line:21,x:40,y:430,role:"有界异步文件读取与回复"},
+      {id:"WorkerFileCallbacks",file:"transport/files.py",line:25,x:40,y:430,role:"解析 Agent / 直接 read_file"},
       {id:"WorkerExecution",file:"execution/lifecycle.py",line:76,x:570,y:300,role:"本 Flow 的 Task / 工具 / 停止"},
       {id:"TaskExecutor",file:"execution/lifecycle.py",line:37,x:812,y:300,kind:"protocol",base:"Protocol",role:"execute() / 等待子进程清理"},
       {id:"PendingToolCall",file:"execution/lifecycle.py",line:69,x:570,y:430,kind:"model",base:"dataclass",role:"request + 原调用者 Future"},
@@ -173,38 +173,37 @@
       {id:"_LegacyRecord",file:"state/record.py",line:105,x:1100,y:560,kind:"model",base:"_RecordFields · journal v4",role:"校验旧凭据并转为当前记录"},
       {id:"JournalSelection",file:"state/record.py",line:29,x:1342,y:560,kind:"model",base:"ProtocolModel",role:"锁内迁移旧 current.json"},
       {id:"ProtocolModel",file:"app/contracts/protocol.py",line:51,x:1100,y:690,kind:"external",base:"包外 BaseModel · 不计数",role:"共享协议模型校验配置"},
-      {id:"RepositoryWorkspaces",file:"execution/workspaces.py",line:123,x:1630,y:300,role:"目录库存 / claim / release"},
+      {id:"RepositoryWorkspaces",file:"execution/workspaces.py",line:107,x:1630,y:300,role:"目录库存 / claim / release"},
       {id:"WorkspaceManifest",file:"execution/workspaces.py",line:87,x:1872,y:300,kind:"model",base:"BaseModel · manifest v3",role:"root / inference / slots[]"},
       {id:"WorkspaceSlot",file:"execution/workspaces.py",line:55,x:1630,y:430,kind:"model",base:"BaseModel",role:"位置 / generation / 清理身份"},
       {id:"WorkspaceBinding",file:"execution/workspaces.py",line:45,x:1872,y:430,kind:"model",base:"BaseModel · frozen",role:"repo / slot / flow / generation"},
       {id:"InferenceWorkspace",file:"execution/workspaces.py",line:81,x:1630,y:560,kind:"model",base:"BaseModel",role:"无仓库目录身份"},
       {id:"RepositoryProvisionError",file:"execution/workspaces.py",line:37,x:1872,y:560,kind:"error",base:"VcsVerificationError",role:"可分类的本地容量拒绝"},
-      {id:"_LegacyManifest",file:"execution/workspaces.py",line:104,x:1630,y:690,kind:"model",base:"BaseModel · manifest v1",role:"旧库存格式兼容读取"},
-      {id:"_LegacySlot",file:"execution/workspaces.py",line:96,x:1872,y:690,kind:"model",base:"BaseModel",role:"旧 binding / 路径 / state"},
       {id:"Gateway",file:"app/communication/gateway.py",line:30,x:40,y:1080,kind:"external",base:"包外 class · 不计数",role:"peer 路由 / 串行驱动与连接收尾"},
       {id:"Session",file:"app/communication/session.py",line:44,x:282,y:1080,kind:"external",base:"包外 class · 不计数",role:"单 reader / FIFO / watch / IO"},
       {id:"Dispatcher",file:"app/communication/dispatch.py",line:18,x:40,y:1210,kind:"external",base:"包外 class · 不计数",role:"路由 / 回复关联 / 生命周期钩子"},
       {id:"Transport",file:"app/communication/session.py",line:28,x:282,y:1210,kind:"external",base:"包外 Protocol · 不计数",role:"send_text / receive_text / close"},
       {id:"SessionCallbacks",file:"app/communication/dispatch.py",line:14,x:40,y:1340,kind:"external",base:"包外 Protocol · 不计数",role:"bind(Dispatcher)"},
-      {id:"CodingAgent",file:"coding_agent.py",line:10,x:570,y:1080,kind:"protocol",base:"Protocol · worker 内接口",role:"start / resume / read_history"},
-      {id:"CodexAgent",file:"execution/codex.py",line:119,x:570,y:1210,role:"Codex 执行 / 自有历史 reader"},
-      {id:"CodexHistory",file:"execution/codex.py",line:304,x:812,y:1210,role:"原生 rollout JSONL / 分页"},
-      {id:"codex._OutputLimit",name:"_OutputLimit",file:"execution/codex.py",line:42,x:570,y:1340,kind:"error",base:"Exception · codex.py",role:"Codex 有界输出超限"},
-      {id:"AmpCodingAgent",file:"execution/amp_agent.py",line:235,x:1100,y:1210,role:"Amp 执行 / run_process / 历史"},
-      {id:"AmpHistory",file:"execution/amp_agent.py",line:430,x:1342,y:1210,role:"原生 export / 脱敏 / 分页"},
-      {id:"AmpProcessResult",file:"execution/amp_agent.py",line:108,x:1100,y:1340,kind:"model",base:"dataclass · frozen",role:"stdout / stderr / 退出状态"},
-      {id:"_Snapshot",file:"execution/amp_agent.py",line:424,x:1342,y:1340,kind:"model",base:"dataclass",role:"公开历史块 / 缓存时间"},
-      {id:"amp._OutputLimit",name:"_OutputLimit",file:"execution/amp_agent.py",line:116,x:1100,y:1470,kind:"error",base:"Exception · amp_agent.py",role:"Amp 进程有界管道超限"},
-      {id:"FileLinks",file:"state/file_links.py",line:46,x:1630,y:1080,role:"持久不透明文件 ID / 按需读取"},
-      {id:"LocalFile",file:"state/file_links.py",line:17,x:1872,y:1080,kind:"model",base:"BaseModel",role:"path / device / inode 身份"},
-      {id:"AmpAttachment",file:"state/amp_attachments.py",line:16,x:1630,y:1210,kind:"model",base:"BaseModel · frozen",role:"白名单附件 URL / 有界下载"},
+      {id:"CodingAgent",file:"coding_agent.py",line:45,x:570,y:1080,kind:"protocol",base:"Protocol · 本地文件默认实现",role:"编码 / 历史 / 文件契约"},
+      {id:"CodexAgent",file:"execution/codex.py",line:120,x:570,y:1210,base:"CodingAgent · backend=codex",role:"Codex 执行 / 历史 / 本地文件"},
+      {id:"CodexHistory",file:"execution/codex.py",line:311,x:812,y:1210,role:"原生 rollout JSONL / 分页"},
+      {id:"codex._OutputLimit",name:"_OutputLimit",file:"execution/codex.py",line:43,x:570,y:1340,kind:"error",base:"Exception · codex.py",role:"Codex 有界输出超限"},
+      {id:"AmpCodingAgent",file:"execution/amp_agent.py",line:240,x:1100,y:1210,base:"CodingAgent · backend=amp",role:"Amp 执行 / 历史 / 附件 IO"},
+      {id:"AmpHistory",file:"execution/amp_agent.py",line:515,x:1342,y:1210,role:"原生 export / 脱敏 / 分页"},
+      {id:"AmpProcessResult",file:"execution/amp_agent.py",line:113,x:1100,y:1340,kind:"model",base:"dataclass · frozen",role:"stdout / stderr / 退出状态"},
+      {id:"_Snapshot",file:"execution/amp_agent.py",line:509,x:1342,y:1340,kind:"model",base:"dataclass",role:"公开历史块 / 缓存时间"},
+      {id:"amp._OutputLimit",name:"_OutputLimit",file:"execution/amp_agent.py",line:121,x:1100,y:1470,kind:"error",base:"Exception · amp_agent.py",role:"Amp 进程有界管道超限"},
+      {id:"FileLinks",file:"state/file_links.py",line:15,x:1630,y:1080,role:"backend / source / 去重 / lookup"},
+      {id:"LocalFile",file:"coding_agent.py",line:17,x:1872,y:1080,kind:"model",base:"BaseModel",role:"path / device / inode 身份"},
+      {id:"AmpAttachment",file:"execution/amp_agent.py",line:452,x:1630,y:1210,kind:"model",base:"BaseModel · frozen",role:"URL / name / 有界 read()"},
       {id:"link_history()",file:"state/history_links.py",line:171,x:1872,y:1210,kind:"function",base:"函数锚点 · 不计数",role:"出站副本的 Markdown 文件链接"},
       {id:"HistoryQuery",file:"app/contracts/conversation.py",line:19,x:1630,y:1340,kind:"external",base:"包外模型 · 不计数",role:"session / cursor / limit"},
       {id:"HistoryPage",file:"app/contracts/conversation.py",line:81,x:1872,y:1340,kind:"external",base:"包外模型 · 不计数",role:"items / cursor / status"},
       {id:"InstalledPackage",file:"self_update.py",line:39,x:1630,y:1620,kind:"model",base:"dataclass · frozen",role:"核验后的 sha / package_path"},
       {id:"UpdateError",file:"self_update.py",line:34,x:1872,y:1620,kind:"error",base:"RuntimeError",role:"安装 / 更新安全失败"},
       {id:"update_worker()",file:"self_update.py",line:233,x:1630,y:1750,kind:"function",base:"函数锚点 · 不计数",role:"CLI --update 独立执行"},
-      {id:"NativeAgentInference",file:"execution/inference.py",line:31,x:570,y:1810,role:"空目录 / 仅 start 的独立推理"},
+      {id:"capability()",file:"execution/inference.py",line:32,x:570,y:1680,kind:"function",base:"无状态函数 · 非类 / 不计数",role:"CLI / 无仓库目录 / 写入探测"},
+      {id:"infer()",file:"execution/inference.py",line:64,x:570,y:1810,kind:"function",base:"无状态函数 · 非类 / 不计数",role:"共享 Agent / 新会话 / 调用预算"},
       {id:"WorkerInferenceCallbacks",file:"app/inference/transport.py",line:29,x:812,y:1810,kind:"external",base:"包外 class · 不计数",role:"连接拥有的推理槽位 / 取消"},
       {id:"InferenceTask",file:"app/domain/inference_models.py",line:39,x:570,y:1940,kind:"external",base:"包外模型 · 不计数",role:"消息 / schema / 输入输出预算"},
       {id:"InferenceOutput",file:"app/domain/inference_models.py",line:72,x:812,y:1940,kind:"external",base:"包外模型 · 不计数",role:"回答 / digest / adapter 版本"},
@@ -219,12 +218,14 @@
       ["WorkerRuntime","WorkerRootLock","ref","root_lock（创建）"],
       ["WorkerRuntime","WorkerExecution","ref","executions[flow_id]；跨重连保留"],
       ["WorkerRuntime","RepositoryWorkspaces","ref","workspaces；所有 Flow 共用"],
-      ["WorkerRuntime","NativeAgentInference","ref","inference；独立 Agent 与无仓库目录"],
+      ["WorkerRuntime","capability()","use","inference_capability()；root=workspaces.inference_path"],
+      ["WorkerRuntime","infer()","use","infer(task)；共享 _agents[配置后端]，cwd=workspaces.inference_path"],
+      ["WorkerRuntime","Inference","realize","Runtime 自身实现 infer(task)，不新增适配包装类"],
       ["WorkerRuntime","Gateway","ref","gateway；路由当前 server 连接"],
       ["WorkerRuntime","FileLinks","ref","files；跨任务持久登记"],
-      ["WorkerRuntime","CodingAgent","ref","_agents；每后端一个，编码与历史共享实例"],
-      ["WorkerRuntime","CodexAgent","use","创建共享编码 / 历史 Agent；选中时另建小预算推理实例"],
-      ["WorkerRuntime","AmpCodingAgent","use","创建共享编码 / 历史 Agent；选中时另建小预算推理实例"],
+      ["WorkerRuntime","CodingAgent","ref","_agents；每后端一个，编码 / 推理 / 历史 / 文件共用"],
+      ["WorkerRuntime","CodexAgent","use","仅创建一个共享 Codex 后端实例"],
+      ["WorkerRuntime","AmpCodingAgent","use","仅创建一个共享 Amp 后端实例"],
       ["WorkerRuntime","ExecutionState","use","scan()；每个 Flow 创建一个状态对象"],
       ["WorkerRuntime","WorkerExecutor","use","每个 Flow 创建，注入 state、共享 Agent 与目录池"],
       ["WorkerRuntime","HealthFile","use","_report_health() 创建"],
@@ -238,7 +239,6 @@
       ["WorkerRuntime","WorkerInferenceCallbacks","use","每次连接创建与关闭；加入推理清理"],
       ["WorkerRuntime","WorkerProtocolError","use","拒绝无效 execution / workspace 身份"],
       ["WorkerRuntime","link_history()","use","read_history()：读取后登记出站文件链接"],
-      ["WorkerRuntime","AmpAttachment","use","register_file(Path | AmpAttachment)"],
       ["Gateway","Session","ref","经 Registration 持有连接；不拥有编码执行"],
       ["Gateway","Dispatcher","use","serve() 创建一个串行路由器"],
       ["Gateway","SessionCallbacks","use","serve(*callbacks) 调用 bind(routes)"],
@@ -260,7 +260,8 @@
       ["WorkerBusinessCallbacks","WorkerProtocolError","use","拒绝工具回复身份不匹配"],
       ["WorkerBusinessCallbacks","SessionCallbacks","realize","bind(routes) 结构化满足"],
       ["WorkerFileCallbacks","Session","ref","session；异步文件读取完成后发送"],
-      ["WorkerFileCallbacks","FileLinks","ref","files（注入 Runtime 的共享实例）"],
+      ["WorkerFileCallbacks","WorkerRuntime","use","注入绑定的 resolve_file 回调；返回既有 Agent + source"],
+      ["WorkerFileCallbacks","CodingAgent","use","直接 await agent.read_file(source, root=worker_root)"],
       ["WorkerFileCallbacks","Dispatcher","use","bind() 注册读取路由与 prepare 钩子"],
       ["WorkerFileCallbacks","SessionCallbacks","realize","bind(routes) 结构化满足"],
       ["WorkerExecution","TaskExecutor","ref","executor；拥有执行 Task 与取消 / join"],
@@ -272,8 +273,8 @@
       ["WorkerExecutor","TaskExecutor","realize","结构化满足"],
       ["WorkerExecution","FlowToolCaller","realize","tool_caller=self；不依赖当前连接"],
       ["WorkerExecutor","CodingAgent","ref","code_agent；注入 Runtime 共享实例，与同后端历史查询共用"],
-      ["CodexAgent","CodingAgent","realize","结构化满足"],
-      ["AmpCodingAgent","CodingAgent","realize","结构化满足"],
+      ["CodexAgent","CodingAgent","inherit","显式继承；复用本地 register_file / read_file 默认实现"],
+      ["AmpCodingAgent","CodingAgent","inherit","显式继承；扩展附件 URL，保留本地文件默认实现"],
       ["WorkerExecutor","ExecutionState","ref","state；与 WorkerExecution 共用"],
       ["WorkerExecutor","RepositoryWorkspaces","ref","workspaces；Runtime 创建并注入"],
       ["WorkerExecutor","FlowToolCaller","use","execute() 的临时入参"],
@@ -299,42 +300,40 @@
       ["RepositoryWorkspaces","WorkspaceBinding","use","claim / lookup / release；校验 generation"],
       ["RepositoryWorkspaces","WorkspaceSlot","use","创建 / 更新槽位"],
       ["RepositoryWorkspaces","InferenceWorkspace","use","initialize() 创建默认无仓库位置"],
-      ["RepositoryWorkspaces","_LegacyManifest","use","_load() 兼容旧 manifest v1"],
       ["RepositoryWorkspaces","RepositoryProvisionError","use","容量不足时抛出"],
       ["RepositoryWorkspaces","VcsVerificationError","use","抛出 / 捕获"],
       ["RepositoryProvisionError","VcsVerificationError","inherit","继承；增加 ProvisionError code"],
       ["WorkspaceManifest","WorkspaceSlot","ref","slots: 0..*"],
       ["WorkspaceManifest","InferenceWorkspace","ref","inference: 0..1"],
       ["WorkspaceSlot","WorkspaceBinding","ref","binding: 0..1"],
-      ["_LegacyManifest","_LegacySlot","ref","slots: 0..*"],
-      ["_LegacySlot","WorkspaceBinding","ref","binding: 1"],
       ["CodexAgent","CodexHistory","ref","_history（每个 Agent 自建）"],
       ["CodexAgent","codex._OutputLimit","use","本模块 read() 抛出 / _run() 捕获"],
       ["AmpCodingAgent","AmpHistory","ref","_history（每个 Agent 自建）"],
       ["AmpCodingAgent","AmpProcessResult","use","run_process() 返回；_outcome() 解析"],
       ["AmpCodingAgent","amp._OutputLimit","use","run_process() 的 read() 抛出 / 外层捕获"],
+      ["AmpCodingAgent","AmpAttachment","use","register_file / read_file 校验 URL 身份并调用 read(root)"],
       ["AmpHistory","AmpCodingAgent","use","静态 run_process() 执行只读 thread export"],
       ["AmpHistory","AmpProcessResult","use","检查 export 的状态与有界 stdout"],
       ["CodingAgent","CodingExecutionContext","use","start / resume 的可空 context"],
       ["CodingAgent","CodingExecutionResult","use","start / resume 返回"],
       ["CodingAgent","HistoryQuery","use","read_history(query)"],
       ["CodingAgent","HistoryPage","use","read_history() 返回"],
+      ["CodingAgent","LocalFile","use","本地默认实现校验 path / device / inode 并有界读取"],
+      ["CodingAgent","FileLinks","use","register_file(source, files)；登记 backend + 不透明 source"],
       ["CodexHistory","HistoryQuery","use","query() 读取游标与 session"],
       ["CodexHistory","HistoryPage","use","构造原生 JSONL 的公开分页"],
       ["AmpHistory","HistoryQuery","use","query() 校验公开投影的游标"],
       ["AmpHistory","HistoryPage","use","构造原生 export 的公开分页"],
       ["link_history()","HistoryPage","use","深拷贝；只改写出站 Markdown 目标"],
-      ["link_history()","AmpAttachment","use","识别白名单远端附件并传给 register 回调"],
-      ["link_history()","WorkerRuntime","use","register 回调绑定 Runtime.register_file"],
-      ["FileLinks","LocalFile","use","读写持久 path / inode / device 身份"],
-      ["FileLinks","AmpAttachment","use","读写持久 URL 身份；read() 按需下载"],
+      ["link_history()","AmpAttachment","use","识别白名单附件对象；name 用于显示，url URI 始终由 Amp 登记，不受历史来源影响"],
+      ["link_history()","WorkerRuntime","use","register(source, owner) 回调绑定 Runtime.register_file；Path 沿用历史 backend，附件 URI 固定 amp"],
       ["AmpAttachment","AmpCodingAgent","use","静态 run_process() 下载；限制时间 / 输出 / 文件"],
-      ["NativeAgentInference","CodingAgent","ref","agent；更小输出预算，独立于共享编码 / 历史实例"],
-      ["NativeAgentInference","InferenceTask","use","infer(task)；冻结输入与预算"],
-      ["NativeAgentInference","InferenceOutput","use","返回且 validate_for(task)"],
-      ["NativeAgentInference","CodingExecutionResult","use","仅 agent.start(context=None)；核验回答"],
-      ["NativeAgentInference","Inference","realize","结构化满足共享推理端口"],
-      ["WorkerInferenceCallbacks","Inference","ref","inference；Runtime 注入 NativeAgentInference"],
+      ["infer()","capability()","use","每次推理重新探测前置条件和输入预算"],
+      ["infer()","CodingAgent","use","共享 Agent 入参；start(context=None, max_output_bytes=task.max_output_bytes)"],
+      ["infer()","InferenceTask","use","冻结消息、schema、输入输出和超时预算"],
+      ["infer()","InferenceOutput","use","返回且 validate_for(task)"],
+      ["infer()","CodingExecutionResult","use","仅 start 新会话；核验退出、最终答案和预算"],
+      ["WorkerInferenceCallbacks","Inference","ref","inference=self；Runtime 自身满足端口并复用既有 Agent"],
       ["WorkerInferenceCallbacks","Session","ref","session；观察推理完成并发送结果"],
       ["WorkerInferenceCallbacks","Dispatcher","use","bind() 注册 worker.infer"],
       ["WorkerInferenceCallbacks","SessionCallbacks","realize","bind(routes) 结构化满足"],
@@ -350,10 +349,10 @@
       [1080,230,500,590,"持久执行证据 · state/{execution,record}.py"],
       [1610,230,510,590,"目录库存与身份 · execution/workspaces.py"],
       [20,1010,500,440,"共享通信边界 · app/communication/（灰色不计数）"],
-      [550,1010,1030,610,"Agent 接口、原生执行与自有历史"],
-      [1610,1010,510,440,"文件身份与历史出站链接 · state/"],
+      [550,1010,1030,570,"Agent 接口、原生执行与自有历史"],
+      [1610,1010,510,440,"文件身份、登记与历史出站投影"],
       [1610,1550,510,350,"独立 CLI 更新分支 · self_update.py"],
-      [550,1740,500,310,"独立推理与共享回调 · execution/inference.py"],
+      [550,1610,500,440,"无状态推理函数 / 连接回调（灰色不计数）"],
       [1080,1740,500,310,"领域执行边界 · app/domain/{models,ports}.py"]
     ];
     const namespace = "http://www.w3.org/2000/svg";
@@ -479,7 +478,7 @@
       document.querySelector("#status").textContent = id ? `${id} · ${related.length} 条直接关系` : `全部 ${classCount} 个类 · ${edges.length} 条关系 · 选择类后高亮一跳关系`;
       document.querySelector("#detail-title").textContent = id || "从 WorkerRuntime 开始";
       document.querySelector("#detail-meta").textContent = id ? (byId.get(id).base || "普通类，无自定义基类") : "点选图中任意类，或使用上方下拉框。Tab / Enter 也可操作节点。";
-      document.querySelector("#detail-role").textContent = id ? byId.get(id).role : "Runtime 按后端持有共享 Agent，编码执行与历史查询复用同一实例；每个 Flow 的执行状态独立，推理另用小输出预算实例。";
+      document.querySelector("#detail-role").textContent = id ? byId.get(id).role : "Runtime 按后端持有共享 Agent，编码、推理、历史和文件复用同一实例；每个 Flow 的执行状态独立，最终答案预算按推理调用传入。";
       if (!id) return;
       const node = byId.get(id), link = document.createElement("a");
       const path = node.file.startsWith("app/") ? node.file : `app/worker/${node.file}`;
@@ -533,7 +532,7 @@
       const rules = [...document.styleSheets[0].cssRules]
         .filter(rule => rule.selectorText && /\.(node|edge|group-)/.test(rule.selectorText));
       svg("style",{},copy,"svg { background:white; font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif; --accent:#1f6fe0; }\n" + rules.map(rule => rule.cssText).join("\n"));
-      svg("text",{x:20,y:-48,"font-size":23,fill:"#172231"},copy,`Worker 全量类关系图 · ${classCount} 个类 · 2026-11-17 checkout（编码与历史共享 Agent）`);
+      svg("text",{x:20,y:-48,"font-size":23,fill:"#172231"},copy,`Worker 全量类关系图 · ${classCount} 个类 · 2026-11-17 checkout（编码 / 推理 / 历史 / 文件共用 Agent）`);
       svg("text",{x:20,y:-18,fill:"#526276"},copy,`实线 → 持有 / 字段 · 虚线 → 使用 · 实线 ▷ 继承 · 虚线 ▷ Protocol · 灰色节点不计数 · ${edges.length} 条关系`);
       return new XMLSerializer().serializeToString(copy);
     }

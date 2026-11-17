@@ -29,6 +29,7 @@ from app.domain.models import (
     CodingExecutionResult,
     SessionUnavailable,
 )
+from app.worker.coding_agent import CodingAgent
 from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 from app.worker.execution.gh import github_environment
 from app.worker.execution.idle import wait_for_inactivity
@@ -116,8 +117,10 @@ def _parse_thread_id(jsonl_text: str) -> str | None:
     return None
 
 
-class CodexAgent:
+class CodexAgent(CodingAgent):
     """Adapt Codex coding requests and native history to the worker CodingAgent contract."""
+
+    backend = "codex"
 
     def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0,
                  max_output_bytes: int = 8 * 1024 * 1024):
@@ -139,13 +142,15 @@ class CodexAgent:
         context: CodingExecutionContext | None = None,
         model: str | None = None,
         effort: str | None = None,
+        max_output_bytes: int | None = None,
     ) -> CodingExecutionResult:
         args = _start_args(task, cwd, trusted_host=self.trusted_host, context=context)
         if model is not None:
             args.extend(["--model", model])
         if effort is not None:
             args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
-        return await self._run(args, output_schema, cwd=cwd, parse_thread=True, context=context)
+        return await self._run(args, output_schema, cwd=cwd, parse_thread=True, context=context,
+                               max_output_bytes=max_output_bytes)
 
     async def resume(
         self, session_id: str, prompt: str, *, cwd: Path, output_schema: Path | None = None,
@@ -178,7 +183,9 @@ class CodexAgent:
         parse_thread: bool,
         session_id: str | None = None,
         context: CodingExecutionContext | None = None,
+        max_output_bytes: int | None = None,
     ) -> CodingExecutionResult:
+        answer_limit = self.max_output_bytes if max_output_bytes is None else max_output_bytes
         with tempfile.TemporaryDirectory(prefix="flowtool-coding-") as directory:
             run_directory = Path(directory)
             environment = _codex_environment(context=context)
@@ -273,8 +280,8 @@ class CodexAgent:
             raw = b""
             if last_file.exists():
                 with last_file.open("rb") as stream:
-                    raw = stream.read(self.max_output_bytes + 1)
-            if len(raw) > self.max_output_bytes:
+                    raw = stream.read(answer_limit + 1)
+            if len(raw) > answer_limit:
                 return CodingExecutionResult(session_id=sid, last_message="", exit_code=1,
                     failure_detail="Codex final answer exceeded byte limit", failure_kind="output_limit")
             last_message = raw.decode()

@@ -176,7 +176,8 @@ class RevisionAgent:
         return CodingExecutionResult(session_id,
                         "" if self.behavior == "empty" else revision_output().model_dump_json(), 0)
 
-    async def start(self, prompt, cwd, *, output_schema=None, context=None, model=None, effort=None):
+    async def start(self, prompt, cwd, *, output_schema=None, context=None, model=None,
+                    effort=None, max_output_bytes=None):
         assert cwd == self.repo
         self.models.append(model)
         self.efforts.append(effort)
@@ -994,7 +995,8 @@ async def test_session_fallback_keeps_fetched_snapshot_when_remote_advances(
             _git("push", "origin", task.branch, cwd=revision_collaborator)
             raise SessionUnavailable("rejected")
 
-        async def start(self, prompt, cwd, *, output_schema=None, context=None, model=None, effort=None):
+        async def start(self, prompt, cwd, *, output_schema=None, context=None, model=None,
+                        effort=None, max_output_bytes=None):
             self.calls.append(("start", context, prompt))
             assert (cwd / "external.txt").read_text() == "external contents\n"
             assert f"Fetched coding baseline: {baseline}" in prompt

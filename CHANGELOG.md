@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- Worker 的推理、历史和文件操作复用现有编码 Agent。推理直接在已登记的 inference workspace
+  启动新会话，按调用传入答案预算；仅通过 prompt 约束只返回结果，不新增工具禁用模式。
+  `CodingAgent` 提供文件注册/读取协议及本地默认实现，`AmpAttachment` 归入 Amp 后端，
+  文件 callback 按登记归属调用原有 Agent；保留旧文件链接。删除 workspace manifest v1
+  的两个 Legacy 模型及转换，旧格式只报错、不改写；同步完整类图，不改 wire 或部署。
 - Worker 后端职责收拢：`CodingAgent` 移入 worker，统一编码与只读历史接口；Codex/Amp 的
   原生 history 各归对应后端，执行状态不再读取历史。Amp 进程监督直接并入 `AmpCodingAgent`，
   删除 `_Init` / `_Result` 包装类及三份搬空模块；保留严格终态校验、超时、脱敏与取消回收。

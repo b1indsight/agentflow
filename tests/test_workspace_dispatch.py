@@ -36,7 +36,7 @@ from tests.test_worker_workspaces import managed_seed
 from tests.worker_fixtures import NamingInference
 
 
-class ControlledWorker(WorkerRuntime):
+class ControlledWorker(NamingInference, WorkerRuntime):
     def __init__(self, root: Path, limit: int) -> None:
         super().__init__(WorkerSettings(
             worker_id="worker-a", worker_token=SecretStr("test"), serve_ws_url="wss://unused",
@@ -44,7 +44,6 @@ class ControlledWorker(WorkerRuntime):
         ))
         self.running: dict[int, Path] = {}
         self.finish: dict[int, asyncio.Event] = {}
-        self.inference = NamingInference()  # type: ignore[assignment]
 
     def _create_execution(self, flow_id: int) -> WorkerExecution:
         state = ExecutionState(self.settings.worker_root, flow_id)

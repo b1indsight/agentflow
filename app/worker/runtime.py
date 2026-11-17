@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import IO, Protocol
 
 from loguru import logger
+from pydantic import JsonValue
 from websockets.asyncio.client import connect
 
 from app.communication.gateway import Gateway
@@ -31,19 +32,18 @@ from app.contracts.protocol import (
     message_header,
 )
 from app.contracts.validation import parse_server_input
-from app.domain.inference_models import MAX_OUTPUT_BYTES
+from app.domain.inference_models import InferenceCapability, InferenceOutput, InferenceTask
 from app.inference.transport import InferenceProtocolError, WorkerInferenceCallbacks
 from app.telemetry.logging import configure_logging
 from app.worker.coding_agent import CodingAgent
 from app.worker.config import WorkerSettings
+from app.worker.execution import inference
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
 from app.worker.execution.executor import WorkerExecutor
-from app.worker.execution.inference import NativeAgentInference
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.health import HealthFile
-from app.worker.state.amp_attachments import AmpAttachment
 from app.worker.state.execution import ExecutionState
 from app.worker.state.file_links import FileLinks
 from app.worker.state.history_links import link_history
@@ -162,23 +162,13 @@ class WorkerRuntime:
         self.executions: dict[int, WorkerExecution] = {}
         self._changed = asyncio.Event()
         self._initialized = False
-        # Coding and history share backend instances; per-run state stays in each call.
+        # Coding, inference, history and files share instances; per-run state stays in each call.
         self._agents: dict[str, CodingAgent] = {
             "codex": CodexAgent(trusted_host=self.settings.trusted_host_execution,
                                 timeout=self.settings.codex_run_timeout_seconds),
             "amp": AmpCodingAgent(trusted_host=self.settings.trusted_host_execution,
                                   timeout=self.settings.amp_run_timeout_seconds),
         }
-        timeout = (self.settings.amp_run_timeout_seconds if self.settings.coding_agent == "amp"
-                   else self.settings.codex_run_timeout_seconds)
-        agent_type = AmpCodingAgent if self.settings.coding_agent == "amp" else CodexAgent
-        # Answer-only inference keeps its smaller output budget separate from coding.
-        self.inference = NativeAgentInference(
-            agent_type(trusted_host=self.settings.trusted_host_execution, timeout=timeout,
-                       max_output_bytes=MAX_OUTPUT_BYTES),
-            root=self.settings.worker_root / "inference", backend=self.settings.coding_agent, timeout=timeout,
-            enabled=self.settings.trusted_host_execution,
-        )
         self.gateway = Gateway[ServerMessageUnion, WorkerMessageUnion]()
         self._connected = False
         self.files = FileLinks(self.settings.worker_root)
@@ -189,7 +179,6 @@ class WorkerRuntime:
         if self._initialized:
             return
         self.workspaces.initialize()
-        self.inference.root = self.workspaces.inference_path
         for flow_id in ExecutionState.scan(self.settings.worker_root):
             execution = self._create_execution(flow_id)
             execution.state.reconcile_acknowledgement()
@@ -255,15 +244,44 @@ class WorkerRuntime:
     async def read_history(self, query: HistoryQuery) -> HistoryPage:
         """Page native history first, then register destinations only in its outbound copy."""
         deadline = asyncio.get_running_loop().time() + HISTORY_TIMEOUT
-        source = self._agents["amp" if query.session_id.startswith("T-") else "codex"]
+        backend = "amp" if query.session_id.startswith("T-") else "codex"
+        source = self._agents[backend]
         try:
             async with asyncio.timeout_at(deadline):
                 page = await asyncio.to_thread(source.read_history, query)
         except TimeoutError:
             raise ConversationFailure("query_timeout") from None
-        return await link_history(page, self.register_file, deadline=deadline)
+        return await link_history(page, self.register_file, backend=backend, deadline=deadline)
 
-    async def register_file(self, source: Path | AmpAttachment) -> str:
+    def inference_capability(self) -> InferenceCapability | None:
+        """Advertise inference only when the existing workspace and native CLI are usable."""
+        return inference.capability(
+            root=self.workspaces.inference_path, backend=self.settings.coding_agent,
+            enabled=self.settings.trusted_host_execution,
+        )
+
+    async def infer(self, task: InferenceTask) -> InferenceOutput:
+        """Run an independent answer session on the configured, shared coding backend."""
+        settings = self.settings
+        timeout = (settings.amp_run_timeout_seconds if settings.coding_agent == "amp"
+                   else settings.codex_run_timeout_seconds)
+        return await inference.infer(
+            self._agents[settings.coding_agent], task, root=self.workspaces.inference_path,
+            backend=settings.coding_agent, timeout=timeout, enabled=settings.trusted_host_execution,
+        )
+
+    async def resolve_file(self, file_id: str) -> tuple[CodingAgent, dict[str, JsonValue]]:
+        """Recover the registering backend independently of active Flows and coding settings."""
+        backend, source = await asyncio.to_thread(self.files.lookup, file_id)
+        if backend is None:
+            # Pre-ownership records used only local identities and Amp attachment URLs.
+            backend = "amp" if "url" in source else self.settings.coding_agent
+        agent = self._agents.get(backend)
+        if agent is None:
+            raise FileFailure("file_unreadable")
+        return agent, source
+
+    async def register_file(self, source: Path | str, backend: str | None = None) -> str:
         """Return an owner-only URL for local bytes or a private Amp attachment (at most 512 KiB).
 
         Call on this runtime's loop, outside Session callbacks, after registration.
@@ -278,7 +296,8 @@ class WorkerRuntime:
         try:
             registration.session.check_request()
             async with asyncio.timeout(10):
-                file_id = await asyncio.to_thread(self.files.register, source)
+                agent = self._agents[backend or self.settings.coding_agent]
+                file_id = await asyncio.to_thread(agent.register_file, source, self.files)
                 call = FileRegister(**call_header(), method="server.file_register", file_id=file_id)
                 response, _ = await request_reply(
                     registration, call, FileRegistered,
@@ -354,20 +373,22 @@ class WorkerRuntime:
         )
         try:
             inference_callbacks = WorkerInferenceCallbacks(
-                session=session, inference=self.inference, ready=lambda: state_callbacks.ready,
+                session=session, inference=self, ready=lambda: state_callbacks.ready,
             )
             state_callbacks = WorkerStateCallbacks(
                 worker_id=self.settings.worker_id,
                 session=session,
                 runtime=self,
                 on_ready=self._set_connected,
-                inference=await asyncio.to_thread(self.inference.capability),
+                inference=await asyncio.to_thread(self.inference_capability),
                 inference_callbacks=inference_callbacks,
             )
             business_callbacks = WorkerBusinessCallbacks(
                 session=session, runtime=self, ready=lambda: state_callbacks.ready,
             )
-            file_callbacks = WorkerFileCallbacks(session=session, files=self.files)
+            file_callbacks = WorkerFileCallbacks(
+                session=session, resolve_file=self.resolve_file, root=self.settings.worker_root,
+            )
         except BaseException:
             await session.close()
             raise

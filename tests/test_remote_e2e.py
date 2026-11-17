@@ -102,7 +102,8 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
             self.models: list[str | None] = []
             self.efforts: list[str | None] = []
 
-        async def start(self, task, cwd, *, output_schema=None, context=None, model=None, effort=None):
+        async def start(self, task, cwd, *, output_schema=None, context=None, model=None,
+                        effort=None, max_output_bytes=None):
             self.models.append(model)
             self.efforts.append(effort)
             self.started.append((task, cwd))
@@ -124,7 +125,9 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
     # Script coding on the shared backend instance while keeping native history reads real.
     monkeypatch.setattr(agent, "read_history", worker._agents[worker.settings.coding_agent].read_history)
     monkeypatch.setitem(worker._agents, worker.settings.coding_agent, agent)
-    worker.inference = NamingInference()
+    inference = NamingInference()
+    monkeypatch.setattr(worker, "infer", inference.infer)
+    monkeypatch.setattr(worker, "inference_capability", inference.inference_capability)
     worker.root_lock.acquire()
     worker.initialize()
     try:

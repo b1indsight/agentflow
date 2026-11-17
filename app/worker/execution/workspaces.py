@@ -93,22 +93,6 @@ class WorkspaceManifest(BaseModel):
     slots: list[WorkspaceSlot] = Field(default_factory=list)
 
 
-class _LegacySlot(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    binding: WorkspaceBinding
-    relative_path: str
-    kind: Literal["copy", "worktree"]
-    state: Literal["preparing", "occupied", "idle", "releasing", "absent", "quarantined"]
-
-
-class _LegacyManifest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    version: Literal[1]
-    worker_id: str
-    root_identity: tuple[str, int, int]
-    slots: list[_LegacySlot]
-
-
 def validate_repository(repository: str) -> tuple[str, str]:
     """Accept only an unambiguous GitHub owner/repository, never a path or URL."""
     parts = repository.split("/")
@@ -165,19 +149,7 @@ class RepositoryWorkspaces:
                     raise VcsVerificationError("workspace", "workspace manifest missing; refusing adoption")
             return WorkspaceManifest(worker_id=self.worker_id, root_identity=identity)
         try:
-            raw = self.manifest_path.read_text()
-            try:
-                manifest = WorkspaceManifest.model_validate_json(raw)
-            except ValidationError:
-                old = _LegacyManifest.model_validate_json(raw)
-                manifest = WorkspaceManifest(
-                    worker_id=old.worker_id, root_identity=old.root_identity,
-                    slots=[WorkspaceSlot(
-                        slot_id=s.binding.slot_id, repository=s.binding.repository,
-                        generation=s.binding.generation, binding=s.binding,
-                        relative_path=s.relative_path, kind=s.kind,
-                    ) for s in old.slots],
-                )
+            manifest = WorkspaceManifest.model_validate_json(self.manifest_path.read_text())
         except (OSError, ValueError, ValidationError) as error:
             raise VcsVerificationError("workspace", "invalid workspace manifest") from error
         if (manifest.worker_id, manifest.root_identity) != (self.worker_id, identity):

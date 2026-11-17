@@ -92,7 +92,7 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, r
     monkeypatch.setattr(agent, "start", delayed_coding)
 
     class Inference:
-        def capability(self):
+        def inference_capability(self):
             return InferenceCapability(adapter_version="codex/v1")
 
         async def infer(self, task):
@@ -108,7 +108,9 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, r
                 await cleanup_release.wait()
                 infer_closed.set()
 
-    worker.inference = Inference()
+    inference = Inference()
+    monkeypatch.setattr(worker, "infer", inference.infer)
+    monkeypatch.setattr(worker, "inference_capability", inference.inference_capability)
     async with connected(server, worker) as (working, serving):
         try:
             await asyncio.wait_for(coding_entered.wait(), 3)
@@ -138,7 +140,7 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, r
 
 @pytest.mark.parametrize("flow_bound", [False, True])
 async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
-    store, tmp_path, server_runtime, flow_bound,
+    store, tmp_path, server_runtime, flow_bound, monkeypatch,
 ):
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -150,7 +152,7 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
                                    text="Local answer", adapter_version=ADAPTER_VERSION)
 
     class Remote:
-        def capability(self):
+        def inference_capability(self):
             return InferenceCapability(adapter_version="codex/v1")
 
         async def infer(self, task):
@@ -162,7 +164,9 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
         worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
         worker_root=tmp_path / "worker",
     ))
-    worker.inference = Remote()
+    inference = Remote()
+    monkeypatch.setattr(worker, "infer", inference.infer)
+    monkeypatch.setattr(worker, "inference_capability", inference.inference_capability)
     workspace = tmp_path / "local-default"
     workspace.mkdir()
     mini = asyncio.create_task(serve_local_inference(server.serve_worker_session, Local(), workspace))
@@ -377,7 +381,7 @@ async def test_slow_coding_preparation_keeps_inference_live(store, remote_flow, 
     monkeypatch.setattr(server.coordinator, "prepare_for_assignment", prepare_call)
 
     class Inference:
-        def capability(self):
+        def inference_capability(self):
             return InferenceCapability(adapter_version="codex/v1")
 
         async def infer(self, task):
@@ -388,7 +392,9 @@ async def test_slow_coding_preparation_keeps_inference_live(store, remote_flow, 
             return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
                                    text="Answer during preparation", adapter_version="codex/v1")
 
-    worker.inference = Inference()
+    inference = Inference()
+    monkeypatch.setattr(worker, "infer", inference.infer)
+    monkeypatch.setattr(worker, "inference_capability", inference.inference_capability)
     async with connected(server, worker) as (working, serving):
         await asyncio.wait_for(preparing.wait(), 3)
         first_coding_heartbeat = store.jobs.get_job(coding.id).heartbeat_at

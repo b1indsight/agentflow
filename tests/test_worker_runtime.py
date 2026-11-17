@@ -8,7 +8,8 @@ import pytest
 from pydantic import SecretStr
 
 from app.contracts.conversation import HistoryPage, HistoryQuery
-from app.domain.inference_models import MAX_OUTPUT_BYTES
+from app.domain.inference_models import InferenceMessage, InferenceTask
+from app.domain.models import CodingExecutionResult
 from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
@@ -85,8 +86,6 @@ async def test_runtime_shares_configured_agent_for_coding_and_history(
     assert agent.timeout == timeout
     assert agent.trusted_host is trusted_host
     assert agent.max_output_bytes == 8 * 1024 * 1024
-    assert runtime.inference.agent is not agent
-    assert runtime.inference.agent.max_output_bytes == MAX_OUTPUT_BYTES
 
     session_id = ("T-" if backend == "amp" else "") + "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     page = HistoryPage(session_id=session_id, status="unsupported")
@@ -96,6 +95,51 @@ async def test_runtime_shares_configured_agent_for_coding_and_history(
     monkeypatch.setattr(agent, "read_history", lambda query: page)
     assert await runtime.read_history(HistoryQuery(session_id=session_id)) == page
     assert other.executor.code_agent is agent
+
+
+@pytest.mark.parametrize("backend,expected", [("codex", CodexAgent), ("amp", AmpCodingAgent)])
+async def test_runtime_inference_uses_shared_agent_with_call_local_configuration(
+    tmp_path, monkeypatch, backend, expected,
+):
+    # Inference and coding can overlap: inference must never reconfigure their shared agent.
+    monkeypatch.setattr("app.worker.runtime.configure_logging", lambda *args: None)
+    monkeypatch.setattr("app.worker.execution.inference.shutil.which", lambda _: "/controlled-cli")
+    runtime = WorkerRuntime(WorkerSettings(
+        worker_id="worker", worker_token=SecretStr("secret"), worker_root=tmp_path,
+        serve_ws_url="wss://control.example/connect", coding_agent=backend,
+        codex_run_timeout_seconds=23, amp_run_timeout_seconds=47,
+        trusted_host_execution=True, execution_isolation="container",
+    ))
+    runtime.initialize()
+    agent = runtime._agents[backend]
+    original_fields = vars(agent).copy()
+    assert runtime._create_execution(3).executor.code_agent is agent
+    assert runtime._create_execution(4).executor.code_agent is agent
+    available = runtime.inference_capability()
+    assert available is not None and available.adapter_version == f"{backend}/v1"
+    calls = []
+
+    async def start(self, prompt, cwd, *, output_schema=None, context=None, model=None,
+                    effort=None, max_output_bytes=None):
+        assert self is agent
+        assert cwd == runtime.workspaces.inference_path
+        assert cwd.is_dir() and cwd.parent == tmp_path / "inference"
+        assert context is None and model is None and effort is None
+        assert vars(self) == original_fields
+        calls.append(max_output_bytes)
+        await asyncio.sleep(0)
+        assert vars(self) == original_fields
+        return CodingExecutionResult("answer-session", "Answer", 0)
+
+    monkeypatch.setattr(expected, "start", start)
+    tasks = [InferenceTask(messages=[InferenceMessage(role="user", content="Summarize")],
+                           max_output_bytes=limit) for limit in (64, 128)]
+    for task in tasks:
+        output = await runtime.infer(task)
+        assert output.text == "Answer" and output.adapter_version == f"{backend}/v1"
+        assert output.request_id == task.request_id and output.request_digest == task.digest
+        assert vars(agent) == original_fields
+    assert calls == [task.max_output_bytes for task in tasks]
 
 
 @pytest.mark.parametrize("shutdown", ["stop", "cancel"])

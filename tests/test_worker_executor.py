@@ -25,6 +25,7 @@ from app.domain.models import (
     VcsKind,
     VcsOutcome,
 )
+from app.worker.coding_agent import CodingAgent
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.execution.workspaces import RepositoryWorkspaces
@@ -33,7 +34,9 @@ from tests.test_vcs import _git, _git_fixture
 from tests.test_worker_session import _assignment
 
 
-class RecordingAgent:
+class RecordingAgent(CodingAgent):
+    backend = "codex"
+
     def __init__(self) -> None:
         self.started: list[tuple[str, Path]] = []
         self.resumed: list[tuple[str, str]] = []
@@ -44,6 +47,7 @@ class RecordingAgent:
 
     async def start(
         self, task: str, cwd: Path, *, output_schema=None, context=None, model=None, effort=None,
+        max_output_bytes: int | None = None,
     ) -> CodingExecutionResult:
         self.started.append((task, cwd))
         return await self.finish(context)
@@ -77,6 +81,7 @@ class RecordingAgent:
 class BackendlessAgent(RecordingAgent):
     async def start(
         self, task: str, cwd: Path, *, output_schema=None, context=None, model=None, effort=None,
+        max_output_bytes: int | None = None,
     ) -> CodingExecutionResult:
         return CodingExecutionResult(
             session_id="session-1",
@@ -191,7 +196,8 @@ async def test_initial_corrects_completion_in_original_session(
     journal, pool = initial_workspace
 
     class Agent(RecordingAgent):
-        async def start(self, task, cwd, *, output_schema=None, context=None, model=None, effort=None):
+        async def start(self, task, cwd, *, output_schema=None, context=None, model=None,
+                        effort=None, max_output_bytes=None):
             self.started.append((task, cwd))
             self.context, self.schema = context, output_schema
             self.base = (await asyncio.to_thread(
@@ -385,7 +391,8 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
         return await run(*args, **kwargs)
 
     class Agent(RecordingAgent):
-        async def start(self, task, cwd, *, output_schema=None, context=None, model=None, effort=None):
+        async def start(self, task, cwd, *, output_schema=None, context=None, model=None,
+                        effort=None, max_output_bytes=None):
             assert context.github.token.get_secret_value() == "push-token"
             _git("checkout", "-b", "flow/issue-8", cwd=cwd)
             (cwd / "README.md").write_text("implemented\n")

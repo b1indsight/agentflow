@@ -303,7 +303,8 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
             await super().send(raw)
 
     class Agent(RecordingAgent):
-        async def start(self, task, path, *, output_schema=None, context=None, model=None, effort=None):
+        async def start(self, task, path, *, output_schema=None, context=None, model=None,
+                        effort=None, max_output_bytes=None):
             assert (path / "README.md").read_text() == "base\n"
             assert not (path / "untracked").exists()
             (path / "README.md").write_text("cancelled staged edit")
@@ -323,7 +324,9 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
         worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
         worker_root=root, worker_repo_workspace_limit=2 if overflow else 1,
     ))
-    client.inference = NamingInference()
+    inference = NamingInference()
+    monkeypatch.setattr(client, "infer", inference.infer)
+    monkeypatch.setattr(client, "inference_capability", inference.inference_capability)
     client.initialize()
     pool = client.workspaces
     default = pool.initialize()
@@ -562,7 +565,8 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
     executed = []
 
     class Agent(RecordingAgent):
-        async def start(self, task, cwd, *, output_schema=None, context=None, model=None, effort=None):
+        async def start(self, task, cwd, *, output_schema=None, context=None, model=None,
+                        effort=None, max_output_bytes=None):
             flow_id = next(item.flow_id for item in pool.inventory()
                            if item.repository is not None and item.flow_id is not None
                            and pool.path(pool.lookup("owner/repo", item.flow_id)) == cwd)
@@ -579,7 +583,9 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
         worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
         worker_root=root, worker_repo_workspace_limit=1,
     ))
-    client.inference = NamingInference()
+    inference = NamingInference()
+    monkeypatch.setattr(client, "infer", inference.infer)
+    monkeypatch.setattr(client, "inference_capability", inference.inference_capability)
     client.initialize()
     pool = client.workspaces
     session = ExecutionState(root, flows[0].id)
