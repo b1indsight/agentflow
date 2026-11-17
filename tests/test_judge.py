@@ -4,29 +4,24 @@ import asyncio
 import json
 import sys
 from contextlib import asynccontextmanager
-from dataclasses import asdict
-from functools import partial
 from pathlib import Path
 
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from app.contracts.conversation import HistoryQuery
 from app.controler.review.judge import ReviewJudge
 from app.domain.inference_models import InferenceError
-from app.domain.models import CodingExecutionResult, SessionUnavailable, TriageVerdict
-from app.inference.bub import BubAgent
-from app.worker.coding_agent import CodingAgent
+from app.domain.models import TriageVerdict
+from app.inference.bub import BubInference
 from tests.review_memory import review_context as context
 
 
-def judge_for(cwd, *, timeout=60, **configuration):
-    return ReviewJudge(partial(BubAgent(**configuration).start, cwd=cwd), timeout=timeout)
+def judge_for(*, timeout=60, **configuration):
+    return ReviewJudge(BubInference(**configuration), timeout=timeout)
 
 
 @asynccontextmanager
-async def model_endpoint(*, output=None, status=200, delay=0, tool_calls=None, finish="stop",
-                         error=None, retry_after=None):
+async def model_endpoint(*, output=None, status=200, delay=0, tool_calls=None, finish="stop"):
     requests = []
     tasks = set()
 
@@ -51,13 +46,8 @@ async def model_endpoint(*, output=None, status=200, delay=0, tool_calls=None, f
                 chunks[0]["choices"][0]["delta"]["tool_calls"] = tool_calls
             body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
             body += "data: [DONE]\n\n"
-            content_type = "text/event-stream"
-            if error is not None:
-                body = json.dumps({"error": error})
-                content_type = "application/json"
             raw = body.encode()
-            headers = f"Retry-After: {retry_after}\r\n" if retry_after is not None else ""
-            writer.write(f"HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\n{headers}"
+            writer.write(f"HTTP/1.1 {status} Test\r\nContent-Type: text/event-stream\r\n"
                          f"Content-Length: {len(raw)}\r\nConnection: close\r\n\r\n".encode())
             writer.write(raw)
             await writer.drain()
@@ -88,14 +78,14 @@ def test_verdict_rejects_invalid_numbers_types_and_action_fields(change):
         TriageVerdict.model_validate({"verdict": "wait", "confidence": 0.5, **change})
 
 
-async def test_real_bub_contract_is_stateless_and_has_no_tools(monkeypatch, tmp_path):
+async def test_real_bub_contract_is_stateless_and_has_no_tools(monkeypatch):
     monkeypatch.setenv("BUB_MODEL", "malicious:override")
     monkeypatch.setenv("BUB_FALLBACK_MODELS", '["malicious:fallback"]')
     monkeypatch.setenv("GITHUB_TOKEN", "must-not-leak")
     output = json.dumps({"verdict": "answer", "confidence": 0.9,
                          "instruction": "Explain the configured retry limit."})
     async with model_endpoint(output=output) as (url, calls):
-        judge = judge_for(tmp_path, model="openai:test", api_key=SecretStr("fake-key"), api_base=url)
+        judge = judge_for(model="openai:test", api_key=SecretStr("fake-key"), api_base=url)
         first = await judge.triage(context())
         second = await judge.triage(context(2))
     assert first.failure is None
@@ -106,7 +96,7 @@ async def test_real_bub_contract_is_stateless_and_has_no_tools(monkeypatch, tmp_
     assert len(calls) == 2
     for call in calls:
         assert not call.get("tools")
-        assert [m["role"] for m in call["messages"]] == ["user", "system"]
+        assert [m["role"] for m in call["messages"]] == ["system", "user", "system"]
         assert "schema" in call["messages"][-1]["content"]
         assert "must-not-leak" not in json.dumps(call)
 
@@ -117,89 +107,36 @@ async def test_real_bub_contract_is_stateless_and_has_no_tools(monkeypatch, tmp_
     '{"verdict":"answer","answer":"A final answer is no longer Judge output"}',
     '{"verdict":"answer","instruction":" "}',
 ])
-async def test_bad_model_output_waits_without_retries(output, tmp_path):
+async def test_bad_model_output_waits_without_retries(output):
     async with model_endpoint(output=output) as (url, calls):
-        decision = await judge_for(tmp_path, model="openai:test", api_key=SecretStr("fake"),
+        decision = await judge_for(model="openai:test", api_key=SecretStr("fake"),
                                   api_base=url).triage(context())
     assert decision.verdict.verdict == "wait"
     assert decision.failure == "invalid_response"
     assert len(calls) == 1
 
 
-async def test_missing_configuration_never_starts_a_process(monkeypatch, tmp_path):
+async def test_missing_configuration_never_starts_a_process(monkeypatch):
     async def forbidden(*args, **kwargs):
         pytest.fail("Missing configuration must not launch bub")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
-    decision = await judge_for(tmp_path, model="openai:test").triage(context())
+    decision = await judge_for(model="openai:test").triage(context())
     assert decision.failure == "configuration"
 
 
-async def test_provider_returns_one_sanitized_failure_without_owning_retries(tmp_path):
+async def test_provider_returns_one_sanitized_failure_without_owning_retries():
     async with model_endpoint(status=500, output="secret-diagnostic") as (url, calls):
         with pytest.raises(InferenceError) as caught:
-            await judge_for(tmp_path, model="openai:test", api_key=SecretStr("fake"),
+            await judge_for(model="openai:test", api_key=SecretStr("fake"),
                             api_base=url).triage(context())
     assert caught.value.failure.code == "backend_unavailable"
     assert len(calls) == 1
     assert "secret-diagnostic" not in caught.value.failure.model_dump_json()
 
 
-@pytest.mark.parametrize("status,code,retry_after,failure,delay", [
-    (401, "invalid_api_key", None, "authentication", None),
-    (403, "forbidden", None, "authentication", None),
-    (429, "insufficient_quota", "3", "configuration", None),
-    (429, "rate_limit_exceeded", "3", "rate_limited", 3),
-    (429, "rate_limit_exceeded", "NaN", "rate_limited", None),
-    (429, "opaque", "3", "backend_error", None),
-    (503, "server_error", "4", "backend_unavailable", 4),
-])
-async def test_real_sdk_failure_classification_and_retry_after(
-    tmp_path, status, code, retry_after, failure, delay,
-):
-    async with model_endpoint(status=status, retry_after=retry_after,
-        error={"code": code, "message": "secret-provider-diagnostic"}) as (url, calls):
-        agent = BubAgent(model="openai:test", api_key=SecretStr("fake"), api_base=url)
-        result = await agent.start("Answer only", tmp_path)
-    assert result.exit_code != 0
-    assert result.failure_kind == failure
-    assert result.retry_after_seconds == delay
-    assert result.backend == "bub" and result.model == "openai:test"
-    assert len(calls) == 1
-    assert "secret-provider-diagnostic" not in json.dumps(asdict(result))
-
-
-async def test_real_sdk_start_accepts_a_plain_prompt_and_model_override(tmp_path):
-    async with model_endpoint(output="Plain answer") as (url, calls):
-        agent = BubAgent(model="openai:default", api_key=SecretStr("fake"), api_base=url)
-        result = await agent.start("A plain prompt", tmp_path, model="openai:override")
-    assert result.exit_code == 0 and result.last_message == "Plain answer"
-    assert result.model == "openai:override"
-    assert calls[0]["model"] == "override"
-    assert calls[0]["messages"] == [{"role": "user", "content": "A plain prompt"}]
-    assert not list(tmp_path.iterdir())
-
-
-async def test_importing_the_agent_does_not_import_the_sdk(tmp_path):
-    child = await asyncio.create_subprocess_exec(sys.executable, "-I", "-c",
-        "import sys; import app.inference.bub; "
-        "assert not {'bub', 'openai', 'anthropic', 'app.inference.runner'} & sys.modules.keys()",
-        cwd=tmp_path, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    _, stderr = await child.communicate()
-    assert child.returncode == 0, stderr.decode()
-
-
-async def test_bub_explicitly_rejects_resume_and_history(tmp_path):
-    agent = BubAgent()
-    session = "00000000-0000-0000-0000-000000000001"
-    with pytest.raises(SessionUnavailable):
-        await agent.resume(session, "Continue", cwd=tmp_path)
-    with pytest.raises(NotImplementedError):
-        agent.read_history(HistoryQuery(session_id=session))
-
-
-async def test_incomplete_context_waits_without_model_call(tmp_path):
+async def test_incomplete_context_waits_without_model_call():
     snapshot = context().model_copy(update={"limitations": ["files:truncated"]})
-    decision = await judge_for(tmp_path).triage(snapshot)
+    decision = await judge_for().triage(snapshot)
     assert decision.failure == "incomplete-context"
 
 
@@ -243,92 +180,60 @@ class ChildProcess:
 
 async def test_child_output_and_exit_contract(monkeypatch, tmp_path):
     child = ChildProcess(err=b"secret", code=1)
-    provider = BubAgent(model="openai:test", api_key=SecretStr("fake"))
-    existing = tmp_path / "existing.txt"
-    existing.write_text("Do not replace the caller's workspace")
+    provider = BubInference(model="openai:test", api_key=SecretStr("fake"))
+    provider.root = tmp_path / "default-workspace"
+    provider.root.mkdir()
 
     async def start(*args, **kwargs):
         assert args[1:4] == ("-I", "-m", "app.inference.runner")
-        assert Path(kwargs["cwd"]) == tmp_path
+        assert Path(kwargs["cwd"]).parent == provider.root
         assert Path(kwargs["cwd"]).is_dir()
         assert set(kwargs["env"]) == {
-            "PATH", "LANG", "FLOWTOOL_JUDGE_MODEL", "FLOWTOOL_JUDGE_API_KEY",
+            "PATH", "LANG", "FLOWTOOL_JUDGE_MODEL", "FLOWTOOL_JUDGE_API_KEY", "BUB_HOME",
         }
         return child
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
-    result = await ReviewJudge(partial(provider.start, cwd=tmp_path)).triage(context())
+    result = await ReviewJudge(provider).triage(context())
     assert result.failure == "backend_error"
     assert child.waited
     assert not child.killed
-    request = json.loads(child.input)
-    assert set(request) == {"prompt", "output_schema", "max_output_bytes"}
-    assert request["output_schema"]["type"] == "object"
-    assert list(tmp_path.iterdir()) == [existing]
+    assert provider.root.is_dir() and not list(provider.root.iterdir())
 
 
-@pytest.mark.parametrize("text,schema,limit,failure", [
-    ("Plain answer", None, 64, None),
-    ('{"ok":true}', {"type": "object"}, 64, None),
-    ("not JSON", {}, 64, "invalid_response"),
-    ('{"value":NaN}', {}, 64, "invalid_response"),
-    ("é" * 10, None, 12, "output_limit"),
-])
-async def test_bub_reuses_shared_final_answer_validation(
-    monkeypatch, tmp_path, text, schema, limit, failure,
-):
-    # SDK answers must cross the same strict JSON and UTF-8 bounds as native CLI answers.
-    child = ChildProcess(out=json.dumps(asdict(CodingExecutionResult(None, text, 0))).encode())
-
-    async def start(*args, **kwargs):
-        return child
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
-    agent = BubAgent(model="openai:test", api_key=SecretStr("fake"))
-    assert BubAgent.start is CodingAgent.start
-    result = await agent.start("Answer only", tmp_path, output_schema=schema, max_output_bytes=limit)
-    assert result.failure_kind == failure
-    assert result.last_message == ("" if failure else text)
-    assert child.waited and not list(tmp_path.iterdir())
-
-
-@pytest.mark.parametrize("cancel", [False, True])
-async def test_timeout_and_cancellation_kill_and_reap_child(monkeypatch, tmp_path, cancel):
+@pytest.mark.parametrize("error,failure", [(TimeoutError, "execution_timeout"), (asyncio.CancelledError, None)])
+async def test_timeout_and_cancellation_kill_and_reap_child(monkeypatch, error, failure):
     child = ChildProcess(code=None)
-    started = asyncio.Event()
 
     async def start(*args, **kwargs):
         return child
 
     async def exchange(*args):
-        started.set()
-        await asyncio.Future()
+        raise error
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
     monkeypatch.setattr("app.inference.bub._exchange", exchange)
-    provider = BubAgent(model="openai:test", api_key=SecretStr("fake"))
-    task = asyncio.create_task(provider.start("Answer only", tmp_path,
-        timeout_seconds=None if cancel else 0))
-    await started.wait()
-    if cancel:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+    judge = judge_for(model="openai:test", api_key=SecretStr("fake"))
+    if failure:
+        with pytest.raises(InferenceError) as caught:
+            await judge.triage(context())
+        assert caught.value.failure.code == failure
     else:
-        assert (await task).failure_kind == "timeout"
+        with pytest.raises(asyncio.CancelledError):
+            await judge.triage(context())
     assert child.killed and child.waited
 
 
-async def test_process_start_error_is_sanitized(monkeypatch, tmp_path):
+async def test_process_start_error_is_sanitized(monkeypatch):
     async def start(*args, **kwargs):
         raise OSError("secret-path")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
-    result = await judge_for(tmp_path, model="openai:test", api_key=SecretStr("fake")).triage(context())
+    result = await judge_for(model="openai:test", api_key=SecretStr("fake")).triage(context())
     assert result.failure == "configuration"
     assert "secret-path" not in result.model_dump_json()
 
 
-async def test_real_flooded_pipe_is_drained_when_child_is_killed(monkeypatch, tmp_path):
+async def test_real_flooded_pipe_is_drained_when_child_is_killed(monkeypatch):
     original = asyncio.create_subprocess_exec
     children = []
 
@@ -340,7 +245,7 @@ async def test_real_flooded_pipe_is_drained_when_child_is_killed(monkeypatch, tm
         return child
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
-    task = asyncio.create_task(judge_for(tmp_path, model="openai:test", api_key=SecretStr("fake"),
+    task = asyncio.create_task(judge_for(model="openai:test", api_key=SecretStr("fake"),
                                         timeout=10).triage(context()))
     done, _ = await asyncio.wait({task}, timeout=3)
     if not done:
@@ -360,12 +265,10 @@ async def test_real_flooded_pipe_is_drained_when_child_is_killed(monkeypatch, tm
         "name": "shell", "arguments": '{"command":"touch forbidden"}',
     }}], "tool_calls"), (None, "length"),
 ])
-async def test_tool_requests_and_unfinished_model_messages_never_become_decisions(
-    tool_calls, finish, tmp_path,
-):
+async def test_tool_requests_and_unfinished_model_messages_never_become_decisions(tool_calls, finish):
     async with model_endpoint(output='{"verdict":"ignore"}', tool_calls=tool_calls,
                               finish=finish) as (url, calls):
-        result = await judge_for(tmp_path, model="openai:test", api_key=SecretStr("fake"),
+        result = await judge_for(model="openai:test", api_key=SecretStr("fake"),
                                 api_base=url).triage(context())
     assert result.failure == "invalid_response"
     assert len(calls) == 1

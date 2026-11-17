@@ -68,7 +68,7 @@ class InferenceNoticeStore(Repository):
                 "SELECT j.round_no FROM jobs j JOIN review_batches b ON b.id=%s AND b.flow_id=j.flow_id"
                 " JOIN attempts a ON a.id=b.attempt_id AND a.flow_id=b.flow_id AND a.round_no=j.round_no"
                 " WHERE j.flow_id=%s AND j.kind='inference'"
-                " AND j.inference->>'request_id'=%s"
+                " AND j.inference->'task'->>'request_id'=%s"
                 " AND (j.inference->>'batch_id')::bigint=b.id",
                 (batch_id, flow_id, summary.logical_call_id),
             ).fetchone()

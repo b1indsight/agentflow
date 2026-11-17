@@ -20,7 +20,7 @@ from tests.github import RecordingGitHub, RecordingRepository
 from tests.test_worker_executor import RecordingAgent
 from tests.test_worker_workspaces import managed_seed
 from tests.test_workspace_dispatch import wait_until
-from tests.worker_fixtures import run_worker, script_inference
+from tests.worker_fixtures import NamingInference, run_worker
 
 
 class QueueSocket:
@@ -103,7 +103,7 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
             self.efforts: list[str | None] = []
 
         async def start(self, task, cwd, *, output_schema=None, context=None, model=None,
-                        effort=None, max_output_bytes=None, timeout_seconds=None):
+                        effort=None, max_output_bytes=None):
             self.models.append(model)
             self.efforts.append(effort)
             self.started.append((task, cwd))
@@ -121,12 +121,13 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
         worker_id="worker-1", worker_token=SecretStr("worker-secret"),
         serve_ws_url="wss://unused", worker_root=root,
         coding_agent=getattr(request, "param", "codex"),
-        trusted_host_execution=True, execution_isolation="container",
     ))
     # Script coding on the shared backend instance while keeping native history reads real.
     monkeypatch.setattr(agent, "read_history", worker._agents[worker.settings.coding_agent].read_history)
     monkeypatch.setitem(worker._agents, worker.settings.coding_agent, agent)
-    script_inference(monkeypatch, worker)
+    inference = NamingInference()
+    monkeypatch.setattr(worker, "infer", inference.infer)
+    monkeypatch.setattr(worker, "inference_capability", inference.inference_capability)
     worker.root_lock.acquire()
     worker.initialize()
     try:

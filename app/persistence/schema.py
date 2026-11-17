@@ -1,22 +1,6 @@
-"""Complete PostgreSQL schema and repeatable upgrades of durable JSON contracts."""
+"""Complete PostgreSQL schema in dependency order; no historical migrations."""
 
-import hashlib
-import json
-import re
-
-from psycopg import Connection
-from psycopg.types.json import Jsonb
-from pydantic import JsonValue, TypeAdapter
-
-from app.domain.inference_models import (
-    MAX_INPUT_BYTES,
-    MAX_OUTPUT_BYTES,
-    AdapterVersion,
-    InferenceJob,
-    RequestId,
-)
 from app.persistence.console_schema import CONSOLE_SCHEMA, FLOW_LEDGER_BACKFILL
-from app.persistence.records import Row
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runtime_settings (
@@ -393,7 +377,7 @@ CREATE INDEX IF NOT EXISTS ix_projects_due ON project_projections(next_at,id) WH
 """
 
 INFERENCE_SCHEMA = """
--- The v26 JSON contract is rewritten under these ALTERs' transaction-scoped write locks.
+-- Additive and repeatable for deployed databases; historical result receipts are untouched.
 ALTER TABLE jobs ALTER COLUMN flow_id DROP NOT NULL;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS inference JSONB;
 ALTER TABLE workers ADD COLUMN IF NOT EXISTS execute BOOLEAN NOT NULL DEFAULT TRUE;
@@ -410,7 +394,7 @@ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_inference_request
-  ON jobs ((inference->>'request_id')) WHERE kind='inference';
+  ON jobs ((inference->'task'->>'request_id')) WHERE kind='inference';
 """
 
 SCHEMAS = (
@@ -425,142 +409,3 @@ SCHEMAS = (
     INFERENCE_SCHEMA,
     FLOW_LEDGER_BACKFILL,
 )
-
-_AGENT_BACKENDS = {"codex/v1": "codex", "amp/v1": "amp", "bub-0.4.1/v1": "bub"}
-
-
-def _flatten_inference_task(task: JsonValue, deadline_at: JsonValue) -> dict[str, JsonValue]:
-    """Validate the removed message wrapper before dropping its version and role structure."""
-    if (not isinstance(task, dict)
-            or task.keys() - {"version", "request_id", "messages", "output_schema",
-                              "max_output_bytes", "timeout_seconds"}
-            or task.get("version", 1) != 1 or "request_id" not in task):
-        raise ValueError("invalid legacy inference task")
-    messages = task.get("messages")
-    if not isinstance(messages, list) or not 1 <= len(messages) <= 64:
-        raise ValueError("invalid legacy inference messages")
-    for message in messages:
-        if (not isinstance(message, dict) or message.keys() != {"role", "content"}
-                or message["role"] not in ("system", "user", "assistant")
-                or not isinstance(message["content"], str)):
-            raise ValueError("invalid legacy inference message")
-    flattened: dict[str, JsonValue] = {
-        "request_id": task["request_id"],
-        "task": json.dumps(messages, ensure_ascii=False, separators=(",", ":")),
-        "output_schema": task.get("output_schema"),
-        "max_output_bytes": task.get("max_output_bytes", MAX_OUTPUT_BYTES),
-        "timeout_seconds": task.get("timeout_seconds", 60),
-    }
-    InferenceJob.model_validate({**flattened, "deadline_at": deadline_at})
-    return flattened
-
-
-def upgrade_agent_contract(connection: Connection[Row]) -> None:
-    """Rewrite v26 JSON once, atomically with schema/index setup in Database.init_db.
-
-    Import the wire contract only when initializing, not while loading schema declarations.
-    Already-current receipts are never serialized or rehashed, including on later restarts.
-    """
-    from app.contracts.protocol import AgentResult
-
-    rows = connection.execute(
-        "SELECT id,inference,result_payload FROM jobs WHERE kind='inference' AND"
-        " (jsonb_typeof(inference->'task') IS DISTINCT FROM 'string' OR inference ? 'current_task')"
-        " ORDER BY id"
-    ).fetchall()
-    for row in rows:
-        if (not isinstance(row["inference"], dict)
-                or not {"task", "deadline_at"} <= row["inference"].keys()
-                or row["inference"].keys() & {"request_id", "current_request_id", "output_schema",
-                                              "model", "effort", "max_output_bytes", "timeout_seconds"}):
-            raise ValueError(f"invalid legacy inference job {row['id']}")
-        payload = row["result_payload"]
-        if payload is not None and (
-            not isinstance(payload, dict) or payload.get("method") != "worker.infer"
-        ):
-            AgentResult.model_validate(payload)
-        call = dict(row["inference"])
-        flattened = _flatten_inference_task(call.pop("task"), call["deadline_at"])
-        current = call.pop("current_task", None)
-        current_id = None if current is None else _flatten_inference_task(
-            current, call["deadline_at"],
-        )["request_id"]
-        call.update(flattened, current_request_id=current_id, model=None, effort=None)
-        backend = InferenceJob.model_validate(call).backend
-        call["backend"] = _AGENT_BACKENDS.get(backend, backend) if backend is not None else None
-        connection.execute("UPDATE jobs SET inference=%s WHERE id=%s", (Jsonb(call), row["id"]))
-
-    rows = connection.execute(
-        "SELECT id,result_payload FROM jobs WHERE kind='inference'"
-        " AND (result_payload->>'method'='worker.infer' OR result_payload ? 'output') ORDER BY id"
-    ).fetchall()
-    for row in rows:
-        payload = dict(row["result_payload"])
-        if payload.get("method") != "worker.infer" or "result" in payload:
-            raise ValueError(f"invalid legacy inference receipt for job {row['id']}")
-        output = payload.pop("output", None)
-        result = None
-        if output is not None:
-            if (not isinstance(output, dict)
-                    or output.keys() - {"request_id", "request_digest", "text", "adapter_version", "model"}
-                    or not {"request_id", "request_digest", "text", "adapter_version"} <= output.keys()):
-                raise ValueError("invalid legacy inference output")
-            TypeAdapter(RequestId).validate_python(output["request_id"])
-            TypeAdapter(AdapterVersion).validate_python(output["adapter_version"])
-            if (not isinstance(output["request_digest"], str)
-                    or re.fullmatch(r"[0-9a-f]{64}", output["request_digest"]) is None
-                    or not isinstance(output["text"], str)
-                    or len(output["text"].encode()) > MAX_OUTPUT_BYTES
-                    or (output.get("model") is not None and (
-                        not isinstance(output["model"], str) or len(output["model"]) > 256))):
-                raise ValueError("invalid legacy inference output")
-            result = {
-                "session_id": None, "last_message": output["text"], "exit_code": 0,
-                "backend": _AGENT_BACKENDS.get(output["adapter_version"], output["adapter_version"]),
-                "model": output.get("model"),
-            }
-        payload.update(method="worker.start", result=result)
-        receipt = AgentResult.model_validate(payload)
-        digest = hashlib.sha256(receipt.model_dump_json().encode()).hexdigest()
-        connection.execute(
-            "UPDATE jobs SET result_payload=%s,result_digest=%s WHERE id=%s",
-            (Jsonb(receipt.model_dump(mode="json")), digest, row["id"]),
-        )
-
-    rows = connection.execute(
-        "SELECT worker_id,workspace,inference FROM workers"
-        " WHERE inference IS NOT NULL AND jsonb_typeof(inference)<>'string'"
-    ).fetchall()
-    for row in rows:
-        capability = row["inference"]
-        backend = None
-        if capability is not None:
-            if (not isinstance(capability, dict)
-                    or capability.keys() - {"adapter_version", "formats", "max_input_bytes", "max_output_bytes"}):
-                raise ValueError("invalid legacy inference capability")
-            adapter = TypeAdapter(AdapterVersion).validate_python(capability.get("adapter_version"))
-            formats = capability.get("formats", ["text", "json"])
-            if not isinstance(formats, list) or any(item not in ("text", "json") for item in formats):
-                raise ValueError("invalid legacy inference capability formats")
-            for key, maximum in (("max_input_bytes", MAX_INPUT_BYTES), ("max_output_bytes", MAX_OUTPUT_BYTES)):
-                limit = capability.get(key, maximum)
-                if type(limit) is not int or not 0 < limit <= maximum:
-                    raise ValueError("invalid legacy inference capability limit")
-            backend = _AGENT_BACKENDS.get(adapter, adapter)
-        connection.execute(
-            "UPDATE workers SET inference=%s WHERE worker_id=%s AND workspace=%s",
-            (Jsonb(backend) if backend is not None else None, row["worker_id"], row["workspace"]),
-        )
-
-    index = connection.execute(
-        "SELECT pg_get_indexdef('ux_jobs_inference_request'::regclass) AS definition"
-    ).fetchone()
-    if index is not None and "'task'" in index["definition"]:
-        # Build the replacement before removing the old fence. ALTER TABLE's locks
-        # prevent writers seeing either the partial rewrite or a uniqueness gap.
-        connection.execute(
-            "CREATE UNIQUE INDEX ux_jobs_inference_request_agent"
-            " ON jobs ((inference->>'request_id')) WHERE kind='inference';"
-            " DROP INDEX ux_jobs_inference_request;"
-            " ALTER INDEX ux_jobs_inference_request_agent RENAME TO ux_jobs_inference_request"
-        )

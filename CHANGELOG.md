@@ -12,22 +12,23 @@
   `LegacyStopped` 移入各自的 VCS、执行器和 journal 模块，不保留旧路径转发；
   共享通信、模型与推理端点类型保持原归属，不改序列化、校验或运行行为。
 - 删除仅有一个生产实现的 `TaskExecutor` 协议，`WorkerExecution` 直接依赖 `WorkerExecutor`；
-  保留执行、取消和恢复行为，同步测试替身及完整 Worker 类图。
-- 推理直接使用 `CodingAgent.start` 和 `CodingExecutionResult`，删除 `InferenceTask`、消息/输出/能力
-  模型、独立执行模块及 Runtime 推理转发。公共 start/resume 统一总超时、最终答案字节上限、
-  schema 临时文件与严格 JSON 校验；原生后端继续负责进程、空闲超时和取消回收。
-  回调绑定共享 Agent，在既有 inference workspace 原位启动；Bub 也实现相同执行合同。
-  通信改为扁平参数的 `worker.start`，协议升级至 27；启动时事务升级既有推理 JSONB、结果摘要
-  和幂等索引，保持尝试次数、截止时间、取消与重放归属。需同步升级 controller/worker，未部署。
+  保留执行、取消和恢复行为，同步测试替身。
+- 撤回 Worker 简化对包外推理合同的扩大修改：保留 `Inference`、请求/输出/能力模型、
+  控制端与独立 `BubInference`，恢复 `worker.infer`、wire26 及原有持久化格式和幂等索引，
+  删除此次引入的数据升级。WorkerRuntime 仅将外部推理请求交给共享 `CodingAgent.start`，
+  在既有 inference workspace 原位执行并转换返回结果；不另建推理执行器。
+  公共 start/resume 仍统一总超时、最终答案字节上限、schema 临时文件与严格 JSON 校验，
+  原生后端负责进程、空闲超时和取消回收。删除 Worker 类关系图文档及重复的生命周期参数组合测试。
+  未部署，未操作线上数据库。
 - Worker 的推理、历史和文件操作复用现有编码 Agent。推理直接在已登记的 inference workspace
   启动新会话，按调用传入答案预算；仅通过 prompt 约束只返回结果，不新增工具禁用模式。
   `CodingAgent` 提供文件注册/读取协议及本地默认实现，`AmpAttachment` 归入 Amp 后端，
   文件 callback 按登记归属调用原有 Agent；保留旧文件链接。删除 workspace manifest v1
-  的两个 Legacy 模型及转换，旧格式只报错、不改写；同步完整类图，不改 wire 或部署。
+  的两个 Legacy 模型及转换，旧格式只报错、不改写；不改 wire 或部署。
 - Worker 后端职责收拢：`CodingAgent` 移入 worker，统一编码与只读历史接口；Codex/Amp 的
   原生 history 各归对应后端，执行状态不再读取历史。Amp 进程监督直接并入 `AmpCodingAgent`，
   删除 `_Init` / `_Result` 包装类及三份搬空模块；保留严格终态校验、超时、脱敏与取消回收。
-  同步更新完整 Worker 类图，不改 wire、journal、数据库或部署。
+  不改 wire、journal、数据库或部署。
 - Flow 事实账本：`flows` 的每次账本列变化在同一事务内向 `console_activity` 追加一条不可变事实，
   状态转换以 `FlowEvent` 命名，另有创建、归档、归档后合并、归档更正和标题事实；标题与两类指针的写入
   收进 `FlowStore`，边界测试禁止其他模块写 `flows`。新增 `flowtool flow verify [FLOW_ID]` 重放并报告差异，

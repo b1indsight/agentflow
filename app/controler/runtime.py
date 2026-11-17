@@ -32,7 +32,7 @@ from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
 from app.domain.inference_models import InferenceError
 from app.github import GitHubApp
-from app.inference.bub import BubAgent
+from app.inference.bub import BubInference
 from app.inference.local import serve_local_inference
 from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
@@ -85,7 +85,7 @@ class ServerRuntime:
             database=database,
             results=self.results,
         )
-        self.local_bub = BubAgent(model=settings.judge_model, api_key=settings.judge_api_key,
+        self.local_bub = BubInference(model=settings.judge_model, api_key=settings.judge_api_key,
                                       api_base=settings.judge_api_base)
         self._triage_task: asyncio.Task[None] | None = None
         self.service = ControlService(
@@ -202,12 +202,16 @@ class ServerRuntime:
         # The default directory survives connection retries. Each request gets its own
         # child; shutdown joins providers before removing this repository-free root.
         with TemporaryDirectory(prefix="flowtool-local-bub-") as directory:
-            while True:
-                try:
-                    await serve_local_inference(self.serve_worker_session, self.local_bub.start, Path(directory))
-                except Exception:  # noqa: BLE001 -- restart the local connection, not a model attempt
-                    logger.exception("local bub worker disconnected; reconnecting")
-                await asyncio.sleep(self.settings.worker_poll_interval)
+            self.local_bub.root = Path(directory)
+            try:
+                while True:
+                    try:
+                        await serve_local_inference(self.serve_worker_session, self.local_bub, self.local_bub.root)
+                    except Exception:  # noqa: BLE001 -- restart the local connection, not a model attempt
+                        logger.exception("local bub worker disconnected; reconnecting")
+                    await asyncio.sleep(self.settings.worker_poll_interval)
+            finally:
+                self.local_bub.root = None
 
     async def ready(self) -> bool:
         if not self._ready or self._readiness_lock.locked():
@@ -262,7 +266,7 @@ class ServerRuntime:
         for batch in batches:
             judge = ReviewJudge(JobInference(
                 self.database, self.gateway.wake_all, flow_id=batch.flow_id, batch_id=batch.id,
-            ).start, timeout=self.settings.judge_timeout_seconds)
+            ), timeout=self.settings.judge_timeout_seconds)
             try:
                 await self.coordinator.triage(batch, judge)
             except InferencePending:

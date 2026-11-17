@@ -35,17 +35,15 @@ from app.worker.state.execution import ExecutionState
 from tests.github import RecordingGitHub
 from tests.test_coordinator import coordinator
 from tests.test_worker_workspaces import managed_seed
-from tests.worker_fixtures import script_inference
+from tests.worker_fixtures import NamingInference
 
 
-class ControlledWorker(WorkerRuntime):
-    def __init__(self, root: Path, limit: int, monkeypatch) -> None:
+class ControlledWorker(NamingInference, WorkerRuntime):
+    def __init__(self, root: Path, limit: int) -> None:
         super().__init__(WorkerSettings(
             worker_id="worker-a", worker_token=SecretStr("test"), serve_ws_url="wss://unused",
-            worker_root=root, worker_repo_workspace_limit=limit, trusted_host_execution=True,
-            execution_isolation="container",
+            worker_root=root, worker_repo_workspace_limit=limit,
         ))
-        script_inference(monkeypatch, self)
         self.running: dict[int, Path] = {}
         self.finish: dict[int, asyncio.Event] = {}
 
@@ -85,7 +83,7 @@ async def wait_until(condition: Callable[[], bool]) -> None:
 
 @pytest.mark.parametrize("limit", [2, 3, 17])
 async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
-    store, tmp_path, limit, recording_resources, monkeypatch,
+    store, tmp_path, limit, recording_resources,
 ):
     root, _ = managed_seed(tmp_path)
     shutil.copytree(root / "repos/owner/repo", root / "repos/owner/other")
@@ -93,7 +91,7 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
     flows = [required(control.create_flow(repo, issue, 42)) for repo in ("owner/repo", "owner/other")
              for issue in range(1, limit + 2)]
     jobs = [job for flow in flows for job in store.jobs.list_jobs(flow.id)]
-    worker = ControlledWorker(root, limit, monkeypatch)
+    worker = ControlledWorker(root, limit)
     worker.root_lock.acquire()
     worker.initialize()
     assert len(worker.workspaces.inventory()) == 1  # Only the real inference directory initially.
@@ -210,7 +208,7 @@ async def test_provision_failure_does_not_disconnect_other_workspaces(
         with store.database.connection() as conn:
             conn.execute("UPDATE jobs SET prepare_next_at=now()+interval '1 hour' WHERE id=%s", (bad_job.id,))
 
-    worker = ControlledWorker(root, 3, monkeypatch)
+    worker = ControlledWorker(root, 3)
     worker.root_lock.acquire()
     worker.initialize()
     if failure == "workspace_conflict":

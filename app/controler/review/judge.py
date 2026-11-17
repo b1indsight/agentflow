@@ -1,18 +1,19 @@
 """Review prompt assembly and strict decisions, independent of inference location."""
 
-import json
-from collections.abc import Awaitable, Callable
 from uuid import uuid4
+
+from pydantic import ValidationError
 
 from app.domain.context_models import MAX_CONTEXT_BYTES, ReviewContext
 from app.domain.inference_models import (
-    MAX_OUTPUT_BYTES,
     InferenceError,
-    InferenceFailure,
+    InferenceMessage,
+    InferenceTask,
 )
 from app.domain.json import strict_json
 from app.domain.judge_models import JudgeDecision, JudgeRequest, waiting
-from app.domain.models import CodingExecutionResult, TriageVerdict
+from app.domain.models import TriageVerdict
+from app.domain.ports import Inference
 
 SYSTEM_PROMPT = """You judge a GitHub pull request feedback batch. Return exactly one JSON object:
 {"verdict":"revise|wait|answer|ignore","confidence":0.0,"reason":"...",
@@ -40,8 +41,8 @@ class ReviewJudge:
     failures retain conservative WAIT handling. Neither path applies GitHub effects.
     """
 
-    def __init__(self, start: Callable[..., Awaitable[CodingExecutionResult]], *, timeout: float = 60.0) -> None:
-        self.start, self.timeout = start, timeout
+    def __init__(self, inference: Inference, *, timeout: float = 60.0) -> None:
+        self.inference, self.timeout = inference, timeout
 
     async def triage(self, context: ReviewContext) -> JudgeDecision:
         request = JudgeRequest(session_id=uuid4().hex, context=context)
@@ -49,27 +50,29 @@ class ReviewJudge:
                 or context.pull_request is None or context.pull_request.state != "open"
                 or context.pull_request.merged):
             return waiting(request, None, "incomplete-context")
-        schema = TriageVerdict.model_json_schema()
-        del schema["properties"]["answer"]
-        prompt = json.dumps([
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": context.model_dump_json()},
-        ], ensure_ascii=False, separators=(",", ":"))
         try:
-            output = await self.start(prompt, output_schema=schema, timeout_seconds=self.timeout,
-                                      max_output_bytes=MAX_OUTPUT_BYTES)
-            if failure := InferenceFailure.from_result(output):
-                raise InferenceError(failure, backend=output.backend)
+            schema = TriageVerdict.model_json_schema()
+            del schema["properties"]["answer"]
+            task = InferenceTask(
+                request_id=request.session_id,
+                messages=[InferenceMessage(role="system", content=SYSTEM_PROMPT),
+                          InferenceMessage(role="user", content=context.model_dump_json())],
+                output_schema=schema, timeout_seconds=self.timeout,
+            )
+        except ValidationError:
+            return waiting(request, None, "incomplete-context")
+        try:
+            output = await self.inference.infer(task)
         except InferenceError as error:
             if error.failure.recoverable or error.failure.code == "unavailable":
                 raise
             return waiting(request, None, error.failure.code,
                            adapter_version=error.backend or "review/v1")
         try:
-            verdict = TriageVerdict.model_validate(strict_json(output.last_message), context={"judge_response": True})
+            verdict = TriageVerdict.model_validate(strict_json(output.text), context={"judge_response": True})
         except ValueError:
-            return waiting(request, None, "invalid_response", adapter_version=output.backend or "review/v1")
+            return waiting(request, None, "invalid_response", adapter_version=output.adapter_version)
         return JudgeDecision(
-            context_digest=context.digest, session_id=output.session_id or request.session_id,
-            model=output.model, adapter_version=output.backend or "review/v1", verdict=verdict,
+            context_digest=context.digest, session_id=output.request_id,
+            model=output.model, adapter_version=output.adapter_version, verdict=verdict,
         )

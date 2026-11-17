@@ -61,9 +61,8 @@ async def test_schema_calls_use_existing_cwd_and_clean_only_owned_files(monkeypa
 
 
 @pytest.mark.parametrize("backend", ["codex", "amp"])
-@pytest.mark.parametrize("resume", [False, True])
 @pytest.mark.parametrize("stop", ["timeout", "cancel"])
-async def test_total_budget_joins_child_cleanup_before_deleting_schema(monkeypatch, tmp_path, backend, resume, stop):
+async def test_total_budget_joins_child_cleanup_before_deleting_schema(monkeypatch, tmp_path, backend, stop):
     # An active CLI continually renews its idle timer; the caller's total deadline must still win.
     spawn = asyncio.create_subprocess_exec
     children = []
@@ -87,10 +86,7 @@ async def test_total_budget_joins_child_cleanup_before_deleting_schema(monkeypat
     monkeypatch.setattr(asyncio, "create_subprocess_exec", cli)
     agent = (CodexAgent if backend == "codex" else AmpCodingAgent)(trusted_host=True, timeout=10)
     options = {"output_schema": {"type": "object"}, "timeout_seconds": .3 if stop == "timeout" else 10}
-    running = asyncio.create_task(
-        agent.resume(THREAD if backend == "amp" else "session-1", "Answer", cwd=tmp_path, **options)
-        if resume else agent.start("Answer", tmp_path, **options)
-    )
+    running = asyncio.create_task(agent.start("Answer", tmp_path, **options))
     try:
         if stop == "cancel":
             await asyncio.wait_for(entered.wait(), 1)
@@ -168,14 +164,13 @@ async def test_final_budget_is_call_local_and_separate_from_native_streams(monke
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("resume", [False, True])
 @pytest.mark.parametrize("as_path", [False, True])
 @pytest.mark.parametrize("answer,valid", [
     ("", False), (" ", False), ("not JSON", False),
     ('{"duplicate":1,"duplicate":2}', False), ("NaN", False), ("{} trailing", False),
     ('{"other":true}', True), ("null", True),
 ])
-async def test_schema_calls_require_only_strict_json(monkeypatch, tmp_path, resume, as_path, answer, valid):
+async def test_schema_calls_require_only_strict_json(monkeypatch, tmp_path, as_path, answer, valid):
     agent = CodexAgent(trusted_host=True)
     schema = {"type": "object", "required": ["caller_owned"]}
     existing = tmp_path / "caller-schema.json"
@@ -189,8 +184,7 @@ async def test_schema_calls_require_only_strict_json(monkeypatch, tmp_path, resu
 
     monkeypatch.setattr(agent, "_run", run)
     options = {"output_schema": existing if as_path else schema}
-    result = (await agent.resume("session-1", "Answer", cwd=tmp_path, **options)
-              if resume else await agent.start("Answer", tmp_path, **options))
+    result = await agent.start("Answer", tmp_path, **options)
     assert (result.exit_code == 0) == valid
     assert result.failure_kind == (None if valid else "invalid_response")
     if valid:

@@ -9,9 +9,9 @@ from loguru import logger
 from pluggy import PluginManager
 
 from app.contracts.protocol import (
-    AgentResult,
     ArchiveResult,
     Failed,
+    InferenceResult,
     InitialTaskResult,
     RevisionTaskResult,
     Succeeded,
@@ -31,7 +31,7 @@ from app.controler.workflow.initial import BRANCH_SLUG_PATTERN, initial_plan
 from app.controler.workflow.plans import delivered_pr_number, failed_plan
 from app.controler.workflow.revisions import frozen_revision, revision_plan, verify_revision_result
 from app.domain.flow_policy import FlowEvent
-from app.domain.inference_models import InferenceFailure
+from app.domain.inference_models import InferenceError, InferenceFailure
 from app.domain.json import strict_json
 from app.domain.models import (
     TERMINAL_STATES,
@@ -109,17 +109,18 @@ class ResultApplication:
     def _apply_inference(self, job: Job) -> JobState:
         """Validate saved inference results and publish only structured Flow names."""
         inference = job.inference
-        if inference is None or inference.current_request_id is None or job.result_payload is None:
+        if inference is None or inference.current_task is None or job.result_payload is None:
             raise ValueError("inference application requires a persisted assignment and result")
         failure = None
         title = None
         try:
-            result = AgentResult.model_validate(job.result_payload)
-            if result.result is not None and result.result.exit_code == 0:
+            result = InferenceResult.model_validate(job.result_payload)
+            if result.output is not None:
+                result.output.validate_for(inference.current_task)
                 if inference.validation == "review":
-                    TriageVerdict.model_validate(strict_json(result.result.last_message), context={"judge_response": True})
+                    TriageVerdict.model_validate(strict_json(result.output.text), context={"judge_response": True})
                 elif inference.validation == "flow_naming":
-                    output = strict_json(result.result.last_message)
+                    output = strict_json(result.output.text)
                     if not isinstance(output, dict) or set(output) != {"title", "branch_slug"}:
                         raise ValueError("expected title and branch_slug")
                     title, branch_slug = output["title"], output["branch_slug"]
@@ -129,6 +130,8 @@ class ResultApplication:
                             or not 3 <= len(branch_slug) <= 48
                             or re.fullmatch(BRANCH_SLUG_PATTERN, branch_slug) is None):
                         raise ValueError("invalid title or branch_slug")
+        except InferenceError as error:
+            failure = error.failure
         except ValueError:
             failure = InferenceFailure(code="invalid_response")
         with self.database.transaction() as tx:

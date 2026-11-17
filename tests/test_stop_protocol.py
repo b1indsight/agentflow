@@ -65,7 +65,7 @@ from tests.test_worker_handler import queued_initial as queued_initial  # noqa: 
 from tests.test_worker_workspaces import managed_seed
 from tests.test_workspace_inventory import merged_business
 from tests.wire import worker_message
-from tests.worker_fixtures import run_worker, script_inference, worker_runtime
+from tests.worker_fixtures import NamingInference, run_worker, worker_runtime
 
 
 def assignment():
@@ -304,7 +304,7 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
 
     class Agent(RecordingAgent):
         async def start(self, task, path, *, output_schema=None, context=None, model=None,
-                        effort=None, max_output_bytes=None, timeout_seconds=None):
+                        effort=None, max_output_bytes=None):
             assert (path / "README.md").read_text() == "base\n"
             assert not (path / "untracked").exists()
             (path / "README.md").write_text("cancelled staged edit")
@@ -323,9 +323,10 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
     client = WorkerRuntime(WorkerSettings(
         worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
         worker_root=root, worker_repo_workspace_limit=2 if overflow else 1,
-        trusted_host_execution=True, execution_isolation="container",
     ))
-    script_inference(monkeypatch, client)
+    inference = NamingInference()
+    monkeypatch.setattr(client, "infer", inference.infer)
+    monkeypatch.setattr(client, "inference_capability", inference.inference_capability)
     client.initialize()
     pool = client.workspaces
     default = pool.initialize()
@@ -565,7 +566,7 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
 
     class Agent(RecordingAgent):
         async def start(self, task, cwd, *, output_schema=None, context=None, model=None,
-                        effort=None, max_output_bytes=None, timeout_seconds=None):
+                        effort=None, max_output_bytes=None):
             flow_id = next(item.flow_id for item in pool.inventory()
                            if item.repository is not None and item.flow_id is not None
                            and pool.path(pool.lookup("owner/repo", item.flow_id)) == cwd)
@@ -580,10 +581,11 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
     monkeypatch.setattr("app.worker.runtime.CodexAgent", lambda **kwargs: Agent())
     client = WorkerRuntime(WorkerSettings(
         worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
-        worker_root=root, worker_repo_workspace_limit=1, trusted_host_execution=True,
-        execution_isolation="container",
+        worker_root=root, worker_repo_workspace_limit=1,
     ))
-    script_inference(monkeypatch, client)
+    inference = NamingInference()
+    monkeypatch.setattr(client, "infer", inference.infer)
+    monkeypatch.setattr(client, "inference_capability", inference.inference_capability)
     client.initialize()
     pool = client.workspaces
     session = ExecutionState(root, flows[0].id)

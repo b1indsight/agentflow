@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -9,14 +10,15 @@ from pydantic import SecretStr
 
 from app.contracts.conversation import HistoryPage, HistoryQuery
 from app.contracts.protocol import (
-    AgentResult,
-    AgentStart,
+    InferenceRequest,
+    InferenceResult,
     Register,
     ServerMessage,
     call_header,
     message_header,
     parse_worker_message,
 )
+from app.domain.inference_models import InferenceError, InferenceMessage, InferenceTask
 from app.domain.models import CodingExecutionResult
 from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent
@@ -116,87 +118,92 @@ async def test_runtime_inference_uses_shared_agent_with_call_local_configuration
     runtime = WorkerRuntime(WorkerSettings(
         worker_id="worker", worker_token=SecretStr("secret"), worker_root=tmp_path,
         serve_ws_url="wss://control.example/connect", coding_agent=backend,
-        codex_run_timeout_seconds=23, amp_run_timeout_seconds=47,
         trusted_host_execution=True, execution_isolation="container",
     ))
     runtime.initialize()
     agent = runtime._agents[backend]
     original_fields = vars(agent).copy()
     assert runtime._create_execution(3).executor.code_agent is agent
-    assert runtime._create_execution(4).executor.code_agent is agent
+    messages = [
+        {"role": "system", "content": "Summarize only the supplied facts"},
+        {"role": "user", "content": 'Facts with quotes: "hello" and 中文'},
+    ]
     calls = []
 
     async def start(self, prompt, cwd, *, output_schema=None, context=None, model=None,
                     effort=None, max_output_bytes=None, timeout_seconds=None):
-        assert self is agent
-        assert cwd == runtime.workspaces.inference_path
-        assert cwd.is_dir() and cwd.parent == tmp_path / "inference"
-        assert context is None and model == "selected-model" and effort == "high"
-        assert prompt.endswith("Summarize") and "Return only the requested result" in prompt
-        assert output_schema == {"type": "string"}
-        assert vars(self) == original_fields
-        calls.append((max_output_bytes, timeout_seconds))
-        await asyncio.sleep(0)
-        assert vars(self) == original_fields
-        return CodingExecutionResult("answer-session", '"Answer"', 0, backend=backend,
-                                     model=model)
+        assert self is agent and cwd == runtime.workspaces.inference_path and cwd.is_dir()
+        assert context is None and model is None and effort is None
+        assert "Return only the requested result" in prompt
+        assert prompt.endswith(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
+        calls.append((output_schema, max_output_bytes, timeout_seconds))
+        return CodingExecutionResult("answer-session", '"Answer"', 0, model="observed-model")
 
     monkeypatch.setattr(expected, "start", start)
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
     serving = asyncio.create_task(run_worker(runtime, QueueConnection(outgoing, incoming)))
     try:
         registration = parse_worker_message(await asyncio.wait_for(outgoing.get(), 2))
-        assert isinstance(registration, Register) and registration.inference == backend
+        assert isinstance(registration, Register)
+        assert registration.inference.adapter_version == f"{backend}/v1"
         await incoming.put(registered_message().model_dump_json())
-        for limit, timeout in ((64, 5), (128, 10)):
-            call = AgentStart(**call_header(), method="worker.start", job_id=limit,
-                assignment_token="token", task="Summarize", output_schema={"type": "string"},
-                model="selected-model", effort="high", max_output_bytes=limit,
-                timeout_seconds=timeout)
-            await incoming.put(ServerMessage(**message_header("epoch-1"), control=None,
-                                             payload=[call]).model_dump_json())
-            async with asyncio.timeout(2):
-                while True:
-                    message = parse_worker_message(await outgoing.get())
-                    output = next((item for item in message.payload if isinstance(item, AgentResult)), None)
-                    if output is not None:
-                        break
-            assert output.reply_to == call.message_id and output.assignment_token == "token"
-            assert output.result.last_message == '"Answer"' and output.result.backend == backend
-            assert vars(agent) == original_fields
-        assert calls == [(64, 5), (128, 10)]
+        task = InferenceTask(messages=[InferenceMessage(**message) for message in messages],
+                             output_schema={"type": "string"}, max_output_bytes=64, timeout_seconds=5)
+        call = InferenceRequest(**call_header(task.request_id), method="worker.infer", job_id=1,
+                                assignment_token="token", arguments=task)
+        await incoming.put(ServerMessage(**message_header("epoch-1"), control=None,
+                                         payload=[call]).model_dump_json())
+        async with asyncio.timeout(2):
+            while True:
+                message = parse_worker_message(await outgoing.get())
+                output = next((item for item in message.payload if isinstance(item, InferenceResult)), None)
+                if output is not None:
+                    break
+        assert output.reply_to == call.message_id and output.assignment_token == "token"
+        assert output.output.adapter_version == f"{backend}/v1" and output.output.model == "observed-model"
+        output.output.validate_for(task)
+        assert calls == [({"type": "string"}, 64, 5)]
+        assert vars(agent) == original_fields
     finally:
         serving.cancel()
         await asyncio.gather(serving, return_exceptions=True)
 
 
-@pytest.mark.parametrize("trusted_host", [False, True])
-async def test_inference_registration_advertises_opt_in_not_cli_preflight(tmp_path, monkeypatch, trusted_host):
+async def test_inference_requires_trusted_host_opt_in(tmp_path):
     runtime = WorkerRuntime(WorkerSettings(
         worker_id="worker", worker_token=SecretStr("secret"), worker_root=tmp_path,
-        serve_ws_url="wss://unused", trusted_host_execution=trusted_host,
-        execution_isolation="container",
+        serve_ws_url="wss://unused",
     ))
-    agent = runtime._agents[runtime.settings.coding_agent]
+    assert runtime.inference_capability() is None
+    with pytest.raises(InferenceError) as rejected:
+        await runtime.infer(InferenceTask(messages=[InferenceMessage(role="user", content="Answer")]))
+    assert rejected.value.failure.code == "configuration"
 
-    async def missing_cli(*args, **kwargs):
-        raise FileNotFoundError("native executable not installed")
 
-    monkeypatch.setattr(agent, "_run", missing_cli)
-    outgoing, incoming = asyncio.Queue(), asyncio.Queue()
-    serving = asyncio.create_task(run_worker(runtime, QueueConnection(outgoing, incoming)))
-    try:
-        registration = parse_worker_message(await asyncio.wait_for(outgoing.get(), 2))
-        assert isinstance(registration, Register)
-        assert runtime.workspaces.inference_path.is_dir()
-        assert registration.inference == (runtime.settings.coding_agent if trusted_host else None)
-        if trusted_host:
-            # Discovery stays available; the actual start owns execution errors.
-            result = await agent.start("Answer", runtime.workspaces.inference_path)
-            assert result.exit_code != 0 and result.failure_kind == "configuration"
-    finally:
-        serving.cancel()
-        await asyncio.gather(serving, return_exceptions=True)
+@pytest.mark.parametrize("kind,exit_code,expected", [
+    ("timeout", 124, "execution_timeout"),  # The only renamed code.
+    ("invalid_response", 1, "invalid_response"),  # Other agent failures keep their code.
+    (None, 7, "backend_error"),  # An untyped nonzero exit is still a failure.
+])
+async def test_runtime_translates_agent_failures_to_external_inference_errors(
+    tmp_path, monkeypatch, kind, exit_code, expected,
+):
+    runtime = WorkerRuntime(WorkerSettings(
+        worker_id="worker", worker_token=SecretStr("secret"), worker_root=tmp_path,
+        serve_ws_url="wss://unused", trusted_host_execution=True, execution_isolation="container",
+    ))
+    runtime.initialize()
+
+    async def run(*args, **kwargs):
+        return CodingExecutionResult(None, "", exit_code, failure_kind=kind,
+                                     failure_detail="private backend diagnostics")
+
+    monkeypatch.setattr(runtime._agents["codex"], "_run", run)
+    with pytest.raises(InferenceError) as failed:
+        await runtime.infer(InferenceTask(messages=[InferenceMessage(role="user", content="Answer")]))
+    assert failed.value.failure.code == expected
+    assert failed.value.backend == "codex/v1"
+    assert "private" not in str(failed.value)
 
 
 @pytest.mark.parametrize("shutdown", ["stop", "cancel"])

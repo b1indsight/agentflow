@@ -9,10 +9,9 @@ from uuid import uuid4
 
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
-from pydantic import JsonValue
 
-from app.contracts.protocol import AgentResult
-from app.domain.inference_models import MAX_OUTPUT_BYTES, InferenceFailure, InferenceJob
+from app.contracts.protocol import InferenceResult
+from app.domain.inference_models import InferenceFailure, InferenceJob, InferenceTask
 from app.domain.inference_policy import decide_inference_cancellation, decide_inference_settlement
 from app.domain.models import Job, JobKind, JobState
 from app.persistence.flows import FlowStore
@@ -32,11 +31,7 @@ class InferenceStore(Repository):
     """
 
     def enqueue_inference(
-        self, task: str, *, request_id: str | None = None,
-        output_schema: dict[str, JsonValue] | None = None,
-        model: str | None = None, effort: str | None = None,
-        max_output_bytes: int = MAX_OUTPUT_BYTES, timeout_seconds: float = 60,
-        flow_id: int | None = None,
+        self, task: InferenceTask, *, flow_id: int | None = None,
         batch_id: int | None = None, validation: Literal["text", "review", "flow_naming"] = "text",
     ) -> Job:
         """Freeze a logical call once; a batch's consumed recoverable failure starts a new round.
@@ -50,12 +45,6 @@ class InferenceStore(Repository):
         if batch_id is not None and flow_id is None:
             raise ValueError("review inference requires its source Flow")
         now = self._db.now()
-        frozen = InferenceJob(
-            request_id=request_id or uuid4().hex, task=task, output_schema=output_schema,
-            model=model, effort=effort, max_output_bytes=max_output_bytes,
-            timeout_seconds=timeout_seconds, deadline_at=now + timedelta(seconds=timeout_seconds),
-            validation=validation, batch_id=batch_id,
-        )
         with self._db.transaction() as tx, tx.connection() as connection:
             flow = tx.lock_workflow(flow_id) if flow_id is not None else None
             previous = None
@@ -87,25 +76,26 @@ class InferenceStore(Repository):
             # Generic idempotency survives consumption too; callers choose a new logical ID.
             if batch is None:
                 connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-                                   (f"inference:{frozen.request_id}",))
+                                   (f"inference:{task.request_id}",))
                 existing = connection.cursor(row_factory=class_row(Job)).execute(
-                    "SELECT * FROM jobs WHERE kind='inference' AND inference->>'request_id'=%s",
-                    (frozen.request_id,),
+                    "SELECT * FROM jobs WHERE kind='inference' AND inference->'task'->>'request_id'=%s",
+                    (task.request_id,),
                 ).fetchone()
                 if existing is not None:
                     if existing.flow_id != flow_id or existing.inference is None or existing.inference.batch_id is not None:
                         raise ValueError("logical inference request belongs to another caller")
-                    arguments = {"task", "output_schema", "model", "effort", "max_output_bytes",
-                                 "timeout_seconds", "validation"}
-                    if existing.inference.model_dump(include=arguments) != frozen.model_dump(include=arguments):
+                    if existing.inference.task != task or existing.inference.validation != validation:
                         raise ValueError("logical inference request does not match its frozen call")
                     return existing
+            frozen = InferenceTask.model_validate_json(task.model_dump_json())
             if previous is not None:
                 frozen = frozen.model_copy(update={"request_id": uuid4().hex})
-            inference = frozen.model_copy(update={
-                "source_attempt_id": flow.current_attempt_id if flow else None,
-                "context_digest": batch.context.digest if batch and batch.context else None,
-            })
+            inference = InferenceJob(
+                task=frozen, deadline_at=now + timedelta(seconds=frozen.timeout_seconds),
+                validation=validation, batch_id=batch_id,
+                source_attempt_id=flow.current_attempt_id if flow else None,
+                context_digest=batch.context.digest if batch and batch.context else None,
+            )
             job = (
                 connection.cursor(row_factory=class_row(Job))
                 .execute(
@@ -203,7 +193,7 @@ class InferenceStore(Repository):
     def complete_inference_result(self, job_id: int, *, failure: InferenceFailure | None = None) -> bool:
         """Apply caller validation to a durable result after worker cleanup, never before it.
 
-        The original AgentResult JSON is retained for restart/replay. Validation
+        The original InferenceResult JSON is retained for restart/replay. Validation
         failures override worker success; cancellation overrides either outcome. Retry
         budgeting, backoff, summary and batch notice publication share this transaction.
         """
@@ -218,16 +208,16 @@ class InferenceStore(Repository):
                     "SELECT 1 FROM jobs WHERE id=%s AND " + CURRENT_WORKSPACE_SQL, (job.id,),
                 ).fetchone() is None:
                     return False
-            result = AgentResult.model_validate(job.result_payload)
+            result = InferenceResult.model_validate(job.result_payload)
             assert job.inference is not None
+            current_task = job.inference.current_task
             if (result.job_id != job.id or result.assignment_token != job.assignment_token
-                    or result.reply_to != job.inference.current_request_id
+                    or current_task is None or result.reply_to != current_task.request_id
                     # Same immutable-result hash as record_assignment_result, independent of JSONB key order.
                     or hashlib.sha256(result.model_dump_json().encode()).hexdigest() != job.result_digest
-                    or (result.result is not None and result.result.backend != job.inference.backend)):
+                    or (result.output is not None and result.output.adapter_version != job.inference.backend)):
                 failure = InferenceFailure(code="invalid_response")
-            outcome = InferenceFailure.from_result(result.result) if result.result is not None else result.failure
-            inference.settle_inference(job, failure or outcome)
+            inference.settle_inference(job, failure or result.failure)
             return True
 
     def settle_inference(self, job: Job, failure: InferenceFailure | None) -> None:

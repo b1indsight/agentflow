@@ -264,8 +264,6 @@ def test_item_metadata_is_required_on_the_wire(key: str) -> None:
         {"protocol_version": 22},
         {"protocol_version": 23},
         {"protocol_version": 24},
-        {"protocol_version": 25},
-        {"protocol_version": 26},
         {"message_id": "A" * 32},
         {"ack": 1},
         {"ack": "true"},
@@ -304,7 +302,7 @@ def test_mixed_control_ack_and_business_have_independent_identities() -> None:
         [terminal_item, accept, history], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
     )
     parsed = parse_worker_message(json.dumps(data))
-    assert PROTOCOL_VERSION == 27
+    assert PROTOCOL_VERSION == 26
     assert isinstance(parsed.payload[0], ExecuteResult)
     assert parsed.payload[0].terminal() == terminal
     assert isinstance(parsed.payload[1], AcceptResultRequest)
@@ -397,13 +395,14 @@ def test_batch_static_validation_and_pure_ack_boundaries() -> None:
 
 
 def test_inference_fences_and_cancel_control_are_required_and_directional() -> None:
-    request: dict[str, JsonValue] = {
-        "type": "tool_call", "message_id": "a" * 32, "reply_to": None,
-        "method": "worker.start", **IDENTITY, "task": "Answer from supplied facts",
+    task: dict[str, JsonValue] = {
+        "request_id": "a" * 32,
+        "messages": [{"role": "user", "content": "Answer from supplied facts"}],
     }
-    response = result("worker.start", **IDENTITY, failure={"code": "cancelled"})
+    request = {**call("worker.infer", task), **IDENTITY}
+    response = result("worker.infer", **IDENTITY, failure={"code": "cancelled"})
     for parse, item in ((parse_server_message, request), (parse_worker_message, response)):
-        assert parse(json.dumps(message([item]))).payload[0].method == "worker.start"
+        assert parse(json.dumps(message([item]))).payload[0].method == "worker.infer"
         for key in IDENTITY:
             malformed = {name: value for name, value in item.items() if name != key}
             with pytest.raises(ValidationError):
@@ -420,7 +419,7 @@ def test_inference_fences_and_cancel_control_are_required_and_directional() -> N
 
 def test_infer_only_registration_cannot_claim_coding_recovery() -> None:
     data = message([], control="register", connection_epoch=None, worker_id="mini",
-                   recoveries=[], inference="bub",
+                   recoveries=[], inference={"adapter_version": "bub/0.4.1"},
                    coding_agent="amp",
                    workspace="b" * 32, repo_workspace_limit=2,
                    inventory=INVENTORY, inventory_complete=True)

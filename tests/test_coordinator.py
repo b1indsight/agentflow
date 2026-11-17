@@ -11,9 +11,9 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from app.contracts.protocol import (
-    AgentResult,
     ExecutionResult,
     Failed,
+    InferenceResult,
     InitialTask,
     InitialTaskResult,
     Succeeded,
@@ -26,15 +26,8 @@ from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
-from app.domain.inference_models import InferenceFailure
-from app.domain.models import (
-    CodingExecutionResult,
-    DeliveryState,
-    FlowState,
-    Job,
-    JobKind,
-    JobState,
-)
+from app.domain.inference_models import InferenceCapability, InferenceFailure, InferenceOutput
+from app.domain.models import DeliveryState, FlowState, Job, JobKind, JobState
 from app.github import GitHubApp
 from app.persistence.store import Store
 from app.plugins import get_plugin_manager
@@ -104,15 +97,15 @@ async def prepare_initial(subject, coding):
             worker_id = coding.assigned_worker_id
             worker = next(w for w in subject.workers.list_workers() if w.worker_id == worker_id)
             epoch = worker.connection_epoch
-            subject.workers.worker_ready(worker_id, epoch, "codex")
+            subject.workers.worker_ready(worker_id, epoch, InferenceCapability(adapter_version="codex/v1"))
             naming = subject.assignments.assign_job(worker_id, "naming", epoch, slot="infer")
             assert naming is not None and naming.id == flow.title_job_id
-            call = naming.inference
-            response = AgentResult(
-                **result_header(call.current_request_id), method="worker.start", job_id=naming.id,
-                assignment_token="naming", result=CodingExecutionResult(
-                    None, json.dumps({"title": "Task title", "branch_slug": "feat/implement-task"}),
-                    0, backend="codex",
+            call = naming.inference.current_task
+            response = InferenceResult(
+                **result_header(call.request_id), method="worker.infer", job_id=naming.id,
+                assignment_token="naming", output=InferenceOutput(
+                    request_id=call.request_id, request_digest=call.digest, adapter_version="codex/v1",
+                    text=json.dumps({"title": "Task title", "branch_slug": "feat/implement-task"}),
                 ),
             )
             assert subject.assignments.record_assignment_result(naming.id, worker_id, "naming", epoch, response) == "pending"
@@ -126,7 +119,7 @@ async def prepare_initial(subject, coding):
 @pytest.mark.parametrize("agent_type,expected,effort", [
     ("codex", "codex-selected", "ultra"), ("amp", "openai/gpt-6.1-sol", "low"),
 ])
-async def test_assignment_selects_coding_default_without_registered_inference_backend(store, agent_type, expected, effort):
+async def test_assignment_selects_coding_default_without_inference_capability(store, agent_type, expected, effort):
     from app.contracts.protocol import AssignmentArguments
     from app.persistence.settings import SettingsStore
 
@@ -174,26 +167,25 @@ async def test_initial_waits_for_title_and_branch_from_one_inference(store, task
                 await asyncio.sleep(.01)
         assert not preparing.done()
         assert store.deliveries.get_delivery(flow.id) is None
-        store.workers.worker_ready("worker-a", "epoch", "codex")
+        store.workers.worker_ready("worker-a", "epoch", InferenceCapability(adapter_version="codex/v1"))
         naming = store.assignments.assign_job("worker-a", "naming", "epoch", slot="infer")
         assert naming.id == store.flows.get_flow(flow.id).title_job_id
-        call = naming.inference
+        call = naming.inference.current_task
         # The naming inference, not the later coding prompt, must choose a typed branch slug.
-        messages = json.loads(call.task)
-        naming_prompt = messages[0]["content"]
+        naming_prompt = call.messages[0].content
         assert "Conventional Commits" in naming_prompt
         assert "<type>[optional scope][!]: <description>" in naming_prompt
         assert "<type>/<description>" in naming_prompt
         assert "feat(auth)!: remove login -> feat/remove-login" in naming_prompt
         assert "fix/pagination-cursor" in naming_prompt
         assert "flow/ and heads/ prefixes are reserved" in naming_prompt
-        assert messages[-1]["content"] == task_content
+        assert call.messages[1].content == task_content
         assert re.search(call.output_schema["properties"]["branch_slug"]["pattern"], branch_slug)
-        result = AgentResult(
-            **result_header(call.current_request_id), method="worker.start", job_id=naming.id,
-            assignment_token="naming", result=CodingExecutionResult(
-                None, json.dumps({"title": "移除登录功能", "branch_slug": branch_slug}),
-                0, backend="codex",
+        result = InferenceResult(
+            **result_header(call.request_id), method="worker.infer", job_id=naming.id,
+            assignment_token="naming", output=InferenceOutput(
+                request_id=call.request_id, request_digest=call.digest, adapter_version="codex/v1",
+                text=json.dumps({"title": "移除登录功能", "branch_slug": branch_slug}),
             ),
         )
         assert store.assignments.record_assignment_result(naming.id, "worker-a", "naming", "epoch", result) == "pending"
@@ -219,7 +211,7 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr(store, prepared_
     assert task.flow_id == flow.id
     assert task.task_content == (flow.task_content or "Real issue\n\nReal body")
     title_job = store.jobs.get_job(store.flows.get_flow(flow.id).title_job_id)
-    assert json.loads(title_job.inference.task)[-1]["content"] == task.task_content
+    assert title_job.inference.task.messages[-1].content == task.task_content
     if flow.issue_number is None:
         assert not any(call["operation"] == "fetch_issue" for call in github.resource_calls)
     assert task.base_branch == "trunk" and task.branch == request.arguments.branch
@@ -323,13 +315,13 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, pending_nam
     # Recover the branch from the same inference after title application, before delivery exists.
     flow, subject, _coding, preparing, title_job = pending_naming
     assert title_job is not None and title_job.inference.source_attempt_id == flow.current_attempt_id
-    assert json.loads(title_job.inference.task)[-1]["content"] == "Real issue\n\nReal body"
+    assert title_job.inference.task.messages[-1].content == "Real issue\n\nReal body"
     assert store.flows.get_flow(flow.id).title_job_id == title_job.id
     assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind is JobKind.INFERENCE]) == 1
-    store.workers.worker_ready("worker-a", "epoch", "codex")
+    store.workers.worker_ready("worker-a", "epoch", InferenceCapability(adapter_version="codex/v1"))
     assigned = store.assignments.assign_job("worker-a", "title-token", "epoch", slot="infer")
     assert assigned is not None and assigned.id == title_job.id
-    call = assigned.inference
+    call = assigned.inference.current_task
     if (isinstance(reply, dict) and set(reply) == {"title", "branch_slug"}
             and reply["title"] == "Title" and isinstance(reply["branch_slug"], str)):
         # The schema given to the model and replay-time validation must accept the same slugs.
@@ -338,11 +330,12 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, pending_nam
         schema_accepts = (schema["minLength"] <= len(slug) <= schema["maxLength"]
                           and re.search(schema["pattern"], slug) is not None)
         assert schema_accepts is (expected is not None)
-    response = AgentResult(
-        **result_header(call.current_request_id), method="worker.start", job_id=assigned.id,
+    response = InferenceResult(
+        **result_header(call.request_id), method="worker.infer", job_id=assigned.id,
         assignment_token=assigned.assignment_token,
-        result=CodingExecutionResult(None, json.dumps(reply) if isinstance(reply, dict) else reply,
-            0, backend="codex") if not isinstance(reply, InferenceFailure) else None,
+        output=InferenceOutput(request_id=call.request_id, request_digest=call.digest,
+            text=json.dumps(reply) if isinstance(reply, dict) else reply,
+            adapter_version="codex/v1") if not isinstance(reply, InferenceFailure) else None,
         failure=reply if isinstance(reply, InferenceFailure) else None,
     )
     assert store.assignments.record_assignment_result(assigned.id, "worker-a", "title-token", "epoch", response) == "pending"

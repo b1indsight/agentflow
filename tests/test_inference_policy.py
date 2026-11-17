@@ -6,13 +6,17 @@ import pytest
 
 from app.domain.inference_models import (
     LOCAL_BUB_WORKER_ID,
+    InferenceCapability,
     InferenceFailure,
     InferenceJob,
+    InferenceMessage,
+    InferenceTask,
 )
 from app.domain.inference_policy import (
     choose_inference_worker,
     decide_inference_cancellation,
     decide_inference_settlement,
+    plan_inference_attempt,
 )
 from app.domain.models import (
     ArchiveReason,
@@ -31,11 +35,11 @@ from tests.review_memory import judge_decision, review_context
 
 NOW = datetime(2026, 11, 16, 12, tzinfo=UTC)
 DEADLINE = NOW + timedelta(seconds=60)
-REQUEST_ID = "a" * 32
+TASK = InferenceTask(request_id="a" * 32, messages=[InferenceMessage(role="user", content="hi")])
 
 
 def call(**changes) -> InferenceJob:
-    return InferenceJob(request_id=REQUEST_ID, task="hi", deadline_at=DEADLINE, **changes)
+    return InferenceJob(task=TASK, deadline_at=DEADLINE, **changes)
 
 
 def job(*, state=JobState.RUNNING, attempt=1, worker="w1", flow_id=None, **changes) -> Job:
@@ -47,10 +51,10 @@ def job(*, state=JobState.RUNNING, attempt=1, worker="w1", flow_id=None, **chang
     )
 
 
-def worker(worker_id: str, *, backend="codex") -> WorkerRecord:
+def worker(worker_id: str, **capability) -> WorkerRecord:
     return WorkerRecord(
         worker_id=worker_id, workspace="default", protocol_version=1, status=WorkerStatus.ONLINE,
-        inference=backend,
+        inference=InferenceCapability(adapter_version="test/1", **capability),
         first_connected_at=NOW, last_connected_at=NOW, last_seen_at=NOW,
     )
 
@@ -84,7 +88,7 @@ def test_recoverable_failure_retries_until_the_third_attempt(attempt, state, rea
         summary = settled.call.summary
         assert settled.call.next_attempt_at is None
         assert (summary.stop_reason, summary.attempts, summary.last_failure_code) == (reason, 3, "rate_limited")
-        assert (summary.logical_call_id, summary.last_worker_id) == (REQUEST_ID, "w1")
+        assert (summary.logical_call_id, summary.last_worker_id) == (TASK.request_id, "w1")
         assert (summary.finished_at, summary.elapsed_ms) == (NOW, 2000)
 
 
@@ -225,11 +229,21 @@ def test_answer_received_on_time_survives_application_after_the_deadline():
     assert cancellation(late, now=DEADLINE + timedelta(hours=1)) == InferenceFailure(code="execution_timeout")
 
 
+def test_attempt_waits_for_backoff_then_gets_only_the_remaining_budget():
+    backing_off = call(next_attempt_at=NOW + timedelta(seconds=1))
+
+    assert plan_inference_attempt(backing_off, request_id="b" * 32, now=NOW) is None
+    task = plan_inference_attempt(backing_off, request_id="b" * 32, now=NOW + timedelta(seconds=1))
+    assert (task.request_id, task.timeout_seconds, task.messages) == ("b" * 32, 59, TASK.messages)
+    assert plan_inference_attempt(call(), request_id="b" * 32, now=DEADLINE) == InferenceFailure(
+        code="execution_timeout")
+
+
 def test_worker_choice_excludes_then_avoids_then_prefers_local():
-    remote, other, local = worker("w1"), worker("w2"), worker(LOCAL_BUB_WORKER_ID, backend="bub")
+    remote, other, local = worker("w1"), worker("w2"), worker(LOCAL_BUB_WORKER_ID)
 
     def chosen(current, available):
-        return getattr(choose_inference_worker(current, available), "worker_id", None)
+        return getattr(choose_inference_worker(current, TASK, available), "worker_id", None)
 
     # Fair base order decides between equals; the local worker jumps that order.
     assert chosen(call(), [remote, other]) == "w1"
@@ -237,6 +251,6 @@ def test_worker_choice_excludes_then_avoids_then_prefers_local():
     # A worker that failed this call yields to any other ready worker, local or not.
     assert chosen(call(avoid_workers={LOCAL_BUB_WORKER_ID}), [local, other]) == "w2"
     assert chosen(call(avoid_workers={"w1"}), [remote]) == "w1"
-    # Unknown outcomes and workers that did not register a backend never qualify.
+    # Unknown outcomes and unsupported requests never qualify.
     assert chosen(call(excluded_workers={"w1"}), [remote]) is None
-    assert chosen(call(), [worker("w1", backend=None), other]) == "w2"
+    assert chosen(call(), [worker("w1", formats={"json"}), other]) == "w2"

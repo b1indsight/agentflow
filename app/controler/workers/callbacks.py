@@ -17,8 +17,6 @@ from app.contracts.protocol import (
     AcceptResultRequest,
     AcceptResultResponse,
     AcceptStop,
-    AgentResult,
-    AgentStart,
     Assignment,
     AssignmentArguments,
     CancelJob,
@@ -26,6 +24,8 @@ from app.contracts.protocol import (
     ExecutionTask,
     Failed,
     Heartbeat,
+    InferenceRequest,
+    InferenceResult,
     Inventory,
     InventoryPage,
     PayloadValidationError,
@@ -106,7 +106,6 @@ class ServerCallbacks:
         metrics: Metrics | None = None,
     ) -> None:
         self.worker_id, self.register, self.session = worker_id, register, session
-        self.database = database
         self.deliveries, self.jobs = DeliveryStore(database), JobStore(database)
         self.stops, self.workers = StopStore(database), WorkerStore(database)
         self.assignments, self.inference = AssignmentStore(database), InferenceStore(database)
@@ -378,8 +377,8 @@ class ServerCallbacks:
         if current is not None:
             stored = self.jobs.get_job(current.id)
             if stored is not None and stored.state is not JobState.RUNNING:
-                assert current.inference is not None and current.inference.current_request_id is not None
-                self.routes.forget_reply(current.inference.current_request_id)
+                assert current.inference is not None and current.inference.current_task is not None
+                self.routes.forget_reply(current.inference.current_task.request_id)
                 self.inference_current, self.inference_cancelling = None, False
             elif not self.inference_cancelling and self.inference.inference_needs_cancel(current.id):
                 assert current.assignment_token is not None
@@ -392,25 +391,15 @@ class ServerCallbacks:
             token = uuid4().hex
             job = self.assignments.assign_job(self.worker_id, token, self.epoch, slot="infer")
             if job is not None:
-                call = job.inference
-                assert call is not None and call.current_request_id is not None
+                assert job.inference is not None and job.inference.current_task is not None
+                task = job.inference.current_task
                 self.inference_current = job
-                remaining = (call.deadline_at - self.database.now()).total_seconds()
-                if remaining <= 0:
-                    await self.on_inference_result(AgentResult(
-                        **result_header(call.current_request_id), method="worker.start",
-                        job_id=job.id, assignment_token=token,
-                        failure=InferenceFailure(code="execution_timeout"),
-                    ))
-                    return
-                request = AgentStart(
-                    **call_header(call.current_request_id), method="worker.start", task=call.task,
-                    output_schema=call.output_schema, model=call.model, effort=call.effort,
-                    max_output_bytes=call.max_output_bytes, timeout_seconds=remaining,
+                request = InferenceRequest(
+                    **call_header(task.request_id), method="worker.infer", arguments=task,
                     job_id=job.id, assignment_token=token,
                 )
                 self.routes.expect_reply(
-                    request, AgentResult, self.on_inference_result,
+                    request, InferenceResult, self.on_inference_result,
                     on_rejected=partial(self._inference_rejected, request),
                 )
                 await self._send(request)
@@ -552,13 +541,13 @@ class ServerCallbacks:
         await self.results.apply(job.id)
 
     async def on_inference_result(
-        self, item: AgentResult, message: WorkerMessageUnion | None = None
+        self, item: InferenceResult, message: WorkerMessageUnion | None = None
     ) -> None:
         current = self.inference_current
         if (current is None or current.id != item.job_id
                 or current.assignment_token != item.assignment_token
-                or current.inference is None
-                or current.inference.current_request_id != item.reply_to):
+                or current.inference is None or current.inference.current_task is None
+                or current.inference.current_task.request_id != item.reply_to):
             return  # A late or foreign result cannot complete or release another slot.
         receipt = self.assignments.record_assignment_result(
             item.job_id, self.worker_id, item.assignment_token, self.epoch, item,
@@ -570,10 +559,10 @@ class ServerCallbacks:
         self.inference_current, self.inference_cancelling = None, False
         self.notify_jobs()
 
-    async def _inference_rejected(self, request: AgentStart, reason: str) -> None:
+    async def _inference_rejected(self, request: InferenceRequest, reason: str) -> None:
         """A rejected request or malformed reply ends the slot as an invalid provider response."""
-        await self.on_inference_result(AgentResult(
-            **result_header(request.message_id), method="worker.start",
+        await self.on_inference_result(InferenceResult(
+            **result_header(request.message_id), method="worker.infer",
             job_id=request.job_id, assignment_token=request.assignment_token,
             failure=InferenceFailure(code="invalid_response"),
         ))

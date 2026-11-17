@@ -10,6 +10,7 @@ from app.domain.inference_models import (
     InferenceFailure,
     InferenceJob,
     InferenceSummary,
+    InferenceTask,
     StopReason,
 )
 from app.domain.models import Flow, Job, JobKind, JobState, WorkerRecord
@@ -104,7 +105,7 @@ def decide_inference_settlement(
     })
     if state is JobState.FAILED:
         call = call.model_copy(update={"summary": InferenceSummary(
-            logical_call_id=call.request_id, attempts=job.attempt,
+            logical_call_id=call.task.request_id, attempts=job.attempt,
             stop_reason=reason, last_failure_code=failure.code,
             last_worker_id=job.assigned_worker_id, backend=call.backend,
             finished_at=now, elapsed_ms=max(0, int((now - job.created_at).total_seconds() * 1000)),
@@ -112,16 +113,33 @@ def decide_inference_settlement(
     return InferenceSettlement(state=state, call=call, failure=failure)
 
 
+def plan_inference_attempt(
+    call: InferenceJob, *, request_id: str, now: datetime,
+) -> InferenceTask | InferenceFailure | None:
+    """Return this dispatch's task, a timeout once the deadline passed, or None while backing off.
+
+    Each dispatch gets its own request identity and only the budget that remains.
+    """
+    if call.next_attempt_at is not None and call.next_attempt_at > now:
+        return None
+    if call.deadline_at <= now:
+        return InferenceFailure(code="execution_timeout")
+    return call.task.model_copy(update={
+        "request_id": request_id,
+        "timeout_seconds": (call.deadline_at - now).total_seconds(),
+    })
+
+
 def choose_inference_worker(
-    call: InferenceJob, available: Sequence[WorkerRecord],
+    call: InferenceJob, task: InferenceTask, available: Sequence[WorkerRecord],
 ) -> WorkerRecord | None:
     """Pick the preferred ready worker; the caller claims only when it is that worker.
 
     ``available`` keeps the store's fair base order (least recently assigned first).
-    Excluded workers never qualify. Workers that already failed this
+    Excluded and unsupported workers never qualify. Workers that already failed this
     call are avoided while another is ready; within a tier the local bub wins.
     """
     candidates = [worker for worker in available if worker.worker_id not in call.excluded_workers
-                  and worker.inference is not None]
+                  and worker.inference is not None and worker.inference.supports(task)]
     return min(candidates, default=None, key=lambda worker: (
         worker.worker_id in call.avoid_workers, worker.worker_id != LOCAL_BUB_WORKER_ID))

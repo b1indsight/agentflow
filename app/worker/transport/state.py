@@ -57,6 +57,7 @@ from app.contracts.protocol import (
     terminal_id,
 )
 from app.contracts.validation import RejectedMessage
+from app.domain.inference_models import InferenceCapability
 from app.inference.transport import WorkerInferenceCallbacks
 from app.worker.execution.lifecycle import WorkerProtocolError
 from app.worker.execution.workspaces import RepositoryProvisionError
@@ -96,7 +97,7 @@ class WorkerStateCallbacks:
         session: Session[ServerMessageUnion, WorkerMessageUnion],
         runtime: WorkerRuntime,
         on_ready: Callable[[bool], None],
-        inference: str | None,
+        inference: InferenceCapability | None,
         inference_callbacks: WorkerInferenceCallbacks,
     ) -> None:
         self.worker_id, self.session, self.runtime = worker_id, session, runtime

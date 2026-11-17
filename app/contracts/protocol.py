@@ -14,7 +14,6 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
-    JsonValue,
     SecretStr,
     StrictBool,
     Tag,
@@ -29,12 +28,12 @@ from app.contracts.files import MAX_FILE_BASE64, FileError, FileId
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.inference_models import (
-    MAX_INPUT_BYTES,
-    MAX_OUTPUT_BYTES,
+    InferenceCapability,
     InferenceFailure,
+    InferenceOutput,
+    InferenceTask,
 )
 from app.domain.models import (
-    CodingExecutionResult,
     FeedbackRef,
     RevisionCodingOutput,
     VcsKind,
@@ -42,7 +41,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[27] = 27
+PROTOCOL_VERSION: Literal[26] = 26
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -403,18 +402,17 @@ class FileResult(ToolResult):
         return self
 
 
-class AgentStart(ToolCall):
-    """Start an ordinary agent session in the worker's initialized answer workspace."""
-
-    method: Literal["worker.start"]
+class InferenceRequest(ToolCall):
+    method: Literal["worker.infer"]
     job_id: int = Field(strict=True, gt=0)
     assignment_token: str = Field(strict=True, min_length=1)
-    task: str = Field(strict=True, max_length=MAX_INPUT_BYTES)
-    output_schema: dict[str, JsonValue] | None = None
-    model: str | None = None
-    effort: str | None = None
-    max_output_bytes: int = Field(default=MAX_OUTPUT_BYTES, strict=True, gt=0, le=MAX_OUTPUT_BYTES)
-    timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    arguments: InferenceTask
+
+    @model_validator(mode="after")
+    def _request_identity(self) -> Self:
+        if self.message_id != self.arguments.request_id:
+            raise ValueError("inference request identity mismatch")
+        return self
 
 
 class RecoveryRejected(ToolCall):
@@ -522,17 +520,17 @@ class ConversationResult(ToolResult):
         return self
 
 
-class AgentResult(ToolResult):
-    method: Literal["worker.start"]
+class InferenceResult(ToolResult):
+    method: Literal["worker.infer"]
     job_id: int = Field(strict=True, gt=0)
     assignment_token: str = Field(strict=True, min_length=1)
-    result: CodingExecutionResult | None = None
+    output: InferenceOutput | None = None
     failure: InferenceFailure | None = None
 
     @model_validator(mode="after")
     def _one_outcome(self) -> Self:
-        if (self.result is None) == (self.failure is None):
-            raise ValueError("agent result requires exactly one outcome")
+        if (self.output is None) == (self.failure is None):
+            raise ValueError("inference result requires exactly one outcome")
         return self
 
 
@@ -591,11 +589,11 @@ class FlowToolResponse(ToolResult):
 # The two fixed packages, named by their method prefix and fixed in source. Each alias is
 # the only list of its members; directional parsing and _FIXED_METHODS derive from them.
 type WorkerCalls = (
-    Assignment | StopExecution | ConversationQuery | FileQuery | AgentStart
+    Assignment | StopExecution | ConversationQuery | FileQuery | InferenceRequest
     | RecoveryRejected | RepositoryDemand
 )
 type WorkerResults = (
-    ExecuteResult | StopResult | ConversationResult | FileResult | AgentResult | ProvisionResult
+    ExecuteResult | StopResult | ConversationResult | FileResult | InferenceResult | ProvisionResult
 )
 type ServerCalls = Started | AcceptResultRequest | AcceptStop | FileRegister
 type ServerResults = AcceptResultResponse | StopAccepted | FileRegistered
@@ -665,7 +663,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[27]
+    protocol_version: Literal[26]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -725,7 +723,7 @@ class Register(Message[WorkerPayload], InventoryPage):
     repo_workspace_limit: int = Field(strict=True, gt=0)
     execute: StrictBool = True
     coding_agent: Literal["codex", "amp"] | None
-    inference: str | None = Field(max_length=64)
+    inference: InferenceCapability | None
 
     @model_validator(mode="after")
     def _recovery_payload(self) -> Self:
@@ -872,7 +870,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[27]
+    protocol_version: Literal[26]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool
