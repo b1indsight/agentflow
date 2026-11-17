@@ -31,10 +31,11 @@ from app.contracts.protocol import (
 from app.contracts.validation import parse_worker_input
 from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.transport import control_ack
-from app.domain.models import VcsKind, VcsOutcome
+from app.domain.models import VcsKind
 from app.persistence.records import required
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import FlowToolCallError, WorkerExecution, WorkerProtocolError
+from app.worker.execution.vcs import VcsOutcome
 from app.worker.state.execution import ExecutionState
 from tests.test_communication_session import Socket
 from tests.test_conversation_history import SESSION

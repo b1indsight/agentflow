@@ -36,9 +36,10 @@ from app.contracts.protocol import (
     result_header,
 )
 from app.domain.delivery_models import PreparedDelivery
-from app.domain.models import JobState, VcsExecutionContext, VcsKind, VcsOutcome
+from app.domain.models import JobState, VcsKind
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution
+from app.worker.execution.vcs import VcsExecutionContext, VcsOutcome
 from app.worker.state.execution import ExecutionState, ExecutionStateError
 from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
 from tests.test_conversation_history import SESSION

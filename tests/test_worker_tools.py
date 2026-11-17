@@ -6,7 +6,8 @@ import httpx
 import pytest
 
 from app.domain.delivery_models import PreparedDelivery
-from app.domain.models import VcsExecutionContext, VcsKind, VcsOutcome
+from app.domain.models import VcsKind
+from app.worker.execution.vcs import VcsExecutionContext, VcsOutcome
 from app.worker.transport import mcp
 
 

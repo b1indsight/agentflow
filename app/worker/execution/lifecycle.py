@@ -26,8 +26,9 @@ from app.contracts.protocol import (
     result_header,
 )
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.models import JobState, VcsOutcome
+from app.domain.models import JobState
 from app.worker.execution.executor import WorkerExecutor
+from app.worker.execution.vcs import VcsOutcome
 from app.worker.state.execution import ExecutionState
 
 

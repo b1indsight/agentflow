@@ -8,6 +8,9 @@
 
 ## Unreleased
 
+- 将仅供 Worker 使用的 `VcsExecutionContext`、`VcsOutcome`、`InitialCodingOutput` 和
+  `LegacyStopped` 移入各自的 VCS、执行器和 journal 模块，不保留旧路径转发；
+  共享通信、模型与推理端点类型保持原归属，不改序列化、校验或运行行为。
 - 删除仅有一个生产实现的 `TaskExecutor` 协议，`WorkerExecution` 直接依赖 `WorkerExecutor`；
   保留执行、取消和恢复行为，同步测试替身及完整 Worker 类图。
 - 推理直接使用 `CodingAgent.start` 和 `CodingExecutionResult`，删除 `InferenceTask`、消息/输出/能力

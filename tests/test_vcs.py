@@ -13,8 +13,10 @@ from typing import cast
 import pytest
 from pydantic import SecretStr
 
-from app.domain.models import VcsExecutionContext, VcsKind, VcsOutcome
+from app.domain.models import VcsKind
 from app.worker.execution.vcs import (
+    VcsExecutionContext,
+    VcsOutcome,
     VcsVerificationError,
     _remote_sha,
     _run,

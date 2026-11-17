@@ -20,14 +20,13 @@ from app.contracts.protocol import (
 from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import (
     CodingExecutionResult,
-    InitialCodingOutput,
     SessionUnavailable,
     VcsKind,
-    VcsOutcome,
 )
 from app.worker.coding_agent import CodingAgent
-from app.worker.execution.executor import WorkerExecutor
+from app.worker.execution.executor import InitialCodingOutput, WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution
+from app.worker.execution.vcs import VcsOutcome
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.state.execution import ExecutionState
 from tests.test_vcs import _git, _git_fixture

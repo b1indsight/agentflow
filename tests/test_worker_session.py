@@ -26,9 +26,10 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.domain.delivery_models import DeliveryReceipt, PreparedDelivery
-from app.domain.models import JobState, VcsKind, VcsOutcome
+from app.domain.models import JobState, VcsKind
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
+from app.worker.execution.vcs import VcsOutcome
 from app.worker.state.execution import ExecutionState, ExecutionStateError
 
 

@@ -76,7 +76,7 @@
 <body>
   <header>
     <h1>Worker 全量类关系图</h1>
-    <p class="subtitle"><code>app/worker/</code> · <strong id="count">44</strong> 个类 · 2026-11-17 · b8aa1fb + 工作树（共享 Agent.start / resume 生命周期）</p>
+    <p class="subtitle"><code>app/worker/</code> · <strong id="count">48</strong> 个类 · 2026-11-17 · 4849e88 + 工作树（四个专用类迁入 worker）</p>
     <p class="subtitle">按当前实现绘制。包含私有类、Protocol、模型、异常和自更新分支；点选类可查看直接关系及源码，放大后可在画布内横纵滚动。</p>
     <div class="controls">
       <label for="focus">定位类</label>
@@ -98,7 +98,7 @@
   </header>
   <main>
     <div class="canvas" tabindex="0" role="region" aria-label="可横纵滚动的全量关系图">
-      <svg id="graph" viewBox="0 0 2140 2100" role="group" aria-label="Worker 的全部 44 个类及其直接关系">
+      <svg id="graph" viewBox="0 0 2140 2180" role="group" aria-label="Worker 的全部 48 个类及其直接关系">
         <defs>
           <marker id="arrow" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#96a5b8"/></marker>
           <marker id="triangle" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="white" stroke="#64748b"/></marker>
@@ -115,7 +115,7 @@
       <p id="detail-source"></p>
       <ul id="detail-relations"></ul>
       <h3>范围与读法</h3>
-      <p class="muted">44 个类精确对应 app/worker/**/*.py 的全部 ClassDef。两个 _OutputLimit 按模块区分；CodingAgent 提供执行生命周期及本地文件默认实现，Codex / Amp 显式继承。图共 58 节点、118 关系；12 个包外类（含 BubAgent）和 2 个函数锚点不计入 worker 类。</p>
+      <p class="muted">48 个类精确对应 app/worker/**/*.py 的全部 ClassDef。两个 _OutputLimit 按模块区分；CodingAgent 提供执行生命周期及本地文件默认实现，Codex / Amp 显式继承。图共 64 节点、131 关系；14 个包外类（含 BubAgent）和 2 个函数锚点不计入 worker 类。</p>
       <p class="muted">箭头表达静态关系，不表达调用时间顺序或独占所有权。源码链接指向同一 checkout 的相对路径及核对行号；未展开全部共享模型。</p>
     </aside>
   </main>
@@ -125,6 +125,7 @@
       <div>
         <h3>执行所有权与可替换连接</h3>
         <p>WorkerExecution 直接持有 WorkerExecutor，管理本 Flow 的执行 Task、工具 Future 和停止任务，两者共用 ExecutionState。多个 Flow 共用 Runtime 的目录池及配置后端的 Agent；会话、工作目录、凭据与子进程仍属于各次调用。</p>
+        <p>仅 worker 使用的 VcsExecutionContext / VcsOutcome 已归入 execution/vcs.py，InitialCodingOutput 归入 execution/executor.py；记录前置仓库事实、独立核验结果和 INITIAL 输出约束。共享 RevisionCodingOutput / VcsKind 仍由协议字段消费。</p>
         <p>Gateway / Session / Dispatcher 属于共享通信包；连接回调管理握手、消息关联及观察者。断线不取消编码执行，推理任务则由该连接的回调拥有。</p>
       </div>
       <div>
@@ -137,11 +138,12 @@
       <div>
         <h3>持久证据、文件与推理</h3>
         <p>ExecutionRecord 与 WorkspaceSlot 共享 WorkspaceBinding 身份。journal v5 保留 v4 只读转换；目录 manifest 只读写 v3，已删除 _LegacyManifest / _LegacySlot 和 v1 迁移。</p>
+        <p>LegacyStopped 已迁入 state/record.py，保留 ExecutionStopped / _LegacyHeader 双基类与 receipt() 投影；两个基类仍为共享契约，后者也供 LegacySucceeded / LegacyFailed 使用。</p>
         <p>FileLinks 只保存通用 backend / source、去重与 lookup，不导入后端。Agent 校验并读取 LocalFile 或 AmpAttachment；后者仍有 URL / name / read 行为。</p>
         <p>WorkerInferenceCallbacks 直接调用共享 Agent.start，在既有 inference_path 执行，不新建每次调用的子目录，context=None。只读要求仅由提示词表达，仍需可信宿主授权与外部隔离。已删除独立 inference 模块、InferenceTask / InferenceOutput / Inference 及 capability。包外 BubAgent 也继承 CodingAgent，经本地端点复用同一回调，未加入 worker 的 _agents。自更新仍是独立 CLI 分支。</p>
       </div>
     </div>
-    <p class="muted">数量沿革：旧图 33 类 → 合入 main 后 49 类 → Agent 职责收拢 48 类 → c0da88d 共享编码 / 历史实例仍为 48 类 → 删除 NativeAgentInference / _LegacyManifest / _LegacySlot 后 b8aa1fb 为 45 类 → 删除 TaskExecutor 后为 44 类。LocalFile、AmpAttachment 仅迁移；独立推理函数与包外接口已删除，执行回归 CodingAgent，无新增 worker 包装类。</p>
+    <p class="muted">数量沿革：旧图 33 类 → 合入 main 后 49 类 → Agent 职责收拢 48 类 → c0da88d 共享实例仍为 48 类 → b8aa1fb 删除三个旧类后 45 类 → 4849e88 删除 TaskExecutor 后 44 类 → 本工作树四个专用类归属迁移后 48 类。全 app 的 ClassDef 仍为 371，四个类的 AST 原样保留；类数量变化来自包边界调整，未增加系统类或包装层。LocalFile / AmpAttachment 行为和共享 start 生命周期保持。</p>
     <p class="muted">图为当前 checkout 的手工关系快照，类清单与行号经 AST 核对；源码链接随仓库版本一起检出。配套说明：<a href="worker-classes.md">类清单、函数模块与维护方法</a>。</p>
   </section>
   <script>
@@ -158,22 +160,28 @@
       {id:"WorkerStateCallbacks",file:"transport/state.py",line:89,x:40,y:300,role:"注册 / 库存 / 恢复与停止握手"},
       {id:"WorkerBusinessCallbacks",file:"transport/business.py",line:29,x:282,y:300,role:"历史查询 / 借用工具 Future"},
       {id:"WorkerFileCallbacks",file:"transport/files.py",line:25,x:40,y:430,role:"解析 Agent / 直接 read_file"},
-      {id:"WorkerExecution",file:"execution/lifecycle.py",line:62,x:570,y:300,role:"本 Flow 的 Task / 工具 / 停止"},
-      {id:"PendingToolCall",file:"execution/lifecycle.py",line:55,x:570,y:430,kind:"model",base:"dataclass",role:"request + 原调用者 Future"},
-      {id:"WorkerProtocolError",file:"execution/lifecycle.py",line:34,x:570,y:560,kind:"error",base:"RuntimeError",role:"消息不匹配执行所有权"},
-      {id:"FlowToolCallError",file:"execution/lifecycle.py",line:38,x:812,y:560,kind:"error",base:"WorkerProtocolError",role:"工具拒绝分类 / 重试信息"},
-      {id:"WorkerMCP",file:"transport/mcp.py",line:39,x:40,y:680,role:"INITIAL 与修正共用 MCP"},
-      {id:"FlowToolCaller",file:"transport/mcp.py",line:25,x:282,y:680,kind:"protocol",base:"Protocol",role:"call_tool() → DeliveryReceipt"},
-      {id:"_EmbeddedServer",file:"transport/mcp.py",line:32,x:40,y:810,base:"uvicorn.Server",role:"不接管进程信号"},
-      {id:"WorkerExecutor",file:"execution/executor.py",line:59,x:570,y:820,role:"INITIAL / REVISION / ARCHIVE"},
-      {id:"VcsVerificationError",file:"execution/vcs.py",line:27,x:812,y:820,kind:"error",base:"RuntimeError",role:"VCS / 目录分阶段安全失败"},
+      {id:"WorkerExecution",file:"execution/lifecycle.py",line:63,x:570,y:300,role:"本 Flow 的 Task / 工具 / 停止"},
+      {id:"PendingToolCall",file:"execution/lifecycle.py",line:56,x:570,y:430,kind:"model",base:"dataclass",role:"request + 原调用者 Future"},
+      {id:"WorkerProtocolError",file:"execution/lifecycle.py",line:35,x:570,y:560,kind:"error",base:"RuntimeError",role:"消息不匹配执行所有权"},
+      {id:"FlowToolCallError",file:"execution/lifecycle.py",line:39,x:812,y:560,kind:"error",base:"WorkerProtocolError",role:"工具拒绝分类 / 重试信息"},
+      {id:"WorkerMCP",file:"transport/mcp.py",line:38,x:40,y:680,role:"INITIAL 与修正共用 MCP"},
+      {id:"FlowToolCaller",file:"transport/mcp.py",line:24,x:282,y:680,kind:"protocol",base:"Protocol",role:"call_tool() → DeliveryReceipt"},
+      {id:"_EmbeddedServer",file:"transport/mcp.py",line:31,x:40,y:810,base:"uvicorn.Server",role:"不接管进程信号"},
+      {id:"WorkerExecutor",file:"execution/executor.py",line:68,x:570,y:780,role:"INITIAL / REVISION / ARCHIVE"},
+      {id:"InitialCodingOutput",file:"execution/executor.py",line:59,x:812,y:780,kind:"model",base:"BaseModel · extra=forbid",role:"INITIAL 的 summary / VCS 输出"},
+      {id:"VcsExecutionContext",file:"execution/vcs.py",line:36,x:570,y:910,kind:"model",base:"dataclass · frozen",role:"仓库 / 分支 / 远端 / 前置基线"},
+      {id:"VcsOutcome",file:"execution/vcs.py",line:51,x:812,y:910,kind:"model",base:"dataclass · frozen",role:"独立核验的后端 / 提交 / 远端"},
+      {id:"VcsVerificationError",file:"execution/vcs.py",line:27,x:570,y:1040,kind:"error",base:"RuntimeError",role:"VCS / 目录分阶段安全失败"},
       {id:"ExecutionState",file:"state/execution.py",line:38,x:1100,y:300,role:"每 Flow journal / 停止与 ACK"},
       {id:"ExecutionStateError",file:"state/execution.py",line:34,x:1342,y:300,kind:"error",base:"RuntimeError",role:"持久证据或恢复身份无效"},
       {id:"ExecutionRecord",file:"state/record.py",line:99,x:1100,y:430,kind:"model",base:"_RecordFields · journal v5",role:"当前持久执行证据"},
       {id:"_RecordFields",file:"state/record.py",line:35,x:1342,y:430,kind:"model",base:"ProtocolModel",role:"任务 / 终态 / workspace 字段"},
-      {id:"_LegacyRecord",file:"state/record.py",line:105,x:1100,y:560,kind:"model",base:"_RecordFields · journal v4",role:"校验旧凭据并转为当前记录"},
+      {id:"_LegacyRecord",file:"state/record.py",line:118,x:1100,y:560,kind:"model",base:"_RecordFields · journal v4",role:"校验旧凭据并转为当前记录"},
       {id:"JournalSelection",file:"state/record.py",line:29,x:1342,y:560,kind:"model",base:"ProtocolModel",role:"锁内迁移旧 current.json"},
       {id:"ProtocolModel",file:"app/contracts/protocol.py",line:52,x:1100,y:690,kind:"external",base:"包外 BaseModel · 不计数",role:"共享协议模型校验配置"},
+      {id:"LegacyStopped",file:"state/record.py",line:105,x:1342,y:690,kind:"model",base:"ExecutionStopped + _LegacyHeader",role:"校验旧停止凭据 / receipt 投影"},
+      {id:"ExecutionStopped",file:"app/contracts/protocol.py",line:237,x:1100,y:820,kind:"external",base:"包外 StopFence 子类 · 不计数",role:"共享当前执行停止证据"},
+      {id:"_LegacyHeader",file:"app/contracts/receipts.py",line:36,x:1342,y:820,kind:"external",base:"包外 ProtocolModel · 不计数",role:"共享旧版本 / connection_epoch"},
       {id:"RepositoryWorkspaces",file:"execution/workspaces.py",line:107,x:1630,y:300,role:"目录库存 / claim / release"},
       {id:"WorkspaceManifest",file:"execution/workspaces.py",line:87,x:1872,y:300,kind:"model",base:"BaseModel · manifest v3",role:"root / inference / slots[]"},
       {id:"WorkspaceSlot",file:"execution/workspaces.py",line:55,x:1630,y:430,kind:"model",base:"BaseModel",role:"位置 / generation / 清理身份"},
@@ -185,15 +193,15 @@
       {id:"Dispatcher",file:"app/communication/dispatch.py",line:18,x:40,y:1210,kind:"external",base:"包外 class · 不计数",role:"路由 / 回复关联 / 生命周期钩子"},
       {id:"Transport",file:"app/communication/session.py",line:28,x:282,y:1210,kind:"external",base:"包外 Protocol · 不计数",role:"send_text / receive_text / close"},
       {id:"SessionCallbacks",file:"app/communication/dispatch.py",line:14,x:40,y:1340,kind:"external",base:"包外 Protocol · 不计数",role:"bind(Dispatcher)"},
-      {id:"CodingAgent",file:"coding_agent.py",line:50,x:570,y:1080,kind:"protocol",base:"Protocol · 共享执行 / 文件实现",role:"start / resume → _execute"},
-      {id:"CodexAgent",file:"execution/codex.py",line:120,x:570,y:1210,base:"CodingAgent · backend=codex",role:"Codex 执行 / 历史 / 本地文件"},
-      {id:"CodexHistory",file:"execution/codex.py",line:287,x:812,y:1210,role:"原生 rollout JSONL / 分页"},
-      {id:"codex._OutputLimit",name:"_OutputLimit",file:"execution/codex.py",line:43,x:570,y:1340,kind:"error",base:"Exception · codex.py",role:"Codex 有界输出超限"},
-      {id:"AmpCodingAgent",file:"execution/amp_agent.py",line:240,x:1100,y:1210,base:"CodingAgent · backend=amp",role:"Amp 执行 / 历史 / 附件 IO"},
-      {id:"AmpHistory",file:"execution/amp_agent.py",line:499,x:1342,y:1210,role:"原生 export / 脱敏 / 分页"},
-      {id:"AmpProcessResult",file:"execution/amp_agent.py",line:113,x:1100,y:1340,kind:"model",base:"dataclass · frozen",role:"stdout / stderr / 退出状态"},
-      {id:"_Snapshot",file:"execution/amp_agent.py",line:493,x:1342,y:1340,kind:"model",base:"dataclass",role:"公开历史块 / 缓存时间"},
-      {id:"amp._OutputLimit",name:"_OutputLimit",file:"execution/amp_agent.py",line:121,x:1100,y:1470,kind:"error",base:"Exception · amp_agent.py",role:"Amp 进程有界管道超限"},
+      {id:"CodingAgent",file:"coding_agent.py",line:50,x:570,y:1270,kind:"protocol",base:"Protocol · 共享执行 / 文件实现",role:"start / resume → _execute"},
+      {id:"CodexAgent",file:"execution/codex.py",line:120,x:570,y:1400,base:"CodingAgent · backend=codex",role:"Codex 执行 / 历史 / 本地文件"},
+      {id:"CodexHistory",file:"execution/codex.py",line:287,x:812,y:1400,role:"原生 rollout JSONL / 分页"},
+      {id:"codex._OutputLimit",name:"_OutputLimit",file:"execution/codex.py",line:43,x:570,y:1530,kind:"error",base:"Exception · codex.py",role:"Codex 有界输出超限"},
+      {id:"AmpCodingAgent",file:"execution/amp_agent.py",line:240,x:1100,y:1400,base:"CodingAgent · backend=amp",role:"Amp 执行 / 历史 / 附件 IO"},
+      {id:"AmpHistory",file:"execution/amp_agent.py",line:499,x:1342,y:1400,role:"原生 export / 脱敏 / 分页"},
+      {id:"AmpProcessResult",file:"execution/amp_agent.py",line:113,x:1100,y:1530,kind:"model",base:"dataclass · frozen",role:"stdout / stderr / 退出状态"},
+      {id:"_Snapshot",file:"execution/amp_agent.py",line:493,x:1342,y:1530,kind:"model",base:"dataclass",role:"公开历史块 / 缓存时间"},
+      {id:"amp._OutputLimit",name:"_OutputLimit",file:"execution/amp_agent.py",line:121,x:1100,y:1660,kind:"error",base:"Exception · amp_agent.py",role:"Amp 进程有界管道超限"},
       {id:"FileLinks",file:"state/file_links.py",line:15,x:1630,y:1080,role:"backend / source / 去重 / lookup"},
       {id:"LocalFile",file:"coding_agent.py",line:22,x:1872,y:1080,kind:"model",base:"BaseModel",role:"path / device / inode 身份"},
       {id:"AmpAttachment",file:"execution/amp_agent.py",line:436,x:1630,y:1210,kind:"model",base:"BaseModel · frozen",role:"URL / name / 有界 read()"},
@@ -203,10 +211,10 @@
       {id:"InstalledPackage",file:"self_update.py",line:39,x:1630,y:1620,kind:"model",base:"dataclass · frozen",role:"核验后的 sha / package_path"},
       {id:"UpdateError",file:"self_update.py",line:34,x:1872,y:1620,kind:"error",base:"RuntimeError",role:"安装 / 更新安全失败"},
       {id:"update_worker()",file:"self_update.py",line:233,x:1630,y:1750,kind:"function",base:"函数锚点 · 不计数",role:"CLI --update 独立执行"},
-      {id:"WorkerInferenceCallbacks",file:"app/inference/transport.py",line:36,x:570,y:1680,kind:"external",base:"包外 class · 不计数",role:"共享 start / 连接槽位与取消"},
-      {id:"BubAgent",file:"app/inference/bub.py",line:23,x:812,y:1810,kind:"external",base:"包外 CodingAgent 子类 · 不计数",role:"本地端点 / 无工具 SDK 子进程"},
-      {id:"CodingExecutionContext",file:"app/domain/models.py",line:388,x:1100,y:1680,kind:"external",base:"包外 dataclass · 不计数",role:"本轮 GitHub / MCP 临时能力"},
-      {id:"CodingExecutionResult",file:"app/domain/models.py",line:359,x:1342,y:1680,kind:"external",base:"包外 dataclass · 不计数",role:"session / answer / backend / 失败"}
+      {id:"WorkerInferenceCallbacks",file:"app/inference/transport.py",line:36,x:570,y:1880,kind:"external",base:"包外 class · 不计数",role:"共享 start / 连接槽位与取消"},
+      {id:"BubAgent",file:"app/inference/bub.py",line:23,x:812,y:2010,kind:"external",base:"包外 CodingAgent 子类 · 不计数",role:"本地端点 / 无工具 SDK 子进程"},
+      {id:"CodingExecutionContext",file:"app/domain/models.py",line:362,x:1100,y:1880,kind:"external",base:"包外 dataclass · 不计数",role:"本轮 GitHub / MCP 临时能力"},
+      {id:"CodingExecutionResult",file:"app/domain/models.py",line:333,x:1342,y:1880,kind:"external",base:"包外 dataclass · 不计数",role:"session / answer / backend / 失败"}
     ];
     // ref = stored reference/field; use = construction/call/read-write/error;
     // inherit = Python base; realize = structural Protocol conformance.
@@ -265,6 +273,8 @@
       ["WorkerExecution","FlowToolCallError","use","工具 future.set_exception()"],
       ["FlowToolCallError","WorkerProtocolError","inherit","继承"],
       ["WorkerExecution","FlowToolCaller","realize","tool_caller=self；不依赖当前连接"],
+      ["WorkerExecution","VcsOutcome","use","call_tool(vcs_outcome=...)；将 MCP 已核验事实写入 FlowToolArguments"],
+      ["FlowToolCaller","VcsOutcome","use","call_tool 的显式 vcs_outcome 参数"],
       ["WorkerExecutor","CodingAgent","ref","code_agent；注入 Runtime 共享实例，与同后端历史查询共用"],
       ["CodexAgent","CodingAgent","inherit","继承 start / resume / _execute 及本地文件实现；原生执行实现 _run"],
       ["AmpCodingAgent","CodingAgent","inherit","继承共享执行生命周期；实现 _run，扩展附件 URL，保留本地文件默认实现"],
@@ -275,8 +285,13 @@
       ["WorkerExecutor","VcsVerificationError","use","抛出 / 捕获 → 失败结果"],
       ["WorkerExecutor","CodingExecutionContext","use","创建每轮 GitHub / MCP 能力"],
       ["WorkerExecutor","CodingExecutionResult","use","读取 Agent 结果并核验业务输出 / VCS"],
+      ["WorkerExecutor","InitialCodingOutput","use","生成 INITIAL schema；model_validate_json 校验最终输出"],
+      ["WorkerExecutor","VcsExecutionContext","use","prepare_*_context / replace；传入 MCP、核验和修正提示词"],
+      ["WorkerExecutor","VcsOutcome","use","经 verify_*_outcome 返回；与 MCP.last_vcs_outcome 对照"],
       ["WorkerMCP","FlowToolCaller","ref","caller（本轮引用）"],
       ["WorkerMCP","_EmbeddedServer","ref","_server（创建）"],
+      ["WorkerMCP","VcsExecutionContext","ref","vcs_context；本轮前置仓库事实"],
+      ["WorkerMCP","VcsOutcome","ref","last_vcs_outcome: 0..1；核验后转交 call_tool"],
       ["ExecutionState","ExecutionRecord","use","load / _write；不持有历史 reader"],
       ["ExecutionState","ExecutionStateError","use","证据或恢复身份无效时抛出"],
       ["ExecutionState","JournalSelection","use","scan() 校验旧选择记录并迁移目录"],
@@ -285,9 +300,15 @@
       ["ExecutionRecord","_RecordFields","inherit","继承公共字段与证据校验"],
       ["_LegacyRecord","_RecordFields","inherit","继承；覆写旧凭据字段"],
       ["_LegacyRecord","ExecutionRecord","use","current() 显式投影为 v5"],
+      ["_LegacyRecord","LegacyStopped","ref","stopped: 0..1；current() 调用 receipt()"],
+      ["LegacyStopped","ExecutionStopped","inherit","第一基类；保留停止身份与执行 nonce"],
+      ["LegacyStopped","_LegacyHeader","inherit","第二基类；旧版本 / epoch；本类另要求必填 type"],
+      ["LegacyStopped","ExecutionStopped","use","receipt() 显式投影为当前停止证据"],
       ["_RecordFields","ProtocolModel","inherit","显式继承共享模型"],
       ["JournalSelection","ProtocolModel","inherit","显式继承共享模型"],
+      ["_LegacyHeader","ProtocolModel","inherit","包外共享旧凭据头；也被 LegacySucceeded / LegacyFailed 继承"],
       ["_RecordFields","WorkspaceBinding","ref","workspace: 0..1（子类继承）"],
+      ["_RecordFields","ExecutionStopped","ref","stopped: 0..1；当前 v5 停止凭据"],
       ["AmpHistory","_Snapshot","ref","_cache[session_id]"],
       ["RepositoryWorkspaces","WorkspaceManifest","use","读写 workspace-pool.json"],
       ["RepositoryWorkspaces","WorkspaceBinding","use","claim / lookup / release；校验 generation"],
@@ -335,15 +356,15 @@
       [20,230,500,320,"连接级回调 · transport/{state,business,files}.py"],
       [20,610,500,310,"执行工具桥 · transport/mcp.py"],
       [550,230,500,460,"每 Flow 的执行所有权 · execution/lifecycle.py"],
-      [550,750,500,170,"业务编排与 VCS · execution/{executor,vcs}.py"],
-      [1080,230,500,590,"持久执行证据 · state/{execution,record}.py"],
+      [550,710,500,430,"业务编排与 VCS · execution/{executor,vcs}.py"],
+      [1080,230,500,720,"持久执行证据 · state/{execution,record}.py"],
       [1610,230,510,590,"目录库存与身份 · execution/workspaces.py"],
       [20,1010,500,440,"共享通信边界 · app/communication/（灰色不计数）"],
-      [550,1010,1030,570,"Agent 接口、原生执行与自有历史"],
+      [550,1200,1030,570,"Agent 接口、原生执行与自有历史"],
       [1610,1010,510,440,"文件身份、登记与历史出站投影"],
       [1610,1550,510,350,"独立 CLI 更新分支 · self_update.py"],
-      [550,1610,500,310,"共享 start 回调 / Bub 边界（灰色不计数）"],
-      [1080,1610,500,310,"领域执行边界 · app/domain/models.py"]
+      [550,1810,500,310,"共享 start 回调 / Bub 边界（灰色不计数）"],
+      [1080,1810,500,310,"领域执行边界 · app/domain/models.py"]
     ];
     const namespace = "http://www.w3.org/2000/svg";
     const width = 224, height = 80;
@@ -365,7 +386,7 @@
     }
     // Route on a small orthogonal grid so long dependencies cannot disappear under
     // unrelated classes or cross module headings. The same paths export to SVG.
-    const step = 10, columns = 215, rows = 211;
+    const step = 10, columns = 215, rows = 219;
     const blocked = new Uint8Array(columns*rows);
     const obstacles = [
       ...nodes.map(node => [node.x-6,node.y-6,width+12,height+12]),
@@ -503,9 +524,9 @@
       copy.removeAttribute("id");
       copy.removeAttribute("style");
       copy.setAttribute("xmlns",namespace);
-      copy.setAttribute("viewBox","0 -80 2140 2180");
+      copy.setAttribute("viewBox","0 -80 2140 2260");
       copy.setAttribute("width","2140");
-      copy.setAttribute("height","2180");
+      copy.setAttribute("height","2260");
       copy.setAttribute("role","img");
       for (const element of copy.querySelectorAll(".selected, .neighbor, .dim, .active")) {
         element.classList.remove("selected","neighbor","dim","active");
@@ -522,7 +543,7 @@
       const rules = [...document.styleSheets[0].cssRules]
         .filter(rule => rule.selectorText && /\.(node|edge|group-)/.test(rule.selectorText));
       svg("style",{},copy,"svg { background:white; font:14px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif; --accent:#1f6fe0; }\n" + rules.map(rule => rule.cssText).join("\n"));
-      svg("text",{x:20,y:-48,"font-size":23,fill:"#172231"},copy,`Worker 全量类关系图 · ${classCount} 个类 · 2026-11-17 · b8aa1fb + 工作树（共享 Agent.start / resume）`);
+      svg("text",{x:20,y:-48,"font-size":23,fill:"#172231"},copy,`Worker 全量类关系图 · ${classCount} 个类 · 2026-11-17 · 4849e88 + 工作树（四个专用类迁入 worker）`);
       svg("text",{x:20,y:-18,fill:"#526276"},copy,`实线 → 持有 / 字段 · 虚线 → 使用 · 实线 ▷ 继承 · 虚线 ▷ Protocol · 灰色节点不计数 · ${edges.length} 条关系`);
       return new XMLSerializer().serializeToString(copy);
     }

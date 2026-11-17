@@ -8,7 +8,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -330,31 +329,6 @@ class WorkerView(BaseModel):
 # ---------------------------------------------------------------- 非持久化 dataclass
 
 
-@dataclass(frozen=True)
-class VcsExecutionContext:
-    """Facts fixed before CodingAgent mutates a Flow-owned repository."""
-
-    repo_path: Path
-    branch: str
-    remote: str
-    git_remote_url: str | None
-    jj_remote_url: str | None
-    git_base_sha: str | None
-    jj_base_sha: str | None
-    jj_ancestor_sha: str | None
-    push_token: SecretStr | None = field(default=None, repr=False)
-
-
-@dataclass(frozen=True)
-class VcsOutcome:
-    """VCS facts independently verified after a CodingAgent run."""
-
-    backend: VcsKind
-    branch: str
-    commit_sha: str
-    remote_sha: str
-
-
 @dataclass
 class CodingExecutionResult:
     """One CodingAgent execution, shared by coding and answer-only callers."""
@@ -456,12 +430,3 @@ class RevisionCodingOutput(BaseModel):
     addressed: list[AddressedComment]
     deferred: list[DeferredComment]
     needs_clarification: list[str]
-
-
-class InitialCodingOutput(BaseModel):
-    """Strict structured result required from an INITIAL CodingAgent run."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    summary: str
-    vcs_backend_used: VcsKind
