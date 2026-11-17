@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker 全量类关系图</title>
+  <style>
+    :root { color-scheme: light; --ink:#172231; --muted:#526276; --line:#cbd5e1; --accent:#1f6fe0; --surface:#fff; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:#f0f4f8; color:var(--ink); font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    header { padding:26px 30px 20px; background:var(--surface); border-bottom:1px solid var(--line); }
+    h1 { margin:0 0 6px; font-size:26px; letter-spacing:-.5px; }
+    h2 { font-size:17px; margin:0 0 10px; }
+    h3 { font-size:14px; margin:20px 0 8px; }
+    p { margin:8px 0; }
+    a { color:var(--accent); text-underline-offset:3px; }
+    code, .mono { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; overflow-wrap:anywhere; }
+    .subtitle, .muted { color:var(--muted); }
+    .subtitle { margin:0; }
+    .controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-top:18px; }
+    button, select { font:inherit; color:inherit; background:white; border:1px solid #b9c8da; border-radius:5px; padding:6px 10px; }
+    button { cursor:pointer; }
+    button:hover { border-color:var(--accent); color:var(--accent); }
+    :focus-visible { outline:3px solid #77b2ff; outline-offset:3px; }
+    select { max-width:100%; }
+    .legend { display:flex; flex-wrap:wrap; gap:8px 24px; font-size:12px; color:var(--muted); margin-top:14px; }
+    .legend b { color:var(--ink); font:16px ui-monospace,monospace; }
+    main { display:grid; grid-template-columns:minmax(0,1fr) 330px; align-items:start; gap:18px; padding:20px; }
+    .canvas, aside, .notes { background:var(--surface); border:1px solid var(--line); border-radius:8px; }
+    .canvas { overflow:auto; }
+    #graph { display:block; width:100%; min-width:900px; height:auto; }
+    aside { position:sticky; top:16px; padding:20px; max-height:calc(100vh - 32px); overflow:auto; }
+    #detail-title { overflow-wrap:anywhere; }
+    #detail-meta { font-size:12px; }
+    #detail-relations { padding-left:0; list-style:none; }
+    #detail-relations li { padding:9px 0; border-bottom:1px solid #e8edf3; font-size:12px; }
+    #detail-relations button { padding:0; border:0; color:var(--accent); text-align:left; overflow-wrap:anywhere; }
+    #detail-relations small { display:block; color:var(--muted); }
+    .notes { margin:0 20px 24px; padding:22px; }
+    .note-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:26px; }
+    .group-box { fill:#f8fafc; stroke:#d3dce7; }
+    .group-label { fill:#526276; font-size:14px; font-weight:600; paint-order:stroke; stroke:#f8fafc; stroke-width:6px; stroke-linejoin:round; }
+    .node { cursor:pointer; }
+    .node rect { fill:white; stroke:#b5c3d4; stroke-width:1.4; }
+    .node .name { font:600 13px ui-monospace,SFMono-Regular,Consolas,monospace; fill:#172231; }
+    .node .kind { font-size:10px; fill:#53677d; }
+    .node .role { font-size:12px; fill:#526276; }
+    .node.protocol rect { fill:#f0f5ff; stroke:#99b8eb; stroke-dasharray:5 3; }
+    .node.model rect { fill:#f2faf7; stroke:#a3caba; }
+    .node.error rect { fill:#fff7f5; stroke:#dab7ae; }
+    .node.function rect, .node.external rect { fill:#f1f3f6; stroke-dasharray:3 3; }
+    .node.selected rect { stroke:var(--accent); stroke-width:3; fill:#eaf2ff; }
+    .node.neighbor rect { stroke:var(--accent); }
+    .node.dim { opacity:.24; }
+    .edge path { fill:none; stroke:#96a5b8; stroke-width:1.3; }
+    .edge.use path, .edge.realize path { stroke-dasharray:5 4; }
+    .edge.active path { stroke:var(--accent); stroke-width:2.2; }
+    .edge.dim { opacity:.07; }
+    #status { font-size:12px; color:var(--muted); }
+    @media(max-width:1050px) {
+      main { grid-template-columns:minmax(0,1fr); }
+      aside { position:static; max-height:none; }
+      .note-grid { grid-template-columns:1fr; gap:4px; }
+      header { padding:20px; }
+    }
+    @media print {
+      main { display:block; padding:0; }
+      aside, .controls { display:none; }
+      #graph { min-width:0; width:100% !important; }
+      .canvas { border:0; overflow:visible; }
+      .node.dim, .edge.dim { opacity:1; }
+      .notes { break-before:page; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Worker 全量类关系图</h1>
+    <p class="subtitle"><code>app/worker/</code> · <strong id="count">33</strong> 个类 · 源码快照 <code>ce89bab</code> · 2026-11-17</p>
+    <p class="subtitle">按当前实现绘制。包含私有类、Protocol、模型、异常和自更新分支；点选类可查看直接关系及源码。</p>
+    <div class="controls">
+      <label for="focus">定位类</label>
+      <select id="focus"><option value="">全部类与关系</option></select>
+      <button id="reset" type="button">显示全部</button>
+      <button id="zoom-out" type="button" aria-label="缩小关系图">−</button>
+      <button id="zoom-in" type="button" aria-label="放大关系图">＋</button>
+      <button id="fit" type="button">适应宽度</button>
+      <span id="status" role="status" aria-live="polite">选择类后高亮一跳关系；图中可横向滚动</span>
+    </div>
+    <div class="legend" aria-label="关系图图例">
+      <span><b>→</b> 持有引用 / 数据字段（含共享引用）</span>
+      <span><b>⇢</b> 创建 / 调用 / 读写 / 抛出或捕获（虚线）</span>
+      <span><b>─▷</b> 显式继承</span>
+      <span><b>┄▷</b> 结构化满足 Protocol，未显式继承</span>
+      <span>蓝底：Protocol · 绿底：模型 / dataclass · 浅红：异常 · 灰底：包外接口 / 函数锚点</span>
+    </div>
+  </header>
+  <main>
+    <div class="canvas" aria-label="可滚动的全量关系图">
+      <svg id="graph" viewBox="0 0 1440 1450" role="group" aria-label="Worker 的全部 33 个类及其直接关系">
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#96a5b8"/></marker>
+          <marker id="triangle" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="white" stroke="#64748b"/></marker>
+          <marker id="active-arrow" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#1f6fe0"/></marker>
+          <marker id="active-triangle" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="white" stroke="#1f6fe0"/></marker>
+        </defs>
+        <g id="groups"></g><g id="edges"></g><g id="group-titles"></g><g id="nodes"></g>
+      </svg>
+    </div>
+    <aside aria-labelledby="detail-title">
+      <h2 id="detail-title">从 WorkerRuntime 开始</h2>
+      <p id="detail-meta" class="muted">点选图中任意类，或使用上方下拉框。Tab / Enter 也可操作节点。</p>
+      <p id="detail-role">Runtime 装配 Client、Executor 和共享 Session；Client 管连接与执行 Task，Executor 管任务编排，Session 管持久恢复证据。</p>
+      <p id="detail-source"></p>
+      <ul id="detail-relations"></ul>
+      <h3>范围与读法</h3>
+      <p class="muted">33 个类均来自 app/worker/**/*.py 的 ClassDef。包外 CodingAgent 和两个函数锚点不计入；第三方基类写在节点内。</p>
+      <p class="muted">箭头表达静态关系，不表达调用时间顺序。未展开所有协议消息和第三方类型；完整边界见配套说明。</p>
+    </aside>
+  </main>
+  <section class="notes" aria-labelledby="reading">
+    <h2 id="reading">用于简化结构时，先核对这些边界</h2>
+    <div class="note-grid">
+      <div>
+        <h3>共享状态与连接生命周期</h3>
+        <p>Client 与 Executor 持有同一个 WorkerSession。WebSocket 重连不重建执行 Task；进程丢失后的编码任务不会凭 journal 盲目重跑。</p>
+        <p>WorkerSession 同时负责 journal、停止/归档证据与历史查询路由。是否拆分应结合重连、结果重放、取消用例判断。</p>
+      </div>
+      <div>
+        <h3>回调依赖与函数边界</h3>
+        <p>Client 将自身以 tool_caller 传给 Executor；INITIAL 中的 WorkerMCP 经 FlowToolCaller 回调 Client。Executor 不长期持有 Client。</p>
+        <p>Amp 编码和历史导出共用 run_amp()。VCS、凭据、gh、prompt 和原子写文件主要由函数实现，类数量不能代表全部复杂度。</p>
+      </div>
+      <div>
+        <h3>两份持久证据与更新分支</h3>
+        <p>SessionState.workspace 与 WorkspaceSlot.binding 记录同一分配身份；journal 证明执行与清理，manifest 证明目录槽位所有权。</p>
+        <p>self_update 是 CLI 独立分支；InstalledPackage 和 UpdateError 没有被 Runtime 持有。建议保留这条边界。</p>
+      </div>
+    </div>
+    <p class="muted">上述“是否拆分”为后续评估点，本次不调整实现。源码链接固定到 ce89bab；图为手工维护的快照。配套说明：<a href="https://github.com/b1indsight/agentflow/blob/docs/worker-class-relationship-diagram/docs/architecture/worker-classes.md">类清单、函数模块与维护方法</a>。</p>
+  </section>
+  <script>
+    // Only ClassDef entries under app/worker count toward the inventory.
+    // External ports and function anchors make non-class ownership explicit.
+    const nodes = [
+      {id:"WorkerSettings",file:"config.py",line:12,x:50,y:82,kind:"model",base:"BaseSettings",role:"配置与安全约束"},
+      {id:"WorkerRuntime",file:"runtime.py",line:92,x:390,y:82,role:"组装 / 信号 / 生命周期"},
+      {id:"WorkerRootLock",file:"runtime.py",line:51,x:730,y:82,role:"根目录独占与身份锁"},
+      {id:"HealthFile",file:"health.py",line:12,x:1070,y:82,role:"写入连接状态探针"},
+      {id:"Connection",file:"transport/client.py",line:49,x:44,y:284,kind:"protocol",base:"Protocol",role:"send() / recv()"},
+      {id:"TaskExecutor",file:"transport/client.py",line:55,x:254,y:284,kind:"protocol",base:"Protocol",role:"执行任务 / 回收工作区"},
+      {id:"WorkerClient",file:"transport/client.py",line:89,x:44,y:414,role:"连接 / Task / 重连 / 工具复用"},
+      {id:"_PendingTool",file:"transport/client.py",line:84,x:254,y:414,kind:"model",base:"dataclass",role:"request + Future<回执>"},
+      {id:"WorkerProtocolError",file:"transport/client.py",line:63,x:44,y:604,kind:"error",base:"RuntimeError",role:"连接与协议错误"},
+      {id:"FlowToolCallError",file:"transport/client.py",line:67,x:254,y:604,kind:"error",base:"WorkerProtocolError",role:"工具拒绝的分类与重试信息"},
+      {id:"WorkerMCP",file:"transport/mcp.py",line:39,x:44,y:804,role:"INITIAL 单次 loopback MCP"},
+      {id:"FlowToolCaller",file:"transport/mcp.py",line:25,x:254,y:804,kind:"protocol",base:"Protocol",role:"call_tool() → DeliveryReceipt"},
+      {id:"_EmbeddedServer",file:"transport/mcp.py",line:32,x:44,y:934,base:"uvicorn.Server",role:"让 Runtime 统一拥有信号"},
+      {id:"WorkerExecutor",file:"execution/executor.py",line:52,x:630,y:284,role:"INITIAL / REVISION / ARCHIVE"},
+      {id:"CodexAgent",file:"execution/codex.py",line:134,x:524,y:424,role:"Codex start / resume 适配"},
+      {id:"AmpCodingAgent",file:"execution/amp_agent.py",line:113,x:734,y:424,role:"Amp start / resume 适配"},
+      {id:"_Init",file:"execution/amp_agent.py",line:27,x:734,y:554,kind:"model",base:"BaseModel",role:"校验 Amp session / tools"},
+      {id:"_Result",file:"execution/amp_agent.py",line:33,x:734,y:684,kind:"model",base:"BaseModel",role:"校验 Amp 最终事件"},
+      {id:"VcsVerificationError",file:"execution/vcs.py",line:27,x:524,y:684,kind:"error",base:"RuntimeError",role:"stage + 安全失败原因"},
+      {id:"CodingAgent",file:"app/domain/ports.py",line:15,x:630,y:954,kind:"external",base:"包外 Protocol · 不计数",role:"start() / resume()"},
+      {id:"WorkerSession",file:"state/session.py",line:60,x:1000,y:284,role:"journal / 恢复 / 历史入口"},
+      {id:"SessionError",file:"state/session.py",line:34,x:1000,y:414,kind:"error",base:"RuntimeError",role:"journal / 恢复证据无效"},
+      {id:"SessionState",file:"state/session.py",line:38,x:1210,y:414,kind:"model",base:"BaseModel · journal v4",role:"任务 / 停止 / 终态 / workspace"},
+      {id:"CodexHistory",file:"state/history.py",line:27,x:1000,y:554,role:"按需读取 rollout JSONL"},
+      {id:"AmpHistory",file:"state/amp_history.py",line:46,x:1210,y:554,role:"原生导出 / 脱敏 / 分页"},
+      {id:"_Snapshot",file:"state/amp_history.py",line:40,x:1210,y:684,kind:"model",base:"dataclass",role:"公开历史块 + 缓存时间"},
+      {id:"RepositoryWorkspaces",file:"execution/workspaces.py",line:71,x:1000,y:954,role:"有界目录池 / 分配 / 回收"},
+      {id:"WorkspaceManifest",file:"execution/workspaces.py",line:52,x:1210,y:954,kind:"model",base:"BaseModel · manifest v1",role:"worker / root / slots[]"},
+      {id:"WorkspaceBinding",file:"execution/workspaces.py",line:34,x:1000,y:1084,kind:"model",base:"BaseModel · frozen",role:"repo / slot / flow / generation"},
+      {id:"WorkspaceSlot",file:"execution/workspaces.py",line:44,x:1210,y:1084,kind:"model",base:"BaseModel",role:"binding / 路径 / 类型 / 状态"},
+      {id:"run_amp()",file:"execution/amp_process.py",line:206,x:630,y:1184,kind:"function",base:"函数锚点 · 不计数",role:"并发有界管道 / 超时 / 取消"},
+      {id:"AmpProcessResult",file:"execution/amp_process.py",line:137,x:524,y:1324,kind:"model",base:"dataclass · frozen",role:"stdout / stderr / 退出状态"},
+      {id:"_OutputLimit",file:"execution/amp_process.py",line:145,x:734,y:1324,kind:"error",base:"Exception",role:"管道超过字节预算"},
+      {id:"InstalledPackage",file:"self_update.py",line:39,x:44,y:1154,kind:"model",base:"dataclass · frozen",role:"已核验 sha + package_path"},
+      {id:"UpdateError",file:"self_update.py",line:34,x:254,y:1154,kind:"error",base:"RuntimeError",role:"安装 / 更新安全失败"},
+      {id:"update_worker()",file:"self_update.py",line:233,x:149,y:1304,kind:"function",base:"函数锚点 · 不计数",role:"CLI --update 独立执行"}
+    ];
+    // ref = stored reference/field; use = construction/call/read-write/error;
+    // inherit = Python base; realize = structural Protocol conformance.
+    const edges = [
+      ["WorkerRuntime","WorkerSettings","ref","settings（注入）"],
+      ["WorkerRuntime","WorkerRootLock","ref","root_lock（创建）"],
+      ["WorkerRuntime","WorkerClient","ref","client（创建）"],
+      ["WorkerRuntime","WorkerExecutor","use","创建并注入 Client"],
+      ["WorkerRuntime","WorkerSession","use","创建一个共享实例"],
+      ["WorkerRuntime","CodexAgent","use","coding_agent=codex"],
+      ["WorkerRuntime","AmpCodingAgent","use","coding_agent=amp"],
+      ["WorkerRuntime","HealthFile","use","_report_health() 创建"],
+      ["WorkerClient","Connection","use","run_connection(connection)"],
+      ["WorkerClient","TaskExecutor","ref","executor（注入）"],
+      ["WorkerClient","WorkerSession","ref","session（共享）"],
+      ["WorkerClient","_PendingTool","ref","_tool_requests 队列"],
+      ["WorkerClient","WorkerProtocolError","use","协议或恢复不匹配时抛出"],
+      ["WorkerClient","FlowToolCallError","use","工具 future.set_exception()"],
+      ["FlowToolCallError","WorkerProtocolError","inherit","继承"],
+      ["WorkerExecutor","TaskExecutor","realize","结构化满足"],
+      ["WorkerClient","FlowToolCaller","realize","结构化满足 / tool_caller=self"],
+      ["WorkerExecutor","CodingAgent","ref","code_agent（注入）"],
+      ["CodexAgent","CodingAgent","realize","结构化满足"],
+      ["AmpCodingAgent","CodingAgent","realize","结构化满足"],
+      ["WorkerExecutor","WorkerSession","ref","session（共享）"],
+      ["WorkerExecutor","RepositoryWorkspaces","ref","workspaces（创建）"],
+      ["WorkerExecutor","FlowToolCaller","use","execute() 的临时入参"],
+      ["WorkerExecutor","WorkerMCP","use","仅 INITIAL 的 async with"],
+      ["WorkerExecutor","VcsVerificationError","use","抛出 / 捕获 → 失败结果"],
+      ["WorkerMCP","FlowToolCaller","ref","caller（本轮引用）"],
+      ["WorkerMCP","_EmbeddedServer","ref","_server（创建）"],
+      ["WorkerSession","SessionState","use","load() / _write()"],
+      ["WorkerSession","SessionError","use","证据无效时抛出"],
+      ["WorkerSession","CodexHistory","ref","_history（创建）"],
+      ["WorkerSession","AmpHistory","ref","_amp_history（创建）"],
+      ["AmpHistory","_Snapshot","ref","_cache[session_id]"],
+      ["SessionState","WorkspaceBinding","ref","workspace: 0..1"],
+      ["RepositoryWorkspaces","WorkspaceManifest","use","读写 workspace-pool.json"],
+      ["RepositoryWorkspaces","WorkspaceBinding","use","acquire / lookup / release"],
+      ["RepositoryWorkspaces","WorkspaceSlot","use","创建 / 更新槽位"],
+      ["RepositoryWorkspaces","VcsVerificationError","use","抛出 / 捕获"],
+      ["WorkspaceManifest","WorkspaceSlot","ref","slots: 0..*"],
+      ["WorkspaceSlot","WorkspaceBinding","ref","binding: 1"],
+      ["AmpCodingAgent","_Init","use","经 _outcome() 校验"],
+      ["AmpCodingAgent","_Result","use","经 _outcome() 校验"],
+      ["AmpCodingAgent","AmpProcessResult","use","经 _outcome() 解析"],
+      ["AmpCodingAgent","run_amp()","use","执行编码 CLI"],
+      ["AmpHistory","run_amp()","use","执行只读 thread export"],
+      ["run_amp()","AmpProcessResult","use","构造并返回"],
+      ["run_amp()","_OutputLimit","use","read() 抛出 / 外层捕获"],
+      ["update_worker()","InstalledPackage","use","经 installed_package() 读取"],
+      ["update_worker()","UpdateError","use","抛出 / 捕获"]
+    ];
+    const groups = [
+      [20,20,1400,180,"进程根 · runtime / config / health"],
+      [20,230,450,490,"传输 · transport/client.py"],
+      [20,750,450,290,"单次工具桥 · transport/mcp.py"],
+      [500,230,450,650,"执行编排与适配 · execution/"],
+      [980,230,440,610,"本地会话与历史 · state/"],
+      [980,900,440,310,"目录池与持久身份 · execution/workspaces.py"],
+      [500,900,450,150,"包外执行端口 · domain/ports.py"],
+      [500,1090,450,340,"共用 Amp 进程监督 · execution/amp_process.py"],
+      [20,1080,450,340,"独立 CLI 更新分支 · self_update.py"]
+    ];
+    const namespace = "http://www.w3.org/2000/svg";
+    const width = 190, height = 80;
+    const byId = new Map(nodes.map(node => [node.id,node]));
+    const selector = document.querySelector("#focus");
+    let scale = 1;
+    function svg(tag, attrs, parent, text) {
+      const element = document.createElementNS(namespace,tag);
+      for (const [key,value] of Object.entries(attrs)) element.setAttribute(key,value);
+      if (text !== undefined) element.textContent = text;
+      parent.append(element);
+      return element;
+    }
+    for (const [x,y,w,h,label] of groups) {
+      svg("rect",{x,y,width:w,height:h,rx:8,class:"group-box"},document.querySelector("#groups"));
+      svg("text",{x:x+16,y:y+27,class:"group-label"},document.querySelector("#group-titles"),label);
+    }
+    // Route on a small orthogonal grid so long dependencies cannot disappear under
+    // unrelated classes or cross module headings. The same paths export to SVG.
+    const step = 10, columns = 145, rows = 146;
+    const blocked = new Uint8Array(columns*rows);
+    const obstacles = [
+      ...nodes.map(node => [node.x-6,node.y-6,width+12,height+12]),
+      ...groups.map(([x,y,w]) => [x+10,y+3,w-20,35])
+    ];
+    for (let y=0;y<rows;y++) for (let x=0;x<columns;x++) {
+      blocked[y*columns+x] = Number(obstacles.some(([left,top,w,h]) =>
+        x*step>=left && x*step<=left+w && y*step>=top && y*step<=top+h));
+    }
+    function ports(node) {
+      const cx = node.x+width/2, cy = node.y+height/2;
+      return [
+        [[cx,node.y],[Math.round(cx/step),Math.floor((node.y-12)/step)]],
+        [[node.x+width,cy],[Math.ceil((node.x+width+12)/step),Math.round(cy/step)]],
+        [[cx,node.y+height],[Math.round(cx/step),Math.ceil((node.y+height+12)/step)]],
+        [[node.x,cy],[Math.floor((node.x-12)/step),Math.round(cy/step)]]
+      ].map(([point,[x,y]]) => ({point,cell:y*columns+x}));
+    }
+    function route(start,end) {
+      const sources = new Map(ports(start).filter(port => !blocked[port.cell]).map(port => [port.cell,port.point]));
+      const targets = new Map(ports(end).filter(port => !blocked[port.cell]).map(port => [port.cell,port.point]));
+      const parent = new Int32Array(columns*rows).fill(-2);
+      const queue = new Int32Array(columns*rows);
+      let head=0, tail=0, found;
+      for (const cell of sources.keys()) { parent[cell]=-1; queue[tail++]=cell; }
+      while (head<tail) {
+        const cell = queue[head++], x=cell%columns, y=Math.floor(cell/columns);
+        if (targets.has(cell)) { found=cell; break; }
+        const next = [];
+        if (x>0) next.push(cell-1);
+        if (x<columns-1) next.push(cell+1);
+        if (y>0) next.push(cell-columns);
+        if (y<rows-1) next.push(cell+columns);
+        for (const neighbor of next) if (!blocked[neighbor] && parent[neighbor]===-2) {
+          parent[neighbor]=cell; queue[tail++]=neighbor;
+        }
+      }
+      if (found===undefined) throw new Error(`No diagram route: ${start.id} → ${end.id}`);
+      const cells=[];
+      for (let cell=found;cell!==-1;cell=parent[cell]) cells.push(cell);
+      cells.reverse();
+      const points=[sources.get(cells[0]),...cells.map(cell => [cell%columns*step,Math.floor(cell/columns)*step]),targets.get(found)];
+      return points.filter((point,index) => {
+        if (index===0 || index===points.length-1) return true;
+        const before=points[index-1], after=points[index+1];
+        return !((before[0]===point[0] && point[0]===after[0]) || (before[1]===point[1] && point[1]===after[1]));
+      }).map(([x,y],index) => `${index?"L":"M"}${x},${y}`).join(" ");
+    }
+    for (const edge of edges) {
+      const [from,to,kind,label] = edge, start = byId.get(from), end = byId.get(to);
+      const element = svg("g",{class:`edge ${kind}`},document.querySelector("#edges"));
+      const triangle = kind === "inherit" || kind === "realize";
+      svg("path",{d:route(start,end),"marker-end":`url(#${triangle?"triangle":"arrow"})`},element);
+      svg("title",{},element,`${from} → ${to}: ${label}`);
+      // Relationship labels live in the sidebar; long crossing-edge labels obscure class names.
+      edge.element = element;
+      edge.triangle = triangle;
+    }
+    const files = new Map();
+    for (const node of nodes) {
+      const element = svg("g",{class:`node ${node.kind || "class"}`,tabindex:0,role:"button","aria-label":node.id,"aria-pressed":"false",transform:`translate(${node.x},${node.y})`},document.querySelector("#nodes"));
+      svg("rect",{width,height,rx:5},element);
+      svg("text",{x:10,y:18,class:"kind"},element,node.base || "class");
+      svg("text",{x:10,y:40,class:"name"},element,node.id);
+      svg("text",{x:10,y:62,class:"role"},element,node.role);
+      svg("title",{},element,`${node.file}:${node.line} · ${node.role}`);
+      element.addEventListener("click",() => select(node.id));
+      element.addEventListener("keydown",event => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(node.id); }
+      });
+      node.element = element;
+      if (!files.has(node.file)) {
+        const group = document.createElement("optgroup");
+        group.label = node.file;
+        selector.append(group);
+        files.set(node.file,group);
+      }
+      const option = document.createElement("option");
+      option.value = node.id; option.textContent = node.id;
+      files.get(node.file).append(option);
+    }
+    function select(id) {
+      selector.value = id;
+      const related = edges.filter(([from,to]) => from === id || to === id);
+      const neighbors = new Set(related.flatMap(([from,to]) => [from,to]));
+      for (const node of nodes) {
+        node.element.classList.toggle("selected",node.id === id);
+        node.element.classList.toggle("neighbor",!!id && node.id !== id && neighbors.has(node.id));
+        node.element.classList.toggle("dim",!!id && !neighbors.has(node.id));
+        node.element.setAttribute("aria-pressed",String(node.id === id));
+      }
+      for (const edge of edges) {
+        const active = !!id && related.includes(edge);
+        edge.element.classList.toggle("active",active);
+        edge.element.classList.toggle("dim",!!id && !active);
+        edge.element.querySelector("path").setAttribute("marker-end",`url(#${active?"active-":""}${edge.triangle?"triangle":"arrow"})`);
+      }
+      document.querySelector("#detail-relations").replaceChildren();
+      document.querySelector("#detail-source").replaceChildren();
+      document.querySelector("#status").textContent = id ? `${id} · ${related.length} 条直接关系` : "全部 33 个类 · 选择类后高亮一跳关系";
+      document.querySelector("#detail-title").textContent = id || "从 WorkerRuntime 开始";
+      document.querySelector("#detail-meta").textContent = id ? (byId.get(id).base || "普通类，无自定义基类") : "点选图中任意类，或使用上方下拉框。Tab / Enter 也可操作节点。";
+      document.querySelector("#detail-role").textContent = id ? byId.get(id).role : "Runtime 装配 Client、Executor 和共享 Session；Client 管连接与执行 Task，Executor 管任务编排，Session 管持久恢复证据。";
+      if (!id) return;
+      const node = byId.get(id), link = document.createElement("a");
+      const path = node.file.startsWith("app/") ? node.file : `app/worker/${node.file}`;
+      link.href = `https://github.com/b1indsight/agentflow/blob/ce89bab/${path}#L${node.line}`;
+      link.textContent = `${path}:${node.line}`;
+      link.target = "_blank"; link.rel = "noopener";
+      document.querySelector("#detail-source").append(link);
+      const kinds = {ref:"持有 / 字段",use:"使用",inherit:"继承",realize:"结构化满足"};
+      for (const [from,to,kind,label] of related) {
+        const item = document.createElement("li"), button = document.createElement("button"), detail = document.createElement("small");
+        const other = from === id ? to : from;
+        button.type = "button"; button.textContent = `${from === id?"→":"←"} ${other}`;
+        button.addEventListener("click",() => select(other));
+        detail.textContent = `${kinds[kind]} · ${label}`;
+        item.append(button,detail); document.querySelector("#detail-relations").append(item);
+      }
+    }
+    selector.addEventListener("change",() => select(selector.value));
+    document.querySelector("#reset").addEventListener("click",() => select(""));
+    function zoom(value) {
+      scale = Math.max(.75,Math.min(2,value));
+      document.querySelector("#graph").style.width = `${scale*100}%`;
+    }
+    document.querySelector("#zoom-in").addEventListener("click",() => zoom(scale+.25));
+    document.querySelector("#zoom-out").addEventListener("click",() => zoom(scale-.25));
+    document.querySelector("#fit").addEventListener("click",() => zoom(1));
+    document.querySelector("#count").textContent = nodes.filter(node => !["external","function"].includes(node.kind)).length;
+  </script>
+</body>
+</html>

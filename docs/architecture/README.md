@@ -9,6 +9,7 @@
 ## 如何阅读
 
 - 本页的状态表描述当前实现，是架构文档中的 current truth；
+- [Worker 全量类关系图](worker-classes.md)列出 worker 的全部类、持有/调用/继承关系及后续简化评估点，提供静态预览与交互定位；
 - [会话查询 API](conversation-api.md)描述按 flow 读取 worker Codex 历史的接口、分页与可用性边界；
 - [已取消 Flow 手动归档](../plan/cancelled-flow-archive.md)描述控制台展示归档、持久化与恢复边界；
 - [总览](overview.md)、[组件职责](components.md)和[端到端流程](workflows.md)同时记录目标设计，
