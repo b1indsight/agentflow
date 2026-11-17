@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`review-version-merge.md`](review-version-merge.md) — [PR #182](https://github.com/b1indsight/agentflow/pull/182)，计划待批准：`review_items` 并入 `review_versions`，GitHub 对象按 `(kind, github_id)` 全局识别，新对象的 `item_id` 由其编码生成；删除 `review_pending_edits` 与无读取方的 `review_thread_observations`。冻结的 `(item_id, version)` 与 Worker 协议不变。
+
 - [`workflow-job-kinds.md`](workflow-job-kinds.md) — [PR #175](https://github.com/b1indsight/agentflow/pull/175)：INITIAL、REVISION、ARCHIVE 已各自拥有任务准备和结果计划构造；保留公共事务、恢复及派发屏障，`retry` 保留共同生命周期检查。验证、简化比较与交付状态见功能记录及 PR。
 
 - [`worker-store-split.md`](worker-store-split.md) — 已实现，待发布前审查：推理结算、取消、候选选择和准备重试预算改为领域纯函数；`WorkerStore` 按会话与库存、领取与租约、推理调用拆开，Flow 执行绑定归 `FlowStore`，`Database` 提供公开的 worker 锁方法。数据库结构、wire 协议和 worker → Flow → job 锁顺序不变；推理独立表只作为单独提案，不在本项实施。
