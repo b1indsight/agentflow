@@ -76,7 +76,7 @@
 <body>
   <header>
     <h1>Worker 全量类关系图</h1>
-    <p class="subtitle"><code>app/worker/</code> · <strong id="count">45</strong> 个类 · 2026-11-17 · b8aa1fb + 工作树（共享 Agent.start / resume 生命周期）</p>
+    <p class="subtitle"><code>app/worker/</code> · <strong id="count">44</strong> 个类 · 2026-11-17 · b8aa1fb + 工作树（共享 Agent.start / resume 生命周期）</p>
     <p class="subtitle">按当前实现绘制。包含私有类、Protocol、模型、异常和自更新分支；点选类可查看直接关系及源码，放大后可在画布内横纵滚动。</p>
     <div class="controls">
       <label for="focus">定位类</label>
@@ -98,7 +98,7 @@
   </header>
   <main>
     <div class="canvas" tabindex="0" role="region" aria-label="可横纵滚动的全量关系图">
-      <svg id="graph" viewBox="0 0 2140 2100" role="group" aria-label="Worker 的全部 45 个类及其直接关系">
+      <svg id="graph" viewBox="0 0 2140 2100" role="group" aria-label="Worker 的全部 44 个类及其直接关系">
         <defs>
           <marker id="arrow" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#96a5b8"/></marker>
           <marker id="triangle" markerWidth="10" markerHeight="10" refX="10" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="white" stroke="#64748b"/></marker>
@@ -115,7 +115,7 @@
       <p id="detail-source"></p>
       <ul id="detail-relations"></ul>
       <h3>范围与读法</h3>
-      <p class="muted">45 个类精确对应 app/worker/**/*.py 的全部 ClassDef。两个 _OutputLimit 按模块区分；CodingAgent 提供执行生命周期及本地文件默认实现，Codex / Amp 显式继承。图共 59 节点、119 关系；12 个包外类（含 BubAgent）和 2 个函数锚点不计入 worker 类。</p>
+      <p class="muted">44 个类精确对应 app/worker/**/*.py 的全部 ClassDef。两个 _OutputLimit 按模块区分；CodingAgent 提供执行生命周期及本地文件默认实现，Codex / Amp 显式继承。图共 58 节点、118 关系；12 个包外类（含 BubAgent）和 2 个函数锚点不计入 worker 类。</p>
       <p class="muted">箭头表达静态关系，不表达调用时间顺序或独占所有权。源码链接指向同一 checkout 的相对路径及核对行号；未展开全部共享模型。</p>
     </aside>
   </main>
@@ -124,7 +124,7 @@
     <div class="note-grid">
       <div>
         <h3>执行所有权与可替换连接</h3>
-        <p>WorkerExecution 持有本 Flow 的执行 Task、工具 Future 和停止任务，与 WorkerExecutor 共用 ExecutionState。多个 Flow 共用 Runtime 的目录池及配置后端的 Agent；会话、工作目录、凭据与子进程仍属于各次调用。</p>
+        <p>WorkerExecution 直接持有 WorkerExecutor，管理本 Flow 的执行 Task、工具 Future 和停止任务，两者共用 ExecutionState。多个 Flow 共用 Runtime 的目录池及配置后端的 Agent；会话、工作目录、凭据与子进程仍属于各次调用。</p>
         <p>Gateway / Session / Dispatcher 属于共享通信包；连接回调管理握手、消息关联及观察者。断线不取消编码执行，推理任务则由该连接的回调拥有。</p>
       </div>
       <div>
@@ -141,7 +141,7 @@
         <p>WorkerInferenceCallbacks 直接调用共享 Agent.start，在既有 inference_path 执行，不新建每次调用的子目录，context=None。只读要求仅由提示词表达，仍需可信宿主授权与外部隔离。已删除独立 inference 模块、InferenceTask / InferenceOutput / Inference 及 capability。包外 BubAgent 也继承 CodingAgent，经本地端点复用同一回调，未加入 worker 的 _agents。自更新仍是独立 CLI 分支。</p>
       </div>
     </div>
-    <p class="muted">数量沿革：旧图 33 类 → 合入 main 后 49 类 → Agent 职责收拢 48 类 → c0da88d 共享编码 / 历史实例仍为 48 类 → 删除 NativeAgentInference / _LegacyManifest / _LegacySlot 后 b8aa1fb 为 45 类 → 当前工作树仍为 45 类。LocalFile、AmpAttachment 仅迁移；本轮删除独立推理函数与包外接口，执行回归 CodingAgent，无新增 worker 包装类。</p>
+    <p class="muted">数量沿革：旧图 33 类 → 合入 main 后 49 类 → Agent 职责收拢 48 类 → c0da88d 共享编码 / 历史实例仍为 48 类 → 删除 NativeAgentInference / _LegacyManifest / _LegacySlot 后 b8aa1fb 为 45 类 → 删除 TaskExecutor 后为 44 类。LocalFile、AmpAttachment 仅迁移；独立推理函数与包外接口已删除，执行回归 CodingAgent，无新增 worker 包装类。</p>
     <p class="muted">图为当前 checkout 的手工关系快照，类清单与行号经 AST 核对；源码链接随仓库版本一起检出。配套说明：<a href="worker-classes.md">类清单、函数模块与维护方法</a>。</p>
   </section>
   <script>
@@ -158,11 +158,10 @@
       {id:"WorkerStateCallbacks",file:"transport/state.py",line:89,x:40,y:300,role:"注册 / 库存 / 恢复与停止握手"},
       {id:"WorkerBusinessCallbacks",file:"transport/business.py",line:29,x:282,y:300,role:"历史查询 / 借用工具 Future"},
       {id:"WorkerFileCallbacks",file:"transport/files.py",line:25,x:40,y:430,role:"解析 Agent / 直接 read_file"},
-      {id:"WorkerExecution",file:"execution/lifecycle.py",line:76,x:570,y:300,role:"本 Flow 的 Task / 工具 / 停止"},
-      {id:"TaskExecutor",file:"execution/lifecycle.py",line:37,x:812,y:300,kind:"protocol",base:"Protocol",role:"execute() / 等待子进程清理"},
-      {id:"PendingToolCall",file:"execution/lifecycle.py",line:69,x:570,y:430,kind:"model",base:"dataclass",role:"request + 原调用者 Future"},
-      {id:"WorkerProtocolError",file:"execution/lifecycle.py",line:48,x:570,y:560,kind:"error",base:"RuntimeError",role:"消息不匹配执行所有权"},
-      {id:"FlowToolCallError",file:"execution/lifecycle.py",line:52,x:812,y:560,kind:"error",base:"WorkerProtocolError",role:"工具拒绝分类 / 重试信息"},
+      {id:"WorkerExecution",file:"execution/lifecycle.py",line:62,x:570,y:300,role:"本 Flow 的 Task / 工具 / 停止"},
+      {id:"PendingToolCall",file:"execution/lifecycle.py",line:55,x:570,y:430,kind:"model",base:"dataclass",role:"request + 原调用者 Future"},
+      {id:"WorkerProtocolError",file:"execution/lifecycle.py",line:34,x:570,y:560,kind:"error",base:"RuntimeError",role:"消息不匹配执行所有权"},
+      {id:"FlowToolCallError",file:"execution/lifecycle.py",line:38,x:812,y:560,kind:"error",base:"WorkerProtocolError",role:"工具拒绝分类 / 重试信息"},
       {id:"WorkerMCP",file:"transport/mcp.py",line:39,x:40,y:680,role:"INITIAL 与修正共用 MCP"},
       {id:"FlowToolCaller",file:"transport/mcp.py",line:25,x:282,y:680,kind:"protocol",base:"Protocol",role:"call_tool() → DeliveryReceipt"},
       {id:"_EmbeddedServer",file:"transport/mcp.py",line:32,x:40,y:810,base:"uvicorn.Server",role:"不接管进程信号"},
@@ -259,13 +258,12 @@
       ["WorkerFileCallbacks","CodingAgent","use","直接 await agent.read_file(source, root=worker_root)"],
       ["WorkerFileCallbacks","Dispatcher","use","bind() 注册读取路由与 prepare 钩子"],
       ["WorkerFileCallbacks","SessionCallbacks","realize","bind(routes) 结构化满足"],
-      ["WorkerExecution","TaskExecutor","ref","executor；拥有执行 Task 与取消 / join"],
+      ["WorkerExecution","WorkerExecutor","ref","executor；直接持有具体执行器，拥有执行 Task 与取消 / join"],
       ["WorkerExecution","ExecutionState","ref","state；与该 Flow 的 Executor 共用"],
       ["WorkerExecution","PendingToolCall","ref","_tool_calls；原调用者 Future 队列"],
       ["WorkerExecution","WorkerProtocolError","use","所有权校验失败 / 取消工具调用"],
       ["WorkerExecution","FlowToolCallError","use","工具 future.set_exception()"],
       ["FlowToolCallError","WorkerProtocolError","inherit","继承"],
-      ["WorkerExecutor","TaskExecutor","realize","结构化满足"],
       ["WorkerExecution","FlowToolCaller","realize","tool_caller=self；不依赖当前连接"],
       ["WorkerExecutor","CodingAgent","ref","code_agent；注入 Runtime 共享实例，与同后端历史查询共用"],
       ["CodexAgent","CodingAgent","inherit","继承 start / resume / _execute 及本地文件实现；原生执行实现 _run"],

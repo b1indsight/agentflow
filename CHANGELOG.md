@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 删除仅有一个生产实现的 `TaskExecutor` 协议，`WorkerExecution` 直接依赖 `WorkerExecutor`；
+  保留执行、取消和恢复行为，同步测试替身及完整 Worker 类图。
 - 推理直接使用 `CodingAgent.start` 和 `CodingExecutionResult`，删除 `InferenceTask`、消息/输出/能力
   模型、独立执行模块及 Runtime 推理转发。公共 start/resume 统一总超时、最终答案字节上限、
   schema 临时文件与严格 JSON 校验；原生后端继续负责进程、空闲超时和取消回收。

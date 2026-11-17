@@ -6,17 +6,14 @@ import asyncio
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
 from uuid import uuid4
 
 from loguru import logger
 
 from app.contracts.protocol import (
     AssignmentArguments,
-    AssignmentSecret,
     ExecutionResult,
     ExecutionStopped,
-    ExecutionTask,
     FlowToolArguments,
     FlowToolErrorKind,
     FlowToolRequest,
@@ -30,20 +27,9 @@ from app.contracts.protocol import (
 )
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.models import JobState, VcsOutcome
+from app.worker.execution.executor import WorkerExecutor
 from app.worker.state.execution import ExecutionState
-from app.worker.transport.mcp import FlowToolCaller
 
-
-class TaskExecutor(Protocol):
-    """Execute an assignment, joining its subprocesses before returning or cancelling."""
-
-    async def execute(
-        self,
-        task: ExecutionTask,
-        secret: AssignmentSecret | None = None,
-        *,
-        tool_caller: FlowToolCaller,
-    ) -> ExecutionResult: ...
 
 class WorkerProtocolError(RuntimeError):
     """A worker message cannot be applied to the owned execution."""
@@ -80,7 +66,7 @@ class WorkerExecution:
     replacing it; cancelling its observers never cancels the execution or an authorized stop.
     """
 
-    def __init__(self, *, worker_id: str, executor: TaskExecutor, state: ExecutionState,
+    def __init__(self, *, worker_id: str, executor: WorkerExecutor, state: ExecutionState,
                  on_change: Callable[[], None] | None = None) -> None:
         self.worker_id = worker_id
         self.executor = executor

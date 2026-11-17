@@ -37,6 +37,7 @@ from app.contracts.protocol import (
 )
 from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import JobState, VcsExecutionContext, VcsKind, VcsOutcome
+from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.state.execution import ExecutionState, ExecutionStateError
 from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
@@ -503,7 +504,9 @@ async def test_replacing_connection_preserves_running_executor_and_renews_lease(
     # Join Runtime's connection driver, not just one Session; execution outlives either.
     executor = CancellableExecutor()
     session = ExecutionState(tmp_path, 3)
-    owner = WorkerExecution(worker_id="worker-1", executor=executor, state=session)
+    owner = WorkerExecution(
+        worker_id="worker-1", executor=Mock(spec=WorkerExecutor, wraps=executor), state=session,
+    )
     client = await worker_runtime(
         worker_token="worker-secret",
         execution=owner,
@@ -576,7 +579,10 @@ async def test_replacing_connection_preserves_running_executor_and_renews_lease(
 async def test_heartbeat_failure_interrupts_waiting_for_tool_reply(tmp_path) -> None:
     # A stalled control-side tool reply must not prevent a failed heartbeat from reconnecting.
     state = ExecutionState(tmp_path, 3)
-    owner = WorkerExecution(worker_id="worker-1", executor=ToolCallingExecutor(), state=state)
+    owner = WorkerExecution(
+        worker_id="worker-1", executor=Mock(spec=WorkerExecutor, wraps=ToolCallingExecutor()),
+        state=state,
+    )
     client = await worker_runtime(
         worker_token="worker-secret",
         execution=owner,
