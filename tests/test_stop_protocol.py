@@ -162,7 +162,6 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         client = await worker_runtime(
             worker_token="secret",
             execution=owner,
-            read_history=journal.read,
         )
         request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
         with pytest.raises(ConnectionError, match="ack lost"):
@@ -186,7 +185,6 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
                 state=restarted_state,
                 executor=SimpleNamespace(),
             ),
-            read_history=restarted_state.read,
         )
         connection = AckConnection(request, epoch="new")
         with pytest.raises(ConnectionError, match="script complete"):
@@ -221,7 +219,7 @@ async def test_reconnection_during_stop_joins_executor_and_preserves_original_re
     owner.start()
     request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
 
-    client = await worker_runtime(execution=owner, read_history=state.read)
+    client = await worker_runtime(execution=owner)
 
     def connect(request, epoch="epoch"):
         connection = AckConnection(request, epoch=epoch)
@@ -276,7 +274,6 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
     client = await worker_runtime(
         worker_token="secret",
         execution=WorkerExecution(worker_id="w", executor=SimpleNamespace(), state=journal),
-        read_history=journal.read,
     )
     request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
     with pytest.raises(WorkerProtocolError, match="ownership is unknown"):

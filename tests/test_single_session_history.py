@@ -7,18 +7,17 @@ import pytest
 from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.controler.workers.conversation import ConversationService
 from app.persistence.records import required
-from app.worker.state import history
-from app.worker.state.history import CodexHistory
-from tests.test_conversation_history import SESSION, message, rollout
+from app.worker.execution import codex
+from tests.test_conversation_history import SESSION, codex_agent, message, rollout
 
 OTHER = "019eac3b-a60c-7a93-a442-3718f660fc8d"
 
 
-def test_single_session_query_validates_before_reading(tmp_path):
-    reader = CodexHistory(tmp_path)
+def test_single_session_query_validates_before_reading(tmp_path, monkeypatch):
+    reader = codex_agent(tmp_path, monkeypatch)
     path = rollout(tmp_path, [message("user", "first"), message("assistant", "second")])
     query = HistoryQuery(session_id=SESSION, limit=1)
-    first = reader.query(query)
+    first = reader.read_history(query)
     assert "attempt_id" not in first.items[0].model_dump()
     with pytest.raises(ConversationFailure, match="cursor_invalid"):
         HistoryQuery(session_id=OTHER, cursor=first.next_cursor)
@@ -30,11 +29,11 @@ def test_single_session_query_validates_before_reading(tmp_path):
     path.rename(path.with_suffix(".old"))
     rollout(tmp_path, [message("user", "first"), message("assistant", "second")])
     with pytest.raises(ConversationFailure, match="cursor_invalid"):
-        reader.query(second_query)
+        reader.read_history(second_query)
 
 
 @pytest.mark.asyncio
-async def test_control_owns_session_order_attribution_and_tail(store, completed_open_initial, tmp_path):
+async def test_control_owns_session_order_attribution_and_tail(store, completed_open_initial, tmp_path, monkeypatch):
     first_path = rollout(tmp_path, [message("user", "one")])
     second_path = first_path.with_name(first_path.name.replace(SESSION, OTHER))
     second_path.write_text(json.dumps({"type": "session_meta", "payload": {"id": OTHER}}) + "\n"
@@ -45,12 +44,12 @@ async def test_control_owns_session_order_attribution_and_tail(store, completed_
         attempt.codex_session_id, attempt.session_generation = session, generation
         store.flows.update_attempt(attempt)
     calls = []
-    reader = CodexHistory(tmp_path)
+    reader = codex_agent(tmp_path, monkeypatch)
 
     async def query(worker_id, request):
         assert worker_id == "worker-a"
         calls.append(request)
-        return reader.query(request)
+        return reader.read_history(request)
 
     service = ConversationService(
         SimpleNamespace(query=query), database=store.database,
@@ -84,9 +83,9 @@ async def test_control_owns_session_order_attribution_and_tail(store, completed_
 
 def test_byte_budget_does_not_skip_record(tmp_path, monkeypatch):
     rollout(tmp_path, [message("user", "one"), message("assistant", "two")])
-    reader = CodexHistory(tmp_path)
-    all_items = reader.query(HistoryQuery(session_id=SESSION)).items
-    monkeypatch.setattr(history, "MAX_PAGE", max(len(i.model_dump_json().encode()) for i in all_items))
-    first = reader.query(HistoryQuery(session_id=SESSION))
-    second = reader.query(HistoryQuery(session_id=SESSION, cursor=first.next_cursor))
+    reader = codex_agent(tmp_path, monkeypatch)
+    all_items = reader.read_history(HistoryQuery(session_id=SESSION)).items
+    monkeypatch.setattr(codex, "MAX_PAGE", max(len(i.model_dump_json().encode()) for i in all_items))
+    first = reader.read_history(HistoryQuery(session_id=SESSION))
+    second = reader.read_history(HistoryQuery(session_id=SESSION, cursor=first.next_cursor))
     assert first.has_more and first.items + second.items == all_items

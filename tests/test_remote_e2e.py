@@ -115,14 +115,15 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
             return await self.finish(context)
 
     agent = Agent()
-    monkeypatch.setattr("app.worker.runtime.CodexAgent", lambda **kwargs: agent)
-    monkeypatch.setattr("app.worker.runtime.AmpCodingAgent", lambda **kwargs: agent)
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
     worker = WorkerRuntime(WorkerSettings(
         worker_id="worker-1", worker_token=SecretStr("worker-secret"),
         serve_ws_url="wss://unused", worker_root=root,
         coding_agent=getattr(request, "param", "codex"),
     ))
+    # Runtime's history readers stay real; only subsequently created coding agents are scripted.
+    monkeypatch.setattr("app.worker.runtime.CodexAgent", lambda **kwargs: agent)
+    monkeypatch.setattr("app.worker.runtime.AmpCodingAgent", lambda **kwargs: agent)
     worker.inference = NamingInference()
     worker.root_lock.acquire()
     worker.initialize()

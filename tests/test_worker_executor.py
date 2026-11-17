@@ -9,6 +9,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from app.contracts.conversation import HistoryPage, HistoryQuery
 from app.contracts.protocol import (
     AssignmentSecret,
     InitialTask,
@@ -36,6 +37,10 @@ class RecordingAgent:
     def __init__(self) -> None:
         self.started: list[tuple[str, Path]] = []
         self.resumed: list[tuple[str, str]] = []
+
+    def read_history(self, query: HistoryQuery) -> HistoryPage:
+        """The scripted coding agent has no native history records."""
+        return HistoryPage(session_id=query.session_id, status="not_found")
 
     async def start(
         self, task: str, cwd: Path, *, output_schema=None, context=None, model=None, effort=None,

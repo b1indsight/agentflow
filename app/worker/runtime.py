@@ -34,6 +34,7 @@ from app.contracts.validation import parse_server_input
 from app.domain.inference_models import MAX_OUTPUT_BYTES
 from app.inference.transport import InferenceProtocolError, WorkerInferenceCallbacks
 from app.telemetry.logging import configure_logging
+from app.worker.coding_agent import CodingAgent
 from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
@@ -43,10 +44,8 @@ from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.health import HealthFile
 from app.worker.state.amp_attachments import AmpAttachment
-from app.worker.state.amp_history import AmpHistory
 from app.worker.state.execution import ExecutionState
 from app.worker.state.file_links import FileLinks
-from app.worker.state.history import CodexHistory
 from app.worker.state.history_links import link_history
 from app.worker.transport.business import WorkerBusinessCallbacks
 from app.worker.transport.files import WorkerFileCallbacks
@@ -163,8 +162,11 @@ class WorkerRuntime:
         self.executions: dict[int, WorkerExecution] = {}
         self._changed = asyncio.Event()
         self._initialized = False
-        self._history = CodexHistory()
-        self._amp_history = AmpHistory()
+        # History follows the requested session, not the configured backend or active Flow.
+        # Worker-lifetime agents retain each backend's cache and concurrency budget.
+        self._history_agents: dict[str, CodingAgent] = {
+            "codex": CodexAgent(), "amp": AmpCodingAgent(),
+        }
         timeout = (self.settings.amp_run_timeout_seconds if self.settings.coding_agent == "amp"
                    else self.settings.codex_run_timeout_seconds)
         agent_type = AmpCodingAgent if self.settings.coding_agent == "amp" else CodexAgent
@@ -253,10 +255,10 @@ class WorkerRuntime:
     async def read_history(self, query: HistoryQuery) -> HistoryPage:
         """Page native history first, then register destinations only in its outbound copy."""
         deadline = asyncio.get_running_loop().time() + HISTORY_TIMEOUT
-        source = self._amp_history if query.session_id.startswith("T-") else self._history
+        source = self._history_agents["amp" if query.session_id.startswith("T-") else "codex"]
         try:
             async with asyncio.timeout_at(deadline):
-                page = await asyncio.to_thread(source.query, query)
+                page = await asyncio.to_thread(source.read_history, query)
         except TimeoutError:
             raise ConversationFailure("query_timeout") from None
         return await link_history(page, self.register_file, deadline=deadline)

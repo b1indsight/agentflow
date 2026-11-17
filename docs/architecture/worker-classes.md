@@ -1,124 +1,192 @@
 # Worker 全量类关系图
 
-> 核对基线：`ce89bab`（2026-11-17）。范围为 `app/worker/**/*.py` 中定义的全部 **33 个类**，
-> 包括私有类、Protocol、Pydantic 模型、dataclass 和异常；不含测试替身及 control 端同名概念。
-> 本页记录当前结构，供后续简化评估，本次不改变运行逻辑。
+> 核对范围：2026-11-17 工作树（`f6eb85c` 合入 `origin/main`，含本轮 Agent 收敛改动）。
+> `app/worker/**/*.py` 的全部 **48 个 AST `ClassDef`**，包括私有类、Protocol、模型、dataclass 和异常。
+> 递归核对也包含枚举及嵌套类；当前 worker 内未定义枚举或嵌套类。不含测试替身和包外同名概念。
+> 这是当前实现的关系快照；尚未提交的源码不能由某个已有 Git commit 精确代表。
 
-[打开交互图](worker-classes.html)：下载 HTML 后可直接用浏览器打开，无需构建、联网或安装依赖。
-支持缩放、下拉定位、点击高亮直接关系、键盘选择，以及逐条查看关系和源码位置。
-GitHub 文件页不执行 HTML；下方静态图可直接预览，点击图片可放大。
+[打开交互图](worker-classes.html)：直接用浏览器打开，无需构建、联网或安装依赖。
+保留下拉定位、点击/键盘选择、一跳关系高亮、侧栏跳转、缩放和适应宽度；可用“导出 SVG”同步静态图。
+画布高度最多占视口的 80%，放大后可在画布内横纵滚动；窄屏同步缩放图的最小宽度，页面本身不被撑宽。
+图本身可单独离线使用；源码链接使用相对路径，需保留仓库目录结构，行号同时显示在侧栏。
+GitHub 文件页不执行 HTML；下方静态 SVG 可直接预览、放大。
 
-![Worker 全部 33 个类的关系图，按进程根、传输、执行、会话、工作区和更新分组](worker-classes.svg)
+![Worker 全部 48 个类，按进程根、连接回调、执行所有权、持久证据、目录池、Agent、文件和推理分组](worker-classes.svg)
 
-## 关系含义
+## 范围与关系含义
 
-- **实线箭头**：实例持有引用或模型字段。共享引用不表示独占所有权；`Client.session` 与
-  `Executor.session` 指向 Runtime 创建的同一个对象。
-- **虚线箭头**：创建、临时参数、函数调用、模型读写、异常抛出/捕获；具体含义在交互图侧栏中列出。
-- **实线空心三角**：显式 Python 继承，指向基类；Worker 内只有
-  `FlowToolCallError → WorkerProtocolError`。第三方/标准库基类直接写在节点中，未展开独立节点。
-- **虚线空心三角**：结构化满足 Protocol，代码中没有显式继承。
-  `WorkerExecutor` 满足 `TaskExecutor`，`WorkerClient` 满足 `FlowToolCaller`，
-  `CodexAgent`、`AmpCodingAgent` 满足包外的 `CodingAgent`。
-- 灰色 `CodingAgent` 是包外接口，`run_amp()`、`update_worker()` 是函数锚点，均不计入 33 个类。
-  箭头是静态关系，不能作为执行时序或“每轮都创建”的说明。
+图中共 **64 个节点、125 条关系**：48 个 worker 类、14 个灰色包外边界类、2 个灰色函数锚点。
+关系分为 41 条持有/字段、68 条使用、6 条显式继承、10 条结构化 Protocol 满足。
+`nodes` / `edges` 的手工定义和布局位于 [HTML](worker-classes.html)。
 
-依据：[Runtime 装配](../../app/worker/runtime.py#L92-L130)、
-[Client 注入和临时回调](../../app/worker/transport/client.py#L89-L149)、
-[Executor 注入与分派](../../app/worker/execution/executor.py#L52-L103)、
-[CodingAgent 端口](../../app/domain/ports.py#L15-L42)。
+- **实线箭头**：对象持有引用或模型字段。共享引用不表示独占所有权：每个 Flow 的
+  `WorkerExecution.state` 和 `WorkerExecutor.state` 是同一个 `ExecutionState`；所有 Flow 共用目录池。
+- **虚线箭头**：创建、临时参数、函数/静态方法调用、持久模型读写或异常抛出/捕获。
+  侧栏逐条注明；间接调用会标出中间函数或 Runtime，避免把 import 画成持有关系。
+- **实线空心三角**：显式 Python 继承，指向基类。worker 内有
+  `FlowToolCallError → WorkerProtocolError`、`RepositoryProvisionError → VcsVerificationError`、
+  `ExecutionRecord / _LegacyRecord → _RecordFields`；另外两条指向包外 `ProtocolModel`。
+  其余标准库/第三方基类写在节点内，不再展开。
+- **虚线空心三角**：结构化满足 Protocol，未显式继承。包括 `WorkerExecutor → TaskExecutor`、
+  `WorkerExecution → FlowToolCaller`、两个原生 Agent → worker 内 `CodingAgent`、
+  `WebSocketTransport → Transport`、四组连接回调 → `SessionCallbacks`、`NativeAgentInference → Inference`。
+- 灰色类来自 `app/communication`、`app/inference`、`app/domain` 或 `app/contracts`，不计入 48 类。
+  `link_history()`、`update_worker()` 是函数锚点；`AmpCodingAgent.run_process()` 是方法，不另造节点。
+- 两个私有 `_OutputLimit` 各占一个节点，ID 为 `codex._OutputLimit` / `amp._OutputLimit`，
+  展示名均保留真实类名；文件路径区分其身份。继承字段只在定义类上连线，不为每个子类重复画边。
+
+依据：[Runtime 装配](../../app/worker/runtime.py#L149-L210)、
+[执行所有权与工具 Future](../../app/worker/execution/lifecycle.py#L69-L101)、
+[Executor 注入](../../app/worker/execution/executor.py#L59-L95)、
+[worker-local CodingAgent](../../app/worker/coding_agent.py#L10-L29)。
 
 ## 全量类清单
 
-同一行的类都定义在所链接模块中；交互图的每个节点另有固定到基线的源码行链接。
+链接逐个定位 `class` 所在行，按模块列出完整集合；数量以 AST 集合相等为准。
 
-| 模块 | 全部类 | 数量 | 当前职责 |
+| 模块 | 全部类（定义行） | 数量 | 当前职责 |
 | --- | --- | ---: | --- |
-| [config.py](../../app/worker/config.py) | `WorkerSettings` | 1 | worker 配置、隔离和 WS 安全约束 |
-| [runtime.py](../../app/worker/runtime.py) | `WorkerRuntime`、`WorkerRootLock` | 2 | 装配与进程生命周期；root 锁和 worker 身份 |
-| [health.py](../../app/worker/health.py) | `HealthFile` | 1 | 写入本地连接状态文件，供探针函数读取 |
-| [transport/client.py](../../app/worker/transport/client.py) | `Connection`、`TaskExecutor`、`WorkerClient`、`_PendingTool`、`WorkerProtocolError`、`FlowToolCallError` | 6 | WS、心跳、执行 Task、恢复/停止握手、历史查询和工具复用 |
-| [transport/mcp.py](../../app/worker/transport/mcp.py) | `FlowToolCaller`、`WorkerMCP`、`_EmbeddedServer` | 3 | 单次 INITIAL 的 MCP、VCS 前置核验及回调接口；嵌入服务不接管信号 |
-| [execution/executor.py](../../app/worker/execution/executor.py) | `WorkerExecutor` | 1 | 三类任务编排、Schema/VCS 核验、修订 fallback、归档与取消后的目录回收 |
-| [execution/codex.py](../../app/worker/execution/codex.py) | `CodexAgent` | 1 | Codex CLI start/resume、当前轮环境和进程回收 |
-| [execution/amp_agent.py](../../app/worker/execution/amp_agent.py) | `AmpCodingAgent`、`_Init`、`_Result` | 3 | Amp 编码适配、流式 init/result 校验 |
-| [execution/amp_process.py](../../app/worker/execution/amp_process.py) | `AmpProcessResult`、`_OutputLimit` | 2 | 共用进程监督函数的输出与内部超限异常 |
-| [execution/vcs.py](../../app/worker/execution/vcs.py) | `VcsVerificationError` | 1 | VCS/目录核验函数的分阶段错误 |
-| [execution/workspaces.py](../../app/worker/execution/workspaces.py) | `RepositoryWorkspaces`、`WorkspaceManifest`、`WorkspaceSlot`、`WorkspaceBinding` | 4 | 有界目录池、manifest、槽位状态与不可变分配身份 |
-| [state/session.py](../../app/worker/state/session.py) | `WorkerSession`、`SessionState`、`SessionError` | 3 | assignment journal、恢复/停止/清理证据、历史读取入口 |
-| [state/history.py](../../app/worker/state/history.py) | `CodexHistory` | 1 | 按需读取原生 Codex JSONL、分页、限流与脱敏 |
-| [state/amp_history.py](../../app/worker/state/amp_history.py) | `AmpHistory`、`_Snapshot` | 2 | 原生 Amp export、公开块投影、短时缓存与游标身份 |
-| [self_update.py](../../app/worker/self_update.py) | `InstalledPackage`、`UpdateError` | 2 | CLI 独立更新分支的安装事实与错误 |
-| **合计** | | **33** | |
+| `coding_agent.py` | [CodingAgent:10](../../app/worker/coding_agent.py#L10) | 1 | worker 内 start / resume / read_history 结构化接口 |
+| `config.py` | [WorkerSettings:12](../../app/worker/config.py#L12) | 1 | 配置、trusted-host 隔离与 WS 安全约束 |
+| `runtime.py` | [Connection:69](../../app/worker/runtime.py#L69)、[WebSocketTransport:75](../../app/worker/runtime.py#L75)、[WorkerRootLock:108](../../app/worker/runtime.py#L108)、[WorkerRuntime:149](../../app/worker/runtime.py#L149) | 4 | IO 适配、root 锁、多 Flow 装配、连接替换与历史路由 |
+| `health.py` | [HealthFile:12](../../app/worker/health.py#L12) | 1 | 本地连接状态文件；不证明执行所有权 |
+| `transport/state.py` | [WorkerStateCallbacks:90](../../app/worker/transport/state.py#L90) | 1 | 注册、库存、恢复、结果/停止握手、心跳与协议授权 |
+| `transport/business.py` | [WorkerBusinessCallbacks:29](../../app/worker/transport/business.py#L29) | 1 | 独立历史查询；借用执行拥有的工具调用并关联回复 |
+| `transport/files.py` | [WorkerFileCallbacks:21](../../app/worker/transport/files.py#L21) | 1 | 有界异步文件读取和同一串行 driver 内的回复 |
+| `transport/mcp.py` | [FlowToolCaller:25](../../app/worker/transport/mcp.py#L25)、[_EmbeddedServer:32](../../app/worker/transport/mcp.py#L32)、[WorkerMCP:39](../../app/worker/transport/mcp.py#L39) | 3 | INITIAL 与修正共享的 MCP、VCS 前置核验、执行工具回调 |
+| `execution/lifecycle.py` | [TaskExecutor:37](../../app/worker/execution/lifecycle.py#L37)、[WorkerProtocolError:48](../../app/worker/execution/lifecycle.py#L48)、[FlowToolCallError:52](../../app/worker/execution/lifecycle.py#L52)、[PendingToolCall:69](../../app/worker/execution/lifecycle.py#L69)、[WorkerExecution:76](../../app/worker/execution/lifecycle.py#L76) | 5 | 每 Flow 的 Task、工具 Future、取消/join、停止凭据和结果重放 |
+| `execution/executor.py` | [WorkerExecutor:59](../../app/worker/execution/executor.py#L59) | 1 | 三类任务编排、Schema/VCS 核验、修正、修订 fallback 与归档清理 |
+| `execution/codex.py` | [_OutputLimit:42](../../app/worker/execution/codex.py#L42)、[CodexAgent:119](../../app/worker/execution/codex.py#L119)、[CodexHistory:304](../../app/worker/execution/codex.py#L304) | 3 | Codex 执行监督与自有原生 JSONL 历史读取 |
+| `execution/amp_agent.py` | [AmpProcessResult:108](../../app/worker/execution/amp_agent.py#L108)、[_OutputLimit:116](../../app/worker/execution/amp_agent.py#L116)、[AmpCodingAgent:235](../../app/worker/execution/amp_agent.py#L235)、[_Snapshot:424](../../app/worker/execution/amp_agent.py#L424)、[AmpHistory:430](../../app/worker/execution/amp_agent.py#L430) | 5 | Amp 执行与有界进程监督；自有 export 历史、脱敏、短时缓存与分页 |
+| `execution/inference.py` | [NativeAgentInference:31](../../app/worker/execution/inference.py#L31) | 1 | 无仓库目录、仅 start 的独立回答会话与输出预算 |
+| `execution/vcs.py` | [VcsVerificationError:27](../../app/worker/execution/vcs.py#L27) | 1 | VCS/目录核验函数的分阶段错误 |
+| `execution/workspaces.py` | [RepositoryProvisionError:37](../../app/worker/execution/workspaces.py#L37)、[WorkspaceBinding:45](../../app/worker/execution/workspaces.py#L45)、[WorkspaceSlot:55](../../app/worker/execution/workspaces.py#L55)、[InferenceWorkspace:81](../../app/worker/execution/workspaces.py#L81)、[WorkspaceManifest:87](../../app/worker/execution/workspaces.py#L87)、[_LegacySlot:96](../../app/worker/execution/workspaces.py#L96)、[_LegacyManifest:104](../../app/worker/execution/workspaces.py#L104)、[RepositoryWorkspaces:123](../../app/worker/execution/workspaces.py#L123) | 8 | manifest v3、实际目录库存与 generation fence、默认推理位置、旧格式兼容 |
+| `state/execution.py` | [ExecutionStateError:34](../../app/worker/state/execution.py#L34)、[ExecutionState:38](../../app/worker/state/execution.py#L38) | 2 | 每 Flow journal、迁移、恢复/停止/清理证据与 ACK；不读历史 |
+| `state/record.py` | [JournalSelection:29](../../app/worker/state/record.py#L29)、[_RecordFields:35](../../app/worker/state/record.py#L35)、[ExecutionRecord:99](../../app/worker/state/record.py#L99)、[_LegacyRecord:105](../../app/worker/state/record.py#L105) | 4 | journal v5 schema、只读 v4 转换及旧选择记录校验；不拥有 IO |
+| `state/file_links.py` | [LocalFile:17](../../app/worker/state/file_links.py#L17)、[FileLinks:46](../../app/worker/state/file_links.py#L46) | 2 | 持久文件 ID、本地 inode/device 身份或 Amp URL、按需读取 |
+| `state/amp_attachments.py` | [AmpAttachment:16](../../app/worker/state/amp_attachments.py#L16) | 1 | 允许的私有附件 URL；原生身份认证与受限下载 |
+| `self_update.py` | [UpdateError:34](../../app/worker/self_update.py#L34)、[InstalledPackage:39](../../app/worker/self_update.py#L39) | 2 | 独立更新分支的已安装事实与安全失败 |
+| **合计** | | **48** | |
 
-## 类图之外的实际依赖
+## 当前的主要关系路径
+
+### 执行所有权跨重连，回调按连接替换
+
+`WorkerRuntime.executions[flow_id] → WorkerExecution → TaskExecutor(WorkerExecutor)`。
+执行对象持有工具队列和原调用者 Future；MCP 经 `FlowToolCaller(WorkerExecution)` 提交工具调用。
+`WorkerBusinessCallbacks.pending` 只借用同一调用，注册回复关联，不接管执行 Task/Future。
+Runtime 创建一个共享 `RepositoryWorkspaces`，为每个 Flow 创建一份 `ExecutionState` 并同时注入执行对象和 Executor。
+见 [Runtime](../../app/worker/runtime.py#L197-L210)、[工具队列](../../app/worker/execution/lifecycle.py#L284-L370)、
+[借用与回复](../../app/worker/transport/business.py#L90-L172)。
+
+每条连接通过 `WebSocketTransport → Transport` 进入共享 `Session`，`Gateway.serve()` 创建 `Dispatcher`，
+挂载 state / business / inference / file 四组回调并串行处理事件。state 和 business 回调持有 Runtime 的反向引用，
+所以静态图中存在真实的连接期引用环；Runtime 只在 `_serve_connection()` 内临时使用这些回调，按连接关闭它们。
+`WorkerInferenceCallbacks` 属于包外共享实现，持有当前连接的推理 Task，断线时需要取消并等待其清理。
+见 [连接装配与关闭](../../app/worker/runtime.py#L348-L391)、
+[共享 driver](../../app/communication/gateway.py#L39-L105)、[推理回调](../../app/inference/transport.py#L29)。
+
+### 历史跟随请求 session，与 assignment journal 分离
+
+`WorkerBusinessCallbacks → WorkerRuntime.read_history() → _history_agents[prefix] → CodingAgent.read_history()`。
+Runtime 为历史长期保留两个 Agent；`T-` 前缀选择 Amp，其余选择 Codex，不依赖当前配置的后端或活动 Flow。
+每个 Agent 自己创建 History，历史读取不要求 trusted-host 编码授权；同步 reader 被卸载到线程，保留各自限流和缓存。
+`ExecutionState` 只负责执行持久证据，无 History 引用或历史入口。
+见 [历史路由](../../app/worker/runtime.py#L167-L170)、[读取与超时](../../app/worker/runtime.py#L255-L264)、
+[Codex Agent](../../app/worker/execution/codex.py#L119-L131)、[Amp Agent](../../app/worker/execution/amp_agent.py#L235-L247)。
+
+Amp 的编码、历史导出和附件下载共用静态 `AmpCodingAgent.run_process()`；`AmpHistory → AmpCodingAgent`
+是方法调用边，`AmpCodingAgent → AmpHistory` 是实例持有边，二者不表示循环构造。
+流式 init/final 校验在 `_outcome()` 内进行，已无 `_Init` / `_Result` 模型。
+见 [进程监督](../../app/worker/execution/amp_agent.py#L249-L352)、
+[流式结果解析](../../app/worker/execution/amp_agent.py#L165-L232)、
+[历史 export](../../app/worker/execution/amp_agent.py#L456-L497)、
+[附件下载](../../app/worker/state/amp_attachments.py#L42-L69)。
+
+### 文件出站投影与独立推理
+
+原生 History 返回 `HistoryPage` 后，Runtime 调用 `link_history(page, self.register_file, ...)`，
+深拷贝缓存页、识别实际 Markdown 目标并登记文件，只改写出站副本。
+`FileLinks` 在磁盘记录 `LocalFile | AmpAttachment` 身份，读取时重新核验本地文件身份，或临时下载远端附件；
+`WorkerFileCallbacks` 负责有界读取与发送。见 [链接投影](../../app/worker/state/history_links.py#L171)、
+[登记与读取](../../app/worker/state/file_links.py#L46-L97)、[文件回调](../../app/worker/transport/files.py#L21-L70)。
+
+Runtime 的 `NativeAgentInference` 持有独立 Agent，在目录池提供的无仓库目录里运行新会话，
+仅调用 `start(context=None)`，验证 `InferenceTask → InferenceOutput`，不续用编码 session。
+见 [推理装配](../../app/worker/runtime.py#L171-L190)、[推理适配](../../app/worker/execution/inference.py#L31-L115)。
+
+## 类图之外的函数与共享模型
 
 ### 无类模块与函数所有权
 
-为避免把函数误画成管理器类，图中仅为两个跨类关系增加函数锚点，其余函数模块在这里列出。
-
 | 模块 / 函数 | 调用方及职责 |
 | --- | --- |
-| [cli.py](../../app/worker/cli.py) | 普通启动在 `installation_lock(updating=False)` 内运行 Runtime；`--update` 调用 `update_worker()` 后退出，不启动 Runtime |
-| [execution/prompts.py](../../app/worker/execution/prompts.py) | Executor 调用 `build_initial_prompt()` / `build_revision_prompt()`，组织任务输入与输出约束 |
-| [execution/credentials.py](../../app/worker/execution/credentials.py) | Codex、Amp 环境函数和 VCS 命令复用临时 Git credential 环境 |
-| [execution/gh.py](../../app/worker/execution/gh.py) | Executor 调用 `require_gh()`；两个 agent 使用 `github_environment()` 创建当前轮 bot gh 包装，复用 workspace 模块的仓库标识校验 |
-| [state/files.py](../../app/worker/state/files.py) | Session 与 RepositoryWorkspaces 共用 `write_private_record()` 原子写入私有 journal / manifest |
-| [execution/vcs.py](../../app/worker/execution/vcs.py) | Executor 负责执行前后核验，MCP 在工具转发前调用 `verify_pushed_outcome()`；目录池复用 seed、clean、align 和 worktree 核验函数 |
-| [execution/amp_process.py](../../app/worker/execution/amp_process.py) | `run_amp()` 被 AmpCodingAgent 和 AmpHistory 共用；环境、临时 settings、脱敏也是函数 |
-| [self_update.py](../../app/worker/self_update.py) | `installation_lock()` 保护安装目录；`installed_package()` 返回 InstalledPackage；`update_worker()` 编排更新与新进程核验 |
+| [cli.py](../../app/worker/cli.py) | 普通启动持有安装共享锁后运行 Runtime；`--update` 调用更新函数后退出 |
+| [execution/prompts.py](../../app/worker/execution/prompts.py) | INITIAL、修正和 REVISION 的提示词构造 |
+| [execution/credentials.py](../../app/worker/execution/credentials.py) | Agent / VCS 复用可信宿主环境过滤和临时 Git credential 环境 |
+| [execution/gh.py](../../app/worker/execution/gh.py) | gh 可用性核验与本轮 bot gh 包装；不引入长期 GitHub client |
+| [execution/git_identity.py](../../app/worker/execution/git_identity.py) | 目录池配置当前能力所对应的 Git 作者身份 |
+| [execution/idle.py](../../app/worker/execution/idle.py) | 两个原生 Agent 的无新输出超时等待；进程回收由 Agent 负责 |
+| [execution/vcs.py](../../app/worker/execution/vcs.py) | 执行前后及 MCP 转发前核验；目录池复用 seed、clean、align、worktree 核验函数 |
+| [state/files.py](../../app/worker/state/files.py) | journal、manifest、文件身份记录共用的私有原子写入与目录 fsync |
+| [state/history_links.py](../../app/worker/state/history_links.py#L171) | `link_history()` 函数锚点；Markdown 解析及文件注册回调，未造额外服务类 |
+| [self_update.py](../../app/worker/self_update.py#L233) | `update_worker()` 函数锚点；安装独占锁、来源核验、更新与新进程验证 |
 
-各级 `__init__.py` 不定义类。`health.py` 另有独立的 `healthy()` / `main()` 探针入口。
+各级 `__init__.py` 不定义类。`health.py` 另有 `healthy()` / `main()` 探针入口。
+`execution/amp_process.py`、`state/history.py`、`state/amp_history.py` 已删除；它们原有职责由具体 Agent 模块承接。
 
-### 包外类型边界
+### 包外边界
 
-“全部”限定于 worker 自定义类。以下是 worker 消费的主要包外数据类型，不把整个共享领域层和协议层
-重复展开成 worker 自有类；定义、字段和模型继承以所链接源码为准。
+14 个灰色类展示关键接口和数据流，其余共享模型在这里说明；不重复展开整个领域层或消息继承树。
 
-| 来源 | worker 使用的边界 |
+| 来源 | 已画节点 / 补充边界 |
 | --- | --- |
-| [domain/ports.py](../../app/domain/ports.py) | `CodingAgent` 的 start/resume 结构化接口（已在图中单列）；Worker 不使用 Judge |
-| [domain/models.py](../../app/domain/models.py#L227-L283) | `CodingExecutionContext → GitHubCapability`；agent 返回 `CodingExecutionResult`；VCS 函数使用 `VcsExecutionContext` / `VcsOutcome` / `VcsKind`；Codex 可抛出 `SessionUnavailable` |
-| [domain/models.py 的输出契约](../../app/domain/models.py#L333-L350) | Executor 解析 `InitialCodingOutput` / `RevisionCodingOutput`，adapter 不替代业务结果核验 |
-| [contracts/protocol.py](../../app/contracts/protocol.py) | `Assignment → InitialTask / RevisionTask / ArchiveTask` 与临时 `AssignmentSecret → PushSecret`；任务结果、注册/心跳、恢复、停止、工具请求/回执和会话查询消息 |
-| [contracts/conversation.py](../../app/contracts/conversation.py) | `HistoryQuery`、`HistoryPage → HistoryItem → ConversationContent` 和 `ConversationFailure`；Session 按 session ID 选择两个历史 reader |
-| [domain/delivery_models.py](../../app/domain/delivery_models.py) | `DeliveryReceipt` 是工具返回、待处理 Future 与 INITIAL 结果核验共同使用的交付回执 |
+| [communication/](../../app/communication/) | 已画 `Gateway`、`Session`、`Dispatcher`、`Transport`、`SessionCallbacks`；Gateway 经 `Registration` 持有 Session 和路由器，省略中间类节点 |
+| [inference/transport.py](../../app/inference/transport.py#L29) | 已画共享 `WorkerInferenceCallbacks`，包外身份与 worker 自定义回调明确区分 |
+| [domain/ports.py](../../app/domain/ports.py#L18) | 已画 `Inference`；`CodingAgent` 已迁入 worker 包，不再属于该模块 |
+| [domain/inference_models.py](../../app/domain/inference_models.py) | 已画 `InferenceTask`、`InferenceOutput`；另消费 capability、failure 与异常 |
+| [domain/models.py](../../app/domain/models.py#L334-L393) | 已画 `CodingExecutionContext`、`CodingExecutionResult`；前者携带可空 `GitHubCapability` 和 MCP 能力，VCS 使用 `VcsExecutionContext` / `VcsOutcome` / `VcsKind`，Codex 可抛出 `SessionUnavailable` |
+| [domain/models.py 的输出契约](../../app/domain/models.py#L446-L462) | Executor 解析 `InitialCodingOutput` / `RevisionCodingOutput` 并独立核验业务结果 |
+| [contracts/protocol.py](../../app/contracts/protocol.py) | 已画 `ProtocolModel`；`Assignment.arguments` 中包含 `AssignmentArguments → InitialTask / RevisionTask / ArchiveTask`，临时 secret 不进入 journal；另有恢复/停止/工具/文件/推理与注册库存消息 |
+| [contracts/conversation.py](../../app/contracts/conversation.py) | 已画 `HistoryQuery`、`HistoryPage`；页内含 `HistoryItem → ConversationContent`，失败使用 `ConversationFailure` |
+| [contracts/files.py](../../app/contracts/files.py) | `FileFailure`、文件 ID 与字节上限；文件路径和原生远端认证留在 worker |
+| [contracts/receipts.py](../../app/contracts/receipts.py) | `_LegacyRecord` 读取旧 `LegacyTerminal` / `LegacyStopped` 并显式投影成当前业务凭据 |
+| [domain/delivery_models.py](../../app/domain/delivery_models.py) | `DeliveryReceipt` 贯穿 MCP 返回、`PendingToolCall.future` 与 INITIAL 交付核验 |
 
-## 后续简化的评估点
+## 历史沿革与保留边界
 
-下面是从当前依赖推导出的检查方向，尚未选择重构方案：
+旧图停留在 33 类时期。执行生命周期拆分见 [`bbf8504`](https://github.com/b1indsight/agentflow/commit/bbf85048c432bf3d0e2960d36adde758eaeba9ea)，
+共享 Session / callbacks 与 `transport/client.py` 移除见
+[`4d9f37e`](https://github.com/b1indsight/agentflow/commit/4d9f37edf74726c89bda073d3a8c60674fbc5bec)，
+并发目录库存见 [`fadf3c1`](https://github.com/b1indsight/agentflow/commit/fadf3c1fe1d77d1c96b22cf259e385710fc50bbd)。
+本轮图继续对齐已落在工作树中的 worker-local Agent 接口、Agent 自有 History 与静态 Amp 进程监督。
 
-1. **先看 WorkerClient 的职责集中程度**：它同时管理连接、执行 Task、工具队列、历史并发和停止握手。
-   拆分前先保留“断线不取消编码执行、一个 socket reader、停止凭据确认后才释放”的契约。
-   依据：[client.py](../../app/worker/transport/client.py#L151-L479)。
-2. **再看 WorkerSession 的边界**：journal 与历史读取拥有不同数据源和生命周期；目前由一个对象提供入口。
-   可评估是否需要拆分，但终态脱敏、归档清理证据和结果 ACK 的顺序需要保持。
-   依据：[session.py](../../app/worker/state/session.py#L60-L132)、
-   [终态及 ACK](../../app/worker/state/session.py#L243-L272)。
-3. **追踪执行→工具→连接的临时回调**：`Client → Executor → WorkerMCP → FlowToolCaller(Client)`。
-   这是当前运行时调用路径，不是 Executor 长期持有 Client 的对象引用环。
-   依据：[Client 传入 self](../../app/worker/transport/client.py#L319-L341)、
-   [MCP 创建](../../app/worker/execution/executor.py#L147-L162)、
-   [MCP caller](../../app/worker/transport/mcp.py#L131-L150)。
-4. **不要直接合并 journal 与 workspace manifest**：它们共享 WorkspaceBinding，但分别证明执行状态
-   与目录槽位所有权；同一 binding 的 generation 阻止旧任务释放复用后的目录。
-   依据：[SessionState](../../app/worker/state/session.py#L38-L57)、
-   [绑定与清理](../../app/worker/state/session.py#L190-L208)、
-   [目录池所有权校验](../../app/worker/execution/workspaces.py#L134-L154)。
-5. **按真实变化区分共用与差异**：两个 agent 共用 CodingAgent、临时凭据与 Executor 业务核验；
-   进程结果格式、历史来源和 session 拒绝证明不同。Amp 已有 run_amp 共用点，自更新仍是独立 CLI 分支。
-   依据：[Codex resume 拒绝判定](../../app/worker/execution/codex.py#L226-L241)、
-   [Amp 不自动 fallback](../../app/worker/execution/amp_agent.py#L163-L173)、
-   [CLI 分支](../../app/worker/cli.py#L23-L40)。
+简化后仍需按实际生命周期读图：执行对象跨重连存活；连接回调只借用编码执行；历史 reader 不依赖 journal；
+journal 和目录 manifest 分别证明执行状态和目录身份；文件 ID 独立于当前 assignment。
+其中 generation 与目录身份核验见 [WorkspaceBinding](../../app/worker/execution/workspaces.py#L45-L78)、
+[claim / release](../../app/worker/execution/workspaces.py#L364-L465)，
+终态/清理 ACK 见 [ExecutionState](../../app/worker/state/execution.py#L402-L451)。
 
-## 维护与核对
+## 维护、精确核对与渲染
 
-- `worker-classes.html` 的 `nodes` / `edges` 是手工维护源；类数量应与 Python AST 的 `ClassDef` 集合一致，
-  不只核对总数，还要核对 `(模块, 类名, 行号)`，避免漏一个又多一个。
-- 修改关系时追踪构造、字段、类型注解与调用，不把 import 当作持有关系；显式继承与结构化 Protocol 分开。
-- `worker-classes.svg` 是 HTML 全部显示、未选中状态下的 SVG 导出，供 Markdown 静态预览；
-  更新 HTML 后同步导出，并在浏览器检查文字边界及箭头。
-- 同步更新两份文档的源码快照；图中源码链接固定到核对基线，避免后续行号漂移。
-- 验证入口优先复用 `test_worker_client`、`test_worker_connection`、`test_worker_executor`、
-  `test_worker_session`、`test_worker_workspaces`、`test_worker_tools`、`test_conversation_worker`
-  及 agent/history 对应测试。类图本身不证明真实 GitHub、Codex 或 Amp 运行链路已验收。
+1. 手工维护 HTML 的 `nodes` / `edges` / `groups`，以源码构造、字段、类型注解和调用为依据。
+   `id` 必须全局唯一；真实类名是 `node.name || node.id`。嵌套类新增时采用限定 ID，仍保留其真实类名和定义行。
+   标题避让同时覆盖分组标题栏及实际 `getBBox()` 文字区域，并为描边和关系线预留 10 个 SVG 单位。
+   Agent 分组使用短标题；`coding_agent.py`、`execution/codex.py`、`execution/amp_agent.py` 保留在图下说明及类清单中。
+2. 递归解析所有 worker `.py` 的 AST，用 `ast.walk()` 收集每一个 `ClassDef`，
+   与排除 `kind=external/function` 后的图节点逐项比较 `(文件, 类名, lineno)` 的有序多重集。
+   同时核对限定身份、唯一 ID 和清单表，不允许只比较总数；当前核对结果为 **48 对 48，缺失/多余/行号差异均为 0**。
+   灰色类与两个函数锚点的定义行也须核对，所有边端点须存在。
+3. 工作树改动还未提交，本文和 HTML 使用同目录源码相对链接与实际行号，不伪称固定到 `f6eb85c` 的源码快照。
+   后续若改用 GitHub 固定链接，须等包含这些源码的提交产生后，再一起更新核对基线和静态图。
+4. 用浏览器打开 `docs/architecture/worker-classes.html`，点击 **“导出 SVG”**，用下载结果覆盖同目录
+   `worker-classes.svg`。导出直接复用 `serializeGraph()`：嵌入图形 CSS，移除聚焦/淡化和缩放状态，
+   保留全部节点、关系、标题和图例；输出 **2140 × 2180**，无需 Graphviz、构建或网络。
+5. 也可由现有 Playwright 环境打开本地 HTML，用 `page.evaluate(() => serializeGraph())` 获取 SVG。
+   核对静态与交互图的节点/边一致，检查文本边界、箭头、下拉定位、Enter/Space、关系侧栏、reset、zoom/fit 和导出。
+
+本次图形检查覆盖：全部 64 个节点的选择与源码链接、125 条边的有效端点/唯一性、所有节点和标题的文字边界、
+键盘与鼠标/侧栏跳转、重置与缩放、聚焦前后导出一致，以及独立 SVG 的 XML 解析和节点/边数量。
+桌面默认、Amp 聚焦及窄屏默认/放大截图均已检查：关系线不遮挡标题，图在画布内横向滚动、
+整页纵向浏览，页面无横向溢出；窄屏放大确实增加图宽，打印时解除缩放限制。
+类图检查不证明真实 GitHub、Codex 或 Amp 链路已验收。

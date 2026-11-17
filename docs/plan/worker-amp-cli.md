@@ -498,3 +498,54 @@ shell 结果出现在 user 事件中；本机 `codex-cli 0.162.1` 的 exec 与 r
 - 进程内临时恢复总时限、分别移除 stdout/stderr 续期、恢复 REVISION 外层 deadline、
   将 history 改为 idle、丢弃诊断、让超时覆盖已完成结果，均被保留测试捕获。
   未改写产品源码，临时变体脚本不保留。证据为前述目录的 `simplified-*.log`。
+
+### [006] — 2026-11-17 — Worker 编码后端与原生历史职责收拢
+
+**触发与决定：** 用户在完整类图基础上提出删除 `_Init` / `_Result`、将 `run_amp` 并入
+`AmpCodingAgent`、把 `CodingAgent` 移入 worker，以及将两种 history 放回各自后端并通过
+`CodingAgent` 调用。沿用 `docs/worker-class-relationship-diagram` /
+[#181](https://github.com/b1indsight/agentflow/pull/181)，普通合入主线以保留并发 Flow、原生推理、
+通信回调及文件链接后续改动，保留原图示基线为祖先，不改写已发布历史。
+
+#### 实际结构与取舍
+
+- `worker/coding_agent.py` 定义结构化 `CodingAgent` Protocol：保留主线 `start` / `resume`
+  签名，新增同步 `read_history(HistoryQuery) -> HistoryPage`。Executor、NativeAgentInference
+  与 Runtime 依赖该接口；domain 的 Judge / Inference 和共享输入输出数据类型不搬动。
+- `execution/codex.py` 拥有 `CodexAgent` / `CodexHistory`，`execution/amp_agent.py` 拥有
+  `AmpCodingAgent` / `AmpHistory`、快照和进程结果。每个 agent 保留自己的 reader；Runtime
+  持有 worker 生命周期的两种只读 agent，按 session ID 前缀选取，通过 `to_thread` 读取，
+  不依赖配置后端、当前 assignment 或 trusted-host 编码开关。保留独立 Flow 编码和 inference
+  实例，不合并其生命周期及输出上限。ExecutionState 只保留执行状态和恢复证据。
+- `AmpCodingAgent.run_process` 直接包含原进程监督实现，编码、history export 和附件下载
+  复用这一方法。编码继续使用 idle；导出和下载继续使用 total 及各自预算，保留文件大小内核
+  限制、双管道字节上限、进程组清理和取消传播。trusted-host 检查仍在编码入口。
+- `_Init` / `_Result` 改为边界处显式字段校验，复用 SessionId TypeAdapter，不增加替代模型。
+  保留严格布尔值、tools 字符串列表、init/final 顺序、同 session、shell 工具和最终文本检查；
+  空字符串成功仍有效，失败可缺少 result，error 缺省为空但显式 null 不合法。畸形字段不能
+  把原始输入、thinking 或凭据放进诊断。
+- 删除搬空的 `execution/amp_process.py`、`state/history.py`、`state/amp_history.py`，不保留
+  兼容转发或引入额外 backend 子包/History Protocol。两种后端模块变长，但职责归属直接，
+  无需跨模块循环依赖。历史分页、缓存、游标、脱敏及出站副本链接处理保持原逻辑。
+
+#### 验证与交付边界
+
+本次以减少类型和模块为主，没有引入需要消融比较的新机制。进程内将原解析器与新解析器在
+缺失/非法字段、退出状态、超时和输出超限组合上比较，执行结果字段一致（不比较诊断措辞）；
+AST 对照确认监督方法主体未变，CodexHistory 未变，AmpHistory 仅修改监督调用目标。
+测试入口同步到新公开接口，并保留协议测试中故意阻塞的历史回调。完整类清单和关系按实际
+整合后的 worker 源码更新，不沿用旧类数；旧 [004]/[005] 的验证不作为此次改动的证明。
+
+本轮 `uv run ruff check app tests`、`uv run mypy app tests` 通过。在独立、用后清理的本机
+PostgreSQL 17 实例上运行 `uv run pytest -q`，全量通过；仅 Git 后端不适用的 jj 元数据保护
+参数用例跳过，并保留现有 Starlette/httpx 弃用警告。`uv run python scripts/build_console.py`、
+`uv build --no-sources` 和 wheel 内容检查通过，生成包包含新接口、不含已删除模块；
+控制台 `npm run format:check` / `npm test` 通过。构建仍有既有大 chunk 提示。
+
+HTML、Markdown 与递归 AST 按 `(文件, 类名, 定义行)` 精确一致，覆盖所有私有类；源码链接、
+关系端点、键盘/下拉选择、reset、zoom/fit、窄屏滚动和聚焦前后 SVG 导出一致性检查通过。
+实际检查桌面默认、Amp 聚焦和窄屏默认/放大截图，并修复窄屏 min-width 导致缩放无效的问题。
+原始验证日志与最终截图保存在 `.amp/in/artifacts/worker-backend-*`，不提交一次性验证脚本。
+没有调用真实模型或 GitHub 业务工具，不以 fixture 测试声称真实外部链路已验收。
+
+不改 wire、journal、数据库、调度、凭据来源或部署；不重试现有 Flow，也不重启运行中的 worker。

@@ -88,7 +88,6 @@ async def test_bad_assignment_rejects_every_sibling_without_recording_then_conti
     runtime = await worker_runtime(
         worker_token="token",
         execution=execution,
-        read_history=state.read,
     )
     running = asyncio.create_task(run_worker(runtime, connection))
     try:
@@ -150,7 +149,6 @@ async def test_tool_failure_retires_original_waiter_before_critical_recovery(tmp
     runtime = await worker_runtime(
         worker_token="token",
         execution=execution,
-        read_history=state.read,
     )
     work = _assignment(workspace=runtime.workspaces.inventory()[1].workspace)
     execution.receive(work)

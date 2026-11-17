@@ -10,7 +10,7 @@ from urllib.parse import unquote, urlsplit
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.contracts.files import MAX_FILE_BYTES, FileFailure
-from app.worker.execution.amp_process import amp_environment, run_amp
+from app.worker.execution.amp_agent import AmpCodingAgent, amp_environment
 
 
 class AmpAttachment(BaseModel):
@@ -44,7 +44,7 @@ class AmpAttachment(BaseModel):
         try:
             with TemporaryDirectory(prefix=".amp-attachment-", dir=worker_root) as directory:
                 target = Path(directory) / "attachment"
-                result = await run_amp(
+                result = await AmpCodingAgent.run_process(
                     ["files", "get", self.url, "-o", str(target), "--log-file", os.devnull],
                     env=amp_environment(), timeout=5, max_stdout=65536,
                     # One sentinel byte distinguishes oversize writes from an exact-limit file.

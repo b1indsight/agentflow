@@ -16,7 +16,7 @@ from app.controler.api import create_app
 from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.transport import serve_worker
 from app.worker.config import WorkerSettings
-from app.worker.execution.amp_process import AmpProcessResult
+from app.worker.execution.amp_agent import AmpCodingAgent, AmpProcessResult
 from app.worker.execution.lifecycle import WorkerProtocolError
 from app.worker.runtime import WorkerRuntime
 from app.worker.state.amp_attachments import AmpAttachment
@@ -294,7 +294,7 @@ async def test_amp_download_is_lazy_private_ephemeral_and_restartable(server_run
         target.write_bytes(content)
         return AmpProcessResult(b"", b"", 0)
 
-    monkeypatch.setattr("app.worker.state.amp_attachments.run_amp", download)
+    monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(download))
     source = AmpAttachment(url=AMP_ATTACHMENT + "#amp-media-source=file%3A%2F%2F%2Fprivate")
     async with connected_files(server_runtime, root) as (worker, _, http, frames):
         link = await worker.register_file(source)
@@ -342,7 +342,7 @@ async def test_amp_download_failure_is_bounded_retryable_and_cleaned(
         return AmpProcessResult(b"", b"private error", int(outcome in {"large", "auth"}),
                                 timed_out=outcome == "timeout")
 
-    monkeypatch.setattr("app.worker.state.amp_attachments.run_amp", download)
+    monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(download))
     async with connected_files(server_runtime, tmp_path / "worker") as (worker, _, http, _):
         link = await worker.register_file(AmpAttachment(url=AMP_ATTACHMENT))
         response = await http.get(link)
@@ -370,7 +370,7 @@ async def test_worker_disconnect_cancels_amp_download_and_removes_partial_copy(
         finally:
             stopped.set()
 
-    monkeypatch.setattr("app.worker.state.amp_attachments.run_amp", download)
+    monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(download))
     async with connected_files(server_runtime, tmp_path / "worker") as (worker, _, http, _):
         link = await worker.register_file(AmpAttachment(url=AMP_ATTACHMENT))
         pending = asyncio.create_task(http.get(link))

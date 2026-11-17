@@ -17,6 +17,7 @@ from tests.test_amp_driver import THREAD, stream
 async def test_cli_partial_output_renews_idle_timeout(monkeypatch, tmp_path, backend):
     # Each pipe alone stays active longer than the deadline; no newline is needed.
     spawn = asyncio.create_subprocess_exec
+    supervisor = AmpCodingAgent.run_process
 
     async def fake_cli(*args, **kwargs):
         final = stream() if backend == "amp" else b'{"type":"thread.started","thread_id":"s"}\n'
@@ -24,9 +25,14 @@ async def test_cli_partial_output_renews_idle_timeout(monkeypatch, tmp_path, bac
                   "  os.write(fd,b' '); time.sleep(.08)\n" f"os.write(1,{final!r})\n")
         if backend == "codex":
             script += f"open({args[args.index('-o') + 1]!r},'w').write('{{\"caller_owned\":true}}')\n"
-        return await spawn(sys.executable, "-c", script, **kwargs)
+            return await spawn(sys.executable, "-c", script, **kwargs)
+        return await supervisor(["-c", script], **kwargs)
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_cli)
+    if backend == "amp":
+        monkeypatch.setattr("app.worker.execution.amp_agent.AMP_BIN", sys.executable)
+        monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(fake_cli))
+    else:
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_cli)
     agent = (AmpCodingAgent if backend == "amp" else CodexAgent)(trusted_host=True, timeout=0.4)
     result = await agent.start("task", tmp_path)
     assert result.exit_code == 0 and result.last_message == '{"caller_owned":true}'
@@ -39,7 +45,7 @@ async def test_silent_cli_reports_timeout_even_after_process_exit(monkeypatch, t
                               stdout=asyncio.StreamReader(), stderr=asyncio.StreamReader())
     process.stderr.feed_data(b"last progress")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
-    monkeypatch.setattr("app.worker.execution.amp_process._stop_amp", AsyncMock())
+    monkeypatch.setattr("app.worker.execution.amp_agent._stop_amp", AsyncMock())
     monkeypatch.setattr("app.worker.execution.codex.os.killpg", lambda *_args: None)
     agent = (AmpCodingAgent if backend == "amp" else CodexAgent)(trusted_host=True, timeout=0.01)
     result = await agent.resume(THREAD if backend == "amp" else "session-1", "task", cwd=tmp_path)

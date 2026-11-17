@@ -187,7 +187,6 @@ async def test_bad_cursor_returns_correlated_query_error(tmp_path):
     client = await worker_runtime(
         worker_token="token",
         execution=WorkerExecution(worker_id="worker", executor=SimpleNamespace(), state=state),
-        read_history=state.read,
     )
     request = ConversationQuery(
         **call_header(),
@@ -322,7 +321,6 @@ async def test_recovery_decision_precedes_terminal_replay_and_fences_ack_epoch(t
     client = await worker_runtime(
         worker_token="test",
         execution=owner,
-        read_history=state.read,
     )
     connection = Connection()
     running = asyncio.create_task(run_worker(client, connection))

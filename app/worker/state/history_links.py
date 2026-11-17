@@ -13,8 +13,8 @@ from mdit_py_plugins.footnote import footnote_plugin
 
 from app.contracts.conversation import HistoryPage
 from app.contracts.files import FileFailure
+from app.worker.execution.codex import MAX_PAGE
 from app.worker.state.amp_attachments import AmpAttachment
-from app.worker.state.history import MAX_PAGE
 
 MAX_LOCAL_FILES = 16
 

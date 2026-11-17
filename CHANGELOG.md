@@ -8,6 +8,10 @@
 
 ## Unreleased
 
+- Worker 后端职责收拢：`CodingAgent` 移入 worker，统一编码与只读历史接口；Codex/Amp 的
+  原生 history 各归对应后端，执行状态不再读取历史。Amp 进程监督直接并入 `AmpCodingAgent`，
+  删除 `_Init` / `_Result` 包装类及三份搬空模块；保留严格终态校验、超时、脱敏与取消回收。
+  同步更新完整 Worker 类图，不改 wire、journal、数据库或部署。
 - Flow 事实账本：`flows` 的每次账本列变化在同一事务内向 `console_activity` 追加一条不可变事实，
   状态转换以 `FlowEvent` 命名，另有创建、归档、归档后合并、归档更正和标题事实；标题与两类指针的写入
   收进 `FlowStore`，边界测试禁止其他模块写 `flows`。新增 `flowtool flow verify [FLOW_ID]` 重放并报告差异，

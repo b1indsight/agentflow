@@ -251,7 +251,6 @@ async def test_assignment_never_launches_before_started_is_sent_and_persisted(tm
     client = await worker_runtime(
         worker_token="test",
         execution=owner,
-        read_history=state.read,
     )
     connection = Connection(_assignment(workspace=client.workspaces.inventory()[1].workspace))
     owner.receive(connection.work)
@@ -345,7 +344,6 @@ async def test_completion_between_register_and_resume_is_persisted_without_reexe
         client = await worker_runtime(
             worker_token="test",
             execution=owner,
-            read_history=state.read,
         )
         await asyncio.wait_for(run_worker(client, connection), 2)
 
@@ -390,7 +388,6 @@ async def test_worker_redacts_echoed_push_capability_before_journal_and_wire(tmp
     client = await worker_runtime(
         worker_token="worker-secret",
         execution=owner,
-        read_history=state.read,
     )
     connection = ScriptedConnection(_assignment(workspace=client.workspaces.inventory()[1].workspace))
     owner.receive(connection.work)
@@ -510,7 +507,6 @@ async def test_replacing_connection_preserves_running_executor_and_renews_lease(
     client = await worker_runtime(
         worker_token="worker-secret",
         execution=owner,
-        read_history=session.read,
     )
     assignment = _assignment(workspace=client.workspaces.inventory()[1].workspace)
     owner.receive(assignment)
@@ -584,7 +580,6 @@ async def test_heartbeat_failure_interrupts_waiting_for_tool_reply(tmp_path) -> 
     client = await worker_runtime(
         worker_token="worker-secret",
         execution=owner,
-        read_history=state.read,
     )
     assignment = _assignment(workspace=client.workspaces.inventory()[1].workspace)
     owner.receive(assignment)
@@ -714,7 +709,6 @@ async def test_cancelled_disconnected_tool_does_not_leak_into_resumed_or_next_as
     client = await worker_runtime(
         worker_token="test",
         execution=owner,
-        read_history=state.read,
     )
     assignment = _assignment(workspace=client.workspaces.inventory()[1].workspace)
     following = assignment.model_copy(update={"job_id": 6, "assignment_token": "next-token"})
@@ -753,7 +747,6 @@ async def test_reconnection_replays_original_tool_call(tmp_path, sent_before_dis
     client = await worker_runtime(
         worker_token="test",
         execution=owner,
-        read_history=session.read,
     )
     pending = await asyncio.wait_for(owner.next_tool_call(), 1)
 
@@ -876,7 +869,6 @@ async def test_tool_cancelled_after_borrow_is_not_sent_or_blocking_completion(
     client = await worker_runtime(
         worker_token="test",
         execution=owner,
-        read_history=state.read,
     )
     work = _assignment(workspace=client.workspaces.inventory()[1].workspace)
     owner.receive(work)
@@ -1058,7 +1050,6 @@ async def test_mcp_shutdown_consumes_late_tool_response_before_delivering_result
     client = await worker_runtime(
         worker_token="token",
         execution=owner,
-        read_history=session.read,
     )
     connection = LateConnection(_assignment(workspace=client.workspaces.inventory()[1].workspace))
     owner.receive(connection.work)

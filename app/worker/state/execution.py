@@ -9,7 +9,6 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
-from app.contracts.conversation import HistoryPage, HistoryQuery
 from app.contracts.protocol import (
     ArchiveTask,
     AssignmentArguments,
@@ -26,9 +25,7 @@ from app.contracts.protocol import (
 )
 from app.domain.models import JobState
 from app.worker.execution.workspaces import WorkspaceBinding
-from app.worker.state.amp_history import AmpHistory
 from app.worker.state.files import sync_directory, write_private_record
-from app.worker.state.history import CodexHistory
 from app.worker.state.record import ExecutionRecord, JournalSelection, decode_journal
 
 _TERMINAL: TypeAdapter[TerminalPayload] = TypeAdapter(TerminalPayload)
@@ -55,8 +52,6 @@ class ExecutionState:
         self._legacy = worker_root / "assignment-journal.json"
         self._selection_path = self.directory / "current.json"
         self.assignment: AssignmentArguments | None = None
-        self._history = CodexHistory()
-        self._amp_history = AmpHistory()
 
     @property
     def path(self) -> Path:
@@ -130,12 +125,6 @@ class ExecutionState:
             selection_path.unlink()
             sync_directory(directory)
         return sorted(records)
-
-    def read(self, query: HistoryQuery) -> HistoryPage:
-        """Read the session selected by control, independent of the active assignment."""
-        return (self._amp_history if query.session_id.startswith("T-") else self._history).query(
-            query
-        )
 
     def recovery(self, *, executor_active: bool) -> RecoveryDescriptor | None:
         record = self.load()

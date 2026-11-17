@@ -17,7 +17,7 @@ from app.domain.inference_models import (
     InferenceOutput,
     InferenceTask,
 )
-from app.domain.ports import CodingAgent
+from app.worker.coding_agent import CodingAgent
 from app.worker.execution.credentials import inherited_agent_environment
 
 _INSTRUCTIONS = """Generate only an answer from the supplied conversation. This is an independent

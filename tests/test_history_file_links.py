@@ -13,7 +13,7 @@ from app.contracts.files import FileFailure
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.worker.config import WorkerSettings
-from app.worker.execution.amp_process import AmpProcessResult
+from app.worker.execution.amp_agent import AmpCodingAgent, AmpProcessResult
 from app.worker.runtime import WorkerRuntime
 from tests.test_conversation_history import AMP_SESSION, SESSION, message, rollout
 from tests.test_remote_e2e import remote_connection
@@ -29,6 +29,7 @@ def worker(tmp_path, monkeypatch):
     return WorkerRuntime(WorkerSettings(
         worker_id="worker-1", worker_token=SecretStr("worker-secret"),
         serve_ws_url="wss://unused", worker_root=tmp_path / "worker",
+        coding_agent="codex", trusted_host_execution=False,
     ))
 
 
@@ -53,7 +54,7 @@ async def test_only_message_markdown_destinations_are_registered(worker, tmp_pat
         "    [脚注定义]: /tmp/footnote-definition\r\n\r\n"
         "[正文引用脚注里的定义][脚注定义]\r\n"
     )
-    source = rollout(worker._history.root, [message("assistant", text), message("system", "[系统](/tmp/system)")])
+    source = rollout(tmp_path / "codex", [message("assistant", text), message("system", "[系统](/tmp/system)")])
 
     async def register(path):
         assert path == target
@@ -69,6 +70,8 @@ async def test_only_message_markdown_destinations_are_registered(worker, tmp_pat
 
 
 async def test_amp_repeat_and_next_page_keep_native_cursor_and_cache(worker, monkeypatch):
+    # Browsing old Amp sessions must work on a Codex worker with no current assignment.
+    assert worker.executions == {}
     first_text = "[报告](/tmp/report%23draft.md)"
     payload = {"id": AMP_SESSION, "messages": [
         {"protocolMessageID": "one", "role": "assistant", "content": [{"type": "text", "text": first_text}]},
@@ -78,15 +81,15 @@ async def test_amp_repeat_and_next_page_keep_native_cursor_and_cache(worker, mon
     async def export(*args, **kwargs):
         return AmpProcessResult(stdout=json.dumps(payload).encode(), stderr=b"", exit_code=0)
 
-    monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
+    monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
     monkeypatch.setattr(worker, "register_file", AsyncMock(return_value=LINK))
     query = HistoryQuery(session_id=AMP_SESSION, limit=1)
-    native = await asyncio.to_thread(worker._amp_history.query, query)
+    native = await asyncio.to_thread(worker._history_agents["amp"].read_history, query)
     page = await worker.read_history(query)
     assert page.items[0].content.text == f"[报告]({LINK}#name=report%23draft.md)"
     assert page.next_cursor == native.next_cursor
     assert native.items[0].content.text == first_text
-    assert await asyncio.to_thread(worker._amp_history.query, query) == native
+    assert await asyncio.to_thread(worker._history_agents["amp"].read_history, query) == native
     assert await worker.read_history(query) == page
     following = await worker.read_history(HistoryQuery(session_id=AMP_SESSION, cursor=page.next_cursor))
     assert following.items[0].content.text == "second"
@@ -114,9 +117,9 @@ async def test_private_amp_images_register_without_downloading_or_trusting_sourc
         assert source.name == "screen.png"
         return LINK
 
-    monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
+    monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
     monkeypatch.setattr(worker, "register_file", register)
-    native = await asyncio.to_thread(worker._amp_history.query, HistoryQuery(session_id=AMP_SESSION))
+    native = await asyncio.to_thread(worker._history_agents["amp"].read_history, HistoryQuery(session_id=AMP_SESSION))
     page = await worker.read_history(HistoryQuery(session_id=AMP_SESSION))
     named = f"{LINK}#name=screen.png"
     assert page.items[0].content.text == text.replace(f"<{full}>", f"<{named}>").replace(
@@ -126,10 +129,10 @@ async def test_private_amp_images_register_without_downloading_or_trusting_sourc
     assert native.items[0].content.text == text
 
 
-async def test_registration_deadline_and_failure_keep_partial_text(worker, monkeypatch):
+async def test_registration_deadline_and_failure_keep_partial_text(worker, tmp_path, monkeypatch):
     monkeypatch.setattr("app.worker.runtime.HISTORY_TIMEOUT", 0.1, raising=False)
     text = "[好](/tmp/good) [失败](/tmp/missing) [慢](/tmp/slow)"
-    rollout(worker._history.root, [message("assistant", text)])
+    rollout(tmp_path / "codex", [message("assistant", text)])
     cancelled = asyncio.Event()
 
     async def register(path):
@@ -148,9 +151,9 @@ async def test_registration_deadline_and_failure_keep_partial_text(worker, monke
     assert cancelled.is_set()
 
 
-async def test_expanding_short_links_never_overflows_item_or_page(worker, monkeypatch):
+async def test_expanding_short_links_never_overflows_item_or_page(worker, tmp_path, monkeypatch):
     text = "中" * (8192 - len("[x](/x)")) + "[x](/x)"
-    rollout(worker._history.root, [message("assistant", text), message("user", "[ok](/x)")])
+    rollout(tmp_path / "codex", [message("assistant", text), message("user", "[ok](/x)")])
     monkeypatch.setattr(worker, "register_file", AsyncMock(return_value=LINK))
     page = await worker.read_history(HistoryQuery(session_id=SESSION))
     assert page.items[0].content.text == text
@@ -159,9 +162,9 @@ async def test_expanding_short_links_never_overflows_item_or_page(worker, monkey
 
     # A nearly full UTF-8 source page cannot grow just because each item has space.
     body = "中" * 2600 + " [x](/x)" * 35
-    rollout(worker._history.root, [message("assistant", body)] * 40)
+    rollout(tmp_path / "codex", [message("assistant", body)] * 40)
     query = HistoryQuery(session_id=SESSION)
-    native = worker._history.query(query)
+    native = await asyncio.to_thread(worker._history_agents["codex"].read_history, query)
     page = await worker.read_history(query)
     assert [item.id for item in page.items] == [item.id for item in native.items]
     assert page.next_cursor == native.next_cursor
@@ -170,9 +173,9 @@ async def test_expanding_short_links_never_overflows_item_or_page(worker, monkey
     assert LINK in texts and "](/x)" in texts
 
 
-async def test_file_count_and_duplicate_targets_are_bounded(worker, monkeypatch):
+async def test_file_count_and_duplicate_targets_are_bounded(worker, tmp_path, monkeypatch):
     text = " ".join(f"[{i}](/tmp/file-{i})" for i in range(17)) + " [重复](file:///tmp/file-0)"
-    rollout(worker._history.root, [message("assistant", text)])
+    rollout(tmp_path / "codex", [message("assistant", text)])
     monkeypatch.setattr(worker, "register_file", AsyncMock(return_value=LINK))
     page = await worker.read_history(HistoryQuery(session_id=SESSION))
     assert page.items[0].content.text.count(LINK) == 17
@@ -185,7 +188,7 @@ async def test_uploaded_history_and_refresh_use_real_registered_files(store, rem
     flow, runtime, _github, worker, agent = remote_flow
     path = tmp_path / "报告.md"
     text = f"[报告](<{path.as_uri()}>)"
-    rollout(worker._history.root, [message("assistant", text)] * 53)
+    rollout(tmp_path / "codex", [message("assistant", text)] * 53)
     finish = agent.finish
 
     async def finish_session(context):

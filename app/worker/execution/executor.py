@@ -31,7 +31,7 @@ from app.domain.models import (
     SessionUnavailable,
     VcsExecutionContext,
 )
-from app.domain.ports import CodingAgent
+from app.worker.coding_agent import CodingAgent
 from app.worker.execution.gh import require_gh
 from app.worker.execution.prompts import (
     build_initial_correction_prompt,
