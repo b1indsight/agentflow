@@ -109,7 +109,12 @@ async def filesystem_operation[**P, T](
 async def ensure_seed(
     seed: Path, repository: str, base_branch: str, remote: str, push_token: SecretStr | None,
 ) -> None:
-    """Atomically clone only a missing/empty seed; preserve every existing repository."""
+    """Atomically clone only a missing/empty seed; preserve every existing repository.
+
+    Existing seeds may contain operator-provided Git/jj state. Bootstrap deliberately does
+    not refresh them: new allocations use their local base branch, not the remote's latest
+    commit. Updating that baseline is a separate operation from workspace allocation.
+    """
     if seed.exists() and any(seed.iterdir()):
         require_repository(seed)
         return

@@ -71,6 +71,42 @@ async def test_pool_reuses_warm_copy_bounds_overflow_and_fences_late_archive(tmp
     assert pool.lookup("owner/repo", 2) == replacement and worktree.exists()
 
 
+@pytest.mark.parametrize("location", ["copy", "reused-copy", "worktree"])
+async def test_allocations_follow_local_seed_baseline_until_explicitly_updated(tmp_path, location):
+    # A merged remote change does not refresh an existing seed during the next Flow's INITIAL.
+    root, remote = managed_seed(tmp_path)
+    seed = root / "repos/owner/repo"
+    pool = RepositoryWorkspaces(root, "worker-a", limit=2)
+    if location != "copy":
+        first = await acquire(pool, 1)
+        if location == "reused-copy":
+            await pool.release(first)
+
+    publisher = tmp_path / "publisher"
+    shutil.copytree(seed, publisher)
+    (publisher / "README.md").write_text("latest remote baseline\n")
+    _git("commit", "-am", "advance remote baseline", cwd=publisher)
+    _git("push", "origin", "main", cwd=publisher)
+    assert await asyncio.to_thread(subprocess.check_output,
+        ["git", "show", "main:README.md"], cwd=remote, text=True,
+    ) == "latest remote baseline\n"
+
+    binding = await acquire(pool, 2)
+    assert (pool.path(binding) / "README.md").read_text() == "base\n"
+    assert (seed / "README.md").read_text() == "base\n"
+
+    # Even a fetch only updates remote-tracking refs; allocation reads the local base branch.
+    _git("fetch", "origin", "main", cwd=seed)
+    await pool.release(binding)
+    binding = await acquire(pool, 3)
+    assert (pool.path(binding) / "README.md").read_text() == "base\n"
+
+    _git("merge", "--ff-only", "origin/main", cwd=seed)
+    await pool.release(binding)
+    binding = await acquire(pool, 4)
+    assert (pool.path(binding) / "README.md").read_text() == "latest remote baseline\n"
+
+
 @pytest.mark.parametrize("problem", ["tracked", "unknown", "operation", "symlink"])
 async def test_pool_quarantines_unsafe_release_without_discarding_contents(tmp_path, problem):
     root, _ = managed_seed(tmp_path)
