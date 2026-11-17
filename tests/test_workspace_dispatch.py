@@ -4,6 +4,7 @@ import asyncio
 import shutil
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -27,6 +28,7 @@ from app.controler.workflow.service import ControlService
 from app.domain.models import ArchiveReason, JobState
 from app.persistence.records import required
 from app.worker.config import WorkerSettings
+from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.runtime import WorkerRuntime
 from app.worker.state.execution import ExecutionState
@@ -36,7 +38,7 @@ from tests.test_worker_workspaces import managed_seed
 from tests.worker_fixtures import NamingInference
 
 
-class ControlledWorker(WorkerRuntime):
+class ControlledWorker(NamingInference, WorkerRuntime):
     def __init__(self, root: Path, limit: int) -> None:
         super().__init__(WorkerSettings(
             worker_id="worker-a", worker_token=SecretStr("test"), serve_ws_url="wss://unused",
@@ -44,7 +46,6 @@ class ControlledWorker(WorkerRuntime):
         ))
         self.running: dict[int, Path] = {}
         self.finish: dict[int, asyncio.Event] = {}
-        self.inference = NamingInference()  # type: ignore[assignment]
 
     def _create_execution(self, flow_id: int) -> WorkerExecution:
         state = ExecutionState(self.settings.worker_root, flow_id)
@@ -68,8 +69,10 @@ class ControlledWorker(WorkerRuntime):
                     worker.running.pop(assignment.job_id)
                 raise RuntimeError("controlled coding outcome")
 
-        return WorkerExecution(worker_id="worker-a", executor=Executor(), state=state,
-                               on_change=self.notify)
+        return WorkerExecution(
+            worker_id="worker-a", executor=Mock(spec=WorkerExecutor, wraps=Executor()), state=state,
+            on_change=self.notify,
+        )
 
 
 async def wait_until(condition: Callable[[], bool]) -> None:

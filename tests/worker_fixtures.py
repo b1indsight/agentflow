@@ -18,9 +18,9 @@ from tests.test_communication_session import Socket
 
 
 class NamingInference:
-    """Script only the model answer, keeping inference dispatch and result handling real."""
+    """Runtime mixin scripting only the model answer, not dispatch or result handling."""
 
-    def capability(self):
+    def inference_capability(self):
         return InferenceCapability(adapter_version="codex/v1")
 
     async def infer(self, task):

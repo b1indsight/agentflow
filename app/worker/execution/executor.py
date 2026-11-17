@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from loguru import logger
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.contracts.protocol import (
     ArchiveResult,
@@ -26,12 +26,11 @@ from app.domain.models import (
     CodingExecutionContext,
     CodingExecutionResult,
     GitHubCapability,
-    InitialCodingOutput,
     RevisionCodingOutput,
     SessionUnavailable,
-    VcsExecutionContext,
+    VcsKind,
 )
-from app.domain.ports import CodingAgent
+from app.worker.coding_agent import CodingAgent
 from app.worker.execution.gh import require_gh
 from app.worker.execution.prompts import (
     build_initial_correction_prompt,
@@ -39,6 +38,7 @@ from app.worker.execution.prompts import (
     build_revision_prompt,
 )
 from app.worker.execution.vcs import (
+    VcsExecutionContext,
     VcsVerificationError,
     agent_guidance,
     local_commit,
@@ -54,6 +54,15 @@ from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
 
 VCS_VERIFICATION_EXIT_CODE = 65
 INITIAL_CORRECTION_LIMIT = 2
+
+
+class InitialCodingOutput(BaseModel):
+    """Strict structured result required from an INITIAL CodingAgent run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str
+    vcs_backend_used: VcsKind
 
 
 class WorkerExecutor:

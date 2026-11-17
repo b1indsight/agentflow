@@ -31,10 +31,11 @@ from app.contracts.protocol import (
 from app.contracts.validation import parse_worker_input
 from app.controler.workers.conversation import ConversationBroker
 from app.controler.workers.transport import control_ack
-from app.domain.models import VcsKind, VcsOutcome
+from app.domain.models import VcsKind
 from app.persistence.records import required
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import FlowToolCallError, WorkerExecution, WorkerProtocolError
+from app.worker.execution.vcs import VcsOutcome
 from app.worker.state.execution import ExecutionState
 from tests.test_communication_session import Socket
 from tests.test_conversation_history import SESSION
@@ -88,7 +89,6 @@ async def test_bad_assignment_rejects_every_sibling_without_recording_then_conti
     runtime = await worker_runtime(
         worker_token="token",
         execution=execution,
-        read_history=state.read,
     )
     running = asyncio.create_task(run_worker(runtime, connection))
     try:
@@ -150,7 +150,6 @@ async def test_tool_failure_retires_original_waiter_before_critical_recovery(tmp
     runtime = await worker_runtime(
         worker_token="token",
         execution=execution,
-        read_history=state.read,
     )
     work = _assignment(workspace=runtime.workspaces.inventory()[1].workspace)
     execution.receive(work)

@@ -162,7 +162,6 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
         client = await worker_runtime(
             worker_token="secret",
             execution=owner,
-            read_history=journal.read,
         )
         request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
         with pytest.raises(ConnectionError, match="ack lost"):
@@ -186,7 +185,6 @@ async def test_stop_kills_owned_process_and_child_then_replays_lost_ack(tmp_path
                 state=restarted_state,
                 executor=SimpleNamespace(),
             ),
-            read_history=restarted_state.read,
         )
         connection = AckConnection(request, epoch="new")
         with pytest.raises(ConnectionError, match="script complete"):
@@ -221,7 +219,7 @@ async def test_reconnection_during_stop_joins_executor_and_preserves_original_re
     owner.start()
     request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
 
-    client = await worker_runtime(execution=owner, read_history=state.read)
+    client = await worker_runtime(execution=owner)
 
     def connect(request, epoch="epoch"):
         connection = AckConnection(request, epoch=epoch)
@@ -276,7 +274,6 @@ async def test_restarted_worker_does_not_infer_stopped_from_absent_task(tmp_path
     client = await worker_runtime(
         worker_token="secret",
         execution=WorkerExecution(worker_id="w", executor=SimpleNamespace(), state=journal),
-        read_history=journal.read,
     )
     request = StopFence(job_id=1, flow_id=1, assignment_token="token", request_id="stop")
     with pytest.raises(WorkerProtocolError, match="ownership is unknown"):
@@ -306,7 +303,8 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
             await super().send(raw)
 
     class Agent(RecordingAgent):
-        async def start(self, task, path, *, output_schema=None, context=None, model=None, effort=None):
+        async def start(self, task, path, *, output_schema=None, context=None, model=None,
+                        effort=None, max_output_bytes=None):
             assert (path / "README.md").read_text() == "base\n"
             assert not (path / "untracked").exists()
             (path / "README.md").write_text("cancelled staged edit")
@@ -326,7 +324,9 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
         worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
         worker_root=root, worker_repo_workspace_limit=2 if overflow else 1,
     ))
-    client.inference = NamingInference()
+    inference = NamingInference()
+    monkeypatch.setattr(client, "infer", inference.infer)
+    monkeypatch.setattr(client, "inference_capability", inference.inference_capability)
     client.initialize()
     pool = client.workspaces
     default = pool.initialize()
@@ -565,7 +565,8 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
     executed = []
 
     class Agent(RecordingAgent):
-        async def start(self, task, cwd, *, output_schema=None, context=None, model=None, effort=None):
+        async def start(self, task, cwd, *, output_schema=None, context=None, model=None,
+                        effort=None, max_output_bytes=None):
             flow_id = next(item.flow_id for item in pool.inventory()
                            if item.repository is not None and item.flow_id is not None
                            and pool.path(pool.lookup("owner/repo", item.flow_id)) == cwd)
@@ -582,7 +583,9 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
         worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
         worker_root=root, worker_repo_workspace_limit=1,
     ))
-    client.inference = NamingInference()
+    inference = NamingInference()
+    monkeypatch.setattr(client, "infer", inference.infer)
+    monkeypatch.setattr(client, "inference_capability", inference.inference_capability)
     client.initialize()
     pool = client.workspaces
     session = ExecutionState(root, flows[0].id)

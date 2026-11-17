@@ -498,3 +498,127 @@ shell 结果出现在 user 事件中；本机 `codex-cli 0.162.1` 的 exec 与 r
 - 进程内临时恢复总时限、分别移除 stdout/stderr 续期、恢复 REVISION 外层 deadline、
   将 history 改为 idle、丢弃诊断、让超时覆盖已完成结果，均被保留测试捕获。
   未改写产品源码，临时变体脚本不保留。证据为前述目录的 `simplified-*.log`。
+
+### [006] — 2026-11-17 — Worker 编码后端与原生历史职责收拢
+
+**触发与决定：** 用户在完整类图基础上提出删除 `_Init` / `_Result`、将 `run_amp` 并入
+`AmpCodingAgent`、把 `CodingAgent` 移入 worker，以及将两种 history 放回各自后端并通过
+`CodingAgent` 调用。沿用 `docs/worker-class-relationship-diagram` /
+[#181](https://github.com/b1indsight/agentflow/pull/181)，普通合入主线以保留并发 Flow、原生推理、
+通信回调及文件链接后续改动，保留原图示基线为祖先，不改写已发布历史。
+
+#### 实际结构与取舍
+
+- `worker/coding_agent.py` 定义结构化 `CodingAgent` Protocol：保留主线 `start` / `resume`
+  签名，新增同步 `read_history(HistoryQuery) -> HistoryPage`。Executor、NativeAgentInference
+  与 Runtime 依赖该接口；domain 的 Judge / Inference 和共享输入输出数据类型不搬动。
+- `execution/codex.py` 拥有 `CodexAgent` / `CodexHistory`，`execution/amp_agent.py` 拥有
+  `AmpCodingAgent` / `AmpHistory`、快照和进程结果。每个 agent 保留自己的 reader；Runtime
+  持有 worker 生命周期的两种只读 agent，按 session ID 前缀选取，通过 `to_thread` 读取，
+  不依赖配置后端、当前 assignment 或 trusted-host 编码开关。保留独立 Flow 编码和 inference
+  实例，不合并其生命周期及输出上限。ExecutionState 只保留执行状态和恢复证据。
+- `AmpCodingAgent.run_process` 直接包含原进程监督实现，编码、history export 和附件下载
+  复用这一方法。编码继续使用 idle；导出和下载继续使用 total 及各自预算，保留文件大小内核
+  限制、双管道字节上限、进程组清理和取消传播。trusted-host 检查仍在编码入口。
+- `_Init` / `_Result` 改为边界处显式字段校验，复用 SessionId TypeAdapter，不增加替代模型。
+  保留严格布尔值、tools 字符串列表、init/final 顺序、同 session、shell 工具和最终文本检查；
+  空字符串成功仍有效，失败可缺少 result，error 缺省为空但显式 null 不合法。畸形字段不能
+  把原始输入、thinking 或凭据放进诊断。
+- 删除搬空的 `execution/amp_process.py`、`state/history.py`、`state/amp_history.py`，不保留
+  兼容转发或引入额外 backend 子包/History Protocol。两种后端模块变长，但职责归属直接，
+  无需跨模块循环依赖。历史分页、缓存、游标、脱敏及出站副本链接处理保持原逻辑。
+
+#### 验证与交付边界
+
+本次以减少类型和模块为主，没有引入需要消融比较的新机制。进程内将原解析器与新解析器在
+缺失/非法字段、退出状态、超时和输出超限组合上比较，执行结果字段一致（不比较诊断措辞）；
+AST 对照确认监督方法主体未变，CodexHistory 未变，AmpHistory 仅修改监督调用目标。
+测试入口同步到新公开接口，并保留协议测试中故意阻塞的历史回调。完整类清单和关系按实际
+整合后的 worker 源码更新，不沿用旧类数；旧 [004]/[005] 的验证不作为此次改动的证明。
+
+本轮 `uv run ruff check app tests`、`uv run mypy app tests` 通过。在独立、用后清理的本机
+PostgreSQL 17 实例上运行 `uv run pytest -q`，全量通过；仅 Git 后端不适用的 jj 元数据保护
+参数用例跳过，并保留现有 Starlette/httpx 弃用警告。`uv run python scripts/build_console.py`、
+`uv build --no-sources` 和 wheel 内容检查通过，生成包包含新接口、不含已删除模块；
+控制台 `npm run format:check` / `npm test` 通过。构建仍有既有大 chunk 提示。
+
+HTML、Markdown 与递归 AST 按 `(文件, 类名, 定义行)` 精确一致，覆盖所有私有类；源码链接、
+关系端点、键盘/下拉选择、reset、zoom/fit、窄屏滚动和聚焦前后 SVG 导出一致性检查通过。
+实际检查桌面默认、Amp 聚焦和窄屏默认/放大截图，并修复窄屏 min-width 导致缩放无效的问题。
+原始验证日志与最终截图保存在 `.amp/in/artifacts/worker-backend-*`，不提交一次性验证脚本。
+没有调用真实模型或 GitHub 业务工具，不以 fixture 测试声称真实外部链路已验收。
+
+不改 wire、journal、数据库、调度、凭据来源或部署；不重试现有 Flow，也不重启运行中的 worker。
+
+### [007] — 2026-11-17 — 共享 Agent 的原位推理与文件协议
+
+**触发与决定：** 用户要求推理复用编码 API、文件注册和读取归入通用 Agent 协议，并放弃旧
+workspace manifest 兼容；明确推理直接使用已登记 workspace、只返回结果暂靠 prompt。
+按用户批准的[新版方案](https://ampcode.com/artifacts/worker-d3ac0ceb-b247-4aac-b760-f38a35f5d5f1)
+实施。本条替代 [006] 中保留独立推理实例的决定；基于随后已共享编码/历史实例的代码继续收拢，
+保留各 Flow 的执行状态、通信回调、domain 合同和既有 trusted-host 前提。
+
+#### 实际实现与取舍
+
+- 删除 `NativeAgentInference` 及额外 Agent，Runtime 实现现有 `Inference.infer` 端口，
+  调用 `execution/inference.py` 的无状态函数。每次调用现有后端的 `start`，保持新会话、
+  `context=None`，cwd 精确等于 `workspaces.inference_path`。能力探测与 schema 使用该目录内
+  的独占临时文件，进程回收后只删除本次文件，不建请求子目录或清空 workspace。
+- 两种后端的 `start` 增加调用级最终答案预算，不改共享实例字段和原生事件流预算，
+  `resume` 及普通编码默认行为不变。动作限制仅在 prompt 内表达；没有新增强制禁用工具，
+  目录和 prompt 不能代替外部隔离。保留总超时、取消回收、结果关联和严格 JSON 校验。
+- `CodingAgent` 保留 Protocol，同时给出本地文件注册/读取默认方法；Codex/Amp 显式继承。
+  将原 `LocalFile` 和有界读取移到接口所在模块，`AmpAttachment` 整体移入 Amp 后端，
+  删除搬空模块。附件仍保留 URL/name/read 行为，由 Amp 覆盖相同 API，其余调用默认实现。
+- `FileLinks` 只持久化后端归属和 Agent 校验后的来源、去重与查询，不导入具体后端。
+  Runtime 用既有 `_agents` 恢复原登记归属，`WorkerFileCallbacks` 调用选定对象的
+  `read_file`，不解析 Amp URL 或下载文件。旧无归属记录只在 Runtime 兼容路由，旧 ID 不变；
+  同一本地文件跨后端去重，重启或切换默认后端不改变新登记的读取归属。
+- 历史只改出站副本，保留缓存和游标。普通路径归历史所在后端，Amp 附件保持 Amp 归属，
+  包括复制到 Codex 历史中的附件；不能直接用历史后端覆盖文件来源。该边界已用先红后绿的
+  参数化用例检查，两种历史都不下载附件、不信任媒体片段里的本地路径。
+- 删除 `_LegacyManifest`、`_LegacySlot` 和 manifest v1 转换。旧格式直接拒绝，原文件内容、
+  修改时间和目录保持不变；当前 manifest v3、assignment journal 和文件链接兼容保留。
+  不新增推理 Agent、本地文件 Agent、Mixin 或文件服务。
+
+#### 验证与复杂度检查
+
+本地文件读取函数的 AST 与搬动前一致，`AmpAttachment` 的 AST 仅将临时目录构造改为模块限定名。
+扩展现有公开行为测试，覆盖共享实例、精确 cwd、两后端并发预算、超时/取消后的 schema 与
+进程清理、跨后端文件归属、真实旧文件记录、下载限额与断连、旧 manifest 非破坏性拒绝。
+
+在独立进程内分别去掉调用级预算、丢弃持久归属并改用当前编码后端，同一组 Codex/Amp
+回归用例均失败；原实现通过。因此保留这两个有实际调用差异的机制。其余主要是删除或搬动，
+不引入替代状态机。比较通过内存替换执行，没有把临时变体写入产品源码；日志保存在
+`.amp/in/artifacts/worker-simplified-ablation-{budget,ownership}.log`。
+
+Ruff、全局 Mypy、控制台格式检查及测试、控制台构建和 wheel/sdist 打包通过；wheel 含通用
+接口、不含已删除附件模块。补齐跨历史来源的附件归属后，在独立 PostgreSQL 实例上重跑
+全量测试通过；仅当前 Git checkout 不适用的 jj 元数据保护用例跳过。类清单与源码定义位置
+逐项一致，桌面、推理/Amp 聚焦、窄屏及放大状态的渲染和 SVG 导出检查通过。最终验证日志与
+截图保存在 `.amp/in/artifacts/worker-simplified-*`。现有构建大 chunk 提示与 Starlette/httpx
+弃用警告不在本次修改范围。
+
+没有执行真实外部模型、部署、重启或已有 Flow 重试。代码和测试的最终交付状态见本线程，
+不以先前提交的 CI 代替本轮验证。旧提案已由新版方案完整替换，不在方案正文恢复旧修订。
+
+### [008] — 2026-11-17 — 公共执行生命周期归 CodingAgent，撤回包外推理改动
+
+**触发与决定：** 用户要求超时、取消、输出上限和结果校验归 CodingAgent 执行入口。实现时
+曾越界删除包外 `Inference` 端口、`worker.infer` 协议及控制端/Bub 合同；用户指出后已撤回，
+包外推理合同、wire26 与持久化格式恢复为 [007] 的状态，不需要数据升级。
+
+#### 实际实现与边界
+
+- 既有 `CodingAgent.start/resume` 共用 `_execute`，统一调用级总时限、最终 UTF-8 答案预算、
+  schema 临时文件清理和严格 JSON 解码；Codex/Amp 的原生执行放入 `_run`，继续负责
+  原生管道预算、空闲计时和取消后的进程回收。业务 schema、Flow/VCS 与 verdict 校验仍归调用者。
+- `WorkerRuntime.infer()` 满足包外 `Inference`：把消息序列化进只读提示词，调用共享 Agent 的
+  `start()`，在既有 inference workspace 原位执行、`context=None`，只转换结果与失败。
+  `execution/inference.py` 保持删除，不做 CLI/Git/可写性探测。
+- 按用户要求删除 Worker 类关系图（HTML/SVG/Markdown）及索引链接，并删除重复的
+  start/resume 参数组合与重复的运行时推理测试，保留各行为的一条代表性检查。
+
+#### 验证
+
+本地独立 PostgreSQL 全量 pytest、Ruff、Mypy 通过；没有真实外部模型调用、部署或生产数据库操作。

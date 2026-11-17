@@ -226,8 +226,14 @@ worker socket 与 executor 解耦，root 内 `journals/flow-<id>.json` 分别保
 
 ## 4.4 CodingAgent Drivers
 
+`CodingAgent` 位于 `worker/coding_agent.py`，统一声明 `start`、`resume` 和同步只读
+`read_history`。`CodexAgent` / `AmpCodingAgent` 各自拥有同模块内的原生 history reader；
+`ExecutionState` 只负责执行状态和恢复证据。`WorkerRuntime` 通过该接口在线程中读历史，
+按 session ID 选择来源，与编码后端配置、当前 assignment 及 trusted-host 编码开关无关。
+worker 生命周期的只读实例保留分页、缓存与并发预算；每 Flow 编码及独立 inference 实例仍各自创建。
+
 `WorkerRuntime` 默认装配 Codex；`FLOWTOOL_CODING_AGENT=amp` 装配本地 Amp CLI，采用各自的
-单轮超时，并将所选超时用于 revision deadline。INITIAL/REVISION 的业务 Schema、VCS 核验、
+stdout/stderr 空闲超时，不再设置整轮 revision deadline。INITIAL/REVISION 的业务 Schema、VCS 核验、
 交付回执和 ARCHIVE 的 workspace 释放由共用 executor 负责。
 
 两个后端通过 `credentials.inherited_agent_environment` 继承原生 CLI/skills/MCP 环境，
@@ -258,9 +264,12 @@ Codex 选择通过原生 `--model` 与 `-c model_reasoning_effort="..."` 传入�
   继续按本轮 GitHub capability 重建。
 - 成功必须具有完整、同 session 的 init/result、进程退出 0、`is_error=false` 和 `subtype=success`。
   最终文本原样交给 executor，Schema 只作提示，不修复 JSON 或自动重跑未知执行。
-- `amp_process.run_amp` 供编码与历史导出共用，并行有界读取两条管道；取消/超时先 SIGTERM，升级时包含事前捕获的独立
+- `AmpCodingAgent.run_process` 直接监督编码、历史导出及附件下载，并行有界读取两条管道；
+  编码使用 idle 超时，导出和下载保留各自 total 预算及输出/文件上限。
+  取消/超时先 SIGTERM，升级时包含事前捕获的独立
   shell 进程组。该快照无法保证回收任意脱离进程树的进程；仍依赖外部隔离。
-- `ExecutionState` 按 ID 格式选择历史来源。Amp 原生 export 经公开块映射与脱敏后短时缓存，
+- `WorkerRuntime` 按 ID 格式选择历史来源，经 `AmpCodingAgent.read_history` 调用 `AmpHistory`。
+  Amp 原生 export 经公开块映射与脱敏后短时缓存，
   支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。
   记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v26。
 - 不再拒绝 workspace Amp 设置或因额外工具拒收结果；保留必要的原生 shell 与完整终态检查。
@@ -272,7 +281,10 @@ Codex 选择通过原生 `--model` 与 `-c model_reasoning_effort="..."` 传入�
 
 ### Codex
 
-`CodexAgent` 已实现 `CodingAgent` 端口的 `start` / `resume`：
+`CodexAgent` 实现 `CodingAgent` 的 `start` / `resume` / `read_history`，历史读取由同模块的
+`CodexHistory` 处理原生 rollout；查询无需开启 trusted-host 编码权限。
+
+编码行为：
 
 - start 仅在显式 `FLOWTOOL_TRUSTED_HOST_EXECUTION=true` 时使用
   `codex exec <prompt> --json -C <flow-repo> -s danger-full-access`；

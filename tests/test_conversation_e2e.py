@@ -6,7 +6,7 @@ import pytest
 
 from app.controler.api import create_app
 from app.persistence.records import required
-from app.worker.execution.amp_process import AmpProcessResult
+from app.worker.execution.amp_agent import AmpCodingAgent, AmpProcessResult
 from tests.access import AccessIssuer
 from tests.test_conversation_history import SESSION, message, rollout
 from tests.test_remote_e2e import remote_connection
@@ -80,7 +80,7 @@ async def test_http_history_queues_behind_callbacks_but_not_execution(
                         for index, (role, text) in enumerate(entries)]
             return AmpProcessResult(json.dumps({"id": args[2], "messages": messages}).encode(), b"", 0)
 
-        monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
+        monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
     broker = runtime.conversations.broker
     broker.timeout = broker.timeout / 10 if phase == "slow_export" else 1
     issuer = AccessIssuer()

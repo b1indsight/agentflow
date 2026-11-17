@@ -132,7 +132,7 @@ async def test_modern_merge_stops_original_worker_before_reusing_only_its_genera
         owner = WorkerExecution(worker_id="worker-a", executor=executor, state=journal)
         client = await worker_runtime(
             worker_token="secret",
-            execution=owner, read_history=journal.read,
+            execution=owner,
         )
         registered, ack_waiting, deliver_ack = asyncio.Event(), asyncio.Event(), asyncio.Event()
 

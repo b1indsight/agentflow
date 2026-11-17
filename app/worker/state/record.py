@@ -19,7 +19,7 @@ from app.contracts.protocol import (
     TerminalPayload,
     terminal_digest,
 )
-from app.contracts.receipts import LegacyStopped, LegacyTerminal
+from app.contracts.receipts import LegacyTerminal, _LegacyHeader
 from app.worker.execution.workspaces import WorkspaceBinding
 
 _JSON = TypeAdapter(dict[str, JsonValue])
@@ -100,6 +100,19 @@ class ExecutionRecord(_RecordFields):
     """Current durable business data; no message, epoch or message identity is persisted."""
 
     version: Annotated[Literal[5], BeforeValidator(_INTEGER.validate_python)] = 5
+
+
+class LegacyStopped(ExecutionStopped, _LegacyHeader):
+    type: Literal["execution_stopped"]
+
+    def receipt(self) -> ExecutionStopped:
+        return ExecutionStopped(
+            request_id=self.request_id,
+            flow_id=self.flow_id,
+            job_id=self.job_id,
+            assignment_token=self.assignment_token,
+            execution_nonce=self.execution_nonce,
+        )
 
 
 class _LegacyRecord(_RecordFields):

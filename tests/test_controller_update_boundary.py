@@ -47,9 +47,11 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(
     start = agent.start
 
     async def paused(*args, **kwargs):
-        invocations.append(args[0])
-        started.set()
-        await proceed.wait()
+        # Naming uses the same agent; pause only the assignment that owns Flow capabilities.
+        if kwargs.get("context") is not None:
+            invocations.append(args[0])
+            started.set()
+            await proceed.wait()
         return await start(*args, **kwargs)
 
     monkeypatch.setattr(agent, "start", paused)

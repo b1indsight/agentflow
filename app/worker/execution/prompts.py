@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from app.contracts.protocol import ReviewFeedback, RevisionTask
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.models import VcsExecutionContext
+from app.worker.execution.vcs import VcsExecutionContext
 
 # 硬约束：codex 只碰本地 VCS，不碰 GitHub API（平面边界 §3）
 _HARD_CONSTRAINTS = (

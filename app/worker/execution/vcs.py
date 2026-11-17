@@ -13,14 +13,14 @@ import shutil
 import signal
 import tempfile
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from urllib.parse import urlparse
 
 from pydantic import SecretStr
 
-from app.domain.models import VcsExecutionContext, VcsKind, VcsOutcome
+from app.domain.models import VcsKind
 from app.worker.execution.credentials import git_credential_environment
 
 
@@ -30,6 +30,31 @@ class VcsVerificationError(RuntimeError):
     def __init__(self, stage: str, message: str) -> None:
         super().__init__(message)
         self.stage = stage
+
+
+@dataclass(frozen=True)
+class VcsExecutionContext:
+    """Facts fixed before CodingAgent mutates a Flow-owned repository."""
+
+    repo_path: Path
+    branch: str
+    remote: str
+    git_remote_url: str | None
+    jj_remote_url: str | None
+    git_base_sha: str | None
+    jj_base_sha: str | None
+    jj_ancestor_sha: str | None
+    push_token: SecretStr | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class VcsOutcome:
+    """VCS facts independently verified after a CodingAgent run."""
+
+    backend: VcsKind
+    branch: str
+    commit_sha: str
+    remote_sha: str
 
 
 VCS_COMMAND_TIMEOUT_SECONDS = 30.0

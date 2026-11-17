@@ -1,6 +1,7 @@
 import asyncio
 import threading
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -35,6 +36,7 @@ from app.contracts.protocol import (
     stop_receipt_id,
     terminal_id,
 )
+from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
 from app.worker.state.execution import ExecutionState, ExecutionStateError
 from tests.test_conversation_history import SESSION
@@ -84,7 +86,9 @@ async def test_history_does_not_block_separate_registration(tmp_path, registered
     state = State(tmp_path, 3)
     client = await worker_runtime(
         worker_token="token",
-        execution=WorkerExecution(worker_id="worker-1", executor=SimpleNamespace(), state=state),
+        execution=WorkerExecution(
+            worker_id="worker-1", executor=Mock(spec=WorkerExecutor), state=state,
+        ),
         read_history=state.read,
     )
     query = ConversationQuery(
@@ -187,7 +191,6 @@ async def test_bad_cursor_returns_correlated_query_error(tmp_path):
     client = await worker_runtime(
         worker_token="token",
         execution=WorkerExecution(worker_id="worker", executor=SimpleNamespace(), state=state),
-        read_history=state.read,
     )
     request = ConversationQuery(
         **call_header(),
@@ -322,7 +325,6 @@ async def test_recovery_decision_precedes_terminal_replay_and_fences_ack_epoch(t
     client = await worker_runtime(
         worker_token="test",
         execution=owner,
-        read_history=state.read,
     )
     connection = Connection()
     running = asyncio.create_task(run_worker(client, connection))

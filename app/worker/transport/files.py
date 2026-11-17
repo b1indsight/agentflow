@@ -2,6 +2,10 @@
 
 import asyncio
 import base64
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+
+from pydantic import JsonValue
 
 from app.communication.dispatch import Dispatcher
 from app.communication.session import Session
@@ -15,15 +19,16 @@ from app.contracts.protocol import (
     message_header,
     result_header,
 )
-from app.worker.state.file_links import FileLinks
+from app.worker.coding_agent import CodingAgent
 
 
 class WorkerFileCallbacks:
     """Run filesystem IO outside the driver without occupying its scarce watch slots."""
 
     def __init__(self, *, session: Session[ServerMessageUnion, WorkerMessageUnion],
-                 files: FileLinks) -> None:
-        self.session, self.files = session, files
+                 resolve_file: Callable[[str], Awaitable[tuple[CodingAgent, dict[str, JsonValue]]]],
+                 root: Path) -> None:
+        self.session, self.resolve_file, self.root = session, resolve_file, root
         self._pending: set[asyncio.Task[FileResult]] = set()
 
     def bind(self, routes: Dispatcher[ServerMessageUnion]) -> None:
@@ -46,7 +51,8 @@ class WorkerFileCallbacks:
 
     async def _read(self, call: FileQuery) -> FileResult:
         try:
-            content = await self.files.read(call.file_id)
+            agent, source = await self.resolve_file(call.file_id)
+            content = await agent.read_file(source, root=self.root)
             return FileResult(**result_header(call.message_id), method=call.method,
                               content_base64=base64.b64encode(content).decode())
         except FileFailure as error:

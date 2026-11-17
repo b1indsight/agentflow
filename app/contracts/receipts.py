@@ -60,19 +60,6 @@ LegacyTerminal = Annotated[LegacySucceeded | LegacyFailed, Field(discriminator="
 _LEGACY_TERMINAL: TypeAdapter[LegacyTerminal] = TypeAdapter(LegacyTerminal)
 
 
-class LegacyStopped(ExecutionStopped, _LegacyHeader):
-    type: Literal["execution_stopped"]
-
-    def receipt(self) -> ExecutionStopped:
-        return ExecutionStopped(
-            request_id=self.request_id,
-            flow_id=self.flow_id,
-            job_id=self.job_id,
-            assignment_token=self.assignment_token,
-            execution_nonce=self.execution_nonce,
-        )
-
-
 class MergeArchiveNotice(ProtocolModel):
     """Control's frozen business conclusion; never a Worker execution or cleanup receipt."""
 

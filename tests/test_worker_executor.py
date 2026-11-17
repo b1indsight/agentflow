@@ -9,6 +9,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from app.contracts.conversation import HistoryPage, HistoryQuery
 from app.contracts.protocol import (
     AssignmentSecret,
     InitialTask,
@@ -19,28 +20,39 @@ from app.contracts.protocol import (
 from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import (
     CodingExecutionResult,
-    InitialCodingOutput,
     SessionUnavailable,
     VcsKind,
-    VcsOutcome,
 )
-from app.worker.execution.executor import WorkerExecutor
+from app.worker.coding_agent import CodingAgent
+from app.worker.execution.executor import InitialCodingOutput, WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution
+from app.worker.execution.vcs import VcsOutcome
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.state.execution import ExecutionState
 from tests.test_vcs import _git, _git_fixture
 from tests.test_worker_session import _assignment
 
 
-class RecordingAgent:
+class RecordingAgent(CodingAgent):
+    backend = "codex"
+
     def __init__(self) -> None:
         self.started: list[tuple[str, Path]] = []
         self.resumed: list[tuple[str, str]] = []
 
-    async def start(
-        self, task: str, cwd: Path, *, output_schema=None, context=None, model=None, effort=None,
+    def read_history(self, query: HistoryQuery) -> HistoryPage:
+        """The scripted coding agent has no native history records."""
+        return HistoryPage(session_id=query.session_id, status="not_found")
+
+    async def _run(
+        self, prompt: str, cwd: Path, *, session_id: str | None = None,
+        output_schema=None, context=None, model=None, effort=None, max_output_bytes: int,
     ) -> CodingExecutionResult:
-        self.started.append((task, cwd))
+        """Script native execution while retaining the shared start/resume checks."""
+        if session_id is not None:
+            self.resumed.append((session_id, prompt))
+            return CodingExecutionResult(session_id, "revision done", 0)
+        self.started.append((prompt, cwd))
         return await self.finish(context)
 
     async def finish(self, context) -> CodingExecutionResult:
@@ -55,27 +67,22 @@ class RecordingAgent:
         return CodingExecutionResult(
             session_id="session-1",
             last_message=InitialCodingOutput(
-                summary="initial done", vcs_backend_used=VcsKind.GIT,
+                summary="initial done",
+                vcs_backend_used=VcsKind.GIT,
             ).model_dump_json(),
-            exit_code=0,
-        )
-
-    async def resume(self, session_id: str, prompt: str, *, cwd: Path, output_schema=None, context=None) -> CodingExecutionResult:
-        self.resumed.append((session_id, prompt))
-        return CodingExecutionResult(
-            session_id=session_id,
-            last_message="revision done",
             exit_code=0,
         )
 
 
 class BackendlessAgent(RecordingAgent):
-    async def start(
-        self, task: str, cwd: Path, *, output_schema=None, context=None, model=None, effort=None,
+    async def _run(
+        self, prompt: str, cwd: Path, *, session_id: str | None = None,
+        output_schema=None, context=None, model=None, effort=None, max_output_bytes: int,
     ) -> CodingExecutionResult:
+        # Valid JSON gets past the shared check but still lacks required VCS evidence.
         return CodingExecutionResult(
-            session_id="session-1",
-            last_message="claimed success",
+            session_id=session_id or "session-1",
+            last_message='{"summary":"claimed success"}',
             exit_code=0,
         )
 
@@ -186,7 +193,8 @@ async def test_initial_corrects_completion_in_original_session(
     journal, pool = initial_workspace
 
     class Agent(RecordingAgent):
-        async def start(self, task, cwd, *, output_schema=None, context=None, model=None, effort=None):
+        async def start(self, task, cwd, *, output_schema=None, context=None, model=None,
+                        effort=None, max_output_bytes=None):
             self.started.append((task, cwd))
             self.context, self.schema = context, output_schema
             self.base = (await asyncio.to_thread(
@@ -380,7 +388,8 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
         return await run(*args, **kwargs)
 
     class Agent(RecordingAgent):
-        async def start(self, task, cwd, *, output_schema=None, context=None, model=None, effort=None):
+        async def start(self, task, cwd, *, output_schema=None, context=None, model=None,
+                        effort=None, max_output_bytes=None):
             assert context.github.token.get_secret_value() == "push-token"
             _git("checkout", "-b", "flow/issue-8", cwd=cwd)
             (cwd / "README.md").write_text("implemented\n")

@@ -299,7 +299,7 @@ def test_scan_migrates_legacy_selection_without_losing_unselected_records(tmp_pa
 
 
 @pytest.mark.parametrize("state", ["occupied", "idle"])
-async def test_legacy_pool_migration_preserves_real_flow_binding(tmp_path, state):
+async def test_legacy_pool_is_rejected_without_changing_files(tmp_path, state):
     root, _ = managed_seed(tmp_path)
     binding = WorkspaceBinding(repository="owner/repo", slot_id="a" * 32, flow_id=1, generation=7)
     relative = "workspaces/owner/repo/" + binding.slot_id
@@ -312,20 +312,15 @@ async def test_legacy_pool_migration_preserves_real_flow_binding(tmp_path, state
         "slots": [{"binding": binding.model_dump(), "relative_path": relative,
                    "kind": "copy", "state": state}],
     }))
+    original = manifest_path.read_bytes()
+    modified = manifest_path.stat().st_mtime_ns
+    contents = sorted(path.relative_to(root) for path in root.rglob("*"))
     pool = RepositoryWorkspaces(root, "worker-a", limit=1)
-    pool.initialize()
-    item = pool.inventory()[1]
-    assert item.flow_id == 1 and item.generation == 7
-    assert len(await pool.provision("owner/repo")) == 2
-    with pytest.raises(VcsVerificationError, match="bound"):
-        await claim(pool, 2, item)
-    with pytest.raises(VcsVerificationError, match="identity"):
-        pool.lookup("owner/repo", 1)
-    with pytest.raises(VcsVerificationError, match="identity"):
-        await pool.release(binding, job_id=1, token="archive")
-    slot = json.loads(manifest_path.read_text())["slots"][0]
-    assert slot["binding"] == binding.model_dump() and slot["directory_identity"] is None
-    assert "state" not in slot
+    with pytest.raises(VcsVerificationError, match="invalid workspace manifest"):
+        pool.initialize()
+    assert manifest_path.read_bytes() == original
+    assert manifest_path.stat().st_mtime_ns == modified
+    assert sorted(path.relative_to(root) for path in root.rglob("*")) == contents
     assert (root / relative / "README.md").read_text() == "base\n"
 
 

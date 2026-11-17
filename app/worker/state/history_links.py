@@ -13,8 +13,8 @@ from mdit_py_plugins.footnote import footnote_plugin
 
 from app.contracts.conversation import HistoryPage
 from app.contracts.files import FileFailure
-from app.worker.state.amp_attachments import AmpAttachment
-from app.worker.state.history import MAX_PAGE
+from app.worker.execution.amp_agent import AmpAttachment
+from app.worker.execution.codex import MAX_PAGE
 
 MAX_LOCAL_FILES = 16
 
@@ -169,7 +169,8 @@ def _destinations(text: str) -> dict[tuple[int, int], Path | AmpAttachment]:
 
 
 async def link_history(
-    page: HistoryPage, register: Callable[[Path | AmpAttachment], Awaitable[str]], *, deadline: float,
+    page: HistoryPage, register: Callable[[Path | str, str], Awaitable[str]], *,
+    backend: str, deadline: float,
 ) -> HistoryPage:
     """Best-effort registration within the history request's remaining time and size budgets."""
     # Amp's page contains shared cache objects, and its cursor hashes their native text.
@@ -187,7 +188,10 @@ async def link_history(
         async with slots:
             try:
                 # Basename is display-only; fragments never reach the opaque attachment endpoint.
-                links[path] = f"{await register(path)}#name={quote(path.name, safe='')}"
+                source = path if isinstance(path, Path) else path.url
+                # Copied Amp URLs keep their native owner even inside another backend's history.
+                owner = backend if isinstance(path, Path) else "amp"
+                links[path] = f"{await register(source, owner)}#name={quote(path.name, safe='')}"
             except FileFailure:
                 pass  # Optional attachments must not discard readable conversation text.
 

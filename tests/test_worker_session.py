@@ -26,8 +26,10 @@ from app.contracts.protocol import (
     terminal_digest,
 )
 from app.domain.delivery_models import DeliveryReceipt, PreparedDelivery
-from app.domain.models import JobState, VcsKind, VcsOutcome
-from app.worker.execution.lifecycle import TaskExecutor, WorkerExecution, WorkerProtocolError
+from app.domain.models import JobState, VcsKind
+from app.worker.execution.executor import WorkerExecutor
+from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
+from app.worker.execution.vcs import VcsOutcome
 from app.worker.state.execution import ExecutionState, ExecutionStateError
 
 
@@ -433,7 +435,7 @@ def test_invalid_predecessor_journal_is_preserved(
 async def test_owner_reuses_tool_future_and_matches_original_item(tmp_path: Path) -> None:
     # A reconnect borrows the same item; an MCP retry may reuse call_id but not the item ID.
     state = ExecutionState(tmp_path, 3)
-    executor = Mock(spec=TaskExecutor)
+    executor = Mock(spec=WorkerExecutor)
     blocked = asyncio.Event()
 
     async def execute(*args: object, **kwargs: object) -> ExecutionResult:
@@ -502,7 +504,7 @@ async def test_owner_reuses_tool_future_and_matches_original_item(tmp_path: Path
 async def test_registration_result_is_withheld_during_stop_and_shutdown(tmp_path: Path) -> None:
     # A disconnected stop observer cannot abandon the join or accept a late result during it.
     state = ExecutionState(tmp_path, 3)
-    executor = Mock(spec=TaskExecutor)
+    executor = Mock(spec=WorkerExecutor)
     entered, joining, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def execute(*args, **kwargs):
