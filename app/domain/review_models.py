@@ -50,7 +50,6 @@ class ReviewBatch(BaseModel):
     id: int
     flow_id: int
     attempt_id: int
-    generation: int
     state: BatchState
     trigger: Literal["discussion", "strong"]
     job_id: int | None

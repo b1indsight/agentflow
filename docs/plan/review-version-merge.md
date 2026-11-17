@@ -1,6 +1,6 @@
 # 评审反馈表合并 — 功能记录
 
-**阶段：** 计划，待批准
+**阶段：** 已实现并推送，本地验证通过；代码审查门禁经用户授权跳过；待 CI
 **PR：** [#182](https://github.com/b1indsight/agentflow/pull/182)（draft）
 **Bookmark：** `refactor/review-version-merge`
 **基线：** `main` / `72707a21`（[PR #181](https://github.com/b1indsight/agentflow/pull/181)），2026-11-17。
@@ -207,3 +207,55 @@
 - **Consequences:**
   - 场景覆盖不变，`test_feedback_replay.py` 的测试数从 11 个减少到 5 个。
 - **Implemented changes:** 尚未实施。
+
+### [002] — 2026-11-18 — 实施与验证
+
+- **Context / requirement update:** 用户批准计划和 [001] 的测试合并后，开始实施。
+- **Implemented changes:**
+  - `app/persistence/schema.py`：`REVIEW_SCHEMA` 改为合并后的结构，在同一段 SQL 中完成可重复执行的迁移。删除 `review_items`、`review_pending_edits`、`review_thread_observations`，以及 `generation`、`force_triage`、`signal_retired` 列。
+  - `app/persistence/reviews.py`：
+    - 重写 `_append_version`：按 `(kind, github_id)` 查当前行；先清除旧当前行，再插入新版本；新对象使用编码 `item_id`。
+    - 删除 `_reconcile_edits`、`_competing_edit`，以及线程快照的写入。
+    - 7 处查询改为直接读 `review_versions WHERE is_current`，Flow 归属改由 attempt 判断。
+  - `app/domain/review_policy.py` 删除 `force_triage` 参数；`ReviewBatch` 删除 `generation`。
+  - 测试：按 [001] 合并、删除和改写。另外新增迁移测试、跨 Flow 遗留对象中止升级测试，以及“其他 Flow 已记录且未编辑的评论不算新反馈”测试。
+  - 文档：`components.md`、`flow-ledger.md`、`review-loop.md`、`architecture/README.md`、`CHANGELOG.md`。
+- **与计划的差异：**
+  - 当前版本标记列命名为 `is_current`，而不是 `current`。`CURRENT` 是 SQL 关键字，改名可以避免歧义。
+  - 新增部分索引 `ix_review_current_attempt (attempt_id) WHERE is_current`。按 Flow 查当前反馈时，过滤条件从 `review_items.flow_id` 改成了 attempt，需要这个索引。
+  - `tests/test_flow_state_migration.py` 不需要冻结旧评审 DDL。它的夹具只要求 `review_batches` 存在，不写入评审数据；新的 `REVIEW_SCHEMA` 在其旧库上可以直接执行。
+  - `test_reconcile_threads.py` 中还有三处读取线程快照表的断言（resolved、outdated、complete），计划里没有列出，已一并删除。行为断言保留：待处理反馈数量、扫描游标和成功时间。
+  - `test_reconcile_feedback.py` 中“approval 不唤醒讨论”原本通过 `generation` 不增长来断言，现改为断言 `due_at` 不变，保留了原意。
+- **Evidence / validation：** 本地 PostgreSQL 17，临时集群。
+  - `uv run pytest tests`：2001 passed，1 skipped。
+  - `uv run ruff check app tests`、`uv run mypy app tests` 均通过。
+  - 第一次全量运行（测试改写前）有 11 个失败，全部是计划中预期要改的测试。没有出现因同一 `github_id` 跨 Flow 共享而导致的意外失败。
+- **简化对照：**
+  - **`is_current` 与 `DISTINCT ON` 对比。** 在独立数据库中生成 500 条 Flow × 40 个对象 × 5 个版本，共 10 万行，用 `pending` 的核心条件查询一条 Flow 的当前反馈，各执行 20 次取平均：`is_current` 方案 0.11 ms，`DISTINCT ON` 方案 34.39 ms，后者需要扫描并排序全部版本。保留 `is_current`。两条查询除取当前版本的方式外，其余条件相同；对比脚本是本地临时文件，未保留。
+  - **去掉 `ux_review_object_version` 和 `ux_review_current`（后者已在 [003] 删除）。** 评审相关的 5 个测试文件（107 个测试）全部通过。这与计划“应各有一条断言失败”的预期不符：两个索引约束的是代码在 workflow 锁内已经维持的不变量，现有路径不会违反它们。决定保留：它们是计划目标中“由数据库约束保证”的落实，代价是两个索引。将来如果代码改错，比如忘记清除旧当前行，事务会直接失败，而不是让 `pending` 悄悄返回重复项。
+- **Outcome / pending：** 实现完成，尚未推送。2026-11-18 第一次运行代码审查门禁时，Codex 额度用尽（恢复时间 2026-11-19 17:40），审查未完成，门禁按规则判定为失败，因此没有推送实现。
+
+
+### [003] — 2026-11-18 — 去掉 `is_current`，当前版本取最大版本号
+
+- **Context / requirement update:** 用户提出，当前版本就是同一 `(kind, github_id)` 下版本号最大的一行，不需要另存标记列。
+- **Decision:** 删除 `is_current` 列、`ux_review_current` 和 `ix_review_current_attempt`。新增普通索引 `ix_review_versions_attempt (attempt_id)`。当前版本按 `(kind, github_id)` 取版本号最大的一行，不建视图、不存标记：
+    - 单对象查询（`_append_version`、`observe_feedback`、`observe_threads`）写 `WHERE kind=%s AND github_id=%s ORDER BY version DESC LIMIT 1`。
+    - 按 Flow 的查询（`_has_unused_signal`、`pending`、`addressed`、`complete`）拼接常量 `_CURRENT`：不存在同一 `(kind, github_id)` 下更大版本号的行。
+    - 两者都走 `ux_review_object_version (kind, github_id, version)`。曾考虑视图 `review_current`，但它会让以后删表、删列或改列类型前必须先删视图，执行计划与内联条件相同，因此不用；也曾考虑按 `item_id` 判断，但统一用对象标识 `(kind, github_id)` 更一致，`item_id` 只负责冻结摘要。
+- **Implemented changes:**
+  - `schema.py`：建表和迁移回填都不再写入 `is_current`；新增上述视图和索引。
+  - `reviews.py`：原来 7 处 `WHERE is_current` 按上述两种写法替换；`_append_version` 不再先清除旧当前行，直接插入下一版本。只更新 `observed_at` 的分支仍指向查到的最新行。
+  - 迁移测试改为按最大版本号断言当前版本；`components.md`、`CHANGELOG.md` 同步修改。
+- **Rationale:** 当前版本由数据推导，不会出现“标记和最大版本不一致”的状态；`ux_review_object_version` 仍保证同一对象的版本号唯一，所以最大版本只有一行。
+- **Evidence / validation:** 同 [002] 的 10 万行数据（500 条 Flow × 40 个对象 × 5 个版本），按一条 Flow 查当前反馈，各执行 20 次取平均：
+
+  | 取当前版本的方式 | 耗时 |
+  |---|---|
+  | `is_current` 部分索引 | 0.061 ms |
+  | `NOT EXISTS` 更大版本（本次采用） | 0.220 ms |
+  | `DISTINCT ON` | 22.9 ms |
+  | 单对象 `ORDER BY version DESC LIMIT 1` | 0.050 ms |
+
+  `NOT EXISTS` 依靠 `ux_review_object_version` 做反连接探测，比 `is_current` 慢约 0.16 ms，量级可以忽略；`DISTINCT ON` 要扫描并排序全部版本，不采用。[002] 中 `is_current` 与 `DISTINCT ON` 的结论由本条替代。
+- **Outcome / pending：** 全量回归 2001 passed、1 skipped，ruff、mypy 通过。Codex 额度未恢复，代码审查门禁无法运行；2026-11-18 用户明确授权跳过门禁，直接推送到 PR #182。待 CI。

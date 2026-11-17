@@ -494,7 +494,7 @@ def test_concurrent_agent_task_requests_enqueue_once(console_runtime, store, flo
 
 
 def test_append_agent_task_preserves_waiting_questions_and_due_feedback(console_runtime, store, flow_ready_for_agent_task):
-    # Already-relayed feedback keeps its deadline and cannot collide with the owner batch generation.
+    # Already-relayed feedback keeps its deadline; the owner batch does not consume or reschedule it.
     flow = flow_ready_for_agent_task
     store.reviews.ingest(flow.id, "feedback", "issue_comment", {}, FeedbackUpdate(
         kind=ReviewItemKind.CONVERSATION, github_id=101, author="alice", body="Which limit?",
@@ -504,8 +504,8 @@ def test_append_agent_task_preserves_waiting_questions_and_due_feedback(console_
     store.reviews.relayed(waiting)
     store.reviews.complete(waiting.id, BatchState.WAITING, [], ["Which limit?"])
     with store.connection() as connection:
-        connection.execute("UPDATE review_buffers SET due_at=now(),force_triage=TRUE WHERE flow_id=%s", (flow.id,))
-        before = connection.execute("SELECT due_at,force_triage FROM review_buffers WHERE flow_id=%s", (flow.id,)).fetchone()
+        connection.execute("UPDATE review_buffers SET due_at=now() WHERE flow_id=%s", (flow.id,))
+        before = connection.execute("SELECT due_at FROM review_buffers WHERE flow_id=%s", (flow.id,)).fetchone()
     with TestClient(create_app(console_runtime)) as client:
         response = client.post(f"/api/flows/{flow.id}/agent-tasks", headers=console_runtime.issuer.headers(),
                                json={"instruction": "Use 10", "request_id": str(uuid4())})
@@ -514,11 +514,11 @@ def test_append_agent_task_preserves_waiting_questions_and_due_feedback(console_
     assert batch.open_points == ["Which limit?"]
     assert [item.body for item in store.reviews.pending(flow.id)] == ["Which limit?"]
     with store.connection() as connection:
-        assert connection.execute("SELECT due_at,force_triage FROM review_buffers WHERE flow_id=%s", (flow.id,)).fetchone() == before
+        assert connection.execute("SELECT due_at FROM review_buffers WHERE flow_id=%s", (flow.id,)).fetchone() == before
     store.reviews.complete(batch.id, BatchState.COMPLETED, [], [])
     resumed = store.reviews.claim_due()[0]
     assert resumed.id != batch.id and resumed.open_points == ["Which limit?"]
-    assert resumed.generation > batch.generation > waiting.generation
+    assert resumed.id > batch.id > waiting.id
     assert [item.github_id for item in resumed.feedback] == [101]
 
 

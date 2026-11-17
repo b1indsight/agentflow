@@ -8,6 +8,14 @@
 
 ## Unreleased
 
+- 评审反馈表合并：`review_items` 并入 `review_versions`，GitHub 反馈对象改按全局 `(kind, github_id)`
+  识别，唯一索引保证每个对象只有一段历史，版本号最大的一行即当前版本；新对象的 `item_id` 为
+  `github_id*4+kind` 编码，升级前的对象保留原 ID，冻结批次、Judge 决策与结果 digest 不变，Worker 协议不变。
+  删除 `review_pending_edits`（无法定序的同秒编辑改为丢弃，由下一次对账收敛）、无读取方的
+  `review_thread_observations`，以及空转的 `generation`、`force_triage`、`signal_retired` 字段。
+  同一 Issue 上较早 Flow 已记录且未再编辑的评论不再进入新 Flow。启动时自动迁移；若同一对象分属多条
+  Flow 则中止升级。迁移会删除三张表，部署前需备份。未部署。
+
 - 将仅供 Worker 使用的 `VcsExecutionContext`、`VcsOutcome`、`InitialCodingOutput` 和
   `LegacyStopped` 移入各自的 VCS、执行器和 journal 模块，不保留旧路径转发；
   共享通信、模型与推理端点类型保持原归属，不改序列化、校验或运行行为。
