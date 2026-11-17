@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 
 from app.controler.workflow.service import ControlService
-from app.domain.inference_models import InferenceMessage, InferenceSummary, InferenceTask
+from app.domain.inference_models import InferenceSummary
 from app.domain.models import ArchiveReason, DeliveryState, Flow, FlowState
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
@@ -178,12 +178,11 @@ def test_delayed_inference_notice_uses_frozen_job_and_batch_identity(store, revi
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     batch, = claim(store, clock)
-    task = InferenceTask(messages=[InferenceMessage(role="user", content="Review feedback")])
-    job = store.inference.enqueue_inference(task, flow_id=flow.id, batch_id=batch.id)
+    job = store.inference.enqueue_inference("Review feedback", flow_id=flow.id, batch_id=batch.id)
     resumed = ControlService(database=store.database).resume(archive(store, flow), expected_round_no=1)
     assert resumed.current_round_no == 2
     summary = InferenceSummary(
-        logical_call_id=task.request_id, attempts=3, stop_reason="max_attempts",
+        logical_call_id=job.inference.request_id, attempts=3, stop_reason="max_attempts",
         last_failure_code="execution_timeout", finished_at=clock.now, elapsed_ms=3000,
     )
     notices = InferenceNoticeStore(store.database)

@@ -10,14 +10,13 @@ from uuid import uuid4
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
-from app.contracts.protocol import Failed, InferenceResult, TerminalPayload, terminal_digest
+from app.contracts.protocol import AgentResult, Failed, TerminalPayload, terminal_digest
 from app.contracts.receipts import ResultInbox
 from app.domain.flow_policy import FlowEvent
-from app.domain.inference_models import InferenceFailure, InferenceTask
+from app.domain.inference_models import InferenceFailure
 from app.domain.inference_policy import (
     MAX_INFERENCE_ATTEMPTS,
     choose_inference_worker,
-    plan_inference_attempt,
 )
 from app.domain.models import DeliveryState, Flow, Job, JobKind, JobState, WorkerRecord
 from app.domain.recovery_policy import (
@@ -128,15 +127,11 @@ class AssignmentStore(Repository):
             call = required(job.inference)
             if inference.inference_needs_cancel(job.id):
                 continue
-            attempt = plan_inference_attempt(call, request_id=uuid4().hex, now=self._db.now())
-            if attempt is None:
+            if call.next_attempt_at is not None and call.next_attempt_at > self._db.now():
                 continue
-            if isinstance(attempt, InferenceFailure):
-                inference.settle_inference(job, attempt)
-                continue
-            chosen = choose_inference_worker(call, attempt, available)
+            chosen = choose_inference_worker(call, available)
             if chosen is not None and chosen.worker_id == worker_id:
-                return self._claim_job(job.id, worker_id, token, connection_epoch, attempt)
+                return self._claim_job(job.id, worker_id, token, connection_epoch)
         return None
 
     def _assign_coding(self, worker_id: str, token: str, connection_epoch: str, now: datetime) -> Job | None:
@@ -191,11 +186,11 @@ class AssignmentStore(Repository):
                     ).fetchone()
                     if bound is None:
                         continue
-                return self._claim_job(row["id"], worker_id, token, connection_epoch, None, flow=flow)
+                return self._claim_job(row["id"], worker_id, token, connection_epoch, flow=flow)
             return None
 
     def _claim_job(self, job_id: int, worker_id: str, token: str, epoch: str,
-                   current_task: InferenceTask | None, *, flow: Flow | None = None) -> Job | None:
+                   *, flow: Flow | None = None) -> Job | None:
         """Commit ownership and the authorized-attempt count under the allocator's locks."""
         now = self._db.now()
         candidate = required(JobStore(self._db).get_job(job_id))
@@ -208,14 +203,14 @@ class AssignmentStore(Repository):
                 if inference.deadline_at <= now:
                     InferenceStore(self._db).settle_inference(job, InferenceFailure(code="execution_timeout"))
                     return None
-                assert current_task is not None and job.attempt < MAX_INFERENCE_ATTEMPTS
+                assert job.attempt < MAX_INFERENCE_ATTEMPTS
                 worker = connection.cursor(row_factory=class_row(WorkerRecord)).execute(
                     "SELECT * FROM workers WHERE worker_id=%s AND repository IS NULL", (worker_id,),
                 ).fetchone()
                 assert worker is not None and worker.inference is not None
                 inference = inference.model_copy(update={
-                    "current_task": current_task,
-                    "assignment_epoch": epoch, "backend": worker.inference.adapter_version,
+                    "current_request_id": uuid4().hex,
+                    "assignment_epoch": epoch, "backend": worker.inference,
                     "next_attempt_at": None,
                 })
                 workspace, generation = worker.workspace, worker.generation
@@ -434,15 +429,15 @@ class AssignmentStore(Repository):
         worker_id: str,
         token: str,
         connection_epoch: str,
-        terminal: TerminalPayload | InferenceResult,
+        terminal: TerminalPayload | AgentResult,
     ) -> str:
         """Persist a fenced business outcome before domain-side result application."""
 
         if terminal.job_id != job_id or terminal.assignment_token != token:
-            if isinstance(terminal, InferenceResult):
+            if isinstance(terminal, AgentResult):
                 return "rejected"
             raise ValueError("terminal does not match its assignment")
-        if isinstance(terminal, InferenceResult):
+        if isinstance(terminal, AgentResult):
             payload = terminal.model_dump(mode="json")
             digest = hashlib.sha256(terminal.model_dump_json().encode()).hexdigest()
         else:
@@ -461,11 +456,10 @@ class AssignmentStore(Repository):
             ).fetchone()
             if row is None:
                 return "rejected"
-            if isinstance(terminal, InferenceResult):
+            if isinstance(terminal, AgentResult):
                 if (row.state is not JobState.RUNNING or row.inference is None
                         or row.inference.assignment_epoch != connection_epoch
-                        or row.inference.current_task is None
-                        or terminal.reply_to != row.inference.current_task.request_id):
+                        or terminal.reply_to != row.inference.current_request_id):
                     return "rejected"
             elif row.kind is JobKind.INFERENCE:
                 return "rejected"

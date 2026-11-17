@@ -1,38 +1,33 @@
-"""One isolated bub completion; credentials never enter generic task or result models."""
+"""An ordinary CodingAgent backed by an isolated, tool-free Bub SDK child."""
 
 import asyncio
+import json
 import os
 import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from loguru import logger
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 
-from app.domain.inference_models import (
-    MAX_OUTPUT_BYTES,
-    InferenceError,
-    InferenceFailure,
-    InferenceOutput,
-    InferenceTask,
-)
-from app.domain.json import strict_json
-
-ADAPTER_VERSION = "bub-0.4.1/v1"
+from app.contracts.conversation import HistoryPage, HistoryQuery
+from app.domain.inference_models import InferenceFailure
+from app.domain.models import CodingExecutionContext, CodingExecutionResult, SessionUnavailable
+from app.worker.coding_agent import CodingAgent
 
 
 class OutputLimitError(Exception):
     pass
 
 
-class BubInference:
+class BubAgent(CodingAgent):
     """Explicit configuration only; SDK imports and model calls stay in a short-lived child."""
+
+    backend = "bub"
 
     def __init__(self, *, model: str = "", api_key: SecretStr | None = None,
                  api_base: str | None = None) -> None:
         self.model, self.api_key, self.api_base = model.strip(), api_key, api_base
-        self.root: Path | None = None
 
     @property
     def configured(self) -> bool:
@@ -40,8 +35,9 @@ class BubInference:
         return bool(self.model or (self.api_key and self.api_key.get_secret_value().strip())
                     or (self.api_base and self.api_base.strip()))
 
-    def configuration_failure(self) -> InferenceFailure | None:
-        parts = self.model.split(":", 1)
+    def configuration_failure(self, *, model: str | None = None) -> InferenceFailure | None:
+        """Check explicit provider configuration without importing its SDK in the worker."""
+        parts = (self.model if model is None else model).split(":", 1)
         if (len(parts) != 2 or not all(part.strip() for part in parts)
                 or not self.api_key or not self.api_key.get_secret_value().strip()):
             return InferenceFailure(code="configuration")
@@ -52,65 +48,68 @@ class BubInference:
             return InferenceFailure(code="configuration")
         return None
 
-    async def infer(self, task: InferenceTask) -> InferenceOutput:
-        try:
-            return await self._infer(task)
-        except InferenceError as error:
-            raise InferenceError(error.failure, backend=ADAPTER_VERSION) from None
-
-    async def _infer(self, task: InferenceTask) -> InferenceOutput:
-        if failure := self.configuration_failure():
-            raise InferenceError(failure)
+    async def _run(
+        self, prompt: str, cwd: Path, *, session_id: str | None = None,
+        output_schema: Path | None = None, context: CodingExecutionContext | None = None,
+        model: str | None = None, effort: str | None = None, max_output_bytes: int,
+    ) -> CodingExecutionResult:
+        """Exchange private SDK data; CodingAgent owns timeout and final-answer validation."""
+        if session_id is not None:
+            raise SessionUnavailable("Bub does not support resuming sessions")
+        selected_model = self.model if model is None else model.strip()
+        if self.configuration_failure(model=selected_model) or effort is not None:
+            return CodingExecutionResult(None, "", 1, failure_kind="configuration",
+                                         backend=self.backend, model=selected_model)
         assert self.api_key is not None
         env = {
             "PATH": os.defpath, "LANG": "C.UTF-8",
-            "FLOWTOOL_JUDGE_MODEL": self.model,
+            "FLOWTOOL_JUDGE_MODEL": selected_model,
             "FLOWTOOL_JUDGE_API_KEY": self.api_key.get_secret_value(),
         }
         if self.api_base:
             env["FLOWTOOL_JUDGE_API_BASE"] = self.api_base
-        with TemporaryDirectory(prefix="flowtool-inference-", dir=self.root) as directory:
-            env["BUB_HOME"] = directory
-            proc = None
-            try:
-                async with asyncio.timeout(task.timeout_seconds):
-                    proc = await asyncio.create_subprocess_exec(
-                        sys.executable, "-I", "-m", "app.inference.runner", env=env, cwd=directory,
-                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    out = await _exchange(proc, task.model_dump_json().encode())
-            except TimeoutError:
-                raise InferenceError(InferenceFailure(code="execution_timeout")) from None
-            except OSError:
-                raise InferenceError(InferenceFailure(code="configuration")) from None
-            except OutputLimitError:
-                raise InferenceError(InferenceFailure(code="output_limit")) from None
-            finally:
-                if proc is not None:
-                    cleanup = asyncio.create_task(_reap(proc))
-                    cancelled = False
-                    while not cleanup.done():
-                        try:
-                            await asyncio.shield(cleanup)
-                        except asyncio.CancelledError:
-                            cancelled = True
-                    cleanup.result()
-                    if cancelled:
-                        raise asyncio.CancelledError
-        if proc.returncode != 0:
-            raise InferenceError(InferenceFailure(code="backend_error"))
+        request = json.dumps({
+            "prompt": prompt,
+            "output_schema": json.loads(output_schema.read_text()) if output_schema else None,
+            "max_output_bytes": max_output_bytes,
+        }).encode()
+        proc = None
         try:
-            data = strict_json(out)
-            if isinstance(data, dict) and "code" in data:
-                raise InferenceError(InferenceFailure.model_validate(data))
-            output = InferenceOutput.model_validate(data)
-            output.validate_for(task)
-            if output.model != self.model or output.adapter_version != ADAPTER_VERSION:
-                raise ValueError("inference provenance mismatch")
-            return output
-        except (ValueError, ValidationError):
-            raise InferenceError(InferenceFailure(code="invalid_response")) from None
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", "-m", "app.inference.runner", env=env, cwd=cwd,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out = await _exchange(proc, request, max_output_bytes)
+        except OSError:
+            return CodingExecutionResult(None, "", 1, failure_kind="configuration",
+                                         backend=self.backend, model=selected_model)
+        except OutputLimitError:
+            return CodingExecutionResult(None, "", 1, failure_kind="output_limit",
+                                         backend=self.backend, model=selected_model)
+        finally:
+            if proc is not None:
+                cleanup = asyncio.create_task(_reap(proc))
+                cancelled = False
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                cleanup.result()
+                if cancelled:
+                    raise asyncio.CancelledError
+        if proc.returncode != 0:
+            return CodingExecutionResult(None, "", 1, failure_kind="backend_error",
+                                         backend=self.backend, model=selected_model)
+        try:
+            return CodingExecutionResult(**json.loads(out))
+        except (ValueError, TypeError):
+            return CodingExecutionResult(None, "", 1, failure_kind="invalid_response",
+                                         backend=self.backend, model=selected_model)
+
+    def read_history(self, query: HistoryQuery) -> HistoryPage:
+        raise NotImplementedError("Bub does not retain session history")
 
 
 async def _reap(proc: asyncio.subprocess.Process) -> None:
@@ -135,7 +134,9 @@ async def _reap(proc: asyncio.subprocess.Process) -> None:
         logger.warning("Inference cleanup exceeded its time limit after termination")
 
 
-async def _exchange(proc: asyncio.subprocess.Process, request: bytes) -> bytes:
+async def _exchange(
+    proc: asyncio.subprocess.Process, request: bytes, max_output_bytes: int,
+) -> bytes:
     """Bound concurrent pipes, allowing JSON escaping overhead on the answer envelope."""
     async def read(stream: asyncio.StreamReader, limit: int) -> bytes:
         chunks = bytearray()
@@ -157,7 +158,7 @@ async def _exchange(proc: asyncio.subprocess.Process, request: bytes) -> bytes:
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    stdout = asyncio.create_task(read(proc.stdout, MAX_OUTPUT_BYTES * 6 + 4096))
+    stdout = asyncio.create_task(read(proc.stdout, max_output_bytes * 6 + 4096))
     tasks = [stdout, asyncio.create_task(read(proc.stderr, 16_000)), asyncio.create_task(write())]
     try:
         await asyncio.gather(*tasks)

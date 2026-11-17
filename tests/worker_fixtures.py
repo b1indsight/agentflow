@@ -9,25 +9,36 @@ from app.contracts.protocol import Register, message_header
 from app.contracts.validation import parse_worker_input
 from app.controler.workers.callbacks import ServerCallbacks
 from app.controler.workers.transport import control_ack
-from app.domain.inference_models import InferenceCapability, InferenceOutput
-from app.domain.models import WorkspaceInventory
+from app.domain.models import CodingExecutionResult, WorkspaceInventory
 from app.worker.config import WorkerSettings
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.runtime import WebSocketTransport, WorkerRuntime
 from tests.test_communication_session import Socket
 
 
-class NamingInference:
-    """Runtime mixin scripting only the model answer, not dispatch or result handling."""
+async def naming_start(task, cwd, *, backend="codex", **kwargs):
+    """Script the title answer, not registration, dispatch or result handling."""
+    return CodingExecutionResult(
+        None, '{"title":"Implement task","branch_slug":"feat/implement-task"}', 0,
+        backend=backend,
+    )
 
-    def inference_capability(self):
-        return InferenceCapability(adapter_version="codex/v1")
 
-    async def infer(self, task):
-        return InferenceOutput(
-            request_id=task.request_id, request_digest=task.digest, adapter_version="codex/v1",
-            text='{"title":"Implement task","branch_slug":"feat/implement-task"}',
-        )
+def script_inference(monkeypatch, worker, start=None):
+    """Script only answer-workspace calls on the shared configured agent."""
+    agent = worker._agents[worker.settings.coding_agent]
+    coding_start = agent.start
+
+    async def shared_start(task, cwd, **kwargs):
+        if cwd == worker.workspaces.inference_path:
+            assert cwd.is_dir()
+            assert kwargs["context"] is None
+            if start is None:
+                return await naming_start(task, cwd, backend=worker.settings.coding_agent, **kwargs)
+            return await start(task, cwd, **kwargs)
+        return await coding_start(task, cwd, **kwargs)
+
+    monkeypatch.setattr(agent, "start", shared_start)
 
 
 def inventory() -> list[WorkspaceInventory]:

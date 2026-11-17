@@ -12,12 +12,7 @@ import pytest
 from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Failed
 from app.controler.workflow.service import ControlService
 from app.domain.flow_policy import FlowEvent
-from app.domain.inference_models import (
-    LOCAL_BUB_WORKER_ID,
-    InferenceCapability,
-    InferenceMessage,
-    InferenceTask,
-)
+from app.domain.inference_models import LOCAL_BUB_WORKER_ID
 from app.domain.models import (
     ArchiveReason,
     DeliveryState,
@@ -347,17 +342,17 @@ def test_inference_is_one_default_lane_with_local_preference(store: Store) -> No
     for i in range(3):
         provision(store, "a", i)
     for worker in ("a", LOCAL_BUB_WORKER_ID):
-        assert store.workers.worker_ready(worker, "epoch", InferenceCapability(adapter_version="test"))
-    first = store.inference.enqueue_inference(InferenceTask(messages=[InferenceMessage(role="user", content="one")]))
+        assert store.workers.worker_ready(worker, "epoch", "bub" if worker == LOCAL_BUB_WORKER_ID else "codex")
+    first = store.inference.enqueue_inference("one")
     assert store.assignments.assign_job("a", "remote", "epoch", slot="infer") is None
     local = store.assignments.assign_job(LOCAL_BUB_WORKER_ID, "local", "epoch", slot="infer")
     assert local is not None
     assert local.id == first.id and local.workspace == identity(LOCAL_BUB_WORKER_ID + ":default")
-    store.inference.enqueue_inference(InferenceTask(messages=[InferenceMessage(role="user", content="two")]))
+    store.inference.enqueue_inference("two")
     remote = store.assignments.assign_job("a", "remote", "epoch", slot="infer")
     assert remote is not None
     assert remote.workspace == identity("a:default")
-    store.inference.enqueue_inference(InferenceTask(messages=[InferenceMessage(role="user", content="three")]))
+    store.inference.enqueue_inference("three")
     assert store.assignments.assign_job("a", "extra", "epoch", slot="infer") is None
 
 

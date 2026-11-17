@@ -378,32 +378,20 @@ class AmpCodingAgent(CodingAgent):
                 raise asyncio.CancelledError
         return AmpProcessResult(bytes(stdout), bytes(stderr), proc.returncode or 0, timed_out, overflow)
 
-    async def start(
-        self, task: str, cwd: Path, *, output_schema: Path | None = None,
-        context: CodingExecutionContext | None = None, model: str | None = None,
-        effort: str | None = None, max_output_bytes: int | None = None,
-    ) -> CodingExecutionResult:
-        return await self._run(task, cwd, output_schema=output_schema, context=context, model=model,
-                               effort=effort, max_output_bytes=max_output_bytes)
-
-    async def resume(
-        self, session_id: str, prompt: str, *, cwd: Path, output_schema: Path | None = None,
-        context: CodingExecutionContext | None = None,
-    ) -> CodingExecutionResult:
-        # Never select a recent thread or silently migrate another backend's session.
-        try:
-            thread_id = _SESSION_ID.validate_python(session_id, strict=True)
-        except ValidationError:
-            thread_id = ""
-        if not thread_id.startswith("T-"):
-            raise ValueError("resume requires an explicit Amp thread ID")
-        return await self._run(prompt, cwd, session_id=session_id, output_schema=output_schema, context=context)
-
     async def _run(
         self, prompt: str, cwd: Path, *, session_id: str | None = None,
         output_schema: Path | None = None, context: CodingExecutionContext | None = None,
-        model: str | None = None, effort: str | None = None, max_output_bytes: int | None = None,
+        model: str | None = None, effort: str | None = None, max_output_bytes: int,
     ) -> CodingExecutionResult:
+        """Adapt a native thread while the common lifecycle owns final-answer validation."""
+        if session_id is not None:
+            # Never select a recent thread or silently migrate another backend's session.
+            try:
+                thread_id = _SESSION_ID.validate_python(session_id, strict=True)
+            except ValidationError:
+                thread_id = ""
+            if not thread_id.startswith("T-"):
+                raise ValueError("resume requires an explicit Amp thread ID")
         if not self.trusted_host:
             raise RuntimeError("Amp trusted-host execution requires FLOWTOOL_TRUSTED_HOST_EXECUTION=true")
         url = context.mcp_url if context else None
@@ -435,10 +423,6 @@ class AmpCodingAgent(CodingAgent):
             process = await AmpCodingAgent.run_process(args, cwd=cwd, env=environment, input_text=prompt,
                                                        timeout=self.timeout, timeout_kind="idle")
             result = _outcome(process, session_id, self.timeout)
-            limit = self.max_output_bytes if max_output_bytes is None else max_output_bytes
-            if len(result.last_message.encode()) > limit:
-                return CodingExecutionResult(session_id=result.session_id, last_message="", exit_code=1,
-                    failure_detail="Amp final answer exceeded byte limit", failure_kind="output_limit")
             # No SessionUnavailable fallback: the observed CLI stderr alone has not
             # proven that every missing-thread rejection precedes all execution.
             secrets = [value for key, value in environment.items()

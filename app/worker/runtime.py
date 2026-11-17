@@ -32,12 +32,10 @@ from app.contracts.protocol import (
     message_header,
 )
 from app.contracts.validation import parse_server_input
-from app.domain.inference_models import InferenceCapability, InferenceOutput, InferenceTask
 from app.inference.transport import InferenceProtocolError, WorkerInferenceCallbacks
 from app.telemetry.logging import configure_logging
 from app.worker.coding_agent import CodingAgent
 from app.worker.config import WorkerSettings
-from app.worker.execution import inference
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
 from app.worker.execution.executor import WorkerExecutor
@@ -253,23 +251,6 @@ class WorkerRuntime:
             raise ConversationFailure("query_timeout") from None
         return await link_history(page, self.register_file, backend=backend, deadline=deadline)
 
-    def inference_capability(self) -> InferenceCapability | None:
-        """Advertise inference only when the existing workspace and native CLI are usable."""
-        return inference.capability(
-            root=self.workspaces.inference_path, backend=self.settings.coding_agent,
-            enabled=self.settings.trusted_host_execution,
-        )
-
-    async def infer(self, task: InferenceTask) -> InferenceOutput:
-        """Run an independent answer session on the configured, shared coding backend."""
-        settings = self.settings
-        timeout = (settings.amp_run_timeout_seconds if settings.coding_agent == "amp"
-                   else settings.codex_run_timeout_seconds)
-        return await inference.infer(
-            self._agents[settings.coding_agent], task, root=self.workspaces.inference_path,
-            backend=settings.coding_agent, timeout=timeout, enabled=settings.trusted_host_execution,
-        )
-
     async def resolve_file(self, file_id: str) -> tuple[CodingAgent, dict[str, JsonValue]]:
         """Recover the registering backend independently of active Flows and coding settings."""
         backend, source = await asyncio.to_thread(self.files.lookup, file_id)
@@ -373,14 +354,16 @@ class WorkerRuntime:
         )
         try:
             inference_callbacks = WorkerInferenceCallbacks(
-                session=session, inference=self, ready=lambda: state_callbacks.ready,
+                session=session, start=self._agents[self.settings.coding_agent].start,
+                cwd=self.workspaces.inference_path,
+                ready=lambda: state_callbacks.ready and self.settings.trusted_host_execution,
             )
             state_callbacks = WorkerStateCallbacks(
                 worker_id=self.settings.worker_id,
                 session=session,
                 runtime=self,
                 on_ready=self._set_connected,
-                inference=await asyncio.to_thread(self.inference_capability),
+                inference=self.settings.coding_agent if self.settings.trusted_host_execution else None,
                 inference_callbacks=inference_callbacks,
             )
             business_callbacks = WorkerBusinessCallbacks(

@@ -8,6 +8,12 @@
 
 ## Unreleased
 
+- 推理直接使用 `CodingAgent.start` 和 `CodingExecutionResult`，删除 `InferenceTask`、消息/输出/能力
+  模型、独立执行模块及 Runtime 推理转发。公共 start/resume 统一总超时、最终答案字节上限、
+  schema 临时文件与严格 JSON 校验；原生后端继续负责进程、空闲超时和取消回收。
+  回调绑定共享 Agent，在既有 inference workspace 原位启动；Bub 也实现相同执行合同。
+  通信改为扁平参数的 `worker.start`，协议升级至 27；启动时事务升级既有推理 JSONB、结果摘要
+  和幂等索引，保持尝试次数、截止时间、取消与重放归属。需同步升级 controller/worker，未部署。
 - Worker 的推理、历史和文件操作复用现有编码 Agent。推理直接在已登记的 inference workspace
   启动新会话，按调用传入答案预算；仅通过 prompt 约束只返回结果，不新增工具禁用模式。
   `CodingAgent` 提供文件注册/读取协议及本地默认实现，`AmpAttachment` 归入 Amp 后端，

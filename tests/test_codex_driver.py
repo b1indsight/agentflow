@@ -56,6 +56,7 @@ async def test_adapter_returns_raw_output_without_interpreting_business_schema(m
     monkeypatch.setattr("app.worker.execution.codex.asyncio.create_subprocess_exec", spawn)
     run = await CodexAgent(trusted_host=True).start("task", tmp_path, output_schema=schema, model=model, effort=effort)
     assert (run.session_id, run.last_message, run.exit_code) == ("session-1", raw, 0)
+    assert run.backend == "codex" and run.model == model
 
 
 def test_trusted_host_start_uses_full_access_in_the_flow_repo() -> None:
@@ -141,18 +142,25 @@ async def test_resume_also_requires_explicit_trusted_host_mode() -> None:
         await agent.resume("session-1", "continue", cwd=Path("/worker/repos/flow-1"))
 
 
-async def test_resume_uses_current_directory_and_disables_saved_broker(monkeypatch, tmp_path):
+@pytest.mark.parametrize("model,effort", [(None, None), ("custom-codex-model", "high")])
+async def test_resume_uses_current_directory_and_disables_saved_broker(monkeypatch, tmp_path, model, effort):
     # A recovered session can retain another directory and an expired INITIAL broker.
     process = AsyncMock(returncode=0, pid=999999999)
     process.stdout, process.stderr = pipe(), pipe()
     spawn = AsyncMock(return_value=process)
     monkeypatch.setattr("app.worker.execution.codex.asyncio.create_subprocess_exec", spawn)
 
-    await CodexAgent(trusted_host=True).resume("session-1", "revise", cwd=tmp_path)
+    result = await CodexAgent(trusted_host=True).resume("session-1", "revise", cwd=tmp_path,
+                                                      model=model, effort=effort)
 
     args, kwargs = spawn.call_args
     assert kwargs["cwd"] == tmp_path
-    assert "--model" not in args and "-m" not in args
+    if model is None:
+        assert "--model" not in args and "-m" not in args
+    else:
+        assert args[args.index("--model") + 1] == model
+        assert f'model_reasoning_effort="{effort}"' in args
+    assert result.model == model
     assert f'cwd="{tmp_path}"' in args
     assert 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}' in args
 

@@ -601,3 +601,55 @@ Ruff、全局 Mypy、控制台格式检查及测试、控制台构建和 wheel/s
 
 没有执行真实外部模型、部署、重启或已有 Flow 重试。代码和测试的最终交付状态见本线程，
 不以先前提交的 CI 代替本轮验证。旧提案已由新版方案完整替换，不在方案正文恢复旧修订。
+
+### [008] — 2026-11-17 — 删除推理执行合同，统一普通 Agent 调用
+
+**触发与决定：** 用户指出 [007] 仍保留 `InferenceTask`、capability 和推理编排，要求按其
+原要求重做。本条取代 [007] 中保留独立 domain/wire 执行合同及 Runtime 推理端口的决定；
+文件协议、共享 Agent、原位 workspace 和已删除的 workspace manifest 兼容保持不变。
+当前完整方案仍维护在[同一方案页](https://ampcode.com/artifacts/worker-d3ac0ceb-b247-4aac-b760-f38a35f5d5f1)，
+旧方案正文已替换，不通过改名保留另一套等价执行包装。
+
+#### 实际实现与边界
+
+- 删除 `InferenceMessage`、`InferenceTask`、`InferenceOutput`、`InferenceCapability`、
+  `Inference` 端口及 `worker/execution/inference.py`。Runtime 不再有 `infer` 或能力探测转发；
+  `WorkerInferenceCallbacks` 绑定共享对象的 `start`、固定 cwd 和注册状态。
+- 既有 `CodingAgent.start/resume` 共用 `_execute`，Codex/Amp 的原生执行放入 `_run`。
+  公共入口统一调用级总时限、最终 UTF-8 答案预算、schema 文件清理及严格 JSON 解码。
+  原生管道预算、空闲计时和取消后的进程回收继续由后端负责，公共入口等清理完成才返回。
+  保留现有编码调用需要的 schema Path，也接收普通 schema 字典；仅本次创建的临时文件由
+  公共入口清理，不动调用者文件。业务 schema、Flow/VCS 和 verdict 校验仍归业务调用者。
+- 推理直接在已有 inference workspace 根目录 start 新会话，`context=None`，不建请求目录，
+  不复制 Agent、不修改共享实例预算；只返回答案、不写代码和不做其他操作依靠 prompt。
+  不再做 CLI/Git/可写性/能力探测，缺少 CLI 等运行问题通过实际执行结果返回。
+  已配置的可选 Bub 改为 `BubAgent(CodingAgent)`，也使用同一 start/result 合同和传入 cwd；
+  SDK 保持在有界、可取消的独立子进程，不在 worker 中加载。
+- 通信使用 `worker.start`，扁平传递普通 start 参数并返回既有 `CodingExecutionResult`。
+  注册只报告后端名。连接 epoch、job/token、取消、心跳与结果关联保留在传输层；持久
+  `InferenceJob` 只冻结普通参数和调度事实，保留原截止时间、三次上限、退避和未知结果排除。
+  ReviewJudge 及命名调用使用普通 prompt/schema 和 `last_message`，没有新增推理任务包装。
+- 协议升级至 27，controller/worker 需要同步升级。`Database.init_db` 在事务和启动锁内
+  将 v26 推理 JSONB、结果回执及其摘要、worker 后端记录与幂等索引一起升级；保留尝试次数、
+  截止、归属和已接收结果，不在运行期兼容旧执行模型。失败耗尽通知也改读扁平请求身份。
+  仅操作独立测试数据库；没有执行部署或生产迁移。
+
+#### 验证与复杂度检查
+
+原生后端使用受控真实子进程验证精确 cwd、既有文件保留、调用预算隔离，以及成功、失败、
+总超时和取消后的进程/schema 清理。原生持续输出不能延长总截止时间。Bub 使用真实 SDK
+子进程与受控 HTTP，核对通用结果、失败分类、取消、无工具和 SDK 导入隔离；没有付费模型调用。
+
+通过内存变体分别移除公共严格 JSON 校验和最终字节校验，使用同一现有回归输入，均出现
+预期失败，未改动源码文件。原实现通过相同用例；保留两项公共检查，避免它们随推理路径
+删除而丢失。临时脚本已删除，负对照及控制日志为 `.amp/in/artifacts/agent-redo-ablation-*.log`。
+
+独立 UTF-8 PostgreSQL 的迁移测试覆盖各持久状态、摘要与唯一索引、重复初始化不写当前记录、
+无效数据整笔回滚和并发初始化；真实 Session 集成保留重试/取消/结果重放及冻结归属检查。
+失败耗尽与延迟通知的旧 JSON 路径回归已先复现，再修复并重跑同组用例。
+全局 Ruff、Mypy、控制台格式/单元测试/构建与 wheel/sdist 检查通过，安装包不含已删除模块
+和推理执行类型；全量 pytest 与提交前独立审查的最终结果见同一方案页和本线程交付记录。
+
+完整类图按最终 AST 精确核对；删除旧推理类型和函数锚点，标明公共/原生生命周期及包外 Bub。
+桌面默认、Agent/推理回调聚焦与窄屏默认/放大均实际渲染并检查，交互和 SVG 导出一致性检查
+通过。最终日志与截图保存在 `.amp/in/artifacts/agent-redo-*`，未以此前提交 CI 代替本轮验证。

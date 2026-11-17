@@ -7,7 +7,6 @@ from typing import Literal
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
-from app.domain.inference_models import InferenceCapability
 from app.domain.models import JobState, WorkerRecord, WorkerStatus, WorkspaceInventory
 from app.persistence.inference import InferenceStore
 from app.persistence.jobs import MAY_HAVE_EXECUTED_SQL
@@ -126,13 +125,13 @@ class WorkerStore(Repository):
             return True
 
     def worker_ready(self, worker_id: str, connection_epoch: str,
-                     capability: InferenceCapability | None) -> bool:
+                     backend: str | None) -> bool:
         """Publish inference readiness for this authenticated, fully registered session only."""
         with self._db.connection() as connection:
             result = connection.execute(
                 "UPDATE workers SET inference=%s WHERE worker_id=%s AND connection_epoch=%s"
                 " AND repository IS NULL AND status IN ('online','busy')",
-                (Jsonb(capability.model_dump(mode="json")) if capability else None, worker_id, connection_epoch),
+                (Jsonb(backend) if backend else None, worker_id, connection_epoch),
             )
             return result.rowcount == 1
 

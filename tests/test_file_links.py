@@ -119,8 +119,10 @@ async def test_file_registration_and_read_while_assignment_is_running(remote_flo
     original = agent.start
 
     async def execute(*args, **kwargs):
-        started.set()
-        await release.wait()
+        # Leave the shared agent's earlier naming call free to finish.
+        if kwargs.get("context") is not None:
+            started.set()
+            await release.wait()
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(agent, "start", execute)
@@ -148,8 +150,9 @@ async def test_slow_file_io_and_late_replies_do_not_interrupt_execution(
     start = agent.start
 
     async def execute(*args, **kwargs):
-        executing.set()
-        await finish.wait()
+        if kwargs.get("context") is not None:
+            executing.set()
+            await finish.wait()
         return await start(*args, **kwargs)
 
     callbacks = WorkerStateCallbacks if operation == "register" else ServerCallbacks

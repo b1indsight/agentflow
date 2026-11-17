@@ -22,7 +22,7 @@ from pydantic import (
 )
 
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.inference_models import InferenceCapability, InferenceJob
+from app.domain.inference_models import FailureCode, InferenceJob
 
 
 def utcnow() -> datetime:
@@ -298,7 +298,7 @@ class WorkerRecord(BaseModel):
     status: WorkerStatus
     execute: bool = True
     coding_agent: Literal["codex", "amp"] | None = None
-    inference: InferenceCapability | None = None
+    inference: str | None = None
     current_inference_job_id: int | None = None
     last_inference_assigned_at: datetime | None = None
     connection_epoch: str | None = None
@@ -357,13 +357,16 @@ class VcsOutcome:
 
 @dataclass
 class CodingExecutionResult:
-    """CodingAgent 一次运行的结果（codex exec / resume）。"""
+    """One CodingAgent execution, shared by coding and answer-only callers."""
 
     session_id: str | None
     last_message: str
     exit_code: int
     failure_detail: str | None = None
-    failure_kind: Literal["timeout", "output_limit"] | None = None
+    failure_kind: Literal["timeout"] | FailureCode | None = None
+    backend: str | None = None
+    model: str | None = None
+    retry_after_seconds: float | None = None
 
 
 class SessionUnavailable(RuntimeError):

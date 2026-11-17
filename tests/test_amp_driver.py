@@ -91,10 +91,12 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
     monkeypatch.setattr("app.worker.execution.amp_agent.github_environment", github)
     monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(execute))
     agent = AmpCodingAgent(trusted_host=True)
-    result = (await agent.resume(THREAD, "task", cwd=tmp_path, output_schema=schema, context=context)
+    result = (await agent.resume(THREAD, "task", cwd=tmp_path, output_schema=schema, context=context,
+                                 model=model, effort=effort)
               if resume else await agent.start("task", tmp_path, output_schema=schema, context=context,
                                               model=model, effort=effort))
     assert result.session_id == THREAD and result.exit_code == 0
+    assert result.backend == "amp" and result.model == (None if resume else model)
     assert result.last_message == '{"caller_owned":"[REDACTED]"}'
     assert settings.read_text() == native_settings
     assert all(not directory.exists() for directory in directories)

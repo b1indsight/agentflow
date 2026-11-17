@@ -45,11 +45,15 @@ class RecordingAgent(CodingAgent):
         """The scripted coding agent has no native history records."""
         return HistoryPage(session_id=query.session_id, status="not_found")
 
-    async def start(
-        self, task: str, cwd: Path, *, output_schema=None, context=None, model=None, effort=None,
-        max_output_bytes: int | None = None,
+    async def _run(
+        self, prompt: str, cwd: Path, *, session_id: str | None = None,
+        output_schema=None, context=None, model=None, effort=None, max_output_bytes: int,
     ) -> CodingExecutionResult:
-        self.started.append((task, cwd))
+        """Script native execution while retaining the shared start/resume checks."""
+        if session_id is not None:
+            self.resumed.append((session_id, prompt))
+            return CodingExecutionResult(session_id, "revision done", 0)
+        self.started.append((prompt, cwd))
         return await self.finish(context)
 
     async def finish(self, context) -> CodingExecutionResult:
@@ -64,28 +68,22 @@ class RecordingAgent(CodingAgent):
         return CodingExecutionResult(
             session_id="session-1",
             last_message=InitialCodingOutput(
-                summary="initial done", vcs_backend_used=VcsKind.GIT,
+                summary="initial done",
+                vcs_backend_used=VcsKind.GIT,
             ).model_dump_json(),
-            exit_code=0,
-        )
-
-    async def resume(self, session_id: str, prompt: str, *, cwd: Path, output_schema=None, context=None) -> CodingExecutionResult:
-        self.resumed.append((session_id, prompt))
-        return CodingExecutionResult(
-            session_id=session_id,
-            last_message="revision done",
             exit_code=0,
         )
 
 
 class BackendlessAgent(RecordingAgent):
-    async def start(
-        self, task: str, cwd: Path, *, output_schema=None, context=None, model=None, effort=None,
-        max_output_bytes: int | None = None,
+    async def _run(
+        self, prompt: str, cwd: Path, *, session_id: str | None = None,
+        output_schema=None, context=None, model=None, effort=None, max_output_bytes: int,
     ) -> CodingExecutionResult:
+        # Valid JSON gets past the shared check but still lacks required VCS evidence.
         return CodingExecutionResult(
-            session_id="session-1",
-            last_message="claimed success",
+            session_id=session_id or "session-1",
+            last_message='{"summary":"claimed success"}',
             exit_code=0,
         )
 

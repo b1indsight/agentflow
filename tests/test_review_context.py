@@ -12,8 +12,7 @@ import pytest
 from app.controler.review.context import build_review_context
 from app.controler.review.judge import ReviewJudge
 from app.domain.context_models import MAX_CONTEXT_BYTES, ReviewContext
-from app.domain.inference_models import InferenceOutput
-from app.domain.models import Flow, FlowState, ReviewItemKind, Verdict
+from app.domain.models import CodingExecutionResult, Flow, FlowState, ReviewItemKind, Verdict
 from app.domain.review_models import BatchState, ReviewBatch, ReviewFeedback
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, ReviewThreads
 from tests.review_memory import review_context
@@ -173,18 +172,18 @@ async def test_question_without_snippet_does_not_wait_or_fetch_discussion_prefix
     assert events == (["pr", ("threads", None), "pr"] if kind is ReviewItemKind.INLINE
                       else ["pr", "pr"])
 
-    async def infer(request):
-        assert json.loads(request.messages[-1].content)["feedback"][0]["body"] == batch.feedback[0].body
-        return InferenceOutput(
-            request_id=request.request_id, request_digest=request.digest,
-            text='{"verdict":"ignore","confidence":1,"reason":"Chatter"}',
-            adapter_version="test/v1",
+    async def start(task, **kwargs):
+        evidence = json.loads(json.loads(task)[-1]["content"])
+        assert evidence["feedback"][0]["body"] == batch.feedback[0].body
+        return CodingExecutionResult(
+            None, '{"verdict":"ignore","confidence":1,"reason":"Chatter"}', 0,
+            backend="test",
         )
 
-    inference = SimpleNamespace(infer=AsyncMock(side_effect=infer))
+    inference = AsyncMock(side_effect=start)
     decision = await ReviewJudge(inference).triage(result)
     assert decision.verdict.verdict is Verdict.IGNORE
-    inference.infer.assert_awaited_once()
+    inference.assert_awaited_once()
 
 
 async def test_related_thread_pages_keep_order_authors_and_cutoff(remote):
@@ -358,10 +357,10 @@ async def test_incomplete_selected_evidence_retains_limitations(remote, reason):
         batch.threads = saved.model_copy(update={"threads": (selected,)})
     result = await build_review_context(repo, flow, batch, 17)
     assert result.limitations
-    inference = SimpleNamespace(infer=AsyncMock(side_effect=AssertionError("incomplete evidence")))
+    inference = AsyncMock(side_effect=AssertionError("incomplete evidence"))
     decision = await ReviewJudge(inference).triage(result)
     assert decision.verdict.verdict is Verdict.WAIT
-    inference.infer.assert_not_awaited()
+    inference.assert_not_awaited()
 
 
 async def test_selected_context_has_multibyte_byte_and_item_budgets(remote):

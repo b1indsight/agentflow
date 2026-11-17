@@ -1,14 +1,15 @@
-"""Bounded, business-independent text inference requests, results and safe failures."""
+"""Durable scheduling facts for answer jobs; execution uses CodingAgent's contract."""
 
-import hashlib
-import json
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Annotated, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from app.domain.json import strict_json
+if TYPE_CHECKING:
+    from app.domain.models import CodingExecutionResult
 
 MAX_INPUT_BYTES = 128_000
 MAX_OUTPUT_BYTES = 64_000
@@ -31,84 +32,6 @@ class InferenceModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class InferenceMessage(InferenceModel):
-    role: Literal["system", "user", "assistant"]
-    content: str = Field(strict=True, max_length=MAX_INPUT_BYTES)
-
-
-class InferenceTask(InferenceModel):
-    version: Literal[1] = 1
-    request_id: RequestId = Field(default_factory=lambda: uuid4().hex)
-    messages: list[InferenceMessage] = Field(min_length=1, max_length=64)
-    output_schema: dict[str, JsonValue] | None = None
-    max_output_bytes: int = Field(default=MAX_OUTPUT_BYTES, strict=True, gt=0, le=MAX_OUTPUT_BYTES)
-    timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
-
-    @model_validator(mode="after")
-    def _bounds(self) -> Self:
-        if len(self.model_dump_json().encode()) > MAX_INPUT_BYTES:
-            raise ValueError("inference input exceeds byte limit")
-        pending: list[tuple[JsonValue, int]] = [(self.output_schema, 0)]
-        while pending:
-            value, depth = pending.pop()
-            if depth > 32:
-                raise ValueError("inference schema exceeds nesting limit")
-            if isinstance(value, dict):
-                ref = value.get("$ref")
-                if isinstance(ref, str) and not ref.startswith("#"):
-                    raise ValueError("external schema references are not supported")
-                pending.extend((child, depth + 1) for child in value.values())
-            elif isinstance(value, list):
-                pending.extend((child, depth + 1) for child in value)
-        return self
-
-    @property
-    def digest(self) -> str:
-        canonical = json.dumps(self.model_dump(mode="json"), sort_keys=True,
-                               ensure_ascii=False, separators=(",", ":"))
-        return hashlib.sha256(canonical.encode()).hexdigest()
-
-
-class InferenceOutput(InferenceModel):
-    request_id: RequestId
-    request_digest: str = Field(strict=True, pattern=r"^[0-9a-f]{64}$")
-    text: str = Field(strict=True, max_length=MAX_OUTPUT_BYTES)
-    adapter_version: AdapterVersion
-    model: str | None = Field(default=None, strict=True, max_length=256)
-
-    @model_validator(mode="after")
-    def _bytes(self) -> Self:
-        if len(self.text.encode()) > MAX_OUTPUT_BYTES:
-            raise ValueError("inference output exceeds byte limit")
-        return self
-
-    def validate_for(self, task: InferenceTask) -> None:
-        """Correlate before parsing; schemas remain the caller's business contract."""
-        if self.request_id != task.request_id or self.request_digest != task.digest:
-            raise InferenceError(InferenceFailure(code="invalid_response"))
-        if len(self.text.encode()) > task.max_output_bytes:
-            raise InferenceError(InferenceFailure(code="output_limit"))
-        if not self.text.strip():
-            raise InferenceError(InferenceFailure(code="invalid_response"))
-        if task.output_schema is not None:
-            try:
-                strict_json(self.text)
-            except ValueError:
-                raise InferenceError(InferenceFailure(code="invalid_response")) from None
-
-
-class InferenceCapability(InferenceModel):
-    adapter_version: AdapterVersion
-    formats: frozenset[Literal["text", "json"]] = frozenset({"text", "json"})
-    max_input_bytes: int = Field(default=MAX_INPUT_BYTES, strict=True, gt=0, le=MAX_INPUT_BYTES)
-    max_output_bytes: int = Field(default=MAX_OUTPUT_BYTES, strict=True, gt=0, le=MAX_OUTPUT_BYTES)
-
-    def supports(self, task: InferenceTask) -> bool:
-        return (("json" if task.output_schema is not None else "text") in self.formats
-                and len(task.model_dump_json().encode()) <= self.max_input_bytes
-                and task.max_output_bytes <= self.max_output_bytes)
-
-
 class InferenceFailure(InferenceModel):
     code: FailureCode
     retry_after_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -116,6 +39,15 @@ class InferenceFailure(InferenceModel):
     @property
     def recoverable(self) -> bool:
         return self.code in _RECOVERABLE
+
+    @classmethod
+    def from_result(cls, result: CodingExecutionResult) -> Self | None:
+        """Translate an executed agent outcome into the queue's existing retry policy."""
+        if result.exit_code == 0 and result.failure_kind is None:
+            return None
+        code = result.failure_kind
+        return cls(code="execution_timeout" if code == "timeout" else code or "backend_error",
+                   retry_after_seconds=result.retry_after_seconds)
 
 
 class InferenceSummary(InferenceModel):
@@ -141,13 +73,19 @@ class InferenceSummary(InferenceModel):
 class InferenceJob(InferenceModel):
     """One durable logical call; only authorized dispatches consume its three attempts.
 
-    ``task`` never changes. ``current_task`` and its epoch identify one dispatch, even
-    across controller restarts. Excluded workers cannot be reused for unknown outcomes;
+    Start arguments never change. The current request and epoch fence one dispatch,
+    including after controller restarts. Unknown-outcome workers cannot be reused;
     other failed workers are merely deprioritized after confirmed cleanup.
     """
 
-    task: InferenceTask
-    current_task: InferenceTask | None = None
+    request_id: RequestId = Field(default_factory=lambda: uuid4().hex)
+    task: str = Field(strict=True, max_length=MAX_INPUT_BYTES)
+    output_schema: dict[str, JsonValue] | None = None
+    model: str | None = None
+    effort: str | None = None
+    max_output_bytes: int = Field(default=MAX_OUTPUT_BYTES, strict=True, gt=0, le=MAX_OUTPUT_BYTES)
+    timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    current_request_id: RequestId | None = None
     deadline_at: datetime
     validation: Literal["text", "review", "flow_naming"] = "text"
     batch_id: int | None = None

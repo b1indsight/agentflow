@@ -7,13 +7,13 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from starlette.testclient import TestClient
 
-from app.contracts.protocol import InferenceResult, result_header
+from app.contracts.protocol import AgentResult, result_header
 from app.controler.api import create_app
 from app.controler.review.judge import ReviewJudge
 from app.controler.workflow.inference import InferencePending, JobInference
 from app.controler.workflow.service import ControlService
-from app.domain.inference_models import InferenceCapability, InferenceFailure, InferenceOutput
-from app.domain.models import JobKind, JobState, TriageVerdict, Verdict
+from app.domain.inference_models import InferenceFailure
+from app.domain.models import CodingExecutionResult, JobKind, JobState, TriageVerdict, Verdict
 from app.domain.review_models import BatchState
 from app.persistence.inference_notices import InferenceNoticeStore
 from tests.github import RecordingGitHub
@@ -122,12 +122,10 @@ async def test_slow_judge_keeps_settle_available_without_a_second_execution(tria
 
 async def finish_inference(store, subject, reply: str | InferenceFailure):
     job = store.assignments.assign_job("plain", "token", "epoch", slot="infer")
-    task = job.inference.current_task
-    response = InferenceResult(
-        **result_header(task.request_id), method="worker.infer",
+    response = AgentResult(
+        **result_header(job.inference.current_request_id), method="worker.start",
         job_id=job.id, assignment_token=job.assignment_token,
-        output=InferenceOutput(request_id=task.request_id, request_digest=task.digest,
-            text=reply, adapter_version="codex/v1") if isinstance(reply, str) else None,
+        result=CodingExecutionResult(None, reply, 0, backend="codex") if isinstance(reply, str) else None,
         failure=reply if isinstance(reply, InferenceFailure) else None,
     )
     assert store.assignments.record_assignment_result(
@@ -149,9 +147,9 @@ async def test_review_recomputes_after_pr_push_without_replaying_old_answer(
     subject = runtime.coordinator
     judge = ReviewJudge(JobInference(
         runtime.database, runtime.gateway.wake_all, flow_id=flow.id, batch_id=batch.id,
-    ))
+    ).start)
     register_worker(store, "plain", epoch="epoch")
-    store.workers.worker_ready("plain", "epoch", InferenceCapability(adapter_version="codex/v1"))
+    store.workers.worker_ready("plain", "epoch", "codex")
 
     with pytest.raises(InferencePending) as first:
         await subject.triage(batch, judge)
@@ -162,6 +160,10 @@ async def test_review_recomputes_after_pr_push_without_replaying_old_answer(
     assert store.reviews.get_batch(batch.id).context is None
     assert github.comments == []
 
+    # A new frozen context is a new logical call, as on the next runtime sweep.
+    judge = ReviewJudge(JobInference(
+        runtime.database, runtime.gateway.wake_all, flow_id=flow.id, batch_id=batch.id,
+    ).start)
     with pytest.raises(InferencePending) as replacement:
         await subject.triage(store.reviews.get_batch(batch.id), judge)
     assert replacement.value.job_id != first.value.job_id
@@ -189,7 +191,7 @@ async def test_exhausted_inference_recovers_notice_without_a_fourth_attempt(
     runtime = server_runtime(settings={"judge_timeout_seconds": 5}, clock=lambda: clock.now)
     runtime.coordinator.github.threads = feedback_threads(batch.feedback)
     register_worker(store, "plain", epoch="epoch")
-    store.workers.worker_ready("plain", "epoch", InferenceCapability(adapter_version="codex/v1"))
+    store.workers.worker_ready("plain", "epoch", "codex")
     await runtime._run_triage()
     timeout = InferenceFailure(code="execution_timeout")
     for _ in range(2):

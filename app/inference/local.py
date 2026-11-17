@@ -29,10 +29,8 @@ from app.contracts.protocol import (
     result_header,
 )
 from app.contracts.validation import RejectedMessage, parse_server_input, parse_worker_input
-from app.domain.inference_models import LOCAL_BUB_WORKER_ID, InferenceCapability
-from app.domain.models import WorkspaceInventory
-from app.domain.ports import Inference
-from app.inference.bub import ADAPTER_VERSION
+from app.domain.inference_models import LOCAL_BUB_WORKER_ID
+from app.domain.models import CodingExecutionResult, WorkspaceInventory
 from app.inference.transport import InferenceProtocolError, WorkerInferenceCallbacks
 
 
@@ -56,12 +54,12 @@ class _LocalConnection:
     """Infer-only handshake and control authority, without coding recovery or Flow routes."""
 
     def __init__(self, session: Session[ServerMessageUnion, WorkerMessageUnion],
-                 inference: Inference) -> None:
+                 start: Callable[..., Awaitable[CodingExecutionResult]], workspace: Path) -> None:
         self.session = session
         self.ready = False
         self._error_logged = False
         self.inference = WorkerInferenceCallbacks(
-            session=session, inference=inference, ready=lambda: self.ready,
+            session=session, start=start, cwd=workspace, ready=lambda: self.ready,
         )
 
     def bind(self, routes: Dispatcher[ServerMessageUnion]) -> None:
@@ -80,7 +78,7 @@ class _LocalConnection:
             inventory=[WorkspaceInventory(workspace="0" * 32, repository=None,
                                           generation=1, flow_id=None)],
             recoveries=[], inventory_complete=True,
-            inference=InferenceCapability(adapter_version=ADAPTER_VERSION),
+            inference="bub",
         ))
         self.session.start()
 
@@ -121,7 +119,7 @@ class _LocalConnection:
         """Reject malformed infer arguments atomically, without accepting coding traffic."""
         if (not self.ready or message.connection_epoch != self.session.epoch
                 or message.control is not None or any(
-                    not isinstance(item, ToolCall) or item.method != "worker.infer"
+                    not isinstance(item, ToolCall) or item.method != "worker.start"
                     for item in message.payload
                 )):
             raise InferenceProtocolError("invalid payload has no local inference authority")
@@ -144,7 +142,7 @@ async def serve_local_inference(
     serve: Callable[
         [str, Register, Session[WorkerMessageUnion, ServerMessageUnion]], Awaitable[None]
     ],
-    inference: Inference,
+    start: Callable[..., Awaitable[CodingExecutionResult]],
     workspace: Path,
 ) -> None:
     """Serve a preflighted bub provider until disconnect or controller task cancellation.
@@ -163,7 +161,7 @@ async def serve_local_inference(
     worker = Session[ServerMessageUnion, WorkerMessageUnion](
         worker_transport, parse=parse_server_input, make_ack=_worker_ack,
     )
-    connection = _LocalConnection(worker, inference)
+    connection = _LocalConnection(worker, start, workspace)
 
     async def serve_host() -> None:
         try:

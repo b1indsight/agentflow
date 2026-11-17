@@ -14,7 +14,7 @@ from psycopg_pool import ConnectionPool
 
 from app.domain.models import Flow, Job, utcnow
 from app.persistence.records import Row
-from app.persistence.schema import SCHEMAS
+from app.persistence.schema import SCHEMAS, upgrade_agent_contract
 
 
 class _WorkflowOwnershipChanged(Exception):
@@ -151,8 +151,11 @@ class Database:
         ).fetchall()
 
     def init_db(self) -> None:
-        """Initialize the complete schema in its foreign-key dependency order."""
-        with self.connection() as connection:
+        """Initialize schema and durable contracts atomically, serializing concurrent starts."""
+        with self.connection() as connection, connection.transaction():
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(current_schema() || ':agentflow:schema',0))"
+            )
             workers = connection.execute("SELECT to_regclass('workers') AS name").fetchone()
             if workers is not None and workers["name"]:
                 primary = connection.execute(
@@ -188,6 +191,7 @@ class Database:
                     )
             for schema in SCHEMAS:
                 connection.execute(schema)
+            upgrade_agent_contract(connection)
 
     def now(self) -> datetime:
         return self._clock()

@@ -133,59 +133,34 @@ class CodexAgent(CodingAgent):
         """Read native rollout history independently of coding authorization."""
         return self._history.query(query)
 
-    async def start(
-        self,
-        task: str,
-        cwd: Path,
-        *,
-        output_schema: Path | None = None,
-        context: CodingExecutionContext | None = None,
-        model: str | None = None,
-        effort: str | None = None,
-        max_output_bytes: int | None = None,
+    async def _run(
+        self, prompt: str, cwd: Path, *, session_id: str | None = None,
+        output_schema: Path | None = None, context: CodingExecutionContext | None = None,
+        model: str | None = None, effort: str | None = None, max_output_bytes: int,
     ) -> CodingExecutionResult:
-        args = _start_args(task, cwd, trusted_host=self.trusted_host, context=context)
-        if model is not None:
-            args.extend(["--model", model])
-        if effort is not None:
-            args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
-        return await self._run(args, output_schema, cwd=cwd, parse_thread=True, context=context,
-                               max_output_bytes=max_output_bytes)
-
-    async def resume(
-        self, session_id: str, prompt: str, *, cwd: Path, output_schema: Path | None = None,
-        context: CodingExecutionContext | None = None,
-    ) -> CodingExecutionResult:
+        """Supervise Codex's native stream and bounded final-message file."""
         if not self.trusted_host:
             raise RuntimeError(
                 "Codex trusted-host full-access execution requires "
                 "FLOWTOOL_TRUSTED_HOST_EXECUTION=true"
             )
-        # CLI 0.153.4 accepts config overrides on resume, but not start's -C/-s flags.
-        # Override the saved broker/environment for every process, including recovered sessions.
-        args = [
-            CODEX_BIN, "exec", "resume", session_id, prompt,
-            "--json", "--skip-git-repo-check",
-            "-c", f"cwd={json.dumps(str(cwd))}",
-            "-c", 'sandbox_mode="danger-full-access"',
-            *_mcp_args(context),
-            "-c", 'shell_environment_policy.inherit="all"',
-        ]
-        return await self._run(args, output_schema, cwd=cwd, parse_thread=False,
-                               session_id=session_id, context=context)
-
-    async def _run(
-        self,
-        args: list[str],
-        output_schema: Path | None,
-        *,
-        cwd: Path,
-        parse_thread: bool,
-        session_id: str | None = None,
-        context: CodingExecutionContext | None = None,
-        max_output_bytes: int | None = None,
-    ) -> CodingExecutionResult:
-        answer_limit = self.max_output_bytes if max_output_bytes is None else max_output_bytes
+        if session_id is None:
+            args = _start_args(prompt, cwd, trusted_host=self.trusted_host, context=context)
+        else:
+            # CLI 0.153.4 accepts config overrides on resume, but not start's -C/-s flags.
+            # Replace saved capabilities for every process, including recovered sessions.
+            args = [
+                CODEX_BIN, "exec", "resume", session_id, prompt,
+                "--json", "--skip-git-repo-check",
+                "-c", f"cwd={json.dumps(str(cwd))}",
+                "-c", 'sandbox_mode="danger-full-access"',
+                *_mcp_args(context),
+                "-c", 'shell_environment_policy.inherit="all"',
+            ]
+        if model is not None:
+            args.extend(["--model", model])
+        if effort is not None:
+            args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
         with tempfile.TemporaryDirectory(prefix="flowtool-coding-") as directory:
             run_directory = Path(directory)
             environment = _codex_environment(context=context)
@@ -196,7 +171,7 @@ class CodexAgent(CodingAgent):
             if output_schema is not None:
                 args += ["--output-schema", str(output_schema)]
 
-            logger.info("codex run started: resume={} output_schema={}", not parse_thread, output_schema is not None)
+            logger.info("codex run started: resume={} output_schema={}", session_id is not None, output_schema is not None)
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -276,12 +251,13 @@ class CodexAgent(CodingAgent):
                     raise asyncio.CancelledError
 
             jsonl = stdout.decode(errors="replace")
-            sid = _parse_thread_id(jsonl)
+            sid = _parse_thread_id(jsonl) or session_id
             raw = b""
             if last_file.exists():
                 with last_file.open("rb") as stream:
-                    raw = stream.read(answer_limit + 1)
-            if len(raw) > answer_limit:
+                    # The common final check cannot bound disk reads after native execution.
+                    raw = stream.read(max_output_bytes + 1)
+            if len(raw) > max_output_bytes:
                 return CodingExecutionResult(session_id=sid, last_message="", exit_code=1,
                     failure_detail="Codex final answer exceeded byte limit", failure_kind="output_limit")
             last_message = raw.decode()
@@ -304,7 +280,7 @@ class CodexAgent(CodingAgent):
                     raise SessionUnavailable("Codex rejected the saved session before execution")
             return CodingExecutionResult(
                 session_id=sid, last_message=last_message, exit_code=proc.returncode or 0,
-                failure_detail=detail[-4000:] if detail else None,
+                failure_detail=detail[-4000:] if detail else None, model=model,
             )
 
 

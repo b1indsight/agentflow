@@ -9,11 +9,11 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from app.contracts.protocol import (
+    AgentResult,
+    AgentStart,
     Assignment,
     ExecutionIdentity,
     Heartbeat,
-    InferenceRequest,
-    InferenceResult,
     PayloadValidationError,
     ProtocolError,
     Register,
@@ -30,13 +30,9 @@ from app.controler.workers.transport import serve_worker
 from app.controler.workflow.inference import InferencePending, JobInference
 from app.domain.inference_models import (
     LOCAL_BUB_WORKER_ID,
-    InferenceCapability,
-    InferenceMessage,
-    InferenceOutput,
-    InferenceTask,
+    InferenceFailure,
 )
-from app.domain.models import JobKind, JobState, utcnow
-from app.inference.bub import ADAPTER_VERSION
+from app.domain.models import CodingExecutionResult, JobKind, JobState, utcnow
 from app.inference.local import serve_local_inference
 from app.persistence.records import required
 from app.worker.config import WorkerSettings
@@ -44,14 +40,79 @@ from app.worker.runtime import WorkerRuntime
 from tests.flow_fixtures import enqueue_job
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_remote_e2e import remote_flow as remote_flow  # noqa: PLC0414
-from tests.worker_fixtures import NamingInference, inventory, run_worker
+from tests.worker_fixtures import inventory, naming_start, run_worker, script_inference
+from tests.workspace_fixtures import register_worker
 
 pytestmark = pytest.mark.usefixtures("recording_resources")
 
 
 def request():
-    return InferenceTask(messages=[InferenceMessage(role="user", content="Summarize supplied facts")],
-                         timeout_seconds=10)
+    return "Summarize supplied facts"
+
+
+@pytest.mark.parametrize("changes", [
+    {"task": "Different evidence"}, {"output_schema": {"type": "object"}},
+    {"model": "other-model"}, {"effort": "low"}, {"max_output_bytes": 256},
+    {"timeout_seconds": 30}, {"validation": "flow_naming"},
+])
+def test_explicit_request_identity_cannot_change_frozen_arguments(store, changes):
+    arguments = {"task": "Answer", "request_id": "a" * 32,
+                 "output_schema": {"type": "string"}, "model": "selected", "effort": "high",
+                 "max_output_bytes": 128, "timeout_seconds": 60}
+    job = store.inference.enqueue_inference(**arguments)
+    with pytest.raises(ValueError, match="frozen call"):
+        store.inference.enqueue_inference(**(arguments | changes))
+    assert store.jobs.get_job(job.id) == job
+
+
+def test_explicit_request_identity_cannot_be_reused_by_another_flow(store):
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    job = store.inference.enqueue_inference("Answer", request_id="a" * 32)
+    with pytest.raises(ValueError, match="another caller"):
+        store.inference.enqueue_inference("Answer", request_id="a" * 32, flow_id=flow.id)
+    assert store.jobs.get_job(job.id) == job
+
+
+def test_retry_keeps_original_deadline_and_fences_each_assignment(store, monkeypatch):
+    # Provider backoff must not reset a logical call or let a late prior answer win.
+    clock = utcnow()
+    monkeypatch.setattr(store.database, "_clock", lambda: clock)
+    register_worker(store, "worker", epoch="epoch")
+    store.workers.worker_ready("worker", "epoch", "codex")
+    arguments = {"request_id": "a" * 32, "output_schema": {"type": "string"},
+                     "model": "selected", "effort": "high", "max_output_bytes": 128, "timeout_seconds": 60}
+    queued = store.inference.enqueue_inference("Answer", **arguments)
+    first = store.assignments.assign_job("worker", "first", "epoch", slot="infer")
+    failure = AgentResult(**result_header(first.inference.current_request_id), method="worker.start",
+        job_id=first.id, assignment_token="first",
+        failure=InferenceFailure(code="rate_limited", retry_after_seconds=1))
+    assert store.assignments.record_assignment_result(first.id, "worker", "first", "epoch", failure) == "pending"
+    assert store.inference.complete_inference_result(first.id)
+    assert store.inference.enqueue_inference("Answer", **arguments).id == first.id
+    clock += timedelta(seconds=.5)
+    assert store.assignments.assign_job("worker", "early", "epoch", slot="infer") is None
+    assert store.jobs.get_job(first.id).attempt == 1
+    clock += timedelta(seconds=.5)
+    second = store.assignments.assign_job("worker", "second", "epoch", slot="infer")
+    assert second is not None and second.id == queued.id and second.attempt == 2
+    assert second.inference.request_id == queued.inference.request_id
+    assert second.inference.deadline_at == queued.inference.deadline_at
+    assert (second.inference.deadline_at - clock).total_seconds() == 59
+    assert second.inference.current_request_id != first.inference.current_request_id
+    assert second.inference.task == "Answer" and second.inference.output_schema == {"type": "string"}
+    assert (second.inference.model, second.inference.effort, second.inference.max_output_bytes) == (
+        "selected", "high", 128)
+    answer = AgentResult(**result_header(second.inference.current_request_id), method="worker.start",
+        job_id=second.id, assignment_token="second",
+        result=CodingExecutionResult(None, '"Answer"', 0, backend="codex", model="selected"))
+    stale_reply = answer.model_copy(update={"reply_to": first.inference.current_request_id})
+    for token, epoch, result in (("first", "epoch", answer), ("second", "stale-epoch", answer),
+                                  ("second", "epoch", stale_reply)):
+        assert store.assignments.record_assignment_result(second.id, "worker", token, epoch, result) == "rejected"
+    assert store.jobs.get_job(second.id).result_received_at is None
+    assert store.assignments.record_assignment_result(second.id, "worker", "second", "epoch", answer) == "pending"
+    assert store.inference.complete_inference_result(second.id)
+    assert store.jobs.get_job(second.id).state is JobState.DONE
 
 
 async def settled(store, job, state):
@@ -84,37 +145,32 @@ async def test_inference_cleanup_keeps_its_slot_without_blocking_coding(store, r
     coding, = store.jobs.list_jobs(flow.id)
     start = agent.start
 
-    async def delayed_coding(*args, **kwargs):
+    async def delayed_coding(task, cwd, **kwargs):
+        if cwd == worker.workspaces.inference_path:
+            return await start(task, cwd, **kwargs)
         coding_entered.set()
         await coding_release.wait()
-        return await start(*args, **kwargs)
+        return await start(task, cwd, **kwargs)
 
     monkeypatch.setattr(agent, "start", delayed_coding)
 
-    class Inference:
-        def inference_capability(self):
-            return InferenceCapability(adapter_version="codex/v1")
+    async def infer(task, cwd, **kwargs):
+        if kwargs["output_schema"] is not None:
+            return await naming_start(task, cwd, **kwargs)
+        infer_entered.set()
+        try:
+            await infer_release.wait()
+            return CodingExecutionResult(None, "Summary", 0, backend="codex")
+        finally:
+            infer_cleaning.set()
+            await cleanup_release.wait()
+            infer_closed.set()
 
-        async def infer(self, task):
-            if task.output_schema is not None:
-                return await NamingInference().infer(task)
-            infer_entered.set()
-            try:
-                await infer_release.wait()
-                return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
-                                       text="Summary", adapter_version="codex/v1")
-            finally:
-                infer_cleaning.set()
-                await cleanup_release.wait()
-                infer_closed.set()
-
-    inference = Inference()
-    monkeypatch.setattr(worker, "infer", inference.infer)
-    monkeypatch.setattr(worker, "inference_capability", inference.inference_capability)
+    script_inference(monkeypatch, worker, infer)
     async with connected(server, worker) as (working, serving):
         try:
             await asyncio.wait_for(coding_entered.wait(), 3)
-            inference = store.inference.enqueue_inference(request())
+            inference = store.inference.enqueue_inference(request(), timeout_seconds=10)
             server.gateway.wake_all()
             await asyncio.wait_for(infer_entered.wait(), 3)
             clock = utcnow() + timedelta(seconds=20)
@@ -144,53 +200,51 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
 ):
     entered, release = asyncio.Event(), asyncio.Event()
 
-    class Local:
-        async def infer(self, task):
-            entered.set()
-            await release.wait()
-            return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
-                                   text="Local answer", adapter_version=ADAPTER_VERSION)
+    async def local_start(task, cwd, **kwargs):
+        assert cwd == workspace
+        entered.set()
+        await release.wait()
+        return CodingExecutionResult(None, "Local answer", 0, backend="bub", model="local-model")
 
-    class Remote:
-        def inference_capability(self):
-            return InferenceCapability(adapter_version="codex/v1")
-
-        async def infer(self, task):
-            return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
-                                   text="Remote answer", adapter_version="codex/v1")
+    async def remote_start(task, cwd, **kwargs):
+        return CodingExecutionResult(None, "Remote answer", 0, backend="codex", model="remote-model")
 
     server = server_runtime()
     worker = WorkerRuntime(WorkerSettings(
         worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
-        worker_root=tmp_path / "worker",
+        worker_root=tmp_path / "worker", trusted_host_execution=True,
+        execution_isolation="container",
     ))
-    inference = Remote()
-    monkeypatch.setattr(worker, "infer", inference.infer)
-    monkeypatch.setattr(worker, "inference_capability", inference.inference_capability)
+    script_inference(monkeypatch, worker, remote_start)
     workspace = tmp_path / "local-default"
     workspace.mkdir()
-    mini = asyncio.create_task(serve_local_inference(server.serve_worker_session, Local(), workspace))
+    mini = asyncio.create_task(serve_local_inference(server.serve_worker_session, local_start, workspace))
     flow = store.flows.create_flow("owner/repo", 7, 42) if flow_bound else None
     flow_id = flow.id if flow is not None else None
-    caller = JobInference(store.database, server.gateway.wake_all, flow_id=flow_id)
-    local_task, remote_task = request(), request()
+    local_caller = JobInference(store.database, server.gateway.wake_all, flow_id=flow_id)
+    remote_caller = JobInference(store.database, server.gateway.wake_all, flow_id=flow_id)
     try:
         async with connected(server, worker):
             async with asyncio.timeout(3):
                 while len([w for w in store.workers.list_workers() if w.inference is not None]) != 2:
                     await asyncio.sleep(.01)
             with pytest.raises(InferencePending) as pending:
-                await caller.infer(local_task)
+                await local_caller.start(request())
             local = store.jobs.get_job(pending.value.job_id)
             await asyncio.wait_for(entered.wait(), 3)
             assert store.jobs.get_job(local.id).assigned_worker_id == LOCAL_BUB_WORKER_ID
+            with pytest.raises(InferencePending) as replay:
+                await local_caller.start(request())
+            assert replay.value.job_id == local.id
+            assert store.jobs.get_job(local.id).attempt == 1
             if flow is not None:
                 # A text call referenced as the title job must still have no naming side effect.
                 with store.connection() as connection:
                     connection.execute("UPDATE flows SET title_job_id=%s WHERE id=%s", (local.id, flow.id))
             with pytest.raises(InferencePending) as pending:
-                await caller.infer(remote_task)
+                await remote_caller.start(request())
             remote = store.jobs.get_job(pending.value.job_id)
+            assert remote.id != local.id
             await settled(store, remote, JobState.DONE)
             assert store.jobs.get_job(remote.id).assigned_worker_id == "worker-1"
             release.set()
@@ -203,9 +257,16 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
         mini.cancel()
         await asyncio.gather(mini, return_exceptions=True)
     # A recreated caller reads saved answers with both workers gone, without a new attempt.
-    recovered = JobInference(store.database, server.gateway.wake_all, flow_id=flow_id)
-    assert (await recovered.infer(local_task)).text == "Local answer"
-    assert (await recovered.infer(remote_task)).text == "Remote answer"
+    recovered_local = JobInference(store.database, server.gateway.wake_all, flow_id=flow_id,
+                                   request_id=local.inference.request_id)
+    recovered_remote = JobInference(store.database, server.gateway.wake_all, flow_id=flow_id,
+                                    request_id=remote.inference.request_id)
+    for recovered, text, backend, model in (
+        (recovered_local, "Local answer", "bub", "local-model"),
+        (recovered_remote, "Remote answer", "codex", "remote-model"),
+    ):
+        result = await recovered.start(request())
+        assert (result.last_message, result.backend, result.model) == (text, backend, model)
     assert store.jobs.get_job(local.id).attempt == store.jobs.get_job(remote.id).attempt == 1
     if flow is not None:
         assert store.flows.get_flow(flow.id).title is None
@@ -248,18 +309,16 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
                         return item
 
     def answer(call):
-        return InferenceResult(**result_header(call.message_id), method="worker.infer",
+        return AgentResult(**result_header(call.message_id), method="worker.start",
             job_id=call.job_id, assignment_token=call.assignment_token,
-            output=InferenceOutput(request_id=call.arguments.request_id,
-                request_digest=call.arguments.digest,
-                text='{"title":"Implement task","branch_slug":"feat/implement-task"}'
-                    if call.arguments.output_schema is not None else "Answer",
-                adapter_version="codex/v1"))
+            result=CodingExecutionResult(None,
+                '{"title":"Implement task","branch_slug":"feat/implement-task"}'
+                    if call.output_schema is not None else "Answer", 0, backend="codex"))
 
     await outgoing.put(Register(**message_header(None), control="register", payload=[],
         worker_id="worker-1", coding_agent="codex", recoveries=[], workspace="b" * 32, repo_workspace_limit=2,
         inventory=inventory(), inventory_complete=True,
-        inference=InferenceCapability(adapter_version="codex/v1")).model_dump_json())
+        inference="codex").model_dump_json())
     try:
         async with asyncio.timeout(3):
             while not isinstance(registered := parse_server_message(await incoming.get()), Registered):
@@ -267,14 +326,14 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
         epoch = registered.connection_epoch
         first = store.inference.enqueue_inference(request())
         server.gateway.wake_all()
-        first_call = await next_call(InferenceRequest)
+        first_call = await next_call(AgentStart)
         await outgoing.put(WorkerMessage(**message_header(epoch), control=None,
                                          payload=[answer(first_call)]).model_dump_json())
         await settled(store, first, JobState.DONE)
 
         coding = enqueue_job(store, flow.id, JobKind.INITIAL)
         server.gateway.wake_all()
-        title_call = await next_call(InferenceRequest)
+        title_call = await next_call(AgentStart)
         assert title_call.job_id == store.flows.get_flow(flow.id).title_job_id
         await outgoing.put(WorkerMessage(**message_header(epoch), control=None,
                                          payload=[answer(title_call)]).model_dump_json())
@@ -291,7 +350,7 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
 
         second = store.inference.enqueue_inference(request())
         server.gateway.wake_all()
-        second_call = await next_call(InferenceRequest)
+        second_call = await next_call(AgentStart)
         saved_first = store.jobs.get_job(first.id)
         saved_coding = store.jobs.get_job(coding.id)
         heartbeat = Heartbeat(**message_header(epoch),
@@ -317,7 +376,7 @@ async def test_completed_inference_heartbeat_skips_renewal_but_dispatches_payloa
 async def test_invalid_inference_exchange_fails_its_slot_and_keeps_the_connection(
     store, defect, server_runtime,
 ):
-    # The InferenceRequest's own reply receiver records the failure; without it a malformed
+    # The AgentStart's own reply receiver records the failure; without it a malformed
     # answer or a worker rejection would wait for the provider deadline instead.
     outgoing, incoming = asyncio.Queue(), asyncio.Queue()
     server = server_runtime()
@@ -326,7 +385,7 @@ async def test_invalid_inference_exchange_fails_its_slot_and_keeps_the_connectio
     await outgoing.put(Register(**message_header(None), control="register", payload=[],
         worker_id="worker-1", coding_agent="codex", recoveries=[], workspace="b" * 32, repo_workspace_limit=2,
         inventory=inventory(), inventory_complete=True,
-        inference=InferenceCapability(adapter_version="codex/v1")).model_dump_json())
+        inference="codex").model_dump_json())
     try:
         async with asyncio.timeout(3):
             while not isinstance(registered := parse_server_message(await incoming.get()), Registered):
@@ -335,16 +394,15 @@ async def test_invalid_inference_exchange_fails_its_slot_and_keeps_the_connectio
             server.gateway.wake_all()
             while not isinstance(
                 call := next(iter(parse_server_message(await incoming.get()).payload), None),
-                InferenceRequest,
+                AgentStart,
             ):
                 pass
-        item = InferenceResult(**result_header(call.message_id), method="worker.infer",
+        item = AgentResult(**result_header(call.message_id), method="worker.start",
             job_id=call.job_id, assignment_token=call.assignment_token,
-            output=InferenceOutput(request_id=call.arguments.request_id,
-                request_digest=call.arguments.digest, text="Answer", adapter_version="codex/v1"),
+            result=CodingExecutionResult(None, "Answer", 0, backend="codex"),
         ).model_dump(mode="json")
         if defect == "malformed_reply":
-            item["output"] = {"text": "missing identity"}
+            item["result"] = {"last_message": "missing exit status"}
         else:
             item = ValidationErrorResult(**result_header(call.message_id), method=call.method,
                 error=PayloadValidationError(code="validation_error",
@@ -380,21 +438,14 @@ async def test_slow_coding_preparation_keeps_inference_live(store, remote_flow, 
     prepare_call = AsyncMock(side_effect=delayed_prepare)
     monkeypatch.setattr(server.coordinator, "prepare_for_assignment", prepare_call)
 
-    class Inference:
-        def inference_capability(self):
-            return InferenceCapability(adapter_version="codex/v1")
+    async def infer(task, cwd, **kwargs):
+        if kwargs["output_schema"] is not None:
+            return await naming_start(task, cwd, **kwargs)
+        inferring.set()
+        await infer_release.wait()
+        return CodingExecutionResult(None, "Answer during preparation", 0, backend="codex")
 
-        async def infer(self, task):
-            if task.output_schema is not None:
-                return await NamingInference().infer(task)
-            inferring.set()
-            await infer_release.wait()
-            return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
-                                   text="Answer during preparation", adapter_version="codex/v1")
-
-    inference = Inference()
-    monkeypatch.setattr(worker, "infer", inference.infer)
-    monkeypatch.setattr(worker, "inference_capability", inference.inference_capability)
+    script_inference(monkeypatch, worker, infer)
     async with connected(server, worker) as (working, serving):
         await asyncio.wait_for(preparing.wait(), 3)
         first_coding_heartbeat = store.jobs.get_job(coding.id).heartbeat_at
