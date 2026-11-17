@@ -68,9 +68,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_console_flow_evidence ON console_activity(f
 CREATE UNIQUE INDEX IF NOT EXISTS ux_console_archived_pr ON console_activity
  (lower(metadata->>'repo'),((metadata->>'pr_number')::integer))
  WHERE source='flow' AND kind='archive' AND metadata->>'pr_number' IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_console_flow_origin ON console_activity(flow_id)
+ WHERE source='flow' AND kind IN ('created','snapshot');
+CREATE UNIQUE INDEX IF NOT EXISTS ux_console_flow_round_start ON console_activity(flow_id,round_no)
+ WHERE source='flow' AND kind='round_resumed';
 CREATE OR REPLACE FUNCTION console_preserve_evidence() RETURNS TRIGGER AS $$
 BEGIN
- IF OLD.source='flow' AND OLD.kind IN ('archive','merge','archive_correction') THEN
+ -- Every Flow row except display snapshots and notices is ledger evidence (activity.py).
+ IF OLD.source='flow' AND OLD.kind NOT IN ('state','baseline','inference_exhausted') THEN
    RAISE EXCEPTION 'Flow activity evidence is immutable' USING ERRCODE='23514';
  END IF;
  IF TG_OP='UPDATE' THEN RETURN NEW; END IF;
@@ -178,4 +183,29 @@ SELECT console_refresh(c.flow_id) FROM console_flows c
  JOIN console_facts f ON f.id=c.flow_id
  WHERE c.facts-'updated_at' IS DISTINCT FROM to_jsonb(f)-'updated_at'
  ORDER BY c.flow_id;
+"""
+
+# Runs after every other schema, including a legacy migration's own evidence writes,
+# so a backfilled snapshot always follows the facts that already describe its row.
+FLOW_LEDGER_BACKFILL = """
+-- Flows older than the ledger replay from one snapshot of their ledger-owned columns.
+WITH missing AS (
+ SELECT f.* FROM flows f WHERE NOT EXISTS (SELECT 1 FROM console_activity a
+  WHERE a.flow_id=f.id AND a.source='flow' AND a.kind IN ('created','snapshot'))),
+reserved AS (
+ UPDATE console_flows c SET activity_version=c.activity_version+1 FROM missing m
+ WHERE c.flow_id=m.id RETURNING c.flow_id,c.activity_version),
+facts AS (
+ SELECT m.id,m.current_round_no,r.activity_version,jsonb_build_object(
+  'repo',m.repo,'issue_number',m.issue_number,'installation_id',m.installation_id,
+  'task_digest',encode(sha256(convert_to(m.task_content,'UTF8')),'hex'),
+  'title',m.title,'state',m.state,'current_round_no',m.current_round_no,
+  'archive_reason',m.archive_reason,'archive_summary',m.archive_summary,
+  'archived_at',m.archived_at,'created_at',m.created_at,'updated_at',m.updated_at) AS metadata
+ FROM missing m JOIN reserved r ON r.flow_id=m.id)
+INSERT INTO console_activity(flow_id,version,round_no,key,source,kind,occurred_at,updated_at,
+ author,title,body,metadata,digest)
+SELECT id,activity_version,current_round_no,'flow:'||id||':snapshot','flow','snapshot',
+ clock_timestamp(),clock_timestamp(),'FlowTool','账本起点快照','',
+ metadata,encode(sha256(convert_to(metadata::text,'UTF8')),'hex') FROM facts;
 """

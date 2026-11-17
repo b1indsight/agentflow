@@ -83,7 +83,7 @@ class InitialPreparation:
             if attempt is None:
                 attempt = flows_tx.create_attempt(fresh.id)
                 fresh.current_attempt_id = attempt.id
-                flows_tx.update_flow_metadata(fresh)
+                flows_tx.set_current_attempt(fresh)
             delivery = deliveries_tx.get_delivery(fresh.id)
             flow = fresh
         try:
@@ -143,7 +143,7 @@ class InitialPreparation:
 
     def _ensure_naming(self, flow: Flow, job: Job, task_content: str) -> int:
         """Extend the existing title call to name its branch in the same inference."""
-        with self._flows.locked(flow.id) as locked, locked.database.connection() as connection:
+        with self._flows.locked(flow.id) as locked:
             tx, fresh = locked.database, locked.flow
             if (fresh is None or preparation_retired(fresh, job, deliveries=self._deliveries.using(tx))
                     or fresh.current_attempt_id != flow.current_attempt_id):
@@ -191,7 +191,7 @@ class InitialPreparation:
                 },
                 max_output_bytes=4096, timeout_seconds=30,
             ), flow_id=flow.id, validation="flow_naming")
-            connection.execute("UPDATE flows SET title_job_id=%s WHERE id=%s", (naming.id, flow.id))
+            self._flows.using(tx).set_title_job(flow.id, naming.id)
             return naming.id
 
     async def _await_naming(self, job: Job, flow: Flow, naming_job_id: int) -> str | JobState:

@@ -109,7 +109,7 @@ async def test_direct_feedback_skips_issue_seed_and_stale_issue_check_but_keeps_
     flow = store.flows.create_flow("owner/repo", None, 42, task_content="Direct")
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow_metadata(flow)
+    store.flows.set_current_attempt(flow)
     flow = apply_flow_event(store, flow, FlowEvent.DELIVERY_APPLIED)
     delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
@@ -453,7 +453,7 @@ async def test_resumed_round_rejects_old_issue_comments_even_if_first_seen_or_ed
     clock.now += timedelta(seconds=10)
     store.assignments.retire_queued_work(flow.id)
     resumed.current_attempt_id = store.flows.create_attempt(flow.id).id
-    store.flows.update_flow_metadata(resumed)
+    store.flows.set_current_attempt(resumed)
     resumed = apply_flow_event(store, resumed, FlowEvent.DELIVERY_APPLIED)
     delivery = store.deliveries.get_delivery(flow.id)
     if delivery is None:

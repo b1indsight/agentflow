@@ -59,8 +59,35 @@ def recording_resources(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ReviewThread, "resolve", RecordingReviewThread.resolve)
 
 
+def _assert_flow_ledgers(url: str) -> None:
+    """Fail a test whose Flows no longer replay from their ledger."""
+    from app.persistence.database import Database
+    from app.persistence.flows import FlowStore
+
+    database = Database(url)
+    try:
+        with database.connection() as connection:
+            row = connection.execute("SELECT to_regclass('console_activity') AS name").fetchone()
+            ids = [] if row is None or row["name"] is None else [
+                item["id"] for item in connection.execute("SELECT id FROM flows ORDER BY id")
+            ]
+        flows = FlowStore(database)
+        mismatches: dict[int, object] = {}
+        for flow_id in ids:
+            try:
+                differences = flows.verify(flow_id)
+            except ValueError as error:
+                mismatches[flow_id] = str(error)
+                continue
+            if differences:
+                mismatches[flow_id] = differences
+        assert not mismatches, f"Flow rows diverge from their ledger: {mismatches}"
+    finally:
+        database.close()
+
+
 @pytest.fixture
-def postgresql_url() -> Iterator[str]:
+def postgresql_url(request: pytest.FixtureRequest) -> Iterator[str]:
     base_url = os.getenv("FLOWTOOL_TEST_DATABASE_URL")
     if not base_url:
         pytest.skip("FLOWTOOL_TEST_DATABASE_URL is required for PostgreSQL integration tests")
@@ -72,6 +99,9 @@ def postgresql_url() -> Iterator[str]:
     schema_url = make_conninfo(base_url, options=f"-c search_path={schema}")
     try:
         yield schema_url
+        # Tests marked ledger_unverified deliberately write rows the ledger cannot explain.
+        if request.node.get_closest_marker("ledger_unverified") is None:
+            _assert_flow_ledgers(schema_url)
     finally:
         with psycopg.connect(base_url, autocommit=True) as connection:
             connection.execute(

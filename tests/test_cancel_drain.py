@@ -22,7 +22,7 @@ def running(store):
     flow = store.flows.create_flow("owner/repo", 1, 1)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow_metadata(flow)
+    store.flows.set_current_attempt(flow)
     register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.assignments.assign_job("w", "token", "epoch")

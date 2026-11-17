@@ -56,6 +56,9 @@ line-length = 100
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "ledger_unverified: the test deliberately writes Flow rows its ledger cannot replay",
+]
 
 [tool.mypy]
 python_version = "3.12"

@@ -130,17 +130,15 @@ def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[st
     assert not contains_forbidden(modules, forbidden)
 
 
-def test_flow_state_sql_has_one_runtime_owner():
-    # A future direct job/worker projection must not bypass the domain transition policy.
+def test_flow_sql_writes_have_one_runtime_owner():
+    # Any other writer would bypass the transition policy and the Flow ledger.
     writers = set()
     for path in Path("app").rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
-            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
-                continue
-            for update in re.finditer(r"\bUPDATE\s+flows\s+SET\s+(.*?)(?:\bWHERE\b|$)",
-                                      node.value, re.IGNORECASE | re.DOTALL):
-                if re.search(r"(?:^|,)\s*state\s*=", update[1], re.IGNORECASE):
-                    writers.add(path.as_posix())
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and re.search(r"\b(?:UPDATE|INSERT\s+INTO)\s+flows\b", node.value,
+                                  re.IGNORECASE)):
+                writers.add(path.as_posix())
     assert writers == {"app/persistence/flows.py"}
 
 

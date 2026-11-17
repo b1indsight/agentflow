@@ -651,10 +651,12 @@ async def test_config_change_revalidates_and_reuses_same_item(store, projection)
     assert remote.calls.count("add") == 1
 
 
+@pytest.mark.ledger_unverified
 async def test_installation_mismatch_blocks_before_any_remote_request(store, projection):
     flow, _, _, remote, sync = projection
-    flow.installation_id = 999
-    store.flows.update_flow_metadata(flow)
+    # No business path changes a Flow's installation; seed the mismatch directly.
+    with store.connection() as connection:
+        connection.execute("UPDATE flows SET installation_id=999 WHERE id=%s", (flow.id,))
     await sync.sweep()
     assert state(store).blocked and remote.calls == []
 

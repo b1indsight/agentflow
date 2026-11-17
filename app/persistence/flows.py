@@ -9,7 +9,14 @@ from datetime import datetime, timedelta
 
 from psycopg.rows import class_row
 
-from app.domain.flow_policy import FlowEvent, decide_flow_state
+from app.domain.flow_policy import (
+    LEDGER_COLUMNS,
+    FlowEvent,
+    decide_flow_state,
+    fact_kind,
+    replay_flow,
+    task_digest,
+)
 from app.domain.models import (
     ArchiveReason,
     Attempt,
@@ -69,8 +76,15 @@ class FlowStore(Repository):
                 (repo, issue_number, installation_id, task_content,
                  decide_flow_state(None, FlowEvent.CREATED, archive_reason=None), now, now),
             ).fetchone()
-            FlowStore(tx).select_owner(required(row))
-        return required(row)
+            flow = required(row)
+            ActivityStore(tx).append_flow(
+                flow.id, flow.current_round_no, fact_kind(FlowEvent.CREATED), occurred_at=now,
+                metadata={"repo": repo, "issue_number": issue_number,
+                          "installation_id": installation_id,
+                          "task_digest": task_digest(task_content)},
+            )
+            FlowStore(tx).select_owner(flow)
+        return flow
 
     def get_flow(self, flow_id: int) -> Flow | None:
         with (
@@ -111,6 +125,7 @@ class FlowStore(Repository):
         Use ``with flows.locked(id)`` for an ordinary operation. Allocation and
         bulk recovery supply their already-locked snapshots instead. A same-state
         decision still writes, while a guarded no-op leaves timestamps untouched.
+        Every write appends its ledger fact in the same transaction.
         """
         from app.persistence.reviews import ReviewStore
 
@@ -131,6 +146,7 @@ class FlowStore(Repository):
                 ).fetchone()
                 if row is None:
                     raise ValueError("archived Flow round is no longer current")
+                self._record(row, event)
                 return row
             if (
                 state is FlowState.ARCHIVED
@@ -146,22 +162,74 @@ class FlowStore(Repository):
             if changed.rowcount != 1:
                 raise ValueError("Flow state or round is no longer current")
             flow.state, flow.updated_at = state, now
+            # archive_round already appended the archive evidence that records archival.
+            if event is not FlowEvent.ROUND_ARCHIVED:
+                self._record(flow, event)
             if state in {FlowState.FINALIZING, FlowState.ARCHIVED}:
                 ReviewStore(self._db).cancel(flow.id)
         return flow
 
-    def update_flow_metadata(self, flow: Flow) -> None:
-        """Update attempt/installation metadata without projecting a possibly stale state."""
-        flow.updated_at = self._db.now()
+    def _record(self, flow: Flow, event: FlowEvent) -> None:
+        """Append the ledger fact for a transition just written to ``flow``."""
+        ActivityStore(self._db).append_flow(
+            flow.id, flow.current_round_no, fact_kind(event), occurred_at=flow.updated_at,
+            metadata={
+                "state": flow.state.value,
+                "archive_reason": flow.archive_reason.value if flow.archive_reason else None,
+                "archive_summary": flow.archive_summary,
+            },
+        )
+
+    def set_current_attempt(self, flow: Flow) -> None:
+        """Point the current round at its Attempt; a pointer, not a ledger fact."""
         with self._db.connection() as connection:
             changed = connection.execute(
-                "UPDATE flows SET installation_id=%s,current_attempt_id=%s,updated_at=%s"
-                " WHERE id=%s AND current_round_no=%s",
-                (flow.installation_id, flow.current_attempt_id, flow.updated_at,
-                 flow.id, flow.current_round_no),
+                "UPDATE flows SET current_attempt_id=%s WHERE id=%s AND current_round_no=%s",
+                (flow.current_attempt_id, flow.id, flow.current_round_no),
             )
             if changed.rowcount != 1:
                 raise ValueError("Flow round is no longer current")
+
+    def set_title_job(self, flow_id: int, job_id: int) -> None:
+        """Point the Flow at the naming inference whose result may set its title."""
+        with self._db.connection() as connection:
+            connection.execute("UPDATE flows SET title_job_id=%s WHERE id=%s", (job_id, flow_id))
+
+    def set_title(self, flow_id: int, job_id: int, title: str) -> None:
+        """Record a naming result only while that inference is still the Flow's naming job."""
+        with self._db.connection() as connection:
+            row = connection.execute(
+                "UPDATE flows SET title=%s WHERE id=%s AND title_job_id=%s"
+                " RETURNING current_round_no",
+                (title, flow_id, job_id),
+            ).fetchone()
+        if row is not None:
+            ActivityStore(self._db).append_flow(
+                flow_id, row["current_round_no"], "titled", occurred_at=self._db.now(),
+                metadata={"title": title, "job_id": job_id},
+            )
+
+    def verify(self, flow_id: int) -> dict[str, tuple[object, object]]:
+        """Compare a ledger replay with the stored row as ``column: (replayed, stored)``.
+
+        Raises ValueError for an unknown Flow or a ledger that cannot be replayed.
+        """
+        with self._db.transaction() as tx, tx.connection() as connection, \
+                connection.cursor(row_factory=class_row(Flow)) as cursor:
+            # Every ledger writer holds this row lock, so the facts match the row.
+            stored = cursor.execute(
+                "SELECT * FROM flows WHERE id=%s FOR SHARE", (flow_id,)
+            ).fetchone()
+            if stored is None:
+                raise ValueError(f"Flow {flow_id} does not exist")
+            replayed = replay_flow(
+                flow_id, ActivityStore(tx).flow_facts(flow_id), task_content=stored.task_content
+            )
+        return {
+            column: (getattr(replayed, column), getattr(stored, column))
+            for column in LEDGER_COLUMNS
+            if getattr(replayed, column) != getattr(stored, column)
+        }
 
     def start_round(self, flow: Flow) -> Flow:
         """Advance the archived round under the caller's Issue/workflow reservation."""
@@ -402,7 +470,7 @@ class FlowStore(Repository):
                 "merge_commit_sha": delivery.merge_commit_sha if delivery else None,
             },
         )
-        self.transition(flow, FlowEvent.ROUND_ARCHIVED)
+        self.transition(flow, FlowEvent.ROUND_ARCHIVED, now=flow.archived_at)
 
     def observe_archived_merge(
         self, flow_id: int, round_no: int, merge: PullRequestMerge, *, origin: str

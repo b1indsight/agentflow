@@ -232,7 +232,7 @@ async def test_late_query_cannot_overwrite_a_changed_workflow(store, merge_flow,
         elif change == "attempt":
             fresh = store.flows.get_flow(merge_flow.id)
             fresh.current_attempt_id = store.flows.create_attempt(fresh.id).id
-            store.flows.update_flow_metadata(fresh)
+            store.flows.set_current_attempt(fresh)
 
     github.before_return = mutate
     await subject(store, github)._sweep()

@@ -40,7 +40,7 @@ async def test_direct_open_pr_preserves_body_without_closing_a_fake_issue(store,
     )
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow_metadata(flow)
+    store.flows.set_current_attempt(flow)
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     job = store.assignments.assign_job("worker-a", "token", "epoch")
     assert store.assignments.start_assignment(job.id, attempt.id, "worker-a", "token", "epoch")

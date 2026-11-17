@@ -37,6 +37,9 @@ from app.persistence.schema import (
 from scripts import migrate_flow_states
 from scripts.migrate_flow_states import main, migrate
 
+# Frozen legacy schemas hold Flow rows that predate the ledger and its state values.
+pytestmark = pytest.mark.ledger_unverified
+
 NOW = datetime(2026, 11, 1, tzinfo=UTC)
 LEGACY_SCHEMA = """
 CREATE TABLE flows (

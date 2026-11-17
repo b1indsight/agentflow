@@ -343,7 +343,7 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, pending_nam
         ControlService(database=store.database).cancel(flow)
     elif cancelled:
         flow.current_attempt_id = store.flows.create_attempt(flow.id).id
-        store.flows.update_flow_metadata(flow)
+        store.flows.set_current_attempt(flow)
     recovered = coordinator(store, subject.github)
     if expected is not None:
         # Fail the title write after settlement: both facts must roll back together.
@@ -366,7 +366,7 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, pending_nam
     await coordinator(store, subject.github).results.apply(assigned.id)
     assert store.flows.get_flow(flow.id).title == expected
     if cancelled != "stop":
-        store.flows.update_flow_metadata(flow)
+        store.flows.set_current_attempt(flow)
     assert store.flows.get_flow(flow.id).title == expected
     if expected is not None:
         preparing.cancel()

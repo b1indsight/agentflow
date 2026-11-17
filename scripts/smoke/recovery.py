@@ -148,7 +148,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         flow = store.flows.create_flow('fixture/no-network', 1, 1)
         attempt = store.flows.create_attempt(flow.id)
         flow.current_attempt_id = attempt.id
-        store.flows.update_flow_metadata(flow)
+        store.flows.set_current_attempt(flow)
         pool = RepositoryWorkspaces(root, 'fixture-worker')
         default = pool.initialize()
         store.workers.worker_connected(

@@ -290,4 +290,9 @@ def test_workflow_evidence_cannot_be_overwritten_or_forged_by_observation(store,
         connection.execute(
             "DELETE FROM console_activity WHERE flow_id=%s AND kind='archive'", (archived.id,)
         )
+    with pytest.raises(CheckViolation, match="immutable"), store.connection() as connection:
+        connection.execute(
+            "UPDATE console_activity SET metadata='{}' WHERE flow_id=%s AND kind='created'",
+            (archived.id,),
+        )
     assert activity.archived(archived.id, 1) == original

@@ -70,7 +70,7 @@ Flow 持久化 `queued/running/review/blocked/finalizing/archived`，所有看�
 已核验 webhook 与补偿查询自动更正归档前已合并的 abandoned 结果；严格要求 merged_at 加一秒早于 archived_at。
 合并证据、更正 activity 与当前归档结果同事务提交，重复消息幂等，不改变原归档时间、当前轮次、owner 或执行。
 状态 activity 继续由数据库触发器产生；归档、合并证据和更正由内部事务写入，不能覆盖或作为缓存清理。
-目标设计把这一做法推广到全部 Flow 状态变化：业务事务先追加带起因的事实，再更新 `flows`，
+这一做法已推广到全部 Flow 状态变化：每次 `FlowStore.transition` 同事务追加一条以事件命名的事实，
 触发器快照只作展示，见 [Flow 事实账本与状态表](flow-ledger.md)。
 Worker 内容按 Attempt 归属，PR 内容按交付身份归属，Issue 共享/未知归属内容的 round_no 为 NULL。
 详见[控制台说明](../../app/controler/web/README.md)；原展示归档记录保留在历史规划中。
@@ -108,10 +108,9 @@ WebhookConsumer 已持久化失败退避和重放；PR 对账处理已追踪 PR 
 | Delivery | none、opening、open、closed、merged | 原生 PR 事实不替代 Flow；关闭/合并经业务处理器更新 Flow |
 | Review | ready、processing、completed、waiting、cancelled | blocked 暂停；finalizing/archived 退休活动批次 |
 
-Flow 行当前有两类写入方式：业务服务修改模型后调用 `FlowStore.update_flow`，以及派发、入队、
-租约清扫、标题回写处的直接 `UPDATE flows`。目标设计把它们收敛为 `FlowStore.record` 一个入口，
-每次写入在同一事务内先追加一条 Flow 事实；状态转换规则本身不变，见
-[写入路径](flow-ledger.md#7-写入路径目标)。
+Flow 行只由 `FlowStore` 写入：状态经 `transition(flow, FlowEvent)`，标题经 `set_title`，
+两类指针经 `set_current_attempt`、`set_title_job`。前两者在同一事务内追加一条 Flow 事实；
+状态转换规则本身由 `decide_flow_state` 决定，见[写入路径](flow-ledger.md#7-写入路径)。
 
 `ControlService` 在显式事务中负责触发、取消和 retry，并由 `lifecycle` 提交合并事实；
 `lifecycle` 也拥有创建 PR 的身份核验、绑定及 close/reopen。`JobCoordinator` 把 INITIAL、REVISION、ARCHIVE
@@ -361,7 +360,7 @@ PostgreSQL，例如在构造函数内执行 `self.flows = FlowStore(database)`�
 | `WebhookStore` / `webhooks.py` | Webhook inbox 消费和事件去重审计 |
 | `ReconcileStore` / `reconciliation.py` | PR 与反馈对账进度 |
 | `ProjectStore` / `projects.py` | Projects 投影与有类型的局部更新 |
-| `ActivityStore` / `activity.py` | `console_activity` 的追加、Flow 证据读取、时间线快照分页与版本对比 |
+| `ActivityStore` / `activity.py` | `console_activity` 的追加、Flow 事实读写、时间线快照分页与版本对比 |
 | `ConsoleStore` / `console.py` | 控制台卡片、详情、来源状态与执行记录查询，以及同步请求 |
 | `ConsoleSyncStore` / `console_sync.py` | 控制台采集的来源 claim、检查点和 webhook 观察归档 |
 | `InferenceNoticeStore` / `inference_notices.py` | 推理耗尽通知的追加与分页 |
@@ -399,7 +398,7 @@ cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时�
 - `review_thread_observations`：远端线程快照与真实 resolved 状态，不以本地 addressed 代替远端确认；
 - `console_flows`：每 Flow 一行的控制台投影，保存 `console_facts` 视图的快照和两个版本号；
   它的行锁同时是 `console_activity` 分配 `version` 的发布围栏；
-- `console_activity`：按 Flow 递增 `version` 的只追加归档，包含 Flow 证据、触发器状态快照、
+- `console_activity`：按 Flow 递增 `version` 的只追加归档，包含 Flow 事实账本、触发器状态快照、
   推理通知，以及 GitHub 与 Worker 内容的展示版本；
 - `console_sync` / `console_installation_backoff`：控制台采集的来源游标、claim、退避与覆盖情况。
 
@@ -408,19 +407,16 @@ cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时�
 PostgreSQL 中的全部表按职责分为五类：Flow 事实账本、`flows` 状态表、业务状态与专用证据、协调数据、
 展示投影与采集归档。逐表归属见[数据分类](flow-ledger.md#2-数据分类)。
 
-当前 `console_activity` 中只有 `archive`、`merge`、`archive_correction` 三种行是业务事务写入的
-不可变事实：`FlowStore.archive_round` 先追加 `archive` 再写 `state='archived'`，
-`FlowStore.update_flow` 在缺少该事实时拒绝写入 `archived`，触发器拒绝更新和删除这三种行。
-其余 Flow 状态变化没有对应事实，只有触发器生成的 `state` 快照。
+`console_activity` 中除 `state`、`baseline`、`inference_exhausted` 外的 `source='flow'` 行是业务事务写入的
+不可变 Flow 事实，触发器拒绝更新和删除：
 
-目标设计：
+- `flows` 的账本列只经 `FlowStore` 写入；每次状态转换同事务追加一条以 `FlowEvent` 命名的事实，
+  创建、归档、归档后合并与标题也各有事实；
+- 领域层的纯函数 `replay_flow` 复用 `decide_flow_state` 重放事实，`flowtool flow verify` 比较重放结果与当前行；
+- 存量 Flow 在启动时补一条 `snapshot` 作为重放起点；
+- Job、交付、反馈、Worker 等表不由账本重建；租约、游标等协调数据不进入账本。
 
-- `flows` 的业务列只经 `FlowStore.record` 写入，每次写入同事务追加一条带 `cause` 的事实；
-- 事实种类覆盖创建、新轮次、六态转换、归档结论和标题；
-- 领域层的纯函数 `apply_fact` 同时用于在线写入和重放，`flowtool flow verify` 比较重放结果与当前行；
-- Job、交付、反馈、Worker 等表不由账本重建，账本只引用它们的 ID；租约、游标等协调数据不进入账本。
-
-实施计划与审批状态见 [feature record](../plan/flow-activity-ledger.md)。
+实施过程与验证见 [feature record](../plan/flow-activity-ledger.md)。
 
 新库不创建 `codex_runs` 或其唯一索引；应用停止写入和依赖该表。已有库的旧表及数据在
 初始化时保留，不 DROP、不回填。外部 SQL 消费者需迁移到 jobs 的持久结果；旧表人工清理

@@ -14,8 +14,7 @@
 - [总览](overview.md)、[组件职责](components.md)和[端到端流程](workflows.md)同时记录目标设计，
   每处涉及未完成能力时明确标注当前边界；
 - [关键决策](decisions.md)记录已定方案、开放风险和退出条件；
-- [Flow 事实账本与状态表](flow-ledger.md)描述数据分类，以及以 Flow 事实为可信来源的目标设计；
-  其中只有归档相关的三种事实已经实现；
+- [Flow 事实账本与状态表](flow-ledger.md)描述数据分类，以及以 Flow 事实为可信来源的账本与重放校验；
 - [路线图](roadmap.md)与[计划目录](../plan/README.md)分别记录未来方向和具体实施决策。
 
 状态术语：
@@ -31,7 +30,7 @@
 |---|---|---|
 | 配置与领域契约 | 已验证（自动化） | serve/worker 独立配置、wire24 task/result/tool/recovery/stop/conversation 消息和分页 inventory、answer/revise 任务用途、纯文本任务与可空 Issue、按 Flow 分文件的 journal v5、历史交付/本轮同步基线与 session generation、批次/item-version/context digest 身份有覆盖 |
 | PostgreSQL 持久层 | 已验证（自动化） | Runtime 管理共享 Database，服务自行创建具体仓储；显式事务与共用锁保护 flow/attempt/job、binding、结果回执与反馈批次；聚合 Store 用于 CLI、live smoke 和测试 |
-| Flow 事实账本 | 部分 | 归档、合并证据和归档更正由业务事务写入 `console_activity`，不可变，且先于 `archived` 状态；其余 Flow 状态变化仍由多处直接写 `flows`，触发器事后追加快照。单一写入口、带起因的事实种类和重放校验是目标设计，见 [Flow 事实账本与状态表](flow-ledger.md) |
+| Flow 事实账本 | 已验证（自动化） | `flows` 的每次账本列变化同事务追加一条不可变 Flow 事实；存量 Flow 启动时补快照；`flowtool flow verify` 重放比较，测试夹具对每个 PostgreSQL 用例校验，见 [Flow 事实账本与状态表](flow-ledger.md) |
 | Webhook Ingress | 已验证（自动化） | HMAC 验签后、202 前持久化 inbox；后台消费者在每条 receipt 事务内创建服务/路由，提交后通知；失败退避、重放和请求体限制有覆盖 |
 | Event Router | 已验证（M2 F1 自动化） | 反馈 delivery/版本/deadline 原子写入，持久 settle、强信号授权、显式 action、同 Flow 冻结批次串行和重启恢复已覆盖 |
 | M3 合并与清理 | F1/F2/F3 已合并 | 原 worker 提交清理凭据后，持久恢复 Issue/PR 完成标签和固定归档说明；全部回写后原子成功、释放与 ACK；真实 M3 闭环待验收 |

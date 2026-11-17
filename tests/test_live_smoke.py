@@ -109,7 +109,7 @@ def test_observe_reads_without_creating_work_and_does_not_claim_partial_success(
     flow = store.flows.create_flow("owner/smoke", 7, 42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow_metadata(flow)
+    store.flows.set_current_attempt(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.state, delivery.pr_number, delivery.head_sha = DeliveryState.OPEN, 8, "a"*40
     store.deliveries.update_delivery(delivery)
@@ -167,7 +167,7 @@ async def test_core_pass_requires_three_verified_heads_and_matching_merge(
     flow = store.flows.create_flow("owner/smoke", 7, 42)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow_metadata(flow)
+    store.flows.set_current_attempt(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 8
     store.deliveries.update_delivery(delivery)

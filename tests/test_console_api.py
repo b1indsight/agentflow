@@ -332,7 +332,7 @@ def flow_ready_for_agent_task(store):
     attempt.codex_session_id = "original-session"
     store.flows.update_attempt(attempt)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow_metadata(flow)
+    store.flows.set_current_attempt(flow)
     register_worker(store, "worker-1", repo=flow.repo, epoch="epoch")
     initial = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.assignments.assign_job("worker-1", "token", "epoch") is not None
@@ -417,6 +417,7 @@ async def test_append_agent_task_uses_revision_pipeline_and_records_input_once(
     "blocked", "archived", "finalizing", "closed", "merged", "no_binding", "no_attempt",
     "queued", "running", "pending_result", "unknown_execution", "triage", "stop",
 ])
+@pytest.mark.ledger_unverified
 def test_append_agent_task_refuses_unsafe_states(console_runtime, store, flow_ready_for_agent_task, scenario):
     flow = flow_ready_for_agent_task
     with store.connection() as connection:

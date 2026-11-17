@@ -87,11 +87,11 @@ def test_flow_transition_preserves_noop_and_same_state_write_semantics(store):
     with pytest.raises(ValueError, match="no longer current"), store.flows.locked(flow.id) as context:
         store.flows.using(context.database).transition(flow, FlowEvent.JOB_CLAIMED)
     assert store.flows.get_flow(flow.id) == blocked
-    # Metadata may carry an older snapshot, but must never overwrite its business state.
-    flow.installation_id = 99
-    store.flows.update_flow_metadata(flow)
+    # A pointer write may carry an older snapshot, but must never overwrite its business state.
+    flow.current_attempt_id = store.flows.create_attempt(flow.id).id
+    store.flows.set_current_attempt(flow)
     assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
-    assert store.flows.get_flow(flow.id).installation_id == 99
+    assert store.flows.get_flow(flow.id).current_attempt_id == flow.current_attempt_id
 
 
 def test_illegal_flow_transition_rolls_back_its_transaction(store):
@@ -104,8 +104,8 @@ def test_illegal_flow_transition_rolls_back_its_transaction(store):
         fresh = context.flow
         assert fresh is not None
         flows = store.flows.using(context.database)
-        fresh.installation_id = 99
-        flows.update_flow_metadata(fresh)
+        fresh.current_attempt_id = flows.create_attempt(fresh.id).id
+        flows.set_current_attempt(fresh)
         flows.transition(fresh, FlowEvent.ROUND_RESUMED)
     assert store.flows.get_flow(flow.id) == flow
 
@@ -126,7 +126,7 @@ def test_resume_does_not_replay_prior_round_feedback_or_cursors(store, branch, r
         flow = service.resume(flow, expected_round_no=previous_round)
     attempt = store.flows.create_attempt(flow.id)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow_metadata(flow)
+    store.flows.set_current_attempt(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, branch)
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
     store.deliveries.update_delivery(delivery)
@@ -154,7 +154,7 @@ def test_resume_does_not_replay_prior_round_feedback_or_cursors(store, branch, r
     resumed = service.resume(flow, expected_round_no=round_no)
     assert store.deliveries.get_delivery(flow.id).branch == expected_branch
     resumed.current_attempt_id = store.flows.create_attempt(flow.id).id
-    store.flows.update_flow_metadata(resumed)
+    store.flows.set_current_attempt(resumed)
     assert store.reviews.pending(flow.id) == []
     assert store.reviews.claim_due() == []
     assert store.reconcile.feedback_get(flow.id, "reviews") is None
@@ -331,3 +331,27 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     _git("push", "origin", next_task.branch, cwd=workspace)
     _git("show-ref", "--verify", f"refs/heads/{task.branch}", cwd=remote)
     _git("show-ref", "--verify", f"refs/heads/{next_task.branch}", cwd=remote)
+
+
+@pytest.mark.ledger_unverified
+def test_legacy_flow_replays_from_a_startup_snapshot_and_verify_reports_bypasses(store):
+    # A Flow written before the ledger existed has no creation fact. Startup must give it
+    # exactly one snapshot origin, and a later write that bypasses transition() must show up.
+    with store.connection() as connection:
+        legacy = connection.execute(
+            "INSERT INTO flows(repo,issue_number,state,archive_reason,archive_summary,"
+            "created_at,updated_at) VALUES ('owner/legacy',3,'finalizing','abandoned','closed',"
+            "now()-interval '1 day',now()) RETURNING id"
+        ).fetchone()["id"]
+    with pytest.raises(ValueError, match="no origin"):
+        store.flows.verify(legacy)
+    store.init_db()
+    store.init_db()
+    assert store.flows.verify(legacy) == {}
+    with store.connection() as connection:
+        assert connection.execute(
+            "SELECT count(*) AS n FROM console_activity WHERE flow_id=%s AND kind='snapshot'",
+            (legacy,),
+        ).fetchone()["n"] == 1
+        connection.execute("UPDATE flows SET state='blocked' WHERE id=%s", (legacy,))
+    assert store.flows.verify(legacy) == {"state": (FlowState.FINALIZING, FlowState.BLOCKED)}

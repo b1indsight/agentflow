@@ -65,7 +65,7 @@ tool authorization 和 delivery ownership 都以稳定 Flow ID 为键。
 
 ### 3.1 与 Flow 事实账本的关系
 
-[Flow 事实账本](flow-ledger.md)是另一项目标设计：Flow 生命周期的每次变化先追加一条不可变事实，
+[Flow 事实账本](flow-ledger.md)已经实现：Flow 生命周期的每次变化同事务追加一条不可变事实，
 `flows` 是它的同事务状态表。它的首期范围只有上表的“Flow 生命周期”一行，其余四个维度继续以各自的表为权威。
 
 本页的派生、等待与验收落地时，按同一规则扩展账本，不另建一套历史记录：

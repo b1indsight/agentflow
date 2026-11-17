@@ -5,16 +5,39 @@ import hashlib
 import json
 from datetime import datetime
 from difflib import unified_diff
-from typing import Literal
 
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.contracts.console import ActivityItem, ActivityPage, ConsoleFailure, ContentPage
+from app.domain.flow_policy import ORIGIN_KINDS, FlowFact
 from app.github.console import Observation
 from app.persistence.console import ConsoleStore
 from app.persistence.records import Row
 from app.persistence.repository import Repository
+
+_FLOW_FACT_TITLES = {
+    "created": "Flow 创建",
+    "snapshot": "账本起点快照",
+    "job_enqueued": "任务入队",
+    "job_claimed": "任务已派发",
+    "assignment_requeued": "派发收回后重新排队",
+    "execution_uncertain": "执行状态无法确认",
+    "result_failed": "结果失败",
+    "delivery_baseline_rejected": "PR 分支已变化",
+    "delivery_applied": "交付已应用",
+    "finalization_requested": "请求收尾",
+    "cleanup_applied": "清理结果已应用",
+    "retry_requested": "请求重试",
+    "round_resumed": "开启新轮次",
+    "archive": "Flow 归档",
+    "merge": "已确认合并",
+    "archive_correction": "归档结果自动更正",
+    "titled": "标题已生成",
+}
+_ROUND_FACTS = frozenset({"archive", "merge", "archive_correction", "round_resumed"})
+# Keep in sync with console_preserve_evidence: every other source='flow' kind is the ledger.
+_NON_LEDGER_SQL = "('state','baseline','inference_exhausted')"
 
 
 class ActivityCursor(BaseModel):
@@ -90,43 +113,56 @@ class ActivityStore(Repository):
         self,
         flow_id: int,
         round_no: int,
-        kind: Literal["archive", "merge", "archive_correction"],
+        kind: str,
         *,
         occurred_at: datetime,
         metadata: dict[str, str | int | bool | None],
     ) -> bool:
-        """Append one immutable workflow fact, sharing the ordinary publication fence.
+        """Append one immutable Flow ledger fact, sharing the ordinary publication fence.
 
         Call from the workflow transaction after validating the fact. These records
         are durable evidence, not mutable display-object versions or a round entity.
+        A repeated once-per-round fact is idempotent; a conflicting one is rejected.
         """
-        if round_no < 1 or kind not in {"archive", "merge", "archive_correction"}:
+        if round_no < 1 or kind not in _FLOW_FACT_TITLES:
             raise ValueError("invalid Flow activity identity")
-        item = Observation(
-            key=f"flow:{flow_id}:round:{round_no}:{kind}",
-            round_no=round_no,
-            source="flow",
-            kind=kind,
-            occurred_at=occurred_at,
-            updated_at=occurred_at,
-            author="FlowTool",
-            title={
-                "archive": "Flow 归档",
-                "merge": "已确认合并",
-                "archive_correction": "归档结果自动更正",
-            }[kind],
-            metadata=metadata,
-        )
         with self._db.transaction() as tx, tx.connection() as connection:
-            connection.execute(
-                "SELECT flow_id FROM console_flows WHERE flow_id=%s FOR UPDATE", (flow_id,)
+            head = connection.execute(
+                "SELECT activity_version FROM console_flows WHERE flow_id=%s FOR UPDATE",
+                (flow_id,),
+            ).fetchone()
+            if head is None:
+                raise ConsoleFailure("flow_not_found", 404)
+            if kind in _ROUND_FACTS:
+                key = f"flow:{flow_id}:round:{round_no}:{kind}"
+            elif kind in ORIGIN_KINDS:
+                key = f"flow:{flow_id}:{kind}"
+            else:
+                # Repeatable transitions are identified by the version this lock reserves.
+                key = f"flow:{flow_id}:fact:{head['activity_version'] + 1}"
+            item = Observation(
+                key=key, round_no=round_no, source="flow", kind=kind,
+                occurred_at=occurred_at, updated_at=occurred_at, author="FlowTool",
+                title=_FLOW_FACT_TITLES[kind], metadata=metadata,
             )
-            previous = ActivityStore(tx).flow_event(flow_id, round_no, kind)
-            if previous is not None:
-                if previous != item:
-                    raise ValueError("conflicting immutable Flow activity")
-                return False
+            if kind in _ROUND_FACTS:
+                previous = ActivityStore(tx).flow_event(flow_id, round_no, kind)
+                if previous is not None:
+                    if previous != item:
+                        raise ValueError("conflicting immutable Flow activity")
+                    return False
             return ActivityStore(tx)._append(flow_id, item)
+
+    def flow_facts(self, flow_id: int) -> list[FlowFact]:
+        """Read the Flow ledger in replay order, skipping display and notice rows."""
+        with self._db.connection() as connection:
+            rows = connection.execute(
+                "SELECT kind,round_no,occurred_at,metadata FROM console_activity"
+                f" WHERE flow_id=%s AND source='flow' AND kind NOT IN {_NON_LEDGER_SQL}"
+                " ORDER BY version",
+                (flow_id,),
+            ).fetchall()
+        return [FlowFact.model_validate(row) for row in rows]
 
     def flow_event(self, flow_id: int, round_no: int, kind: str) -> Observation | None:
         """Read original workflow evidence, never the folded conversation projection."""

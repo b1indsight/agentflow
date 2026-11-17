@@ -3,7 +3,7 @@
 让 `console_activity` 中的 Flow 事实行成为 Flow 状态的唯一可信账本，`flows` 作为它的同事务状态表；
 其他状态库保持不变。
 
-**Stage:** Planning — 待审批；本记录与架构文档为设计，未写任何产品或测试代码。
+**Stage:** Implementation — 已按 [001] 的修订实现并通过真实 PostgreSQL 全量回归；未部署。
 **PR / Bookmark:** `docs/flow-activity-ledger`，独立 jj workspace `.amp/in/flow-activity-ledger`；[PR（按 head 查询）](https://github.com/b1indsight/agentflow/pulls?q=is%3Apr+head%3Adocs%2Fflow-activity-ledger)。
 **讨论：** [架构讨论](https://ampcode.com/threads/T-01a1dea7-36fc-73a9-954d-184ef4e2dd53)。
 **基线：** `main` / [847f03cbcae8](https://github.com/b1indsight/agentflow/commit/847f03cbcae8)（PR #165），2026-11-15。
@@ -35,7 +35,7 @@
 - **目标与成功标准：**
   1. `flows` 的业务列只经一个写入口改变；`app/` 其他位置没有 `UPDATE flows` 或 `INSERT INTO flows`。
   2. 每次状态变化恰好对应一条事实，带 `cause` 和相关的 `job_id` / `pr_number`；条件不成立的转换不写事实。
-  3. 对任意 Flow 重放事实，结果与 `flows` 行在[比较列](../architecture/flow-ledger.md#8-重放与校验目标)上一致。
+  3. 对任意 Flow 重放事实，结果与 `flows` 行在[比较列](../architecture/flow-ledger.md#8-重放与校验)上一致。
   4. 现有 PostgreSQL 回归在不修改业务断言的前提下通过；控制台、API、Worker 协议和 GitHub 行为不变。
   5. 含存量 Flow 的数据库可以启动，并通过校验。
 - **范围：** 只覆盖 `flows` 表；包括事实种类、写入口、纯投影函数、重放校验命令、存量快照和相应文档。
@@ -74,7 +74,7 @@
       - `round_no: int` — 所属轮次，大于零；
       - `occurred_at: AwareDatetime` — 业务时间，取事务时钟；
       - `metadata: dict[str, str | int | bool | None]` — 该种类的字段，必含 `cause`，
-        各种类的字段见[事实目录](../architecture/flow-ledger.md#6-事实目录目标)；
+        各种类的字段见[事实目录](../architecture/flow-ledger.md#6-事实目录)；
       - `body: str = ""` — 仅 `created` 与 `snapshot` 使用，保存 `task_content` 原文。
     - 不为每个种类单独建类型：账本行的 `metadata` 本身是扁平 JSON，现有三种事实已经这样读写；
       各种类的必需字段由 `apply_fact` 校验。
@@ -103,7 +103,7 @@
   - `ActivityStore.facts(self, flow_id: int) -> list[FlowFact]`
     按 `version` 升序读取该 Flow 的全部事实行，排除 `state`、`baseline`、`inference_exhausted`。
   - `FlowStore.record(self, flow_id: int, kind: FlowFactKind, metadata: dict[str, str | int | bool | None], *, expected_round_no: int | None = None) -> Flow | None`
-    唯一写入口，步骤见[写入路径](../architecture/flow-ledger.md#7-写入路径目标)。
+    唯一写入口，步骤见[写入路径](../architecture/flow-ledger.md#7-写入路径)。
     `expected_round_no` 用于只对指定轮次生效的转换（现有 `AND current_round_no=%s` 条件）；
     轮次不符或前置条件不成立时返回 `None`。进入 `finalizing` 或 `archived` 时沿用现有行为退休活动反馈批次。
   - `FlowStore.create_flow(...)`、`start_round(flow)`、`archive_round(flow, delivery)`、
@@ -197,7 +197,7 @@
 - **审批前需确认：**
   1. 是否接受复用 `console_activity` 作为账本，而不是现在就新建独立的表。
   2. 是否接受 `current_attempt_id`、`title_job_id` 不参与重建，以及
-     [`updated_at` 的规则](../architecture/flow-ledger.md#5-状态表-flows目标)。
+     [`updated_at` 的规则](../architecture/flow-ledger.md#5-状态表-flows)。
   3. 是否接受首期校验只报告、不自动修复。
 - **实施中解决：** 回滚后的 `snapshot` 补录判断方式；清扫耗时测量；`flow history` 是否默认隐藏
   触发器的 `state` 行。
@@ -205,4 +205,69 @@
 
 ## 2. PR 变更时间线
 
-<!-- 尚无条目。出现实质的需求变更、实现或设计决定后按时间顺序追加。 -->
+### [001] — 2026-11-17 — 基于 PR #171 的写入口实现账本
+
+- **背景 / 需求更新：**
+  - 用户要求同步 `main` 后实现。分支 rebase 到 `main` / [eb99903e](https://github.com/b1indsight/agentflow/commit/eb99903e)（PR #179），无冲突。
+  - 基线之后合并的 PR #171 已把全部状态写入收拢到 `FlowStore.transition(flow, FlowEvent)`，
+    合法转换由领域函数 `decide_flow_state` 决定；`update_flow` 已不存在。初始计划中“约二十处写入点迁移到
+    新的 `record` 入口”和“按目标状态划分事实种类”的前提因此不再成立。
+  - 实现中发现两条既有约束：控制台测试要求任务原文不出现在任何 `console_activity` 正文里；
+    旧版迁移脚本会单独执行 `CONSOLE_SCHEMA`，随后才补写 `archive` 证据。
+- **备选方案：**
+  - 事实种类：按初始计划保留 `queued`/`running`/… 加 `cause`；或直接以 `FlowEvent` 为种类。
+    前者要维护第二套“事件 → 种类”映射和一份与 `decide_flow_state` 重复的前置条件。
+  - 写入口：新增 `record` 并让 `transition` 调用它；或在 `transition` 内追加事实。
+  - 任务原文：按计划存入 `body`；或只存摘要。
+- **决定 / 状态：**（已实施；用户以“实现”批准计划，本条修订未单独审批）
+  1. 状态转换事实的 `kind` 即 `FlowEvent` 的值，`metadata` 只记录写入后的 `state`、`archive_reason`、
+     `archive_summary`。事件名本身就是起因，不再设 `cause`。`ROUND_ARCHIVED` 由已有 `archive` 证据行记录。
+     取代初始计划“技术设计”中的 `FlowFactKind` 目录和 `round_started`（改名为 `round_resumed`）。
+  2. 不新增 `record`/`apply_fact`：`transition` 在条件更新成功后调用 `ActivityStore.append_flow` 追加事实；
+     重放函数 `replay_flow` 复用 `decide_flow_state` 校验每条事实在前一状态下生效，并与记录的 `state` 比对。
+     事实排在状态更新之后，是为了让调用方捕获“状态已变化”错误时不留下孤立事实；同事务提交，顺序不影响一致性。
+  3. 首期不记录 `job_id`、`pr_number`。事件名已经回答“为什么变化”；按调用点传 ID 要改约十处签名，
+     收益留给后续“事实引用”计划。仅 `titled` 记录命名 `job_id`。
+  4. 起点事实只记录 `task_digest`（SHA-256），不存原文；重放由调用方传入当前 `task_content` 并核对摘要。
+     保留“原始需求只在详情中读取”的既有约束。
+  5. 存量快照放在 `schema.py` 的最后一个 schema（`FLOW_LEDGER_BACKFILL`），不放在 `CONSOLE_SCHEMA`，
+     保证它排在迁移脚本补写的 `archive` 证据之后。
+  6. `update_flow_metadata` 改为只写 `current_attempt_id` 的 `set_current_attempt`，不再推进 `updated_at`、
+     不再回写从不变化的 `installation_id`；标题与命名 Job 指针写入移入 `FlowStore.set_title`、`set_title_job`。
+- **后果：**
+  - 账本与状态机共用一套规则，事件新增时不需要同步第二份目录；`FlowEvent` 的值成为持久化名称，不能改名。
+  - `flow history` 能直接读到事件名，但仍需查 `jobs` 才知道是哪个 Job。
+  - 用 SQL 直接改 `flows` 的测试夹具必须标记 `ledger_unverified`；旧版迁移测试整体如此标记。
+- **相关记录：** 修订本记录第 1 节“技术设计与涉及模块”“实施顺序”和“验证与消融策略”的对应部分；
+  目标、范围、非目标和“只报告不修复”的决定不变。
+- **已实施的改动：**
+  - 领域：[`flow_policy.py`](../../app/domain/flow_policy.py) 新增 `FlowFact`、`fact_kind`、`task_digest`、
+    `replay_flow` 和 `LEDGER_COLUMNS`。
+  - 持久层：[`activity.py`](../../app/persistence/activity.py) 的 `append_flow` 接受全部账本种类，
+    可重复的转换以 `flow:<id>:fact:<version>` 为键，新增 `flow_facts`；
+    [`flows.py`](../../app/persistence/flows.py) 的 `create_flow`、`transition`、`set_title` 追加事实，新增 `verify`；
+    [`console_schema.py`](../../app/persistence/console_schema.py) 扩大不可变触发器、新增两个部分唯一索引和存量快照。
+  - 调用方：[`initial.py`](../../app/controler/workflow/initial.py)、[`results.py`](../../app/controler/workflow/results.py)
+    改用 `FlowStore` 的标题与指针方法。CLI 新增 `flowtool flow verify`。
+  - 测试：边界测试改为“只有 `flows.py` 写 `flows`”；conftest 在每个 PostgreSQL 用例结束时校验全部 Flow；
+    新增存量快照与差异报告用例，并把不可变检查扩展到 `created` 事实。
+- **证据 / 验证：**
+  - 同步后、改动前的全量回归：`FLOWTOOL_TEST_DATABASE_URL=… uv run pytest`，1957 passed / 1 skipped。
+  - 改动后（含每用例账本校验）：全量回归 1958 passed / 1 skipped，用时 364 秒（改动前 355 秒）；
+    `ruff check app tests`、`mypy app` 通过。
+  - CLI 冒烟：在临时库创建并取消一个直接任务 Flow，`flowtool flow verify` 退出 0；`flow history` 依次列出
+    `created`、`finalization_requested`、`archive` 与触发器 `state` 行；用 SQL 改写 `archive_summary` 后
+    `flow verify 1` 报告该列差异并退出 1。
+  - 消融 1（每用例账本校验是否必要）：在副本中让 `set_title` 不追加事实，模拟遗漏的写入点，运行
+    `tests/test_flow_states.py tests/test_coordinator.py tests/test_workspace_dispatch.py tests/test_worker_inference.py`。
+    开启校验：112 passed / 37 errors，全部为账本不一致；关闭校验：112 passed。结论：保留校验夹具。
+  - 消融 2、3（前置条件放在领域层、按状态分种类）：不再适用。前置条件直接复用 `decide_flow_state`，
+    没有第二份实现；种类即事件名，没有可合并的按状态种类。
+  - 记录的 `state` 与重算结果比对只有一行，用于在状态机规则改变后发现旧事实不再按原意重放，未单独消融。
+  - 一次全量运行中，旧版迁移用例的显式重放检查暴露了快照排在迁移补写的 `archive` 之前的问题，由决定 5 修复。
+- **结果 / 待办：**
+  - 已实现首期范围；未部署，真实 E2E 未验收。
+  - 回滚后的处理：旧版本期间的写入没有事实，再次升级时这些 Flow 已有起点，不会重新补快照，
+    `flow verify` 会报告差异。首期只能人工判断；按需补“在最后一条事实后再补快照”的修复命令。
+  - 清扫耗时：租约清扫仍按 `flow_id` 升序逐个 `transition`（PR #171 已如此），每个 Flow 多一次插入，未单独测量。
+  - `flow history` 继续列出触发器 `state` 行，未默认隐藏。
