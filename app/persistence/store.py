@@ -10,9 +10,11 @@ from datetime import datetime, timedelta
 from psycopg import Connection
 
 from app.domain.models import Flow, Job, utcnow
+from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
+from app.persistence.inference import InferenceStore
 from app.persistence.jobs import JobStore
 from app.persistence.projects import ProjectStore
 from app.persistence.reconciliation import ReconcileStore
@@ -49,6 +51,8 @@ class Store:
         self._deliveries = DeliveryStore(db)
         self._jobs = JobStore(db)
         self._workers = WorkerStore(db)
+        self._assignments = AssignmentStore(db)
+        self._inference = InferenceStore(db)
         self._stops = StopStore(db)
         self._results = ResultStore(db)
         self._reviews = ReviewStore(db)
@@ -71,6 +75,14 @@ class Store:
     @property
     def workers(self) -> WorkerStore:
         return self._workers
+
+    @property
+    def assignments(self) -> AssignmentStore:
+        return self._assignments
+
+    @property
+    def inference(self) -> InferenceStore:
+        return self._inference
 
     @property
     def stops(self) -> StopStore:

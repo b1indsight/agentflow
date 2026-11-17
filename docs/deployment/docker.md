@@ -93,11 +93,11 @@ main 发布使用 `sha-<完整提交 SHA>`，不更新 `latest`，也不会自�
 Python 基础镜像固定 digest，依赖锁在 uv.lock；Codex CLI 0.153.4、jj 0.45.1 固定版本，jj 校验
 SHA256。Debian 安全包仍从当前仓库安装，因此源代码相同不等于镜像逐字节相同，部署以 digest 为准。
 worker 提供 Python、Node/npm、Git、gh、jj、Codex 和 Amp；serve 不包含这些编码 CLI。
-Amp 仅在 worker target 安装，固定为 `0.0.1792555249-g702cd1`，不使用 `latest` 或运行期
+Amp 仅在 worker target 安装，固定为 `0.0.1794672034-g01d6fa`，不使用 `latest` 或运行期
 安装。构建下载官方发布的 Linux amd64（官方文件名为 x64）压缩产物
-`https://static.ampcode.com/cli/0.0.1792555249-g702cd1/amp-linux-x64.gz`，解压后以同一官方
+`https://static.ampcode.com/cli/0.0.1794672034-g01d6fa/amp-linux-x64.gz`，解压后以同一官方
 目录的 `linux-x64-amp.sha256` 校验 SHA-256
-`41a2e3680c63091d7c0293e2ad702af95772f9f35d977b74c7794fa40e45b5c9`。这是对官方
+`0a8e4858ba97cf3fac9bcc551b67e32139a5de99740febfee70d639bbed650af`。这是对官方
 [`install.sh`](https://ampcode.com/install.sh/) 安装逻辑的固定化复现；镜像构建不会请求其
 `cli-version.txt`。项目依赖仍须在派生 worker 镜像构建时安装并测试。
 参见 [Codex CLI 安装](https://developers.openai.com/codex/cli)。
@@ -106,9 +106,16 @@ Amp 仅在 worker target 安装，固定为 `0.0.1792555249-g702cd1`，不使用
 
 `FLOWTOOL_CODING_AGENT` 未设置或为 `codex` 时保持 Codex。要让一个**空闲且已 drain** 的
 worker 使用 Amp，在其 worker.env 中设置 `FLOWTOOL_CODING_AGENT=amp`；
-`FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200` 是 Amp 单轮超时。不要为活动或执行状态未知的
-Flow 切换后端，也不要把未知续跑当作可安全重跑的任务。Amp adapter 固定以 `--mode low`
-执行，不提供运行期模式漂移。
+`FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200` 是 Amp 连续无新 stdout/stderr 输出的空闲上限，
+Codex 对应 `FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS`，同样默认 1200；两者必须为正有限值。
+持续输出不会因累计运行时长而终止；静默工具仍可能超时，worker 心跳和历史查询不续期。
+活动定义、独立请求时限与凭据到期限制见[本机部署说明](README.md)。不要为活动或执行状态未知的
+Flow 切换后端，也不要把未知续跑当作可安全重跑的任务。Amp 新会话默认以 `--mode low`
+执行；可在 `/console/#settings` 的下拉框选择具体全局默认模型和推理强度，分别通过
+`--model provider/name` 和可选 `--effort` 传入新会话，不与 `--mode low` 同时使用。
+设置随后续 assignment 下发，仅在新建会话时使用；continue 不传模型、模式或强度覆盖，
+由原生会话恢复处理。CLI 在镜像构建时升级到上述固定版本，
+不在运行期自动更新；预置模型列表不探测账号权限，真实账号的模型可用性与恢复效果仍须验收。
 
 Amp 认证只属于该 worker：可进入该 worker 的专用运行身份执行一次原生 `amp login`，或在
 worker.env 提供可选的 `AMP_API_KEY`。后者按 Amp CLI 自己的优先级生效。`worker_home` 是这个

@@ -47,6 +47,8 @@ class PushCapability(BaseModel):
     repository: str
     permissions: dict[str, Literal["read", "write"]]
     expires_at: datetime
+    bot_login: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
+    bot_user_id: int = Field(gt=0)
 
 
 def split_repo(repo: str) -> tuple[str, str]:
@@ -83,6 +85,7 @@ class Repository(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     full_name: str
     default_branch: Annotated[str, unobserved_field()]
+    archived: Annotated[bool, unobserved_field()]
     _installation: Installation | None = PrivateAttr(default=None)
 
     def __init__(
@@ -129,6 +132,7 @@ class Repository(BaseModel):
                 raise ValueError("repository response does not match its bound identity")
             return Repository(
                 self.installation, data.full_name, default_branch=data.default_branch,
+                archived=data.archived,
             )
 
     async def fetch_issue(self, number: int) -> Issue:
@@ -236,6 +240,7 @@ class Repository(BaseModel):
             return PullRequest._from_response(self, data)
 
     async def create_push_capability(self) -> PushCapability:
+        bot_login = await self.installation.app.resolve_bot_login()
         client = self.installation.app._client()
 
         with translate_errors("create_push_capability"):
@@ -250,7 +255,14 @@ class Repository(BaseModel):
                 {"contents": "write"}, {"contents": "write", "metadata": "read"},
             ) or repositories != [self.full_name]:
                 raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
+            installation_client = self.installation._client()
+            bot = (await installation_client.rest.users.async_get_by_username(
+                bot_login,
+            )).parsed_data
+            if (bot.login.lower() != bot_login.lower() or bot.type != "Bot" or bot.id <= 0):
+                raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
             return PushCapability(
                 token=SecretStr(data.token), repository=self.full_name,
                 permissions=permissions, expires_at=datetime.fromisoformat(data.expires_at),
+                bot_login=bot_login, bot_user_id=bot.id,
             )

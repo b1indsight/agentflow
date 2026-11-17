@@ -102,9 +102,13 @@ jobs:
           python -c "import glob,zipfile; w=zipfile.ZipFile(glob.glob('dist/*.whl')[0]); assert 'app/controler/console_static/index.html' in w.namelist()"
 
   pytest:
-    name: pytest
+    name: pytest (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     services:
       postgres:
         image: postgres:17-alpine
@@ -149,10 +153,38 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked --dev
 
-      - name: Run pytest
-        run: uv run pytest
+      - name: Cache pytest dependency data
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: .testmondata*
+          # Do not reuse dependency data across changes to shared setup or external test inputs.
+          key: pytest-testmon-v1-${{ runner.os }}-py312-shard-${{ matrix.shard }}-of-2-${{ hashFiles('uv.lock', 'pyproject.toml', '.github/workflows/ci.yml', '**/conftest.py', 'tests/fixtures/**', 'scripts/**', 'deploy/**', 'compose.yaml', 'Dockerfile') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            pytest-testmon-v1-${{ runner.os }}-py312-shard-${{ matrix.shard }}-of-2-${{ hashFiles('uv.lock', 'pyproject.toml', '.github/workflows/ci.yml', '**/conftest.py', 'tests/fixtures/**', 'scripts/**', 'deploy/**', 'compose.yaml', 'Dockerfile') }}-
+
+      - name: Run affected pytest tests
+        run: |
+          # Keep each test module and its fixtures together on one shard.
+          test_files=()
+          while IFS= read -r test_file; do
+            test_files+=("$test_file")
+          done < <(
+            find tests -name 'test_*.py' ! -path tests/test_boundaries.py ! -path tests/test_worker_cli.py \
+              | LC_ALL=C sort | awk 'NR % 2 == ${{ matrix.shard }} % 2'
+          )
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            uv run pytest --testmon --testmon-noselect "${test_files[@]}"
+          else
+            uv run pytest --testmon "${test_files[@]}"
+          fi
+
+      # Source inspection and isolated installed copies are invisible to runtime coverage.
+      - name: Check package boundaries and installed worker CLI
+        if: matrix.shard == 1
+        run: uv run pytest --no-testmon tests/test_boundaries.py tests/test_worker_cli.py
 
       - name: Smoke control plane and remote worker processes
+        if: matrix.shard == 1
         run: |
           uv run flowtool serve > /tmp/flowtool.log 2>&1 &
           server_pid=$!

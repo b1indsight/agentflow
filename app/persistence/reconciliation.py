@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from app.github import FeedbackSource
 
 ReconcileSource = FeedbackSource | Literal["threads"]
-PR_RECONCILE_ELIGIBLE = "f.state<>'succeeded' AND d.pr_number IS NOT NULL AND d.state<>'merged'"
+PR_RECONCILE_ELIGIBLE = "d.pr_number IS NOT NULL AND d.state<>'merged'"
 
 from app.persistence.repository import Repository
 
@@ -34,26 +34,52 @@ class FeedbackCheck(ReconcileState):
 class ReconcileStore(Repository):
     """Use the database connection, including the caller's workflow transaction."""
 
+    def merged_backlog(self, limit: int) -> list[int]:
+        """Recover persisted current merges that the ordinary PR poller intentionally excludes."""
+        with self._db.connection() as connection:
+            return [row["id"] for row in connection.execute(
+                "SELECT f.id FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
+                " WHERE f.state<>'archived' AND d.state='merged' AND d.pr_number IS NOT NULL"
+                " AND d.merged_at IS NOT NULL AND length(d.merge_commit_sha)>0"
+                " ORDER BY f.id LIMIT %s", (limit,),
+            ).fetchall()]
+
+    def reset_round(self, flow_id: int) -> None:
+        """A new delivery starts fresh PR/feedback observations in the resume transaction."""
+        with self._db.connection() as connection:
+            connection.execute("DELETE FROM feedback_reconcile WHERE flow_id=%s", (flow_id,))
+            connection.execute("DELETE FROM flow_reconcile WHERE flow_id=%s", (flow_id,))
+
     def feedback_seed(self, limit: int) -> None:
         with self._db.connection() as connection:
             connection.execute(
                 "INSERT INTO feedback_reconcile(flow_id,source,next_at)"
                 " SELECT f.id,s.source,%s FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
                 " CROSS JOIN (VALUES ('issue_comments'),('pr_comments'),('reviews'),('threads')) s(source)"
-                " WHERE f.state='active' AND d.state='open' AND d.pr_number IS NOT NULL"
+                " WHERE f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
+                " AND d.state='open' AND d.pr_number IS NOT NULL"
+                " AND (s.source<>'issue_comments' OR f.issue_number IS NOT NULL)"
                 " AND NOT EXISTS (SELECT 1 FROM feedback_reconcile r"
                 " WHERE r.flow_id=f.id AND r.source=s.source) ORDER BY f.id,s.source"
-                " LIMIT %s ON CONFLICT DO NOTHING", (self._db.now(), limit),
+                " LIMIT %s ON CONFLICT DO NOTHING",
+                (self._db.now(), limit),
             )
 
     def feedback_due(self, limit: int) -> list[FeedbackCheck]:
         with self._db.connection() as connection:
-            return connection.cursor(row_factory=class_row(FeedbackCheck)).execute(
-                "SELECT r.* FROM feedback_reconcile r JOIN flows f ON f.id=r.flow_id"
-                " JOIN flow_deliveries d ON d.flow_id=f.id WHERE r.next_at<=%s"
-                " AND f.state='active' AND d.state='open' AND d.pr_number IS NOT NULL"
-                " ORDER BY r.next_at,r.flow_id,r.source LIMIT %s", (self._db.now(), limit),
-            ).fetchall()
+            return (
+                connection.cursor(row_factory=class_row(FeedbackCheck))
+                .execute(
+                    "SELECT r.* FROM feedback_reconcile r JOIN flows f ON f.id=r.flow_id"
+                    " JOIN flow_deliveries d ON d.flow_id=f.id WHERE r.next_at<=%s"
+                    " AND f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
+                    " AND d.state='open' AND d.pr_number IS NOT NULL"
+                    " AND (r.source<>'issue_comments' OR f.issue_number IS NOT NULL)"
+                    " ORDER BY r.next_at,r.flow_id,r.source LIMIT %s",
+                    (self._db.now(), limit),
+                )
+                .fetchall()
+            )
 
     def feedback_get(self, flow_id: int, source: ReconcileSource) -> FeedbackCheck | None:
         with self._db.connection() as connection:
