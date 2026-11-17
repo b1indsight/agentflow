@@ -166,18 +166,15 @@ control secret。Git/gh 每轮只使用 GitHub App 下发的 assignment 凭据�
 Git/gh 设置，提交作者仍由 worker Git 配置决定。Amp 历史读取是完整原生 thread 快照，可能滞后；
 未知续跑不会自动重跑，Amp adapter 固定使用 `--mode low`。INITIAL 会在
 `<worker_root>/repos/<owner>/<repo>` 缺失或为空时，用当前任务的短期 installation token
-原子 clone；已有 seed 保持原状，不自动 fetch/reset 或安装依赖。seed 必须有任务基线分支，
-不自动处理空远端、submodule 或 LFS。
+原子 clone；已有 seed 在每次新分配执行位置前，使用当前任务凭据 fetch 任务 remote 的
+`base_branch`，完整副本和临时 worktree 都从本次 fetch 固定的远端提交开始。
+不自动安装依赖，也不自动处理空远端、submodule 或 LFS。
 
-因此，远端合并了新提交后，已有 worker 的下一个新 Flow 仍可能从旧代码开始：
-`ensure_seed` 对已有仓库只检查元数据，`align_repository` 将新建或空闲完整副本对齐到
-seed 的本地基线分支（Git 为 `refs/heads/<base_branch>`，jj 为同名 bookmark）；临时 worktree
-也从 seed 的本地 Git 分支创建。副本准备中的 Git fetch 来源是本地 seed，不是 GitHub。
-这是保留预置 Git/jj 状态的既有约定，自动刷新基线未纳入初始化范围，详见
-[原计划的范围与风险](docs/plan/worker-repo-bootstrap.md#成本风险与限制)。
-仅在 seed 中执行 fetch 仍不会推进本地基线；如需更新，应先暂停该 worker 的任务分配，
-检查 seed 的分支和未提交状态，再显式推进任务使用的本地分支/bookmark。
-已占用的 Flow workspace 会继续复用原绑定，不随 seed 更新而切换，以保留进行中的工作。
+同步仅更新 seed Git 对象库中的私有 ref，不改 seed checkout、本地分支或 jj bookmarks；
+未推送到远端的 seed 提交不会成为新任务基线。Git、colocated/non-colocated jj 完整副本
+均使用这一远端快照；ignored 缓存继续保留，若基线切换会覆盖缓存则拒绝执行。
+fetch 失败或远端分支缺失时准备失败，不用旧基线继续执行，也不占用或隔离干净的空闲位置。
+已占用的 Flow workspace 和 REVISION 继续复用原绑定，不重新同步或切换，以保留进行中的工作。
 
 每个 worker 按仓库维护执行位置池：优先复用原 Flow 绑定和空闲完整副本，全部占用时增加临时
 Git worktree。`FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2` 设置每仓库总上限（正整数、最小 1，

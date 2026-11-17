@@ -883,3 +883,16 @@ installation token 做 GitHub clone/push/PR 写入验收。PR 保持 draft；独
   丢 ACK 重连 **1 failed**。三组均捕获预期回归；不修改产品文件，不保留临时测试。
   日志为本地 `.amp/in/artifacts/worker-cancel-tests-trim-{targeted,pytest,static,mutations}.log`。
   本轮无新增产品机制，无需增加复杂性消融；上述检查仅验证保留测试的故障敏感性。
+
+### [012] — 2026-11-17 — 新分配默认使用最新远端基线
+
+- 按 #180 的修订要求，本条取代初始计划中“已有 seed 不 fetch”和“新任务仅对齐本地基线”
+  的限制；每次新分配完整副本或临时 worktree 前，使用当前 assignment 凭据 fetch
+  任务 remote 的 `base_branch`，并固定本次取得的提交。首次原子 clone 不额外重复 fetch。
+- 已有 seed 仅更新 Git 对象库的私有 `refs/flowtool/base`，不移动 checkout、本地分支、
+  remote-tracking refs 或 jj bookmarks；Git 与 colocated/non-colocated jj 完整副本均可使用
+  远端快照。复用工作区继续保留 ignored 缓存，缓存冲突和脏状态仍明确拒绝。
+- fetch 在登记新 allocation 前完成；远端不可达或分支缺失时不回退旧提交，也不隔离干净
+  的空闲位置。原 Flow 仍持有绑定时直接复用，REVISION 不刷新，以保留进行中的工作。
+- 回归覆盖新副本、复用副本、新建与回收后的 worktree、远端基线改写、非默认 remote/分支、
+  Git/jj seed 状态保护、缓存保护与 fetch 失败后重试；旧实现下新增刷新场景 **5 failed**。

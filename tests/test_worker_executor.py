@@ -93,6 +93,7 @@ def initial_workspace(tmp_path):
     (target / "AGENTS.md").write_text("Run tests.")
     _git("add", "AGENTS.md", cwd=target)
     _git("commit", "-m", "conventions", cwd=target)
+    _git("push", "origin", "main", cwd=target)
     journal = WorkerSession(tmp_path)
     journal.record_received(_assignment())
     journal.record_started()

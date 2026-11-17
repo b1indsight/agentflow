@@ -108,20 +108,44 @@ async def filesystem_operation[**P, T](
 
 async def ensure_seed(
     seed: Path, repository: str, base_branch: str, remote: str, push_token: SecretStr | None,
-) -> None:
-    """Atomically clone only a missing/empty seed; preserve every existing repository.
+) -> str:
+    """Return the current remote baseline, cloning a missing seed atomically.
 
-    Existing seeds may contain operator-provided Git/jj state. Bootstrap deliberately does
-    not refresh them: new allocations use their local base branch, not the remote's latest
-    commit. Updating that baseline is a separate operation from workspace allocation.
+    Fetch into a private Git ref so seed checkouts, local branches and jj bookmarks stay
+    intact. A failed refresh never returns an older cached baseline.
     """
+    environment = _vcs_environment()
+    environment.update(git_credential_environment(push_token))
     if seed.exists() and any(seed.iterdir()):
-        require_repository(seed)
-        return
+        await require_idle_repository(seed)
+        if (seed / ".jj").exists():
+            source_git = await _required_stdout(
+                "bootstrap", "jj", "--ignore-working-copy", "git", "root", cwd=seed,
+            )
+        else:
+            source_git = await _required_stdout(
+                "bootstrap", "git", "rev-parse", "--absolute-git-dir", cwd=seed,
+            )
+        url = await _required_stdout(
+            "bootstrap", "git", "--git-dir", source_git, "remote", "get-url", remote, cwd=seed,
+        )
+        url = _canonical_remote_url(url, seed)
+        code, _, _ = await _run(
+            "git", "-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false",
+            "-c", "protocol.ext.allow=never", "--git-dir", source_git,
+            "fetch", "--no-tags", "--no-recurse-submodules", "--no-auto-maintenance",
+            "--no-write-fetch-head", "--refmap=", "--", url,
+            f"+refs/heads/{base_branch}:refs/flowtool/base",
+            cwd=seed, stage="bootstrap", environment=environment,
+        )
+        if code:
+            raise VcsVerificationError("bootstrap", f"repository fetch failed with exit {code}")
+        return await _required_stdout(
+            "bootstrap", "git", "--git-dir", source_git, "rev-parse", "--verify",
+            "refs/flowtool/base^{commit}", cwd=seed,
+        )
     temporary = Path(tempfile.mkdtemp(prefix=f"{seed.name}.clone-", dir=seed.parent))
     try:
-        environment = _vcs_environment()
-        environment.update(git_credential_environment(push_token))
         # Clone outside any checkout. Local Git configuration must not rewrite the fixed URL.
         with tempfile.TemporaryDirectory(prefix="flowtool-clone-cwd-") as directory:
             code, _, _ = await _run(
@@ -134,10 +158,11 @@ async def ensure_seed(
         if code:
             raise VcsVerificationError("bootstrap", f"repository clone failed with exit {code}")
         require_repository(temporary)
-        await _required_stdout("bootstrap", "git", "rev-parse", "HEAD", cwd=temporary)
+        revision = await _required_stdout("bootstrap", "git", "rev-parse", "HEAD", cwd=temporary)
         if seed.exists():
             seed.rmdir()  # Fails without touching contents if another process populated it.
         temporary.rename(seed)
+        return revision
     finally:
         if temporary.exists():
             await filesystem_operation(shutil.rmtree, temporary)
@@ -178,15 +203,11 @@ async def clean_repository(repo: Path) -> None:
     await require_idle_repository(repo)
 
 
-async def align_repository(repo: Path, seed: Path, base_branch: str) -> None:
-    """Move only an idle managed copy to the committed seed baseline, preserving caches."""
+async def align_repository(repo: Path, seed: Path, revision: str) -> None:
+    """Move only an idle managed copy to the fetched remote commit, preserving caches."""
     await require_idle_repository(seed)
     await require_idle_repository(repo)
     if (seed / ".jj").exists():
-        revision = await _required_stdout(
-            "workspace", "jj", "log", "-r", base_branch, "--no-graph", "-T", "commit_id",
-            cwd=seed,
-        )
         # Import only committed objects, including non-colocated jj Git stores.
         source_git = await _required_stdout("workspace", "jj", "git", "root", cwd=seed)
         target_git = await _required_stdout("workspace", "jj", "git", "root", cwd=repo)
@@ -214,10 +235,6 @@ async def align_repository(repo: Path, seed: Path, base_branch: str) -> None:
                 raise VcsVerificationError("workspace", "baseline would overwrite retained cache paths")
         await _required_stdout("workspace", "jj", "new", revision, cwd=repo)
     else:
-        revision = await _required_stdout(
-            "workspace", "git", "rev-parse", "--verify", f"refs/heads/{base_branch}^{{commit}}",
-            cwd=seed,
-        )
         await _required_stdout("workspace", "git", "fetch", "--no-tags", str(seed), revision,
                                cwd=repo)
         await _required_stdout("workspace", "git", "checkout", "--no-overwrite-ignore",

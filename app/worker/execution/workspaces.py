@@ -194,6 +194,10 @@ class RepositoryWorkspaces:
                     slot.state = "quarantined"
                     self._write(manifest)
                     raise VcsVerificationError("workspace", "absent workspace unexpectedly exists")
+            seed = self._managed(Path("repos", owner, name))
+            seed.parent.mkdir(parents=True, exist_ok=True)
+            # Network failure must not claim or quarantine an otherwise reusable location.
+            revision = await ensure_seed(seed, repository, base_branch, remote, push_token)
             if slot is None:
                 binding = WorkspaceBinding(repository=repository, slot_id=uuid4().hex,
                                            flow_id=flow_id, generation=1)
@@ -211,9 +215,6 @@ class RepositoryWorkspaces:
             self._write(manifest)
             copying = False
             try:
-                seed = self._managed(Path("repos", owner, name))
-                seed.parent.mkdir(parents=True, exist_ok=True)
-                await ensure_seed(seed, repository, base_branch, remote, push_token)
                 path = self.path(slot.binding)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if slot.kind == "copy":
@@ -225,16 +226,16 @@ class RepositoryWorkspaces:
                         await filesystem_operation(shutil.copytree, seed, path, symlinks=True)
                     if (path / ".git").is_file():
                         raise VcsVerificationError("workspace", "full copy has external Git metadata")
-                    await align_repository(path, seed, base_branch)
+                    await align_repository(path, seed, revision)
                 else:
                     if not (seed / ".git").is_dir():
                         raise VcsVerificationError("workspace", "overflow requires a standalone Git seed")
                     if path.exists():
                         await _required_stdout("workspace", "git", "checkout", "--no-overwrite-ignore",
-                                               "--detach", f"refs/heads/{base_branch}", cwd=path)
+                                               "--detach", revision, cwd=path)
                     else:
                         await _required_stdout("workspace", "git", "worktree", "add", "--detach",
-                                               str(path), f"refs/heads/{base_branch}", cwd=seed)
+                                               str(path), revision, cwd=seed)
                 slot.state = "occupied"
                 self._write(manifest)
                 return slot.binding
