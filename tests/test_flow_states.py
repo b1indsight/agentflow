@@ -148,6 +148,7 @@ def test_resume_does_not_replay_prior_round_feedback_or_cursors(store, branch, r
         submit_grace_seconds=0,
     )
     store.reconcile.feedback_seed(10)
+    store.reconcile.hint(flow.id)
     assert store.reviews.pending(flow.id)
     assert store.reconcile.feedback_get(flow.id, "reviews") is not None
     service.cancel(flow)
@@ -158,6 +159,7 @@ def test_resume_does_not_replay_prior_round_feedback_or_cursors(store, branch, r
     assert store.reviews.pending(flow.id) == []
     assert store.reviews.claim_due() == []
     assert store.reconcile.feedback_get(flow.id, "reviews") is None
+    assert store.reconcile.get(flow.id) is None
     with store.connection() as connection:
         assert connection.execute("SELECT count(*) AS n FROM review_versions").fetchone()["n"] == 1
 

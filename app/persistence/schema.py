@@ -337,16 +337,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_review_active_batch ON review_batches(flow_
 """
 
 RECONCILE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS flow_reconcile (
-  flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
-  next_at TIMESTAMPTZ NOT NULL,
-  last_success_at TIMESTAMPTZ,
-  failures INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT,
-  hint_version BIGINT NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS ix_reconcile_due ON flow_reconcile(next_at,flow_id);
-CREATE TABLE IF NOT EXISTS feedback_reconcile (
+-- One scheduled GitHub check per Flow and source: the PR status ('pull_request') or a feedback source.
+CREATE TABLE IF NOT EXISTS reconcile_checks (
   flow_id BIGINT NOT NULL REFERENCES flows(id),
   source TEXT NOT NULL,
   cursor TEXT,
@@ -355,9 +347,27 @@ CREATE TABLE IF NOT EXISTS feedback_reconcile (
   failures INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   scan_incomplete BOOLEAN NOT NULL DEFAULT FALSE,
+  hint_version BIGINT NOT NULL DEFAULT 0,
   PRIMARY KEY(flow_id,source)
 );
-CREATE INDEX IF NOT EXISTS ix_feedback_reconcile_due ON feedback_reconcile(next_at,flow_id);
+DO $$
+BEGIN
+  IF to_regclass('feedback_reconcile') IS NOT NULL THEN
+    INSERT INTO reconcile_checks(flow_id,source,cursor,next_at,last_success_at,failures,last_error,
+      scan_incomplete)
+    SELECT flow_id,source,cursor,next_at,last_success_at,failures,last_error,scan_incomplete
+      FROM feedback_reconcile ON CONFLICT DO NOTHING;
+    DROP TABLE feedback_reconcile;
+  END IF;
+  IF to_regclass('flow_reconcile') IS NOT NULL THEN
+    INSERT INTO reconcile_checks(flow_id,source,next_at,last_success_at,failures,last_error,
+      hint_version)
+    SELECT flow_id,'pull_request',next_at,last_success_at,failures,last_error,hint_version
+      FROM flow_reconcile ON CONFLICT DO NOTHING;
+    DROP TABLE flow_reconcile;
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS ix_reconcile_checks_due ON reconcile_checks(next_at,flow_id);
 """
 
 PROJECT_SCHEMA = """
