@@ -119,10 +119,13 @@ async def test_direct_feedback_skips_issue_seed_and_stale_issue_check_but_keeps_
         github.pages[source, None] = page(clock, 101 + i)
     reconciler = poller(store, github)
     reconciler.reconcile_store.feedback_seed(64)
+    # The due PR check shares reconcile_checks and must stay with the PR reconciler.
+    reconciler.reconcile_store.hint(flow.id)
     checks = reconciler.reconcile_store.feedback_due(64)
     assert {check.source for check in checks} == {"pr_comments", "reviews", "threads"}
+    assert [check.flow_id for check in reconciler.reconcile_store.due(64)] == [flow.id]
     with store.connection() as connection:
-        connection.execute("INSERT INTO feedback_reconcile(flow_id,source,next_at) VALUES(%s,'issue_comments',%s)",
+        connection.execute("INSERT INTO reconcile_checks(flow_id,source,next_at) VALUES(%s,'issue_comments',%s)",
                            (flow.id, store.now()))
     stale = reconciler.reconcile_store.feedback_get(flow.id, "issue_comments")
     await reconciler._check(stale)

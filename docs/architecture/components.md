@@ -370,7 +370,7 @@ PostgreSQL，例如在构造函数内执行 `self.flows = FlowStore(database)`�
 | `ResultStore` / `results.py` | 冻结结果计划和 effects/receipt 恢复 |
 | `ReviewStore` / `reviews.py` | 反馈版本、批次、审核上下文及线程事实 |
 | `WebhookStore` / `webhooks.py` | Webhook inbox 消费和事件去重审计 |
-| `ReconcileStore` / `reconciliation.py` | PR 与反馈对账进度 |
+| `ReconcileStore` / `reconciliation.py` | `reconcile_checks` 中 PR 状态与反馈来源的对账进度 |
 | `ProjectStore` / `projects.py` | Projects 投影与有类型的局部更新 |
 | `ActivityStore` / `activity.py` | `console_activity` 的追加、Flow 事实读写、时间线快照分页与版本对比 |
 | `ConsoleStore` / `console.py` | 控制台卡片、详情、来源状态与执行记录查询，以及同步请求 |

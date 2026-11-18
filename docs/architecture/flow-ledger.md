@@ -31,7 +31,7 @@ PostgreSQL 仍是唯一运行时数据库。全部表按职责分为五类，每
 | Flow 事实账本 | 只追加的业务事实，Flow 状态的唯一可信来源 | `console_activity` 中 `source='flow'` 且 `kind` 属于[事实目录](#6-事实目录)的行 |
 | Flow 状态表 | 账本的同事务投影，供判断、加锁和约束使用 | `flows` |
 | 业务状态与专用证据 | 各自领域的权威事实，账本只引用其 ID | `attempts`、`jobs`、`flow_deliveries`、`flow_executions`、`flow_tool_calls`、`execution_stops`、`result_applications`、`result_effects`、`events`、`review_versions`、`review_buffers`、`review_batches`、`webhook_inbox`、`issue_flow_owners`、`runtime_settings`、`project_destinations`、`worker_file_links` |
-| 协调数据 | 谁占用什么、处理到哪里、下次何时处理；不是业务事实 | `workers`、`flow_reconcile`、`feedback_reconcile`、`project_projections`、`console_sync`、`console_installation_backoff`，以及 `jobs` 的租约、心跳、准备和核验退避列、`webhook_inbox` 的消费 claim 列 |
+| 协调数据 | 谁占用什么、处理到哪里、下次何时处理；不是业务事实 | `workers`、`reconcile_checks`、`project_projections`、`console_sync`、`console_installation_backoff`，以及 `jobs` 的租约、心跳、准备和核验退避列、`webhook_inbox` 的消费 claim 列 |
 | 展示投影与采集归档 | 只为控制台读取服务，不参与业务判断 | `console_flows`，以及 `console_activity` 中的其余行 |
 
 几点说明：

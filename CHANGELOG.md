@@ -8,6 +8,11 @@
 
 ## Unreleased
 
+- 对账调度表合并：`flow_reconcile` 与 `feedback_reconcile` 合并为 `reconcile_checks`，每行是一个 Flow 在一个
+  来源上的定时检查，PR 状态检查为 `source='pull_request'` 并保留 `hint_version`。启动时自动迁移两张旧表的行
+  （含退避截止、诊断、游标与唤醒计数）后删除旧表，部署前需备份。对账行为、`reconcile_due` 指标与
+  `ReconcileStore` 接口不变。未部署。
+
 - 评审反馈表合并：`review_items` 并入 `review_versions`，GitHub 反馈对象改按全局 `(kind, github_id)`
   识别，唯一索引保证每个对象只有一段历史，版本号最大的一行即当前版本；新对象的 `item_id` 为
   `github_id*4+kind` 编码，升级前的对象保留原 ID，冻结批次、Judge 决策与结果 digest 不变，Worker 协议不变。

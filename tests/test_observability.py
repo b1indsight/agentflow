@@ -282,7 +282,8 @@ def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
                 )
         store.reconcile.hint(flow.id)
         with store.connection() as conn:
-            conn.execute("UPDATE flow_reconcile SET next_at=now()-(%s * interval '1 second') WHERE flow_id=%s",
+            conn.execute("UPDATE reconcile_checks SET next_at=now()-(%s * interval '1 second')"
+                         " WHERE flow_id=%s AND source='pull_request'",
                          (60 if number <= 2 else 3600, flow.id))
     due = store.reconcile.due(100)
     assert len(due) == 2  # Archived PRs still need evidence; merged/no-PR do not.

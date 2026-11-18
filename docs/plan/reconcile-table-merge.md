@@ -1,6 +1,6 @@
 # 对账调度表合并 — 功能记录
 
-**阶段：** 计划，待审批
+**阶段：** 已实现并推送，本地验证通过；代码审查门禁经用户授权跳过；待 CI
 **PR：** [#183](https://github.com/b1indsight/agentflow/pull/183)（draft）
 **Bookmark：** `refactor/reconcile-table-merge`
 **基线：** `main` / `0eaf15b9`（[PR #182](https://github.com/b1indsight/agentflow/pull/182)），2026-11-18。
@@ -208,3 +208,29 @@ PR 检查的 SQL 字面量 `'pull_request'` 集中为模块常量 `PR_SOURCE = "
 - **验证计划调整：** 升级测试同时预置两张旧表各一行，执行两次 `init_db` 后两张旧表都消失，
   `reconcile_checks` 中反馈行（含 `cursor`、`scan_incomplete`）与 PR 行（含 `hint_version`）都原样存在。
 - **已实现的改动：** 无代码改动，仅更新计划。
+
+### [002] — 2026-11-18 — 实施 `reconcile_checks` 合并
+
+- **背景：** 用户批准初始计划及 [001] 的改名修订后开始实施。
+- **已实现的改动：**
+  - `app/persistence/schema.py`：`RECONCILE_SCHEMA` 改为 [001] 中的建表、迁移 DO 块和索引。
+  - `app/persistence/reconciliation.py`：新增 `PR_SOURCE = "pull_request"`；PR 检查的 7 个方法改读写
+    `reconcile_checks` 并按 `source=PR_SOURCE` 过滤，`feedback_due` 增加 `source<>PR_SOURCE`，
+    反馈其余方法只改表名，`reset_round` 合成一条 DELETE。方法名、模型与签名不变。
+  - `app/persistence/metrics.py`：`due_reconcile` 改读 `reconcile_checks` 的 PR 行。
+  - 测试：`tests/test_store.py` 新增升级测试；`tests/test_reconcile_feedback.py` 的直接输入用例增加到期 PR 行，
+    断言两个 `due` 互不混入；`tests/test_flow_states.py` 的恢复用例断言 `reset_round` 也清除 PR 行；
+    `tests/test_observability.py`、`tests/test_workflow_transactions.py` 改用新表名。
+  - 文档：`docs/architecture/flow-ledger.md`、`docs/architecture/components.md`、
+    `docs/operations/github-cursor-development.md`（重置 SQL 只作用于反馈来源）、`CHANGELOG.md`。
+- **与计划的偏差：** 计划写 `due` / `get` 显式列出 `ReconcileState` 的列。实施时发现 `ReconcileState` 使用 pydantic
+  默认的 `extra="ignore"`，`SELECT r.*` 的多余列会被忽略，显式列清单只多一个名字而不增加约束，因此保留 `SELECT *`。
+- **验证：**
+  - 先写测试：升级测试在实现前因 `reconcile_checks` 不存在而失败，实现后通过。
+  - 有效性检查：临时去掉 `feedback_due` 的 `source<>PR_SOURCE` 条件，直接输入用例失败；恢复后通过。
+  - 隔离 PostgreSQL 17 上运行 `test_store.py`、`test_reconcile*.py`、`test_pr_lifecycle.py`、`test_observability.py`、
+    `test_workflow_transactions.py`、`test_flow_states.py`：全部通过。
+  - `uv run ruff check app tests`、`uv run mypy app tests` 通过。
+  - 隔离 PostgreSQL 17 上全量 `uv run pytest --no-testmon tests`：全部通过，1 项按条件跳过。
+- **简化对照：** 本项只合并表、未新增机制，不适用消融实验；唯一新增的过滤条件已由上面的有效性检查证明必要。
+- **审查门禁：** Codex 审查因额度用尽未完成（执行失败，无审查结论）；用户明确授权跳过门禁直接推送。

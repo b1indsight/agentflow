@@ -53,6 +53,46 @@ def test_issue_input_schema_upgrade_preserves_history_and_is_repeatable(postgres
         assert store.flows.get_flow(direct.id).task_content == content
 
 
+def test_legacy_reconcile_tables_merge_once_into_reconcile_checks(store):
+    # Deployed databases hold PR checks and feedback scans in two tables; startup must move both
+    # rows, including backoff, wake-up and cursor progress, before dropping the old tables.
+    flow = store.flows.create_flow("owner/repo", 17, 42)
+    later = store.now() + timedelta(minutes=10)
+    with store.connection() as connection:
+        connection.execute("""
+            DROP TABLE reconcile_checks;
+            CREATE TABLE flow_reconcile (
+              flow_id BIGINT PRIMARY KEY REFERENCES flows(id), next_at TIMESTAMPTZ NOT NULL,
+              last_success_at TIMESTAMPTZ, failures INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+              hint_version BIGINT NOT NULL DEFAULT 0
+            );
+            CREATE TABLE feedback_reconcile (
+              flow_id BIGINT NOT NULL REFERENCES flows(id), source TEXT NOT NULL, cursor TEXT,
+              next_at TIMESTAMPTZ NOT NULL, last_success_at TIMESTAMPTZ,
+              failures INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+              scan_incomplete BOOLEAN NOT NULL DEFAULT FALSE, PRIMARY KEY(flow_id,source)
+            );
+        """)
+        connection.execute(
+            "INSERT INTO flow_reconcile VALUES(%s,%s,NULL,3,'rate_limited',5)", (flow.id, later))
+        connection.execute(
+            "INSERT INTO feedback_reconcile VALUES(%s,'threads','page-2',%s,NULL,1,'boom',TRUE)",
+            (flow.id, later))
+    store.init_db()
+    store.init_db()
+    with store.connection() as connection:
+        remaining = [
+            connection.execute("SELECT to_regclass(%s) AS name", (table,)).fetchone()["name"]
+            for table in ("flow_reconcile", "feedback_reconcile")
+        ]
+    assert remaining == [None, None]
+    pr = store.reconcile.get(flow.id)
+    assert (pr.next_at, pr.failures, pr.last_error, pr.hint_version) == (later, 3, "rate_limited", 5)
+    scan = store.reconcile.feedback_get(flow.id, "threads")
+    assert (scan.cursor, scan.next_at, scan.failures, scan.last_error, scan.scan_incomplete) == (
+        "page-2", later, 1, "boom", True)
+
+
 def test_persisted_timestamps_follow_the_injected_clock(postgresql_url):
     # Recovery simulations inject a clock; newly created work must share their timeline.
     now = datetime(2026, 9, 1, tzinfo=UTC)

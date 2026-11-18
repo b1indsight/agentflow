@@ -9,10 +9,11 @@
 仅数据库内容全部已经采用新评论结构，而需要重新开始反馈扫描时，可在停止 serve 后执行：
 
 ```sql
-UPDATE feedback_reconcile
+UPDATE reconcile_checks
 SET cursor = NULL, next_at = CURRENT_TIMESTAMP, failures = 0,
-    last_error = NULL, scan_incomplete = FALSE, last_success_at = NULL;
+    last_error = NULL, scan_incomplete = FALSE, last_success_at = NULL
+WHERE source <> 'pull_request';
 ```
 
-该操作只重置扫描调度，不删除反馈版本。存在旧评论数组的冻结批次或 result plan 时，
+该操作只重置反馈扫描调度，不影响 PR 状态检查，也不删除反馈版本。存在旧评论数组的冻结批次或 result plan 时，
 重置 cursor 不会转换它们；使用新的开发数据库。本变更未操作现有开发数据。
