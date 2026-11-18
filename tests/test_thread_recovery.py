@@ -348,27 +348,6 @@ async def test_same_second_round_trip_keeps_the_latest_webhook_version(store, th
     assert github.resolves == [] and github.review_requests == []
 
 
-async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread_revision):
-    flow, job, github, subject = thread_revision
-    # C's webhook arrives before B. GraphQL supplies B, so the stored B→C edit must follow it.
-    latest = FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=1, author="alice",
-                            body="Latest", updated_at=human().updated_at)
-    assert not store.reviews.ingest(flow.id, "edit-c", "pull_request_review_comment",
-        {"changes": {"body": {"from": "Intermediate"}}}, latest,
-        settle_seconds=0, submit_grace_seconds=0)
-    github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(human(body="Intermediate"), *github.thread.comments.items[1:]))})
-    await subject.results.apply(job.id)
-    assert [(f.version, f.body) for f in store.reviews.pending(flow.id)] == [(3, "Latest")]
-    with store.connection() as connection:
-        assert connection.execute("SELECT COUNT(*) AS n FROM review_pending_edits").fetchone()["n"] == 0
-    assert not store.reviews.ingest(flow.id, "late-edit-b", "pull_request_review_comment",
-        {"changes": {"body": {"from": human().body}}}, latest.model_copy(update={"body": "Intermediate"}),
-        settle_seconds=0, submit_grace_seconds=0)
-    queued = settle(store)
-    assert len(queued) == 1
-    assert batch_for(store, queued[0]).feedback[0].body == "Latest"
-
-
 async def test_missing_status_label_does_not_suppress_revision_or_reviewers(
     store,
     thread_revision,

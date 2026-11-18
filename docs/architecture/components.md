@@ -142,7 +142,7 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 当前 coordinator 仍有以下边界：
 
 - 上述路径有自动化覆盖，真实 GitHub App/Codex/bub 闭环待验收；
-- 同秒已出现的编辑转换保留待核对，不重复回放；新鲜观察可推进，见 [M4 F1](../plan/m4-feedback-replay.md)；
+- 同秒已出现的编辑转换不重复回放，无法定序的同秒编辑直接丢弃；新鲜观察可推进，见 [M4 F1](../plan/m4-feedback-replay.md)；
 - 冻结上下文尚不包含 CI 状态；
 - cancel 持久化停止意图，worker 取消执行并回收持有的进程组；未知旧执行和未决 effects
   保留绑定，无强制释放。cancel 不撤销已发生的 push/PR/评论；确认停止后保留工作区并归档；
@@ -404,10 +404,9 @@ cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时�
 - `events`：delivery 去重和 payload 审计；
 - `webhook_inbox`：202 前持久接收的原始事件、消费 claim、重试与保留状态；
 - `execution_stops`：绑定到具体执行与 workspace/generation 的停止意图、凭据 digest 与确认状态；
-- `review_items` / `review_versions`：Flow 内稳定反馈身份、不可变版本、独立 relay/consume 时间和已核验 addressed 依据；
-- `review_pending_edits`：同秒乱序编辑的前序正文与原始来源；只有未在历史表示且后继无歧义时原子回放，其余保留待核对；
-- `review_buffers` / `review_batches`：持久 deadline/generation、冻结反馈/上下文/线程快照、批次所有者 job 和未决问题；
-- `review_thread_observations`：远端线程快照与真实 resolved 状态，不以本地 addressed 代替远端确认；
+- `review_versions`：按全局 `(kind, github_id)` 识别的反馈对象的不可变版本，版本号最大的一行为当前版本；
+  含独立 relay/consume 时间和已核验 addressed 依据。新对象的 `item_id` 为 `github_id*4+kind` 编码，升级前的对象保留原 ID；
+- `review_buffers` / `review_batches`：每 Flow 的持久 settle 截止时间、冻结反馈/上下文/线程快照、批次所有者 job 和未决问题；
 - `console_flows`：每 Flow 一行的控制台投影，保存 `console_facts` 视图的快照和两个版本号；
   它的行锁同时是 `console_activity` 分配 `version` 的发布围栏；
 - `console_activity`：按 Flow 递增 `version` 的只追加归档，包含 Flow 事实账本、触发器状态快照、

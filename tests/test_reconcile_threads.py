@@ -72,23 +72,16 @@ async def sweep(store, github):
     )._sweep()
 
 
-def observed(store):
-    with store.connection() as connection:
-        return connection.execute("SELECT snapshot FROM review_thread_observations").fetchone()["snapshot"]
-
-
 async def test_resolved_thread_still_collects_missed_human_input(store, review_flow, thread_page_resources):
     flow, clock = review_flow
     github = GitHub(clock)
     github.pages[None] = page(clock, human(updated_at=clock.now), human(2, is_bot=True), resolved=True)
     await sweep(store, github)
     assert len(store.reviews.pending(flow.id)) == 1
-    assert observed(store)["resolved"] is True
     clock.now += timedelta(seconds=301)
     github.pages[None] = page(clock, human(updated_at=clock.now), human(3, updated_at=clock.now),
                               resolved=False, outdated=True)
     await sweep(store, github)
-    assert observed(store)["resolved"] is False and observed(store)["outdated"] is True
     assert len(store.reviews.pending(flow.id)) == 2
     assert store.reviews.pending(flow.id)[0].version == 1
     assert store.reconcile.feedback_get(flow.id, "threads").last_success_at is not None
@@ -108,7 +101,7 @@ async def test_new_webhook_version_wins_over_slow_thread_page(store, review_flow
     assert items == [] if deleted else items[0].body == "new content"
 
 
-async def test_thread_observations_and_progress_roll_back_together(store, review_flow, monkeypatch, thread_page_resources):
+async def test_thread_input_and_progress_roll_back_together(store, review_flow, monkeypatch, thread_page_resources):
     flow, clock = review_flow
     original = ReconcileStore.feedback_finish
 
@@ -120,8 +113,6 @@ async def test_thread_observations_and_progress_roll_back_together(store, review
     monkeypatch.setattr(ReconcileStore, "feedback_finish", crash)
     await sweep(store, GitHub(clock))
     assert store.reviews.pending(flow.id) == []
-    with store.connection() as connection:
-        assert connection.execute("SELECT count(*) n FROM review_thread_observations").fetchone()["n"] == 0
     assert store.reconcile.feedback_get(flow.id, "threads").last_success_at is None
 
 
@@ -200,7 +191,6 @@ async def test_nested_scan_retries_and_resumes_after_restart(
     restarted = Store(store.database_url, clock=lambda: clock.now)
     try:
         await sweep(restarted, github)
-        assert observed(store)["complete"] is False
         clock.now += timedelta(seconds=6)
         await sweep(restarted, github)
     finally:

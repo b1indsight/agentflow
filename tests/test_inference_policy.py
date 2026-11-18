@@ -166,7 +166,7 @@ def flow(**changes) -> Flow:
 
 
 def batch(**changes) -> ReviewBatch:
-    values = {"id": 9, "flow_id": 3, "attempt_id": 5, "generation": 1, "state": BatchState.READY,
+    values = {"id": 9, "flow_id": 3, "attempt_id": 5, "state": BatchState.READY,
               "trigger": "discussion", "job_id": None, "inference_job_id": 7, "feedback": [],
               "open_points": [], "created_at": NOW} | changes
     return ReviewBatch.model_validate(values)

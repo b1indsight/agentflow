@@ -17,7 +17,7 @@ class ReviewBatchDecision:
 
 
 def decide_review_batch(
-    feedback: Sequence[ReviewFeedback], *, has_unused_signal: bool, force_triage: bool,
+    feedback: Sequence[ReviewFeedback], *, has_unused_signal: bool,
     previous_open_points: Sequence[str],
 ) -> ReviewBatchDecision | None:
     """Preserve feedback order and authorize direct revision only from a current strong signal.
@@ -27,10 +27,9 @@ def decide_review_batch(
     """
     if not any(item.body.strip() for item in feedback):
         return None
-    strong = has_unused_signal and not force_triage
     return ReviewBatchDecision(
-        trigger="strong" if strong else "discussion",
+        trigger="strong" if has_unused_signal else "discussion",
         instruction="\n".join(f"{item.author}: {item.body}" for item in feedback if item.body)
-        if strong else None,
+        if has_unused_signal else None,
         open_points=tuple(dict.fromkeys(previous_open_points)),
     )

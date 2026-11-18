@@ -101,7 +101,6 @@ async def test_three_missing_sources_are_ingested_once_without_webhook_or_strong
     assert {number for number, _, _ in github.calls} == {7, 17}
     with store.connection() as connection:
         assert connection.execute("SELECT count(*) n FROM events").fetchone()["n"] == 0
-        assert connection.execute("SELECT generation FROM review_buffers").fetchone()["generation"] == 3
 
 
 async def test_direct_feedback_skips_issue_seed_and_stale_issue_check_but_keeps_pr_sources(store, feedback_resources):
@@ -208,12 +207,16 @@ async def test_review_edits_and_invalidation_preserve_versions(store, review_flo
     )])
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id)[0].version == 2
+    due = "SELECT due_at FROM review_buffers"
+    with store.connection() as connection:
+        edited_due = connection.execute(due).fetchone()["due_at"]
     clock.now += timedelta(seconds=301)
     github.pages["reviews", None] = page(clock, state="approved")
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id) == []
+    # Invalidation is not new discussion, so it must not move the settle deadline.
     with store.connection() as connection:
-        assert connection.execute("SELECT generation FROM review_buffers").fetchone()["generation"] == 2
+        assert connection.execute(due).fetchone()["due_at"] == edited_due
 
 
 @pytest.mark.parametrize("field,value", [("is_bot", True), ("body", "/flow stop"),
@@ -284,21 +287,6 @@ async def test_observed_review_then_authorized_submission_preserves_request_chan
     assert store.reviews.pending(flow.id)[0].signal == "request_changes"
     clock.now += timedelta(seconds=16)
     assert settle(store)[0].kind.value == "revision"
-
-
-async def test_polling_missing_predecessor_applies_the_queued_successor(store, review_flow, feedback_resources):
-    flow, clock = review_flow
-    ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="A"))
-    github = GitHub(clock)
-    github.pages["issue_comments", None] = Batch(items=[page(clock).items[0].model_copy(update={"body": "B"})])
-
-    def arriving():
-        store.reviews.ingest(flow.id, "b-c", "issue_comment", {"changes": {"body": {"from": "B"}}},
-            feedback(clock, kind=ReviewItemKind.CONVERSATION, body="C"), settle_seconds=75, submit_grace_seconds=15)
-
-    github.before_return = arriving
-    await poller(store, github)._sweep()
-    assert store.reviews.pending(flow.id)[0].body == "C"
 
 
 async def test_edit_to_command_supersedes_feedback_and_later_edit_recovers(store, review_flow, feedback_resources):

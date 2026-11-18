@@ -36,6 +36,11 @@ from app.persistence.jobs import JobStore
 from app.persistence.repository import Repository
 from app.persistence.webhooks import WebhookStore
 
+# A feedback object's current version is its highest one.
+_CURRENT = ("NOT EXISTS (SELECT 1 FROM review_versions n"
+            " WHERE n.kind=v.kind AND n.github_id=v.github_id AND n.version>v.version)")
+_KIND_CODES = {ReviewItemKind.REVIEW_BODY: 1, ReviewItemKind.INLINE: 2, ReviewItemKind.CONVERSATION: 3}
+
 
 class ReviewStore(Repository):
     """Use the database clock and explicit transaction views; never hold locks across I/O."""
@@ -84,14 +89,12 @@ class ReviewStore(Repository):
                         return False
             previous_body = ((payload.get("changes") or {}).get("body") or {}).get("from")
             if not ReviewStore(tx)._append_version(
-                flow_id,
                 flow.current_attempt_id,
                 delivery_id,
                 update,
                 previous_body=previous_body,
             ):
                 return False
-            ReviewStore(tx)._reconcile_edits(flow_id, update)
             # Invalidating old content adds no discussion and must not wake a waiting batch.
             if update.deleted or delivery.state is DeliveryState.CLOSED:
                 return True
@@ -121,7 +124,6 @@ class ReviewStore(Repository):
 
     def _append_version(
         self,
-        flow_id: int,
         attempt_id: int,
         delivery_id: str | None,
         update: FeedbackUpdate,
@@ -130,10 +132,9 @@ class ReviewStore(Repository):
     ) -> bool:
         with self._db.connection() as connection:
             row = connection.execute(
-                "SELECT i.id,i.version,i.observed_at,v.content,v.source_delivery FROM review_items i JOIN review_versions v"
-                " ON v.item_id=i.id AND v.version=i.version"
-                " WHERE i.flow_id=%s AND i.kind=%s AND i.github_id=%s",
-                (flow_id, update.kind, update.github_id),
+                "SELECT item_id,version,observed_at,content,source_delivery FROM review_versions"
+                " WHERE kind=%s AND github_id=%s ORDER BY version DESC LIMIT 1",
+                (update.kind, update.github_id),
             ).fetchone()
             if row is not None:
                 old = FeedbackUpdate.model_validate(row["content"])
@@ -151,47 +152,29 @@ class ReviewStore(Repository):
                     and (
                         previous_body != old.body
                         or (delivery_id is not None and previous_body is not None
-                            and (self._edit_seen(row["id"], previous_body, update)
-                                 or self._competing_edit(row["id"], previous_body, update)))
+                            and self._edit_seen(row["item_id"], previous_body, update))
                     )
                 ):
-                    # Missing predecessors and already represented same-second transitions are
-                    # retained for diagnosis. Only a fresh observation can disambiguate a repeat.
-                    if previous_body is not None and delivery_id is not None:
-                        connection.execute(
-                            "INSERT INTO review_pending_edits"
-                            " (source_delivery,item_id,attempt_id,previous_body,updated_at,content)"
-                            " VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                            (delivery_id, row["id"], attempt_id, previous_body,
-                             update.updated_at, Jsonb(update.model_dump(mode="json") | {"inert": update.inert})),
-                        )
+                    # A same-second webhook without its stored predecessor cannot be ordered.
+                    # Drop it; the next remote observation supplies GitHub's actual content.
                     return False
                 content_fields = {"updated_at", "submitted"}
                 if (old.inert == update.inert and old.model_dump(exclude=content_fields)
                         == update.model_dump(exclude=content_fields)):
                     connection.execute(
-                        "UPDATE review_items SET observed_at=%s WHERE id=%s",
-                        (update.updated_at, row["id"]),
+                        "UPDATE review_versions SET observed_at=%s WHERE item_id=%s AND version=%s",
+                        (update.updated_at, row["item_id"], row["version"]),
                     )
                     return False
-                item_id, version = row["id"], row["version"] + 1
-                connection.execute(
-                    "UPDATE review_items SET version=%s,observed_at=%s WHERE id=%s",
-                    (version, update.updated_at, item_id),
-                )
+                item_id, version = row["item_id"], row["version"] + 1
             else:
-                item = connection.execute(
-                    "INSERT INTO review_items(flow_id,kind,github_id,version,observed_at)"
-                    " VALUES(%s,%s,%s,1,%s)"
-                    " RETURNING id",
-                    (flow_id, update.kind, update.github_id, update.updated_at),
-                ).fetchone()
-                assert item is not None
-                item_id, version = item["id"], 1
+                # Remainders 1..3 keep kinds apart, since GitHub numbers each kind separately.
+                item_id, version = update.github_id * 4 + _KIND_CODES[update.kind], 1
             connection.execute(
-                "INSERT INTO review_versions(item_id,version,attempt_id,source_delivery,content)"
-                " VALUES(%s,%s,%s,%s,%s)",
-                (item_id, version, attempt_id, delivery_id, Jsonb(update.model_dump(mode="json") | {"inert": update.inert})),
+                "INSERT INTO review_versions(item_id,version,kind,github_id,observed_at,"
+                "attempt_id,source_delivery,content) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (item_id, version, update.kind, update.github_id, update.updated_at, attempt_id,
+                 delivery_id, Jsonb(update.model_dump(mode="json") | {"inert": update.inert})),
             )
             return True
 
@@ -212,58 +195,6 @@ class ReviewStore(Repository):
                 (item_id, update.updated_at, update.body, previous_body),
             ).fetchone() is not None
 
-    def _competing_edit(self, item_id: int, previous_body: str, update: FeedbackUpdate) -> bool:
-        """An incoming webhook has no ordering advantage over a queued alternative."""
-        with self._db.connection() as connection:
-            candidates = connection.execute(
-                "SELECT content FROM review_pending_edits WHERE item_id=%s"
-                " AND previous_body=%s AND updated_at=%s",
-                (item_id, previous_body, update.updated_at),
-            ).fetchall()
-        return any(candidate["content"]["body"] != update.body and not self._edit_seen(
-            item_id, previous_body, FeedbackUpdate.model_validate(candidate["content"]),
-        ) for candidate in candidates)
-
-    def _reconcile_edits(self, flow_id: int, update: FeedbackUpdate) -> bool:
-        """Replay a durable same-second edit chain as predecessors arrive, in the ingest transaction."""
-        changed = False
-        with self._db.connection() as connection:
-            while True:
-                row = connection.execute(
-                    "SELECT i.id,i.observed_at,v.content FROM review_items i JOIN review_versions v"
-                    " ON v.item_id=i.id AND v.version=i.version"
-                    " WHERE i.flow_id=%s AND i.kind=%s AND i.github_id=%s",
-                    (flow_id, update.kind, update.github_id),
-                ).fetchone()
-                assert row is not None
-                current = FeedbackUpdate.model_validate(row["content"])
-                connection.execute(
-                    "DELETE FROM review_pending_edits WHERE item_id=%s AND (updated_at<%s OR %s)",
-                    (row["id"], row["observed_at"], current.deleted),
-                )
-                candidates = connection.execute(
-                    "SELECT * FROM review_pending_edits WHERE item_id=%s"
-                    " AND updated_at=%s AND previous_body=%s ORDER BY source_delivery",
-                    (row["id"], row["observed_at"], current.body),
-                ).fetchall()
-                candidates = [p for p in candidates if not self._edit_seen(
-                    row["id"], p["previous_body"], FeedbackUpdate.model_validate(p["content"]),
-                )]
-                # Competing successors have no provable ordering. Keep both pending until a
-                # fresh remote snapshot supplies a version; delivery IDs are not a clock.
-                if not candidates or len({p["content"]["body"] for p in candidates}) != 1:
-                    return changed
-                pending = candidates[0]
-                connection.execute(
-                    "DELETE FROM review_pending_edits WHERE source_delivery=%s",
-                    (pending["source_delivery"],),
-                )
-                changed |= self._append_version(
-                    flow_id, pending["attempt_id"], pending["source_delivery"],
-                    FeedbackUpdate.model_validate(pending["content"]),
-                    previous_body=pending["previous_body"],
-                )
-
     def observation_boundary(self) -> int:
         """Freeze under the Flow lock before remote I/O, including already consumed versions."""
         with self._db.connection() as connection:
@@ -280,9 +211,9 @@ class ReviewStore(Repository):
         with self._db.connection() as connection:
             for update in updates:
                 row = connection.execute(
-                    "SELECT v.content,v.observation_seq FROM review_items i JOIN review_versions v"
-                    " ON i.id=v.item_id AND i.version=v.version WHERE i.flow_id=%s"
-                    " AND i.kind=%s AND i.github_id=%s", (flow_id, update.kind, update.github_id),
+                    "SELECT content,observation_seq FROM review_versions"
+                    " WHERE kind=%s AND github_id=%s ORDER BY version DESC LIMIT 1",
+                    (update.kind, update.github_id),
                 ).fetchone()
                 if row and row["observation_seq"] > boundary:
                     continue
@@ -291,10 +222,9 @@ class ReviewStore(Repository):
                     # A repeated observation cannot downgrade an authorized webhook signal.
                     update = update.model_copy(update={"signal": old.signal, "submitted": old.submitted})
                 appended = self._append_version(
-                    flow_id, attempt_id, None, update, previous_body=old.body if old else None,
+                    attempt_id, None, update, previous_body=old.body if old else None,
                 )
                 changed |= appended and not (update.deleted or update.inert)
-                changed |= self._reconcile_edits(flow_id, update)
             if changed:
                 self._touch(flow_id, settle_seconds)
 
@@ -303,15 +233,13 @@ class ReviewStore(Repository):
         with self._db.connection() as connection:
             return (
                 connection.execute(
-                    "SELECT 1 FROM review_items i JOIN review_versions v"
-                    " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
+                    f"SELECT 1 FROM review_versions v WHERE {_CURRENT}"
                     " AND v.attempt_id IN (SELECT a.id FROM attempts a JOIN flows f ON f.id=a.flow_id"
-                    " WHERE f.id=i.flow_id AND a.round_no=f.current_round_no)"
+                    " WHERE f.id=%s AND a.round_no=f.current_round_no)"
                     " AND v.consumed_at IS NULL AND v.relayed_at IS NULL"
-                    " AND NOT v.signal_retired"
                     " AND NOT (v.content->>'deleted')::boolean"
                     " AND v.content->>'signal' = 'request_changes'"
-                    " AND (%s::bigint[] IS NULL OR i.id=ANY(%s)) LIMIT 1",
+                    " AND (%s::bigint[] IS NULL OR v.item_id=ANY(%s)) LIMIT 1",
                     (flow_id, ids, ids),
                 ).fetchone()
                 is not None
@@ -320,9 +248,8 @@ class ReviewStore(Repository):
     def _touch(self, flow_id: int, delay: float) -> None:
         with self._db.connection() as connection:
             connection.execute(
-                "INSERT INTO review_buffers(flow_id,generation,due_at) VALUES(%s,1,%s)"
-                " ON CONFLICT(flow_id) DO UPDATE SET generation=review_buffers.generation+1,"
-                " due_at=excluded.due_at",
+                "INSERT INTO review_buffers(flow_id,due_at) VALUES(%s,%s)"
+                " ON CONFLICT(flow_id) DO UPDATE SET due_at=excluded.due_at",
                 (flow_id, self._db.now() + timedelta(seconds=delay)),
             )
 
@@ -330,10 +257,10 @@ class ReviewStore(Repository):
         """Bound batches while reserving one text item; empty reviews retain their authorization."""
         with self._db.connection() as connection:
             rows = connection.execute(
-                "WITH pending AS (SELECT i.id,i.version,v.content,v.relayed_at FROM review_items i JOIN review_versions v"
-                " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
+                "WITH pending AS (SELECT v.item_id AS id,v.version,v.content,v.relayed_at"
+                f" FROM review_versions v WHERE {_CURRENT}"
                 " AND v.attempt_id IN (SELECT a.id FROM attempts a JOIN flows f ON f.id=a.flow_id"
-                " WHERE f.id=i.flow_id AND a.round_no=f.current_round_no)"
+                " WHERE f.id=%s AND a.round_no=f.current_round_no)"
                 " AND v.consumed_at IS NULL AND NOT (v.content->>'deleted')::boolean"
                 " AND NOT COALESCE((v.content->>'inert')::boolean,FALSE)), first_text AS ("
                 " SELECT id FROM pending WHERE content->>'body' !~ '^[[:space:]]*$'"
@@ -378,17 +305,17 @@ class ReviewStore(Repository):
         if attempt_id is None or delivery is None or delivery.state is not DeliveryState.OPEN:
             return None
         with self._db.connection() as connection:
-            buffer = connection.execute(
-                "SELECT force_triage FROM review_buffers WHERE flow_id=%s AND due_at<=%s",
+            due = connection.execute(
+                "SELECT 1 FROM review_buffers WHERE flow_id=%s AND due_at<=%s",
                 (flow_id, self._db.now()),
             ).fetchone()
-            if buffer is None or self.has_active_batch(flow_id):
+            if due is None or self.has_active_batch(flow_id):
                 return None
             feedback = sorted(self.pending(flow_id, for_batch=True), key=lambda item: item.item_id)
             has_unused_signal = self._has_unused_signal(flow_id, feedback)
-            connection.execute("UPDATE review_buffers SET due_at=NULL,force_triage=FALSE WHERE flow_id=%s", (flow_id,))
+            connection.execute("UPDATE review_buffers SET due_at=NULL WHERE flow_id=%s", (flow_id,))
             decision = decide_review_batch(
-                feedback, has_unused_signal=has_unused_signal, force_triage=buffer["force_triage"],
+                feedback, has_unused_signal=has_unused_signal,
                 previous_open_points=self.waiting_open_points(flow_id),
             )
             if decision is None:
@@ -430,27 +357,15 @@ class ReviewStore(Repository):
         self, flow: Flow, *, trigger: Literal["strong", "discussion"],
         feedback: list[ReviewFeedback], open_points: Sequence[str],
     ) -> ReviewBatch:
-        """Freeze ordinary revision inputs under the caller's workflow lock.
-
-        Allocate every batch's generation here, so independent inputs cannot collide
-        with a pending GitHub deadline or change which feedback has been consumed.
-        """
+        """Freeze ordinary revision inputs under the caller's workflow lock."""
         assert flow.current_attempt_id is not None
         with self._db.connection() as connection:
-            generation = connection.execute(
-                "INSERT INTO review_buffers(flow_id,generation) VALUES(%s,1)"
-                " ON CONFLICT(flow_id) DO UPDATE SET generation=review_buffers.generation+1"
-                " RETURNING generation",
-                (flow.id,),
-            ).fetchone()
-            assert generation is not None
             row = connection.execute(
-                "INSERT INTO review_batches(flow_id,attempt_id,generation,state,trigger,feedback,"
-                " open_points,created_at) VALUES(%s,%s,%s,'ready',%s,%s,%s,%s) RETURNING id",
+                "INSERT INTO review_batches(flow_id,attempt_id,state,trigger,feedback,"
+                " open_points,created_at) VALUES(%s,%s,'ready',%s,%s,%s,%s) RETURNING id",
                 (
                     flow.id,
                     flow.current_attempt_id,
-                    generation["generation"],
                     trigger,
                     Jsonb([f.model_dump(mode="json") for f in feedback]),
                     Jsonb(list(open_points)),
@@ -529,9 +444,9 @@ class ReviewStore(Repository):
         """Only current versions addressed by verified deliveries may cover later thread checks."""
         with self._db.connection() as connection:
             rows = connection.execute(
-                "SELECT i.id,i.version,v.content FROM review_items i JOIN review_versions v"
-                " ON v.item_id=i.id AND v.version=i.version WHERE i.flow_id=%s"
-                " AND v.attempt_id=%s AND v.addressed_sha IS NOT NULL",
+                "SELECT v.item_id AS id,v.version,v.content FROM review_versions v"
+                " JOIN attempts a ON a.id=v.attempt_id AND a.flow_id=%s"
+                f" WHERE {_CURRENT} AND v.attempt_id=%s AND v.addressed_sha IS NOT NULL",
                 (flow_id, attempt_id),
             ).fetchall()
         return [ReviewFeedback(item_id=r["id"], version=r["version"], **r["content"]) for r in rows]
@@ -554,7 +469,7 @@ class ReviewStore(Repository):
         self, flow_id: int, snapshot: ReviewThreads, baseline: list[ReviewFeedback],
         *, boundary: int | None = None, settle_seconds: float = 0,
     ) -> None:
-        """Persist remote facts and missing human input without consuming or reviving old versions.
+        """Ingest missing human thread input without consuming or reviving old versions.
 
         Runs under the caller's workflow lock. Even manually resolved threads can contain new input.
         Observations never manufacture an addressed or remote-resolution receipt from observed flags.
@@ -570,22 +485,13 @@ class ReviewStore(Repository):
         frozen = {(f.item_id, f.version) for f in baseline if f.kind is ReviewItemKind.INLINE}
         with self._db.connection() as connection:
             for thread in snapshot.threads:
-                connection.execute(
-                    "INSERT INTO review_thread_observations VALUES(%s,%s,%s,%s)"
-                    " ON CONFLICT(flow_id,thread_id) DO UPDATE SET fetched_at=EXCLUDED.fetched_at,"
-                    " snapshot=EXCLUDED.snapshot WHERE review_thread_observations.fetched_at"
-                    " <= EXCLUDED.fetched_at",
-                    (flow_id, thread.thread_id, snapshot.fetched_at,
-                     Jsonb(thread.model_dump(mode="json", exclude_unset=True))),
-                )
                 for comment in thread.comments.items:
                     if comment.is_bot:
                         continue
                     row = connection.execute(
-                        "SELECT i.id,i.version,i.observed_at,v.content,v.observation_seq"
-                        " FROM review_items i JOIN review_versions v"
-                        " ON i.id=v.item_id AND i.version=v.version WHERE i.flow_id=%s"
-                        " AND i.kind='inline' AND i.github_id=%s", (flow_id, comment.github_id),
+                        "SELECT item_id,version,observed_at,content,observation_seq FROM review_versions"
+                        " WHERE kind='inline' AND github_id=%s ORDER BY version DESC LIMIT 1",
+                        (comment.github_id,),
                     ).fetchone()
                     if row and boundary is not None and row["observation_seq"] > boundary:
                         continue
@@ -593,11 +499,10 @@ class ReviewStore(Repository):
                     if old and (old.body, old.author, old.updated_at) == (
                         comment.body, comment.author, comment.updated_at,
                     ):
-                        # Thread metadata is stored above; enriching it is not new reviewer input.
-                        changed |= self._reconcile_edits(flow_id, old)
+                        # Thread metadata alone is not new reviewer input.
                         continue
                     if (row and boundary is None and row["observed_at"] == comment.updated_at
-                            and (row["id"], row["version"]) not in frozen):
+                            and (row["item_id"], row["version"]) not in frozen):
                         # A webhook may be ahead of an eventually consistent GraphQL read in the
                         # same timestamp tick. Only advance the frozen version, never undo a newer one.
                         continue
@@ -609,10 +514,9 @@ class ReviewStore(Repository):
                         signal=old.signal if old else "discussion",
                     )
                     changed |= self._append_version(
-                        flow_id, flow.current_attempt_id, None, update,
+                        flow.current_attempt_id, None, update,
                         previous_body=old.body if old else None,
                     )
-                    changed |= self._reconcile_edits(flow_id, update)
             if changed:
                 self._touch(flow_id, settle_seconds)
 
@@ -733,11 +637,11 @@ class ReviewStore(Repository):
             )
             # Completing one bounded batch must expose omitted, never-relayed feedback.
             unseen = connection.execute(
-                "SELECT 1 FROM review_items i JOIN review_versions v ON v.item_id=i.id AND v.version=i.version"
-                " WHERE i.flow_id=%s AND v.consumed_at IS NULL AND v.relayed_at IS NULL"
+                "SELECT 1 FROM review_versions v JOIN attempts a ON a.id=v.attempt_id AND a.flow_id=%s"
+                f" WHERE {_CURRENT} AND v.consumed_at IS NULL AND v.relayed_at IS NULL"
                 " AND NOT (v.content->>'deleted')::boolean AND NOT COALESCE((v.content->>'inert')::boolean,FALSE)"
                 " AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(%s) AS seen(item_id bigint,version integer)"
-                " WHERE seen.item_id=i.id AND seen.version=i.version) LIMIT 1",
+                " WHERE seen.item_id=v.item_id AND seen.version=v.version) LIMIT 1",
                 (batch.flow_id, Jsonb([item.model_dump(mode="json") for item in batch.feedback])),
             ).fetchone()
             if unseen:
