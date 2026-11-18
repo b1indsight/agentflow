@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`reconcile-table-merge.md`](reconcile-table-merge.md) — 计划待审批：`flow_reconcile` 与 `feedback_reconcile` 合并为 `reconcile_checks`，PR 检查为 `source='pull_request'` 的一行并保留 `hint_version`；启动时迁移现有行，对账行为与指标不变。
+
 - [`review-version-merge.md`](review-version-merge.md) — [PR #182](https://github.com/b1indsight/agentflow/pull/182)，已实现并通过本地全量回归，未部署：`review_items` 并入 `review_versions`，GitHub 对象按 `(kind, github_id)` 全局识别，新对象的 `item_id` 由其编码生成；删除 `review_pending_edits` 与无读取方的 `review_thread_observations`。冻结的 `(item_id, version)` 与 Worker 协议不变。
 
 - [`workflow-job-kinds.md`](workflow-job-kinds.md) — [PR #175](https://github.com/b1indsight/agentflow/pull/175)：INITIAL、REVISION、ARCHIVE 已各自拥有任务准备和结果计划构造；保留公共事务、恢复及派发屏障，`retry` 保留共同生命周期检查。验证、简化比较与交付状态见功能记录及 PR。
