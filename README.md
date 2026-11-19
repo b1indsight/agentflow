@@ -407,7 +407,7 @@ Control 本地归档通知使用 ResultInbox **v2**。
 模型选择随 assignment 下发，仅供新会话 start 使用；升级前须 drain，server/worker 成组升级。
 INITIAL/REVISION 使用字符串 `task_content`，Issue 在准备时由最新标题与正文拼接；server/worker 必须成组升级，不能混跑旧协议。
 现有六态库启动会幂等新增 `flows.task_content`（TEXT）和可空的 `title` / `title_job_id`、允许 NULL Issue，并校验两种输入恰好存在一种。
-新任务从同一次联合推理读取 `title` 和 `branch_slug`，实际分支沿用 `flow_deliveries.branch` 保存，不新增分支列、回填或占名索引。已有 delivery 保留实际分支，resume 从该分支派生轮次名。首次派发前发现远端同名分支会失败，不自动接管或添加数字后缀；检查到 push 之间仍可能发生并发重名。升级前须让在途准备和推理结果收敛。
+新任务从同一次联合推理读取 `title` 和 `branch_slug`，实际分支由 `flows.delivery_branch` 保存，不按名称占用分支。已有 delivery 保留实际分支，resume 从该分支派生轮次名。首次派发前发现远端同名分支会失败，不自动接管或添加数字后缀；检查到 push 之间仍可能发生并发重名。升级前须让在途准备和推理结果收敛。
 首次创建直接任务后，旧程序无法读取这些记录，即使任务已归档也不能直接降级；应前向修复或按备份整体恢复。
 `workers` 使用 `(worker_id, workspace)` 复合主键；旧单行 worker schema 启动时明确拒绝，
 须在停写、备份后核对真实 worker-root 身份并显式迁移，不自动生成或猜造 workspace。

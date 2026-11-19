@@ -17,8 +17,9 @@ from app.controler.events.webhooks import WebhookConsumer
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
+from app.persistence.metrics import read_snapshot
 from app.persistence.store import Store
-from app.persistence.webhooks import WebhookStore
+from app.persistence.webhooks import DeliveryConflict, WebhookStore
 from app.plugins import get_plugin_manager
 from app.plugins.hookspecs import hookimpl
 from tests.github import RecordingGitHub
@@ -157,7 +158,7 @@ def test_failure_after_event_reservation_rolls_back_business_and_replays(store, 
     assert inbox.list()[0].error_code == "RuntimeError"
     monkeypatch.setattr(ControlService, "create_flow", trigger)
     with store.connection() as conn:
-        conn.execute("UPDATE webhook_inbox SET next_at=%s", (store.now(),))
+        conn.execute("UPDATE events SET next_at=%s WHERE state='pending'", (store.now(),))
     consumer(store).sweep()
     assert store.webhooks.event_seen("one")
     assert store.flows.get_active_flow("owner/repo", 7) is not None
@@ -205,7 +206,7 @@ def test_poison_delivery_does_not_block_following_event_and_can_retry(store, mon
     receive(inbox, "good", following)
     for _ in range(10):
         with store.connection() as conn:
-            conn.execute("UPDATE webhook_inbox SET next_at=%s WHERE delivery_id='bad'", (store.now(),))
+            conn.execute("UPDATE events SET next_at=%s WHERE delivery_id='bad'", (store.now(),))
         consumer(store).sweep()
     rows = {row.delivery_id: row for row in inbox.list()}
     assert rows["bad"].state == "blocked" and rows["bad"].attempts == 10
@@ -274,7 +275,7 @@ def test_cleanup_preserves_pending_and_dedup_identity(store):
     consumer(store).sweep()
     receive(inbox, "pending", payload(8))
     with store.connection() as conn:
-        conn.execute("UPDATE webhook_inbox SET received_at=%s, processed_at=%s WHERE delivery_id='one'",
+        conn.execute("UPDATE events SET received_at=%s, processed_at=%s WHERE delivery_id='one'",
                      (store.now()-timedelta(days=8), store.now()-timedelta(days=8)))
     inbox.cleanup()
     rows = {row.delivery_id: row for row in inbox.list()}
@@ -282,6 +283,68 @@ def test_cleanup_preserves_pending_and_dedup_identity(store):
     assert rows["pending"].payload is not None
     receive(inbox)
     assert consumer(store).sweep() == 1  # only the pending second Issue
+
+
+def test_receipt_expiration_keeps_only_business_registrations(store, postgresql_url):
+    # An ignored webhook and one registered directly both complete; only the latter
+    # must suppress business processing if GitHub redelivers after receipt expiry.
+    inbox = store.webhooks
+    now = store.now()
+    store._db._clock = lambda: now
+    assert inbox.record_event("registered", "issues", None, payload())
+    assert not inbox.list() and inbox.claim() is None
+    assert not any(s.family == "inbox" for s in read_snapshot(postgresql_url).samples)
+    receive(inbox, "ignored")
+    receive(inbox, "registered")
+    now += timedelta(days=91)  # An old receipt with recent completion is not expired.
+    for name in ("ignored", "registered"):
+        item = inbox.claim()
+        assert item.delivery_id == name and inbox.complete(item)
+    inbox.cleanup()
+    assert len(inbox.list()) == 2
+    assert not inbox.event_seen("ignored")
+    now += timedelta(days=8)
+    inbox.cleanup()
+    assert all(row.payload is None for row in inbox.list())
+    with pytest.raises(DeliveryConflict):
+        receive(inbox, "registered", payload(9))
+    with pytest.raises(DeliveryConflict):
+        inbox.receive("registered", "other", payload(), inbox.list()[0].body_digest)
+    now += timedelta(days=83)
+    inbox.cleanup()
+    assert not inbox.list()
+    with store.connection() as conn:
+        assert conn.execute("SELECT delivery_id, payload FROM events").fetchall() == [
+            {"delivery_id": "registered", "payload": None},
+        ]
+    receive(inbox, "first")
+    receive(inbox, "registered")
+    first = inbox.claim()
+    assert first.delivery_id == "first" and inbox.complete(first)
+    assert consumer(store).sweep() == 1 and inbox.event_seen("registered")
+    assert store.flows.get_active_flow("owner/repo", 7) is None
+
+
+def test_concurrent_claim_skips_locked_repository_not_just_locked_row(store):
+    # A second consumer may pass an uncommitted claim to run an unrelated repo,
+    # but may not skip that claim to take a later webhook in the same repo.
+    inbox = store.webhooks
+    now = store.now()
+    store._db._clock = lambda: now
+    receive(inbox, "head")
+    receive(inbox, "tail")
+    receive(inbox, "other", {"repository": {"full_name": "owner/other"}})
+    with store.transaction() as first:
+        old = first.webhooks.claim()
+        assert old.delivery_id == "head"
+        other = inbox.claim()
+        assert other.delivery_id == "other" and inbox.complete(other)
+        assert inbox.claim() is None
+    now += timedelta(seconds=61)
+    current = inbox.claim()
+    assert current.delivery_id == old.delivery_id and current.claim_token != old.claim_token
+    assert not inbox.lock(old) and not inbox.complete(old)
+    assert inbox.complete(current) and inbox.claim().delivery_id == "tail"
 
 
 def test_concurrent_duplicate_receipts_are_consumed_once(store):
@@ -383,7 +446,7 @@ def test_all_business_routes_rollback_with_receipt(store, monkeypatch, event, ac
     assert not store.reviews.pending(flow.id)
     assert observed == []
     with store.connection() as conn:
-        conn.execute("UPDATE webhook_inbox SET next_at=%s", (store.now(),))
+        conn.execute("UPDATE events SET next_at=%s WHERE state='pending'", (store.now(),))
     worker.sweep()
     assert inbox.list()[0].state == "done"
     assert store.webhooks.event_seen("route")
@@ -425,6 +488,6 @@ def test_retry_cannot_be_overtaken_by_cancellation(store, monkeypatch):
     assert consumer(store).sweep() == 0
     monkeypatch.setattr(ControlService, 'create_flow', trigger)
     with store.connection() as conn:
-        conn.execute("UPDATE webhook_inbox SET next_at=%s", (store.now(),))
+        conn.execute("UPDATE events SET next_at=%s WHERE state='pending'", (store.now(),))
     assert consumer(store).sweep() == 2
     assert store.flows.get_active_flow('owner/repo', 7) is None

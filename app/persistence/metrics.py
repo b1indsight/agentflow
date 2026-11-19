@@ -11,10 +11,9 @@ from app.persistence.reconciliation import PR_RECONCILE_ELIGIBLE, PR_SOURCE
 SNAPSHOT_SQL = f"""
 WITH due_reconcile AS (
  SELECT r.next_at FROM reconcile_checks r JOIN flows f ON f.id=r.flow_id
- JOIN flow_deliveries d ON d.flow_id=f.id
  WHERE r.source='{PR_SOURCE}' AND r.next_at<=now() AND {PR_RECONCILE_ELIGIBLE}
 ), ages AS (
- SELECT 'inbox' AS queue, min(received_at) AS oldest FROM webhook_inbox WHERE state != 'done'
+ SELECT 'inbox' AS queue, min(received_at) AS oldest FROM events WHERE state != 'done'
  UNION ALL SELECT 'jobs', min(created_at) FROM jobs WHERE state='queued'
  UNION ALL SELECT 'recovery', min(result_received_at) FROM jobs
    WHERE result_received_at IS NOT NULL AND result_applied_at IS NULL
@@ -22,7 +21,7 @@ WITH due_reconcile AS (
  UNION ALL SELECT 'reconcile', min(next_at) FROM due_reconcile
  UNION ALL SELECT 'projects', min(next_at) FROM project_projections WHERE desired_version > synced_version
 )
-SELECT 'inbox' AS family, state AS a, '' AS b, count(*)::float8 AS value FROM webhook_inbox GROUP BY state
+SELECT 'inbox' AS family, state AS a, '' AS b, count(*)::float8 AS value FROM events WHERE state IS NOT NULL GROUP BY state
 UNION ALL SELECT 'jobs', kind, state, count(*) FROM jobs GROUP BY kind,state
 UNION ALL SELECT 'workers', status, '', count(*) FROM workers WHERE repository IS NULL GROUP BY status
 UNION ALL SELECT 'bindings_active', '', '', count(*) FROM flow_executions WHERE released_at IS NULL

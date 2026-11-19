@@ -25,14 +25,17 @@ from app.contracts.protocol import (
 from app.contracts.receipts import ResultInbox, decode_result_inbox
 from app.contracts.result_models import ResultPlan
 from app.domain.models import FlowState
+from app.persistence.activity import ActivityStore
+from app.persistence.console_schema import FLOW_LEDGER_BACKFILL
 from app.persistence.database import Database
+from app.persistence.flows import FlowStore
 from app.persistence.schema import (
     INFERENCE_SCHEMA,
     PROJECT_SCHEMA,
     RECONCILE_SCHEMA,
     RESULT_SCHEMA,
     REVIEW_SCHEMA,
-    WEBHOOK_SCHEMA,
+    SCHEMA,
 )
 from scripts import migrate_flow_states
 from scripts.migrate_flow_states import main, migrate
@@ -120,6 +123,18 @@ CREATE TABLE execution_stops (
  UNIQUE(flow_id,binding_at)
 );
 CREATE INDEX ix_stops_worker ON execution_stops(worker_id) WHERE state!='confirmed';
+"""
+
+LEGACY_WEBHOOK_SCHEMA = """
+CREATE TABLE webhook_inbox (
+ inbox_position BIGINT GENERATED ALWAYS AS IDENTITY, delivery_id TEXT PRIMARY KEY,
+ event_type TEXT NOT NULL, payload JSONB, body_digest TEXT NOT NULL, received_at TIMESTAMPTZ NOT NULL,
+ state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_at TIMESTAMPTZ NOT NULL,
+ claim_token TEXT, claim_expires_at TIMESTAMPTZ, processed_at TIMESTAMPTZ, error_code TEXT
+);
+CREATE INDEX ix_webhook_pending ON webhook_inbox(state,next_at,received_at);
+CREATE INDEX ix_webhook_order ON webhook_inbox
+ ((payload #>> '{repository,full_name}'), inbox_position) WHERE state != 'done';
 """
 
 LEGACY_CONSOLE = """
@@ -242,7 +257,7 @@ def legacy(postgresql_url):
     with psycopg.connect(postgresql_url, autocommit=True, row_factory=dict_row) as connection:
         for schema in (
             LEGACY_SCHEMA,
-            WEBHOOK_SCHEMA,
+            LEGACY_WEBHOOK_SCHEMA,
             LEGACY_STOP_SCHEMA,
             RESULT_SCHEMA,
             REVIEW_SCHEMA,
@@ -453,6 +468,86 @@ def snapshot(connection):
             "WHERE n.nspname=current_schema() AND NOT t.tgisinternal ORDER BY c.relname,t.tgname"
         ).fetchall(),
     }
+
+
+def test_startup_merges_flow_rows_without_publishing_a_transition(postgresql_url):
+    # An older archived Flow can have been resumed and re-archived after its newer sibling.
+    # Preserve the explicit owner and both generations' independent delivery facts.
+    database = Database(postgresql_url)
+    try:
+        with database.transaction() as tx, tx.connection() as c:
+            c.execute(SCHEMA)
+            c.execute(RESULT_SCHEMA)
+            c.execute("""
+                CREATE TABLE issue_flow_owners (
+                  repo text NOT NULL, issue_number integer NOT NULL, flow_id bigint NOT NULL REFERENCES flows(id),
+                  version bigint NOT NULL DEFAULT 1, PRIMARY KEY(repo,issue_number));
+                CREATE TABLE flow_deliveries (
+                  flow_id bigint PRIMARY KEY REFERENCES flows(id), branch text NOT NULL, base_branch text,
+                  state text NOT NULL, pr_number integer, url text, head_sha text, title text, body text,
+                  merged_at timestamptz, merge_commit_sha text, version integer NOT NULL DEFAULT 0,
+                  created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL);
+                INSERT INTO flows(id,repo,issue_number,task_content,title,state,current_round_no,
+                                  archive_reason,archived_at,created_at,updated_at) VALUES
+                  (1,'r',7,NULL,'Task','archived',2,'succeeded','2025-01-04','2024-01-01','2025-01-04'),
+                  (2,'r',7,NULL,NULL,'archived',1,'abandoned','2025-01-02','2024-01-02','2025-01-02'),
+                  (3,'r',NULL,'direct',NULL,'queued',1,NULL,NULL,'2025-01-01','2025-01-01');
+                INSERT INTO issue_flow_owners VALUES ('r',7,1,3);
+                INSERT INTO flow_deliveries VALUES
+                  (1,'r2','main','merged',92,'url','head','PR','body','2025-01-04','sha',8,'2024-03-01','2025-02-01'),
+                  (2,'r1','main','none',NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,'2025-01-01','2025-01-01');
+            """)
+            c.execute(migrate_flow_states.CONSOLE_SCHEMA)
+            ActivityStore(tx).append_flow(
+                1, 1, "archive", occurred_at=datetime(2024, 2, 1, tzinfo=UTC),
+                metadata={"repo": "r", "pr_number": 13, "archive_reason": "succeeded"},
+            )
+            c.execute(FLOW_LEDGER_BACKFILL)
+            before = snapshot(c)
+            facts = c.execute("SELECT * FROM console_facts ORDER BY id").fetchall()
+
+        # An inconsistent owner must roll back DDL and evidence rather than silently disappearing.
+        with database.connection() as c:
+            c.execute("UPDATE issue_flow_owners SET repo='wrong'")
+        with pytest.raises(psycopg.Error, match="issue_flow_owners"):
+            database.init_db()
+        with database.connection() as c:
+            c.execute("UPDATE issue_flow_owners SET repo='r'")
+            assert snapshot(c) == before
+
+        for _ in range(2):
+            database.init_db()
+            assert ActivityStore(database).archived_pr("r", 13) == (1, 1)
+            for flow_id in (1, 2, 3):
+                assert FlowStore(database).verify(flow_id) == {}
+            with database.connection() as c:
+                after = snapshot(c)
+                assert c.execute("SELECT * FROM console_facts ORDER BY id").fetchall() == facts
+                assert c.execute("SELECT id FROM flows WHERE is_issue_owner").fetchall() == [{"id": 1}]
+                for table in ("flow_deliveries", "issue_flow_owners"):
+                    assert c.execute("SELECT to_regclass(%s) AS name", (table,)).fetchone() == {"name": None}
+                for table in ("console_flows", "console_activity", "console_sync"):
+                    assert after["rows"][table] == before["rows"][table]
+                old_flows = {r["data"]["id"]: r["data"] for r in before["rows"]["flows"]}
+                old_deliveries = {r["data"]["flow_id"]: r["data"] for r in before["rows"]["flow_deliveries"]}
+                for row in after["rows"]["flows"]:
+                    merged = row["data"]
+                    old = old_flows[merged["id"]]
+                    assert {key: merged[key] for key in old} == old
+                    delivery_fields = {key.removeprefix("delivery_"): value for key, value in merged.items()
+                                       if key.startswith("delivery_")}
+                    if merged["id"] in old_deliveries:
+                        assert {"flow_id": merged["id"], **delivery_fields} == old_deliveries[merged["id"]]
+                    else:
+                        assert all(value is None for value in delivery_fields.values())
+        with pytest.raises(CheckViolation), database.connection() as c:
+            c.execute("UPDATE flows SET is_issue_owner=true WHERE id=3")
+        with pytest.raises(UniqueViolation), database.connection() as c:
+            c.execute("UPDATE flows SET is_issue_owner=true WHERE id=2")
+        with pytest.raises(CheckViolation), database.connection() as c:
+            c.execute("UPDATE flows SET delivery_head_sha='dangling' WHERE id=3")
+    finally:
+        database.close()
 
 
 def apply_reviewed(connection, url):

@@ -37,6 +37,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -47,8 +48,11 @@ from app.contracts.protocol import ArchiveResult, ArchiveTask, Succeeded, Termin
 from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import EffectRecord, ResultPlan
 from app.persistence.activity import ActivityStore
-from app.persistence.console_schema import CONSOLE_SCHEMA
 from app.persistence.database import Database
+
+# This offline step produces the pre-merge console projection, even when run from
+# a newer checkout. Startup upgrades it only after the separate workspace migration.
+CONSOLE_SCHEMA = Path(__file__).with_name("flow_state_console.sql").read_text(encoding="utf-8")
 
 Row = dict[str, Any]
 REQUIRED_TABLES = {

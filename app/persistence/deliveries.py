@@ -16,6 +16,13 @@ from app.domain.models import (
 from app.persistence.records import required
 from app.persistence.repository import Repository
 
+_DELIVERY = (
+    "id AS flow_id,delivery_branch AS branch,delivery_base_branch AS base_branch,delivery_state AS state,"
+    "delivery_pr_number AS pr_number,delivery_url AS url,delivery_head_sha AS head_sha,delivery_title AS title,"
+    "delivery_body AS body,delivery_merged_at AS merged_at,delivery_merge_commit_sha AS merge_commit_sha,"
+    "delivery_version AS version,delivery_created_at AS created_at,delivery_updated_at AS updated_at"
+)
+
 
 class DeliveryStore(Repository):
     """Flow delivery identity and the idempotent tool-call ledger."""
@@ -27,12 +34,13 @@ class DeliveryStore(Repository):
             connection.cursor(row_factory=class_row(FlowDelivery)) as cursor,
         ):
             row = cursor.execute(
-                "INSERT INTO flow_deliveries(flow_id, branch, state, version, created_at,"
-                " updated_at) VALUES (%s,%s,%s,0,%s,%s)"
-                " ON CONFLICT(flow_id) DO UPDATE SET branch=flow_deliveries.branch"
-                " RETURNING *",
-                (flow_id, branch, DeliveryState.NONE, now, now),
+                "UPDATE flows SET delivery_branch=%s,delivery_state=%s,delivery_version=0,"
+                " delivery_created_at=%s,delivery_updated_at=%s WHERE id=%s AND delivery_branch IS NULL"
+                f" RETURNING {_DELIVERY}",
+                (branch, DeliveryState.NONE, now, now, flow_id),
             ).fetchone()
+            if row is None:
+                row = cursor.execute(f"SELECT {_DELIVERY} FROM flows WHERE id=%s", (flow_id,)).fetchone()
         delivery = required(row)
         if delivery.branch != branch:
             raise ValueError(f"flow {flow_id} is already bound to branch {delivery.branch}")
@@ -44,7 +52,7 @@ class DeliveryStore(Repository):
             connection.cursor(row_factory=class_row(FlowDelivery)) as cursor,
         ):
             return cursor.execute(
-                "SELECT * FROM flow_deliveries WHERE flow_id=%s", (flow_id,)
+                f"SELECT {_DELIVERY} FROM flows WHERE id=%s AND delivery_branch IS NOT NULL", (flow_id,)
             ).fetchone()
 
     def reset_round(self, flow_id: int, branch: str) -> None:
@@ -52,9 +60,11 @@ class DeliveryStore(Repository):
         now = self._db.now()
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE flow_deliveries SET branch=%s,base_branch=NULL,state='none',pr_number=NULL,"
-                " url=NULL,head_sha=NULL,title=NULL,body=NULL,merged_at=NULL,merge_commit_sha=NULL,"
-                " version=version+1,created_at=%s,updated_at=%s WHERE flow_id=%s",
+                "UPDATE flows SET delivery_branch=%s,delivery_base_branch=NULL,delivery_state='none',"
+                " delivery_pr_number=NULL,delivery_url=NULL,delivery_head_sha=NULL,delivery_title=NULL,"
+                " delivery_body=NULL,delivery_merged_at=NULL,delivery_merge_commit_sha=NULL,"
+                " delivery_version=delivery_version+1,delivery_created_at=%s,delivery_updated_at=%s"
+                " WHERE id=%s AND delivery_branch IS NOT NULL",
                 (branch, now, now, flow_id),
             )
 
@@ -62,11 +72,10 @@ class DeliveryStore(Repository):
         delivery.updated_at = self._db.now()
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE flow_deliveries SET branch=%s, base_branch=%s, state=%s,"
-                " pr_number=%s, url=%s, head_sha=%s, title=%s, body=%s,"
-                " merged_at=%s, merge_commit_sha=%s,"
-                " version=%s, updated_at=%s"
-                " WHERE flow_id=%s",
+                "UPDATE flows SET delivery_branch=%s,delivery_base_branch=%s,delivery_state=%s,"
+                " delivery_pr_number=%s,delivery_url=%s,delivery_head_sha=%s,delivery_title=%s,delivery_body=%s,"
+                " delivery_merged_at=%s,delivery_merge_commit_sha=%s,delivery_version=%s,delivery_updated_at=%s"
+                " WHERE id=%s AND delivery_branch IS NOT NULL",
                 (
                     delivery.branch,
                     delivery.base_branch,

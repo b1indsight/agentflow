@@ -47,7 +47,7 @@ async def test_coordinator_rechecks_after_capability_io(store, pending_revision,
                 )
         elif change == "merged":
             with store.connection() as connection:
-                connection.execute("UPDATE flow_deliveries SET state='merged' WHERE flow_id=%s", (flow.id,))
+                connection.execute("UPDATE flows SET delivery_state='merged' WHERE id=%s", (flow.id,))
         else:
             register_worker(store, "worker-a", repo=flow.repo, epoch="new-epoch")
         if signing_fails:

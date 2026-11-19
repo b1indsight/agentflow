@@ -118,7 +118,7 @@ def test_direct_tasks_keep_independent_inputs_through_retry_and_resume(store: St
     assert second is not None and second.task_content is not None
     assert second.task_content == "另一任务\n\n不同内容"
     with store.connection() as connection:
-        owners = connection.execute("SELECT count(*) AS n FROM issue_flow_owners").fetchone()
+        owners = connection.execute("SELECT count(*) AS n FROM flows WHERE is_issue_owner").fetchone()
         assert owners is not None and owners["n"] == 0
     assert store.jobs.list_jobs(first.id)[-1].kind is JobKind.INITIAL
 
@@ -215,12 +215,10 @@ def test_retry_rolls_back_with_real_database(store: Store, monkeypatch, command)
                 ).fetchall()
                 for table in (
                     "flows",
-                    "flow_deliveries",
                     "console_activity",
                     "reconcile_checks",
                     "console_sync",
                     "console_flows",
-                    "issue_flow_owners",
                     "jobs",
                 )
             }

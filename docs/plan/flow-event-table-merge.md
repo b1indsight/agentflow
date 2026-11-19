@@ -1,6 +1,6 @@
 # 三项合表：Issue 归属、当前交付与 Webhook 收件
 
-**状态：待审方案，尚未实施。**
+**状态：已实施，未部署。** [PR #185](https://github.com/b1indsight/agentflow/pull/185)
 
 ## 1. 初始计划
 
@@ -34,3 +34,6 @@
 4. 不支持旧控制端与新 schema 混跑。正式升级前需停写、备份并验证可恢复性；若初始化事务失败则保持旧库，提交后回退须协调停写、恢复快照及旧程序并核对期间数据。本 PR 不操作生产库、不部署。
 
 ## 2. PR 变更记录
+
+- **Flow 归属与交付。** `FlowStore` 与 Projects 读写显式 owner 标记；`DeliveryStore` 只修改 `delivery_*` 列。控制台、分配、评审和对账改读 Flow 行，历史 PR 仍按归档轮次查。启动迁移在替换视图前回填，不发布状态活动；四态离线脚本固定使用该步骤原有的控制台 SQL。用一次性 PostgreSQL 升级旧 schema 并再次启动，`console_facts` 与 `console_activity` 的快照保持一致，旧表不存在。`uv run pytest tests/test_flow_state_migration.py` 另覆盖错配归属回滚、账本重放和全部交付字段。将 Projects 归属查询临时替换为取最大 ID 后，`test_resuming_older_flow_selects_owner_even_after_both_flows_are_archived` 取到 2，预期为 1；保留显式标记。
+- **Webhook 收件与登记。** `WebhookStore` 在同一行分别维护收件租约和业务登记时间。清理时删除未登记的过期收件，已登记的行仅清收件字段。旧库三种组合以及冲突回滚见 `tests/test_webhook_migration.py`。`uv run pytest tests/test_webhook_inbox.py -k receipt_expiration` 验证过期重投不重复创建 Flow；临时用 `state IS DISTINCT FROM 'done'` 判定可登记时重复创建了 Flow，用 `state='done'` 判断已登记时则把已忽略的投递误认成已登记，因此保留独立的 `recorded_at`。沿用原消费者行为：重投可以提示控制台重新同步，业务登记不会重复生效。

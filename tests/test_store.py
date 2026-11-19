@@ -108,10 +108,10 @@ def test_persisted_timestamps_follow_the_injected_clock(postgresql_url):
         store.webhooks.record_event("clock-event", "issues", flow.id, {})
         with store.connection() as connection:
             event = connection.execute(
-                "SELECT processed_at FROM events WHERE delivery_id='clock-event'"
+                "SELECT recorded_at FROM events WHERE delivery_id='clock-event'"
             ).fetchone()
         assert attempt.updated_at == now
-        assert event is not None and event["processed_at"] == now
+        assert event is not None and event["recorded_at"] == now
 
 
 @pytest.mark.parametrize("state,received,applied,blocked", [
