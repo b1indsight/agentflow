@@ -9,6 +9,15 @@ export interface CodingModelSettings {
   amp_effort: string | null;
   revision: number;
 }
+export interface CatalogModel {
+  id: string;
+  displayName: string;
+  efforts: string[];
+}
+export type ModelCatalog = Record<
+  "codex" | "amp",
+  { status: "ok" | "partial" | "unavailable"; models: CatalogModel[] }
+>;
 export interface FlowSummary {
   id: number;
   repo: string;

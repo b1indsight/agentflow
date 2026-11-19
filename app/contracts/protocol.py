@@ -23,6 +23,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.contracts.catalog import CatalogModel
 from app.contracts.conversation import ConversationError, HistoryPage, SessionId
 from app.contracts.files import MAX_FILE_BASE64, FileError, FileId
 from app.domain.context_models import ReviewContext
@@ -41,7 +42,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[26] = 26
+PROTOCOL_VERSION: Literal[27] = 27
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -368,6 +369,16 @@ class ConversationQuery(ToolCall):
     arguments: HistoryArguments
 
 
+class CatalogQuery(ToolCall):
+    method: Literal["worker.model_catalog"]
+
+
+class CatalogResult(ToolResult):
+    method: Literal["worker.model_catalog"]
+    # Null means discovery failed; an empty list is a successful, empty catalog.
+    models: list[CatalogModel] | None = Field(max_length=1024)
+
+
 class FileRegister(ToolCall):
     method: Literal["server.file_register"]
     file_id: FileId
@@ -590,10 +601,11 @@ class FlowToolResponse(ToolResult):
 # the only list of its members; directional parsing and _FIXED_METHODS derive from them.
 type WorkerCalls = (
     Assignment | StopExecution | ConversationQuery | FileQuery | InferenceRequest
-    | RecoveryRejected | RepositoryDemand
+    | RecoveryRejected | RepositoryDemand | CatalogQuery
 )
 type WorkerResults = (
     ExecuteResult | StopResult | ConversationResult | FileResult | InferenceResult | ProvisionResult
+    | CatalogResult
 )
 type ServerCalls = Started | AcceptResultRequest | AcceptStop | FileRegister
 type ServerResults = AcceptResultResponse | StopAccepted | FileRegistered
@@ -663,7 +675,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[26]
+    protocol_version: Literal[27]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -870,7 +882,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[26]
+    protocol_version: Literal[27]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

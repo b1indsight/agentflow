@@ -11,6 +11,8 @@ from app.communication.dispatch import Dispatcher
 from app.communication.session import Session
 from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.contracts.protocol import (
+    CatalogQuery,
+    CatalogResult,
     ConversationQuery,
     ConversationResult,
     FlowToolResponse,
@@ -21,6 +23,7 @@ from app.contracts.protocol import (
     result_header,
 )
 from app.worker.execution.lifecycle import PendingToolCall, WorkerExecution, WorkerProtocolError
+from app.worker.model_catalog import CatalogUnavailable, discover_models
 
 if TYPE_CHECKING:
     from app.worker.runtime import WorkerRuntime
@@ -39,25 +42,43 @@ class WorkerBusinessCallbacks:
         self.session, self.runtime = session, runtime
         self.ready = ready
         self.pending: dict[int, PendingToolCall] = {}
-        self._history: dict[asyncio.Task[ConversationResult], str | None] = {}
+        self._queries: dict[asyncio.Task[ConversationResult | CatalogResult], str | None] = {}
 
     def bind(self, routes: Dispatcher[ServerMessageUnion]) -> None:
         self.routes = routes
         routes.register("worker.history", ConversationQuery, self.on_history)
+        routes.register("worker.model_catalog", CatalogQuery, self.on_catalog)
         routes.before_wait(self.prepare)
 
     async def on_history(self, call: ConversationQuery, message: ServerMessageUnion) -> None:
         """Keep the driver free to receive registration replies while history is prepared."""
-        if len(self._history) >= 2:
-            await self._send_history(ConversationResult(
+        if len(self._queries) >= 2:
+            await self._send_query(ConversationResult(
                 **result_header(call.message_id), method=call.method, error="query_busy",
             ), message.connection_epoch)
             return
         task = asyncio.create_task(self._read_history(call))
-        self._history[task] = message.connection_epoch
-        task.add_done_callback(self._history_completed)
+        self._queries[task] = message.connection_epoch
+        task.add_done_callback(self._query_completed)
 
-    def _history_completed(self, task: asyncio.Task[ConversationResult]) -> None:
+    async def on_catalog(self, call: CatalogQuery, message: ServerMessageUnion) -> None:
+        if not self.ready() or len(self._queries) >= 2:
+            await self._send_query(CatalogResult(**result_header(call.message_id), method=call.method,
+                                                 models=None), message.connection_epoch)
+            return
+        task = asyncio.create_task(self._read_catalog(call))
+        self._queries[task] = message.connection_epoch
+        task.add_done_callback(self._query_completed)
+
+    async def _read_catalog(self, call: CatalogQuery) -> CatalogResult:
+        try:
+            models = await discover_models(self.runtime.settings.coding_agent)
+        except CatalogUnavailable:
+            models = None
+        return CatalogResult(**result_header(call.message_id), method=call.method,
+                             models=models if models is not None and len(models) <= 1024 else None)
+
+    def _query_completed(self, task: asyncio.Task[ConversationResult | CatalogResult]) -> None:
         if not task.cancelled():
             task.exception()
         self.session.wake()
@@ -74,7 +95,7 @@ class WorkerBusinessCallbacks:
                 **result_header(call.message_id), method="worker.history", error=error.code
             )
 
-    async def _send_history(self, result: ConversationResult, epoch: str | None) -> None:
+    async def _send_query(self, result: ConversationResult | CatalogResult, epoch: str | None) -> None:
         await self.session.send(
             WorkerMessage(
                 **message_header(epoch), control=None, payload=[result]
@@ -82,10 +103,10 @@ class WorkerBusinessCallbacks:
         )
 
     async def aclose(self) -> None:
-        for task in self._history:
+        for task in self._queries:
             task.cancel()
-        await asyncio.gather(*self._history, return_exceptions=True)
-        self._history.clear()
+        await asyncio.gather(*self._queries, return_exceptions=True)
+        self._queries.clear()
 
     async def prepare(self) -> None:
         """Reconcile borrowed work between events, without another callback's lifecycle calls.
@@ -95,10 +116,10 @@ class WorkerBusinessCallbacks:
         """
         if self.session.closed:
             return
-        for task in tuple(self._history):
+        for task in tuple(self._queries):
             if task.done():
-                epoch = self._history.pop(task)
-                await self._send_history(task.result(), epoch)
+                epoch = self._queries.pop(task)
+                await self._send_query(task.result(), epoch)
         if not self.ready():
             return
         active_jobs = set()

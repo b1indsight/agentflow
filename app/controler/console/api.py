@@ -8,6 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.contracts.catalog import CatalogGroup
 from app.contracts.console import (
     ActivityPage,
     AppendAgentTaskRequest,
@@ -28,6 +29,7 @@ from app.contracts.console import (
     UpdateSettingsRequest,
 )
 from app.controler.runtime import ServerRuntime
+from app.controler.workers.catalog import read_catalog
 from app.controler.workflow.service import AgentTaskRejected, ControlService, RetryRejected
 from app.domain.models import CodingModelSettings
 from app.github import GitHubError, GitHubErrorKind
@@ -158,6 +160,12 @@ def _require_same_origin_json(request: Request) -> None:
 async def settings(request: Request) -> CodingModelSettings:
     runtime: ServerRuntime = request.app.state.runtime
     return await runtime.console.db(SettingsStore(runtime.database).get)
+
+
+@router.get("/settings/model-catalog")
+async def model_catalog(request: Request) -> dict[str, CatalogGroup]:
+    runtime: ServerRuntime = request.app.state.runtime
+    return await read_catalog(runtime.gateway, runtime.worker_sessions)
 
 
 @router.put("/settings", response_model=CodingModelSettings)

@@ -224,7 +224,7 @@ seed 和默认推理 workspace 不计入。每个 Flow 独占一个 workspace，
 每次 INITIAL、REVISION resume/fallback 都提供本轮 bot `gh` 包装、独立配置和 Git helper，
 不使用个人登录态；token 过期/权限不足即失败，不自动续期或扩权。worker 保持单仓库
 Contents write，PR 通过 MCP `open_pr` 请求 controler 校验后创建。包装不构成 OS 沙箱。
-当前 Codex/Amp 接入均使用 wire26 / journal5；执行结果使用 ResultInbox v1，Control 本地归档通知使用 v2。
+当前 Codex/Amp 接入均使用 wire27 / journal5；执行结果使用 ResultInbox v1，Control 本地归档通知使用 v2。
 serve 与 worker 的协议版本必须匹配。
 同一 PR 来源分支允许外部更新；revise 编码前安全同步 Git/jj，以实际 fetch 的提交作为本轮基线，保留脏文件和未发布提交。旧 BLOCKED Flow 不自动恢复。
 Judge 的 answer/revise 都派发到原 worker；answer 只回答问题，worker 比较本地提交不变，controller 比较目标 PR head 不变。Judge 只接收反馈关联的 PR 信息、线程和引用片段，不读取全 PR diff；详见 [Review 循环](docs/architecture/review-loop.md)。
@@ -326,10 +326,10 @@ Tunnel/Access 必须将 `/console*` 与 `/api/*` 交给同一服务并应用相�
 不要为静态资源增加公开旁路。Webhook 与 Worker 端点继续使用各自原有鉴权。
 
 顶栏“设置”打开 `/console/#settings`，按 code agent 类型保存 server 全局编码默认值：
-Codex 和 Amp 均从预置下拉列表选择模型；Amp 使用 `provider/name` ID，选择也会影响提示词和工具。
+打开设置或刷新模型时，页面从就绪的编码 worker 读取 CLI 目录，按 Codex / Amp 分组，同类模型和对应强度取并集；Amp 使用 `provider/name` ID。
 选择“不指定”时 Codex 沿用原生默认，Amp 新会话使用 `low`。Amp worker 镜像固定 CLI 为
-`0.0.1794672034-g01d6fa`，新会话通过 `--model` 传入具体模型；没有实时模型目录或账号权限探测。
-已有设置不在预置列表中时仍显示并保留，列表不会清空服务器配置。设置在 PostgreSQL 持久化，保存后后续新编码会话生效，无需重启；
+`0.0.1794672034-g01d6fa`，新会话通过 `--model` 传入具体模型。
+部分 worker 未响应时只显示成功查询的目录，并提示目录不完整。已有设置不在目录中时仍显示并保留。设置在 PostgreSQL 持久化，保存后后续新编码会话生效，无需重启；
 不改变运行中的进程、已有会话恢复、独立 inference 或本地 Bub Judge。
 只校验格式，不探测账号权限；模型不可用时保留原生失败，不静默替换。保存冲突需重新读取；
 网络中断导致结果未知时先回读核对，草稿保留，不自动重复提交。API 为 owner-only 的
@@ -400,7 +400,7 @@ M3 F3 及审查修复本地验证（2026-09-08）：真实 PostgreSQL 下 **502 
 响应丢失与重启恢复。Ruff、Mypy 与 sdist/wheel 构建通过；真实 GitHub App/worker 验收仍待执行，
 详见 [F3 审查修复记录](docs/plan/m3-archive-status.md#7-审查修复2026-09-08)。
 
-当前在线协议仅支持 **v26**，正常写入 worker journal **v5**、执行结果 ResultInbox **v1**、workspace manifest **v3**；
+当前在线协议仅支持 **v27**，正常写入 worker journal **v5**、执行结果 ResultInbox **v1**、workspace manifest **v3**；
 Control 本地归档通知使用 ResultInbox **v2**。
 注册独立上报 `coding_agent`，不从 inference 能力推断；编码 worker 必须声明 Codex 或 Amp。
 初始化幂等新增 `runtime_settings` 单行表和 nullable `workers.coding_agent` 列，旧 worker 类型待重新注册。

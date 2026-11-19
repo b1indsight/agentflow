@@ -1,5 +1,5 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
-import type { CodingModelSettings, FlowDetail } from "../types";
+import type { CodingModelSettings, FlowDetail, ModelCatalog } from "../types";
 
 const defaults: CodingModelSettings = {
   codex_model: null,
@@ -10,6 +10,37 @@ const defaults: CodingModelSettings = {
 };
 const artifactRoot =
   process.env.PLAYWRIGHT_ARTIFACT_DIR ?? "../../../.amp/in/artifacts";
+const model = (id: string, efforts: string[], displayName = id) => ({
+  id,
+  displayName,
+  efforts,
+});
+const levels = ["low", "medium", "high", "xhigh", "max"];
+const catalog: ModelCatalog = {
+  codex: {
+    status: "ok",
+    models: [
+      model("gpt-6.1-sol", [...levels, "ultra"], "GPT-6.1 Sol"),
+      model("gpt-6-astra", [...levels, "ultra"]),
+      model("gpt-6-luna", levels),
+      model("gpt-5.6-luna", levels),
+      model("gpt-6.1-terra", levels),
+    ],
+  },
+  amp: {
+    status: "ok",
+    models: [
+      model("anthropic/claude-opus-5-5", levels, "Claude Opus 5.5"),
+      model("openai/gpt-6.1-sol", levels),
+      model("deepseek/deepseek-v4.1-flash", ["none", "high", "max"]),
+      model("xai/grok-4.5", []),
+      model("xai/grok-build-0.1", []),
+      model("minimax/MiniMax-M3", ["none", "high"]),
+      model("anthropic/claude-sonnet-4-6", ["none", "high"]),
+      model("google-vertex/gemini-3.1-pro-preview", ["low", "medium", "high"]),
+    ],
+  },
+};
 const flow: FlowDetail = {
   id: 42,
   repo: "owner/agentflow",
@@ -50,6 +81,11 @@ async function server(page: Page, initial = defaults) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    if (url.pathname === "/api/settings/model-catalog") {
+      expect(request.method()).toBe("GET");
+      state.reads.push(url.pathname);
+      return route.fulfill({ json: catalog });
+    }
     if (url.pathname === "/api/settings") {
       if (request.method() === "PUT") {
         const body = request.postDataJSON();
@@ -111,7 +147,107 @@ const ampEffort = (page: Page) =>
 const save = (page: Page) =>
   page.getByRole("button", { name: "保存设置", exact: true });
 
+test("an empty discovery is distinct from a failed provider and keeps saved defaults", async ({
+  page,
+}) => {
+  const state = await server(page, {
+    ...defaults,
+    amp_model: "retired/model",
+    amp_effort: "prior-level",
+    codex_effort: "medium",
+  });
+  await page.route("**/api/settings/model-catalog", (route) =>
+    route.fulfill({
+      json: {
+        codex: { status: "ok", models: [] },
+        amp: { status: "unavailable", models: [] },
+      },
+    }),
+  );
+  await page.goto("/console/#settings");
+  await expect(page.getByText("Codex 目录未返回模型")).toBeVisible();
+  await expect(page.getByText("Amp 模型目录不可用")).toBeVisible();
+  await expect(codex(page).locator("option")).toHaveCount(1);
+  await expect(amp(page)).toHaveValue("retired/model");
+  await expect(ampEffort(page)).toHaveValue("prior-level");
+  await expect(save(page)).toBeDisabled();
+  expect(state.puts).toHaveLength(0);
+});
+
 for (const width of [1440, 390]) {
+  test(`dynamic catalog refresh discovers models without changing draft or revision at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const state = await server(page, {
+      ...defaults,
+      amp_model: "old/saved",
+      revision: 4,
+    });
+    await page.goto("/console/#settings");
+    await amp(page).selectOption("anthropic/claude-opus-5-5");
+    await ampEffort(page).selectOption("max");
+    await expect(codex(page).locator('option[value="new-model"]')).toHaveCount(
+      0,
+    );
+    // A worker comes online while another goes offline. Neither discovery nor its retry is a settings reread.
+    const reads = state.reads.length;
+    const refresh = page.getByRole("button", { name: "刷新模型目录" });
+    await page.route("**/api/settings/model-catalog", (route) =>
+      route.fulfill({
+        json: {
+          codex: {
+            status: "partial",
+            models: [
+              ...catalog.codex.models,
+              model("new-model", ["high"], "新模型"),
+            ],
+          },
+          amp: { status: "unavailable", models: [] },
+        },
+      }),
+    );
+    await refresh.click();
+    await expect(page.getByText("Codex 模型目录部分可用")).toBeVisible();
+    await expect(page.getByText("Amp 模型目录不可用")).toBeVisible();
+    await expect(amp(page)).toHaveValue("anthropic/claude-opus-5-5");
+    await expect(amp(page).locator('option[value="old/saved"]')).toHaveCount(1);
+    await expect(ampEffort(page)).toHaveValue("max");
+    await codex(page).selectOption({ label: "新模型" });
+    await codexEffort(page).selectOption("high");
+    await page.screenshot({
+      path: `${artifactRoot}/catalog-partial-${width}.png`,
+    });
+    await page.route("**/api/settings/model-catalog", (route) =>
+      route.abort("failed"),
+    );
+    await refresh.click();
+    await expect(page.getByText(/模型目录读取失败/)).toBeVisible();
+    await expect(codexEffort(page)).toHaveValue("high");
+    await expect(ampEffort(page)).toHaveValue("max");
+    await page.screenshot({
+      path: `${artifactRoot}/catalog-failure-${width}.png`,
+    });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    expect(state.reads).toHaveLength(reads);
+    expect(state.puts).toHaveLength(0);
+    await save(page).click();
+    await expect(page.getByRole("status")).toContainText("设置已保存");
+    expect(state.puts).toEqual([
+      {
+        codex_model: "new-model",
+        codex_effort: "high",
+        amp_model: "anthropic/claude-opus-5-5",
+        amp_effort: "max",
+        expected_revision: 4,
+      },
+    ]);
+  });
+
   test(`settings four-field save, reload, defaults and accessible layout at ${width}px`, async ({
     page,
   }) => {
@@ -529,7 +665,7 @@ test("settings malformed reads and auth refusals stay actionable without changin
 test("settings preserves noncatalog current identifiers through selection, rereads and exact saves", async ({
   page,
 }) => {
-  // A newer server catalog must not disappear or become null in an older console snapshot.
+  // An offline worker can leave saved IDs absent from discovery; never silently save them as null.
   const state = await server(page, {
     ...defaults,
     codex_model: "codex-future-model",
@@ -541,13 +677,13 @@ test("settings preserves noncatalog current identifiers through selection, rerea
   await page.goto("/console/#settings");
   await expect(codex(page)).toHaveValue("codex-future-model");
   await expect(amp(page)).toHaveValue("future-provider/Future-Model");
-  await expect(codex(page).locator("option:checked")).toContainText("当前值");
-  await expect(amp(page).locator("option:checked")).toContainText("当前值");
+  await expect(codex(page).locator("option:checked")).toContainText("目录外");
+  await expect(amp(page).locator("option:checked")).toContainText("目录外");
   await expect(codexEffort(page).locator("option:checked")).toContainText(
-    "当前值",
+    "目录外",
   );
   await expect(ampEffort(page).locator("option:checked")).toContainText(
-    "当前值",
+    "目录外",
   );
   await expect(save(page)).toBeDisabled();
   await codex(page).selectOption("gpt-6.1-sol");
@@ -605,8 +741,6 @@ test("settings model-dependent efforts preserve compatible selections and reset 
   await page.goto("/console/#settings");
   await expect(codexEffort(page)).toBeEnabled();
   await expect(codexEffort(page).locator("option")).toHaveText([
-    "none",
-    "minimal",
     "low",
     "mid",
     "high",
@@ -688,10 +822,10 @@ test("settings labels saved noncatalog efforts explicitly even for known or zero
   await expect(codexEffort(page)).toHaveValue("future-codex-effort");
   await expect(ampEffort(page)).toHaveValue("future-amp-effort");
   await expect(codexEffort(page).locator("option:checked")).toContainText(
-    "当前值（不在预设中）",
+    "目录外",
   );
   await expect(ampEffort(page).locator("option:checked")).toContainText(
-    "当前值（不在预设中）",
+    "目录外",
   );
   await page.getByRole("button", { name: "刷新当前视图" }).click();
   await expect(save(page)).toBeDisabled();
@@ -719,13 +853,14 @@ for (const width of [1440, 390]) {
     const state = await server(page);
     await page.goto("/console/?q=repo%3Aagentflow#settings");
     await expect(codex(page)).toBeEnabled();
-    expect(state.reads.length).toBeGreaterThan(0);
-    expect(state.reads.every((path) => path === "/api/settings")).toBe(true);
+    const settingsPaths = ["/api/settings", "/api/settings/model-catalog"];
+    expect([...new Set(state.reads)].sort()).toEqual(settingsPaths);
     // Development StrictMode may abort a first mount read; count only the explicit refresh delta.
     const initialReads = state.reads.length;
     await page.getByRole("button", { name: "刷新当前视图" }).click();
-    await expect.poll(() => state.reads.length).toBe(initialReads + 1);
-    expect(state.reads.every((path) => path === "/api/settings")).toBe(true);
+    await expect
+      .poll(() => state.reads.slice(initialReads).sort())
+      .toEqual(settingsPaths);
     await page.getByRole("button", { name: "返回看板" }).click();
     await expect(
       page.getByRole("button", { name: /模型设置导航回归/ }),

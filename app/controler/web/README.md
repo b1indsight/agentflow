@@ -83,22 +83,21 @@ Inbox 可折叠，原有阶段分组保留；它只提供导航，不自动重�
 
 「设置」按 Codex / Amp 后端分别保存本服务器全局默认值，仅用于新建编码会话。
 正在运行或恢复的已有会话不被强制换模型，独立 inference / Judge 不受影响。
-模型与推理强度使用预设下拉框，不提供手动输入或实时发现。
+模型与推理强度使用动态目录下拉框，不提供手动输入。
 模型「不指定」保存为 `null`：Codex 沿用原生模型，Amp 新会话保持 `--mode low` 默认。
 Amp CLI `0.0.1794672034-g01d6fa` 支持显式 `--model provider/name`；页面不再提供原生模式选项，
 已有会话恢复行为不变。
 
-[`modelPresets.ts`](modelPresets.ts) 保存 2026-11-14 的 CLI 元数据预设快照：
-Codex 为本地 CLI 缓存中可见的八个模型；Amp 为已脱敏 `current-models.json` 中
-`capabilities.tools=true` 的 53 个模型，保留原始 `id`、`displayName` 及 `capabilities.efforts`。
-Codex 强度来自同一缓存的 `supported_reasoning_levels`，并非旧 CLI 的封闭枚举。
-这些元数据不代表账号授权或模型执行已验证，没有实时权限或可用性探测。
-已保存但不在预设中的模型或强度以「当前值（不在预设中）」保留，读取不会静默清空。
+打开设置页或刷新当前视图时，同时请求 `GET /api/settings/model-catalog`。标题旁的「刷新模型目录」只更新选项，
+不读取或写入设置，也不更改草稿或保存使用的 revision。目录按 `codex` / `amp` 分别返回 `status` 和 `models`；
+模型下拉展示 `displayName`、提交原始 `id`，强度取自模型的 `efforts`。部分可用时仍展示返回的模型；
+目录不可用或请求失败时提示重试，不回退到打包时的预设。草稿或已保存的模型及强度即使不再出现在目录中，
+也会保留并标为「目录外」。目录不代表账号授权或模型执行已验证。
 每组只显示模型标题，强度下拉保留可访问名称；顶栏设置入口仅显示图标，不显示静态说明或已读取提示。
 未指定强度时，支持 `medium` 的模型在草稿中预选 `mid`，显式保存时提交 `medium`，不再提供「模型默认」选项。
 已有显式强度保持不变；预选不会自动写入数据库或修改已有会话。
-已知模型只提供自身的强度，Codex 未指定或未知模型可选后端支持的并集。
-Amp 未指定模型、未知模型或没有可选强度时，禁用空强度框；已保存的非预设强度仍可保留。
+已知模型只提供自身的强度，Codex 未指定或未知模型可选当前 Codex 目录中的强度并集。
+Amp 未指定模型、未知模型或没有可选强度时，禁用空强度框；已保存的目录外强度仍可保留。
 切换模型保留兼容强度，否则预选 `mid`；若支持其他强度但没有 `medium`，需选择可用档位后才能保存。
 非空 Amp 强度要求明确模型。服务端负责最终格式和组合校验，不自动保存。
 
@@ -276,7 +275,6 @@ PNG/JPEG/GIF/WebP 必须通过内容签名和浏览器解码验证，才以已�
 | `main.tsx` / `App.tsx`               | React 入口、URL、服务端筛选/分页、看板、侧栏与详情 |
 | `api.ts` / `types.ts`                | 同源可取消请求、错误与控制台 DTO；不回退到 fixture |
 | `SettingsPage.tsx`                   | 编码默认值草稿、版本冲突与未知保存结果的回读核对   |
-| `modelPresets.ts`                    | Codex / Amp 具体模型预设元数据快照                 |
 | `activity.tsx`                       | 作者分组、结构化活动、安全 Markdown 与原文工具输出 |
 | `FileViewer.tsx` / `files.ts`        | 详情内文件预览、精确链接识别与有界原始字节读取     |
 | `DiffWindow.tsx`                     | 编辑 patch 的有界窗口、行号与行内高亮              |
@@ -324,7 +322,8 @@ CI=1 PLAYWRIGHT_PORT=5175 npm run test:e2e -- --workers=2 --grep 'direct Flow|cr
 CI=1 PLAYWRIGHT_PORT=5175 npm run test:e2e -- e2e/settings.spec.ts --workers=2
 ```
 
-覆盖模型清空、四项保存/重载、`mid` 预选及原值保留、按模型过滤与切换兼容性、非预设当前值保留、冲突、读取/校验/权限错误、未知写入回读且不重发、
+覆盖目录刷新发现新模型、部分来源可用、目录失败时保留草稿和旧值，截图为 `catalog-{partial,failure}-{1440,390}.png`。
+另覆盖模型清空、四项保存/重载、`mid` 预选及原值保留、按模型过滤与切换兼容性、目录外当前值保留、冲突、读取/校验/权限错误、未知写入回读且不重发、
 迟到读取隔离、hash 与浏览器导航、看板搜索/手机阶段和原有会话缓存。
 1440px / 390px 默认、选择后、保存成功、读取失败、未知写入和冲突截图名为
 `code-agent-settings-compact-{default,selected,saved,read-error,unknown,conflict}-{width}.png`。

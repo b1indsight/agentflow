@@ -247,7 +247,7 @@ coordinator 在签发 capability 前按已认证 worker 类型读取设置，经
 executor 按 assignment 捕获值，仅用于 INITIAL 或原有 revision fallback 的 `CodingAgent.start`；
 resume 不带全局模型或强度覆盖，不修改共享 agent 或凭据 context。ARCHIVE 不读取模型设置。
 Codex 选择通过原生 `--model` 与 `-c model_reasoning_effort="..."` 传入，空值不覆盖原生配置；
-独立 inference / Bub Judge 不使用此设置。强度下拉选项按模型元数据快照提供，不探测账号可用性。
+独立 inference / Bub Judge 不使用此设置。owner 读取 `GET /api/settings/model-catalog` 时，control 通过 `worker.model_catalog` 请求就绪的编码 worker；同类 CLI 列出的模型及其可保存的强度取并集，不探测账号可用性。
 
 ### Amp
 
@@ -271,7 +271,7 @@ Codex 选择通过原生 `--model` 与 `-c model_reasoning_effort="..."` 传入�
 - `WorkerRuntime` 按 ID 格式选择历史来源，经 `AmpCodingAgent.read_history` 调用 `AmpHistory`。
   Amp 原生 export 经公开块映射与脱敏后短时缓存，
   支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。
-  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v26。
+  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v27。
 - 不再拒绝 workspace Amp 设置或因额外工具拒收结果；保留必要的原生 shell 与完整终态检查。
   用户禁用与 workspace MCP 审批由原生 CLI 执行，不自动批准；managed policy/账户插件仍由
   运维核查，CLI 工具列表不能替代权限或 OS 隔离。

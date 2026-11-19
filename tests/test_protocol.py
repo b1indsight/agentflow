@@ -302,7 +302,7 @@ def test_mixed_control_ack_and_business_have_independent_identities() -> None:
         [terminal_item, accept, history], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
     )
     parsed = parse_worker_message(json.dumps(data))
-    assert PROTOCOL_VERSION == 26
+    assert PROTOCOL_VERSION == 27
     assert isinstance(parsed.payload[0], ExecuteResult)
     assert parsed.payload[0].terminal() == terminal
     assert isinstance(parsed.payload[1], AcceptResultRequest)

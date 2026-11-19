@@ -24,11 +24,12 @@ from tests.worker_fixtures import NamingInference, run_worker
 
 
 class QueueSocket:
-    def __init__(self, worker_to_serve: asyncio.Queue[str], serve_to_worker: asyncio.Queue[str]):
+    def __init__(self, worker_to_serve: asyncio.Queue[str], serve_to_worker: asyncio.Queue[str],
+                 worker_id: str = "worker-1"):
         self._incoming = worker_to_serve
         self._outgoing = serve_to_worker
         self._headers = {
-            "x-flowtool-worker-id": "worker-1",
+            "x-flowtool-worker-id": worker_id,
             "authorization": "Bearer worker-secret",
         }
 
@@ -140,9 +141,10 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
 async def remote_connection(server, worker):
     """Keep the existing duplex wire while sharing runtime setup with HTTP history tests."""
     to_serve, to_worker = asyncio.Queue(), asyncio.Queue()
+    worker_id = worker.settings.worker_id
     tasks = [
         asyncio.create_task(serve_worker(
-            QueueSocket(to_serve, to_worker), worker_tokens={"worker-1": "worker-secret"},
+            QueueSocket(to_serve, to_worker, worker_id), worker_tokens={worker_id: "worker-secret"},
             serve=server.serve_worker_session,
         )),
         asyncio.create_task(run_worker(worker, QueueConnection(to_serve, to_worker))),
