@@ -1,4 +1,5 @@
 from contextlib import AsyncExitStack
+from unittest.mock import AsyncMock
 
 import httpx
 
@@ -18,16 +19,6 @@ async def test_catalog_unions_live_workers_and_survives_partial_failure(server_r
     def model(name, *efforts):
         return CatalogModel(id=name, displayName=name, efforts=list(efforts))
 
-    codex = iter([[model("a"), model("b", "low")], [model("b", "high"), model("c")],
-                  [model("d")], None])
-
-    async def discover(agent):
-        result = next(codex) if agent == "codex" else []
-        if result is None:
-            raise CatalogUnavailable()
-        return result
-
-    monkeypatch.setattr("app.worker.transport.business.discover_models", discover)
     runtime = server_runtime()
     issuer = AccessIssuer()
     await runtime.access.close()
@@ -42,9 +33,14 @@ async def test_catalog_unions_live_workers_and_survives_partial_failure(server_r
         assert (await http.get(path)).status_code == 401
         http.headers.update(issuer.headers())
         assert (await http.get(path)).json()["codex"] == {"status": "unavailable", "models": []}
-        for i, agent in enumerate(("codex", "amp", "codex")):
+        for i, (agent, responses) in enumerate((
+            ("codex", [[model("a"), model("b", "low")], [model("d")]]),
+            ("amp", [[], []]),
+            ("codex", [[model("b", "high"), model("c")], CatalogUnavailable()]),
+        )):
             worker = WorkerRuntime(WorkerSettings(worker_id=f"w{i}", worker_token="worker-secret",
                                    coding_agent=agent, serve_ws_url="wss://unused", worker_root=tmp_path / str(i)))
+            monkeypatch.setattr(worker._agents[agent], "discover_models", AsyncMock(side_effect=responses))
             await stack.enter_async_context(remote_connection(runtime, worker))
             await wait_until(lambda worker=worker: worker._connected)
         before = (await http.get("/api/settings")).json()

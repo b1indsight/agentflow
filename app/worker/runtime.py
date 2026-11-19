@@ -198,11 +198,15 @@ class WorkerRuntime:
                 self.executions[flow_id] = execution
         self._initialized = True
 
+    @property
+    def coding_agent(self) -> CodingAgent:
+        return self._agents[self.settings.coding_agent]
+
     def _create_execution(self, flow_id: int) -> WorkerExecution:
         state = ExecutionState(self.settings.worker_root, flow_id)
         executor = WorkerExecutor(
             self.settings.worker_root,
-            self._agents[self.settings.coding_agent],
+            self.coding_agent,
             worker_id=self.settings.worker_id, state=state, workspaces=self.workspaces,
         )
         return WorkerExecution(
@@ -281,7 +285,7 @@ class WorkerRuntime:
             [message.model_dump() for message in task.messages],
             ensure_ascii=False, separators=(",", ":"),
         )
-        result = await self._agents[backend].start(
+        result = await self.coding_agent.start(
             prompt, self.workspaces.inference_path, output_schema=task.output_schema,
             context=None, max_output_bytes=task.max_output_bytes, timeout_seconds=task.timeout_seconds,
         )

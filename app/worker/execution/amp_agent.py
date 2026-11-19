@@ -24,6 +24,7 @@ from urllib.parse import unquote, urlsplit
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError, field_validator
 
+from app.contracts.catalog import CatalogModel
 from app.contracts.conversation import (
     ConversationContent,
     ConversationFailure,
@@ -38,6 +39,7 @@ from app.worker.coding_agent import CodingAgent
 from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 from app.worker.execution.gh import github_environment
 from app.worker.execution.idle import wait_for_inactivity
+from app.worker.model_catalog import read_model_catalog
 from app.worker.state.file_links import FileLinks
 
 _SESSION_ID = TypeAdapter(SessionId)
@@ -248,6 +250,18 @@ class AmpCodingAgent(CodingAgent):
         self.timeout = timeout
         self.max_output_bytes = max_output_bytes
         self._history = AmpHistory()
+
+    async def discover_models(self) -> list[CatalogModel]:
+        def parse(row: dict) -> CatalogModel | None:
+            caps = row["capabilities"]
+            if not isinstance(caps["tools"], bool):
+                raise TypeError
+            if not caps["tools"]:
+                return None
+            return CatalogModel(id=row["id"], displayName=row["displayName"], efforts=caps["efforts"])
+
+        command = [AMP_BIN, "plugins", "show-agent-options", "--json", "--log-file", os.devnull]
+        return await read_model_catalog(command, amp_environment(), parse)
 
     def read_history(self, query: HistoryQuery) -> HistoryPage:
         """Read a native thread without granting permission to execute coding tasks."""

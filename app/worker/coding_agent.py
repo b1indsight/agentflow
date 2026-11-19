@@ -12,6 +12,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
+from app.contracts.catalog import CatalogModel
 from app.contracts.conversation import HistoryPage, HistoryQuery
 from app.contracts.files import MAX_FILE_BYTES, FileFailure
 from app.domain.json import strict_json
@@ -160,6 +161,10 @@ class CodingAgent(Protocol):
         model: str | None, effort: str | None, max_output_bytes: int,
     ) -> CodingExecutionResult:
         """Run natively; propagate cancellation only after joining subprocess cleanup."""
+        ...
+
+    async def discover_models(self) -> list[CatalogModel]:
+        """Return native candidates (possibly empty); raise CatalogUnavailable on failure."""
         ...
 
     def read_history(self, query: HistoryQuery) -> HistoryPage: ...

@@ -23,7 +23,7 @@ from app.contracts.protocol import (
     result_header,
 )
 from app.worker.execution.lifecycle import PendingToolCall, WorkerExecution, WorkerProtocolError
-from app.worker.model_catalog import CatalogUnavailable, discover_models
+from app.worker.model_catalog import CatalogUnavailable
 
 if TYPE_CHECKING:
     from app.worker.runtime import WorkerRuntime
@@ -72,7 +72,7 @@ class WorkerBusinessCallbacks:
 
     async def _read_catalog(self, call: CatalogQuery) -> CatalogResult:
         try:
-            models = await discover_models(self.runtime.settings.coding_agent)
+            models = await self.runtime.coding_agent.discover_models()
         except CatalogUnavailable:
             models = None
         return CatalogResult(**result_header(call.message_id), method=call.method,

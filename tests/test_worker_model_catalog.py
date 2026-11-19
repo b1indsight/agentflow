@@ -10,6 +10,8 @@ from typing import Literal
 import pytest
 
 from app.worker import model_catalog
+from app.worker.execution.amp_agent import AmpCodingAgent
+from app.worker.execution.codex import CodexAgent
 
 
 @pytest.fixture
@@ -58,10 +60,11 @@ async def test_refresh_projects_only_coding_models(
         print((Path.home() / 'response').read_text())
     """)
     response = tmp_path / "response"
+    backend = AmpCodingAgent() if agent == "amp" else CodexAgent()
     response.write_text('{"models": []}')
-    assert await model_catalog.discover_models(agent) == []
+    assert await backend.discover_models() == []
     response.write_text(json.dumps({"models": rows, "private": "do not forward"}))
-    assert [m.model_dump() for m in await model_catalog.discover_models(agent)] == [
+    assert [m.model_dump() for m in await backend.discover_models()] == [
         {"id": "provider/Future", "displayName": "Future", "efforts": efforts},
     ]
 
@@ -78,7 +81,7 @@ async def test_unavailable_is_sanitized(
     if code is not None:
         cli("codex", code)
     with pytest.raises(model_catalog.CatalogUnavailable) as error:
-        await model_catalog.discover_models("codex")
+        await CodexAgent().discover_models()
     assert "secret" not in str(error.value)
 
 
@@ -92,7 +95,7 @@ async def test_interrupted_discovery_reaps_cli(
     binary.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setattr(model_catalog, "_TIMEOUT", 10 if cancel else 2)
-    task = asyncio.create_task(model_catalog.discover_models("amp"))
+    task = asyncio.create_task(AmpCodingAgent().discover_models())
     if cancel:
         async with asyncio.timeout(5):
             while not pidfile.exists():
