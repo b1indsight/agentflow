@@ -17,6 +17,7 @@ from typing import BinaryIO
 
 from loguru import logger
 
+from app.contracts.catalog import CatalogModel
 from app.contracts.conversation import (
     ConversationContent,
     ConversationFailure,
@@ -33,6 +34,7 @@ from app.worker.coding_agent import CodingAgent
 from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 from app.worker.execution.gh import github_environment
 from app.worker.execution.idle import wait_for_inactivity
+from app.worker.model_catalog import read_model_catalog
 
 CODEX_BIN = "codex"
 MAX_LINE = 256 * 1024
@@ -128,6 +130,19 @@ class CodexAgent(CodingAgent):
         self.timeout = timeout
         self.max_output_bytes = max_output_bytes
         self._history = CodexHistory()
+
+    async def discover_models(self) -> list[CatalogModel]:
+        def parse(row: dict) -> CatalogModel | None:
+            if row["visibility"] != "list":
+                return None
+            levels = row["supported_reasoning_levels"]
+            if not isinstance(levels, list):
+                raise TypeError
+            return CatalogModel(id=row["slug"], displayName=row["display_name"],
+                                efforts=[level["effort"] for level in levels])
+
+        # Omit --bundled to use Codex's native refresh policy.
+        return await read_model_catalog([CODEX_BIN, "debug", "models"], _codex_environment(), parse)
 
     def read_history(self, query: HistoryQuery) -> HistoryPage:
         """Read native rollout history independently of coding authorization."""

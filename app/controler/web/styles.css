@@ -352,10 +352,19 @@ svg {
   font-weight: 600;
   outline: none;
 }
-.settings-content h2 {
-  margin: 0 0 12px;
+.settings-catalog-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-catalog-heading h2 {
+  margin: 0;
   font-size: 1.25rem;
   font-weight: 600;
+}
+.settings-catalog-notice {
+  font-size: var(--text-control);
+  color: var(--muted);
 }
 .settings-content form {
   margin-top: 24px;

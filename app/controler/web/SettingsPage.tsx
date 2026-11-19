@@ -1,14 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { ArrowLeft, Check, RefreshCw, Save } from "lucide-react";
-import { ApiError, getSettings, updateSettings } from "./api";
+import { ApiError, getModelCatalog, getSettings, updateSettings } from "./api";
 import { Button } from "./components/ui/button";
-import {
-  ampModels,
-  codexModels,
-  codexEfforts,
-  type ModelPreset,
-} from "./modelPresets";
-import type { CodingModelSettings } from "./types";
+import type { CatalogModel, CodingModelSettings, ModelCatalog } from "./types";
 
 type Values = Omit<CodingModelSettings, "revision">;
 type Draft = Record<keyof Values, string>;
@@ -18,13 +12,15 @@ type WriteState =
   | { kind: "notice" | "error" | "conflict"; message: string }
   | { kind: "unknown"; submitted: Values; revision: number; message: string };
 
-function draftFrom(saved: Values): Draft {
+function draftFrom(saved: Values, catalog: ModelCatalog | null): Draft {
   return {
     codex_model: saved.codex_model ?? "",
     amp_model: saved.amp_model ?? "",
     codex_effort:
-      saved.codex_effort ?? defaultEffort("codex", saved.codex_model ?? ""),
-    amp_effort: saved.amp_effort ?? defaultEffort("amp", saved.amp_model ?? ""),
+      saved.codex_effort ??
+      defaultEffort(catalog, "codex", saved.codex_model ?? ""),
+    amp_effort:
+      saved.amp_effort ?? defaultEffort(catalog, "amp", saved.amp_model ?? ""),
   };
 }
 
@@ -40,38 +36,47 @@ const sameValues = (a: Values, b: Values) =>
   a.codex_effort === b.codex_effort &&
   a.amp_effort === b.amp_effort;
 
-function effortsFor(agent: Agent, model: string): readonly string[] {
-  const presets = agent === "codex" ? codexModels : ampModels;
-  return (
-    presets.find((preset) => preset.id === model)?.efforts ??
-    (agent === "codex" ? codexEfforts : [])
-  );
+function effortsFor(
+  catalog: ModelCatalog | null,
+  agent: Agent,
+  model: string,
+): string[] {
+  const models = catalog?.[agent].models ?? [];
+  const known = models.find((entry) => entry.id === model);
+  if (known) return known.efforts;
+  if (agent === "amp") return [];
+  return [...new Set(models.flatMap((entry) => entry.efforts))];
 }
 
-function defaultEffort(agent: Agent, model: string): string {
-  return effortsFor(agent, model).includes("medium") ? "medium" : "";
+function defaultEffort(
+  catalog: ModelCatalog | null,
+  agent: Agent,
+  model: string,
+): string {
+  if (agent === "codex" && !model) return "medium";
+  return effortsFor(catalog, agent, model).includes("medium") ? "medium" : "";
 }
 
 /** Keep both the draft and latest server value selectable when their catalogs differ. */
-function PresetOptions({
-  presets,
+function CatalogOptions({
+  options,
   current,
 }: {
-  presets: readonly Pick<ModelPreset, "id" | "displayName">[];
+  options: readonly Pick<CatalogModel, "id" | "displayName">[];
   current: (string | null | undefined)[];
 }) {
   const noncatalog = [...new Set(current)].filter(
     (value): value is string =>
-      Boolean(value) && !presets.some((model) => model.id === value),
+      Boolean(value) && !options.some((model) => model.id === value),
   );
   return (
     <>
       {noncatalog.map((value) => (
         <option key={value} value={value}>
-          当前值（不在预设中）：{value}
+          {value} · 目录外
         </option>
       ))}
-      {presets.map((model) => (
+      {options.map((model) => (
         <option key={model.id} value={model.id}>
           {model.displayName}
         </option>
@@ -101,6 +106,10 @@ export function SettingsPage({
   const id = useId();
   const heading = useRef<HTMLHeadingElement>(null);
   const request = useRef<AbortController | null>(null);
+  const catalogRequest = useRef<AbortController | null>(null);
+  const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
   const submitting = useRef(false);
   const edits = useRef(0);
   const [saved, setSaved] = useState<CodingModelSettings | null>(null);
@@ -120,11 +129,36 @@ export function SettingsPage({
   const locked = write.kind === "unknown" || write.kind === "conflict";
   const missingEffort = (["codex", "amp"] as const).some(
     (agent) =>
-      effortsFor(agent, draft[`${agent}_model`]).length > 0 &&
+      effortsFor(catalog, agent, draft[`${agent}_model`]).length > 0 &&
       !draft[`${agent}_effort`],
   );
 
-  const read = async () => {
+  const readCatalog = async () => {
+    catalogRequest.current?.abort();
+    const controller = new AbortController();
+    catalogRequest.current = controller;
+    setCatalogLoading(true);
+    setCatalogError("");
+    try {
+      const current = await getModelCatalog(controller.signal);
+      if (!controller.signal.aborted) setCatalog(current);
+      return current;
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setCatalog(null);
+        setCatalogError(
+          error instanceof TypeError
+            ? "模型目录读取失败，请检查网络后刷新目录。"
+            : `模型目录读取失败：${failureMessage(error)}。可刷新目录重试。`,
+        );
+      }
+      return null;
+    } finally {
+      if (!controller.signal.aborted) setCatalogLoading(false);
+    }
+  };
+
+  const read = async (discovery?: Promise<ModelCatalog | null>) => {
     if (submitting.current) return;
     request.current?.abort();
     const controller = new AbortController();
@@ -135,11 +169,13 @@ export function SettingsPage({
     setReadError("");
     try {
       const current = await getSettings(controller.signal);
+      const options = discovery ? await discovery : catalog;
       if (controller.signal.aborted || request.current !== controller) return;
       setSaved(current);
       // A refresh may overlap typing; only a pristine, unchanged draft can be replaced.
       if (!preserve && version === edits.current) {
-        setDraft(draftFrom(current));
+        if (!saved || !sameValues(saved, current))
+          setDraft(draftFrom(current, options));
         setShowServer(false);
       } else setShowServer(true);
       if (write.kind === "unknown") {
@@ -171,10 +207,11 @@ export function SettingsPage({
   };
 
   useEffect(() => {
-    if (active) void read();
+    if (active) void read(readCatalog());
     return () => {
       request.current?.abort();
       request.current = null;
+      catalogRequest.current?.abort();
     };
   }, [active, refresh]);
   useEffect(() => {
@@ -194,9 +231,11 @@ export function SettingsPage({
     change({
       ...draft,
       [modelField]: next,
-      [effortField]: effortsFor(agent, next).includes(draft[effortField])
+      [effortField]: effortsFor(catalog, agent, next).includes(
+        draft[effortField],
+      )
         ? draft[effortField]
-        : defaultEffort(agent, next),
+        : defaultEffort(catalog, agent, next),
     });
   };
   const submit = async () => {
@@ -215,7 +254,7 @@ export function SettingsPage({
         expected_revision: saved.revision,
       });
       setSaved(current);
-      setDraft(draftFrom(current));
+      setDraft(draftFrom(current, catalog));
       setShowServer(false);
       setWrite({ kind: "notice", message: "设置已保存，仅用于新建编码会话。" });
     } catch (error) {
@@ -268,7 +307,44 @@ export function SettingsPage({
           </h1>
         </div>
         <section aria-labelledby={`${id}-models`}>
-          <h2 id={`${id}-models`}>Code agent 模型</h2>
+          <div className="settings-catalog-heading">
+            <h2 id={`${id}-models`}>Code agent 模型</h2>
+            <Button
+              type="button"
+              className="btn"
+              size="icon"
+              aria-label="刷新模型目录"
+              title="刷新模型目录"
+              disabled={catalogLoading || loading || pending}
+              onClick={() => void readCatalog()}
+            >
+              <RefreshCw aria-hidden="true" />
+            </Button>
+          </div>
+          <div aria-live="polite" className="settings-catalog-notice">
+            {catalogLoading ? (
+              "正在读取模型目录…"
+            ) : catalogError ? (
+              <span className="settings-error">{catalogError}</span>
+            ) : (
+              (["codex", "amp"] as const).map((agent) => {
+                const group = catalog?.[agent];
+                if (!group || (group.status === "ok" && group.models.length))
+                  return null;
+                const label = agent === "codex" ? "Codex" : "Amp";
+                const message = {
+                  ok: "目录未返回模型",
+                  partial: "模型目录部分可用",
+                  unavailable: "模型目录不可用",
+                }[group.status];
+                return (
+                  <div key={agent}>
+                    {label} {message}
+                  </div>
+                );
+              })
+            )}
+          </div>
           <form
             onSubmit={(event) => {
               event.preventDefault();
@@ -280,7 +356,7 @@ export function SettingsPage({
               const label = agent === "codex" ? "Codex" : "Amp";
               const modelField = `${agent}_model` as const;
               const effortField = `${agent}_effort` as const;
-              const efforts = effortsFor(agent, draft[modelField]);
+              const efforts = effortsFor(catalog, agent, draft[modelField]);
               const currentEffort =
                 saved?.[modelField] === draft[modelField]
                   ? saved[effortField]
@@ -293,6 +369,7 @@ export function SettingsPage({
                     <label htmlFor={`${id}-${agent}`}>{label} 模型</label>
                     <select
                       id={`${id}-${agent}`}
+                      title={draft[modelField] || undefined}
                       value={draft[modelField]}
                       disabled={!saved || pending}
                       onChange={(event) =>
@@ -304,8 +381,8 @@ export function SettingsPage({
                           ? "不指定（原生默认）"
                           : "不指定（默认 low）"}
                       </option>
-                      <PresetOptions
-                        presets={agent === "codex" ? codexModels : ampModels}
+                      <CatalogOptions
+                        options={catalog?.[agent].models ?? []}
                         current={[draft[modelField], saved?.[modelField]]}
                       />
                     </select>
@@ -325,8 +402,8 @@ export function SettingsPage({
                           {hasEfforts ? "选择强度" : "—"}
                         </option>
                       )}
-                      <PresetOptions
-                        presets={efforts.map((level) => ({
+                      <CatalogOptions
+                        options={efforts.map((level) => ({
                           id: level,
                           displayName: level === "medium" ? "mid" : level,
                         }))}
@@ -388,7 +465,7 @@ export function SettingsPage({
                   disabled={pending || loading || locked}
                   onClick={() => {
                     edits.current++;
-                    setDraft(draftFrom(saved));
+                    setDraft(draftFrom(saved, catalog));
                     setShowServer(false);
                     setWrite({ kind: "idle" });
                   }}

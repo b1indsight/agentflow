@@ -73,6 +73,7 @@ class ServerRuntime:
         )
         self.tools = FlowToolService(github, database=database)
         self.gateway = Gateway[WorkerMessageUnion, ServerMessageUnion]()
+        self.worker_sessions: set[ServerCallbacks] = set()
         conversations = ConversationBroker(self.gateway)
         self.worker_tokens = {
             worker_id: token.get_secret_value()
@@ -162,9 +163,11 @@ class ServerRuntime:
         except BaseException:
             await session.close()
             raise
+        self.worker_sessions.add(callbacks)
         try:
             await self.gateway.serve(worker_id, session, callbacks, files, replace=True)
         finally:
+            self.worker_sessions.remove(callbacks)
             try:
                 await callbacks.aclose()
             finally:

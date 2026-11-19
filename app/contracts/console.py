@@ -21,6 +21,8 @@ from app.domain.inference_models import AdapterVersion, FailureCode, StopReason
 from app.domain.models import ArchiveReason, FlowState
 
 Phase = Literal["queued", "running", "review", "blocked", "archived"]
+CodexEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+AmpEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
 class ConsoleModel(BaseModel):
@@ -34,8 +36,8 @@ class UpdateSettingsRequest(ConsoleModel):
     amp_model: str | None = Field(
         max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
-    codex_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] | None
-    amp_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    codex_effort: CodexEffort | None
+    amp_effort: AmpEffort | None
     expected_revision: int = Field(strict=True, ge=0)
 
     @field_validator("codex_model", "amp_model", mode="before")

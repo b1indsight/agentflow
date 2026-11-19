@@ -65,7 +65,7 @@ Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_M
 进程内创建，跨连接重试保留，请求使用独立临时子目录；退出清除，不创建编码 workspace 或 journal。
 断线重试可能与旧计算重叠并重复计费，不保证模型调用恰好一次。
 
-serve 和 worker 需协调升级到 wire26，journal5 与执行结果 inbox1 不变；Control 本地归档通知保留 inbox2，无旧 wire fallback。
+serve 和 worker 需协调升级到 wire27，以支持设置页按需读取编码 worker 的模型目录；不需要同步升级原生 CLI 或迁移数据库。journal5 与执行结果 inbox1 不变；Control 本地归档通知保留 inbox2，无旧 wire fallback。
 wire26 独立登记 worker 的 Codex / Amp 类型，并随 assignment 下发全局编码模型和推理强度默认值；
 升级前 drain 并收敛在途执行和未决回执，再成组更新两端。启动时幂等新增 `runtime_settings`
 配置表和 nullable `workers.coding_agent` 列；旧 worker 类型待重新注册后补齐，不从 inference 猜测。
@@ -73,7 +73,7 @@ wire26 独立登记 worker 的 Codex / Amp 类型，并随 assignment 下发全�
 数据库初始化幂等增加 nullable `codex_effort` / `amp_effort`，已有模型值和 revision 保留。
 强度为空沿用原生默认；Amp 指定强度前须选择具体模型。Amp 使用
 `provider/name`，worker 镜像中的 CLI 已固定到 `0.0.1794672034-g01d6fa`。直接运行 worker 的
-专用账号也须安装该版本，模型权限和原生恢复仍需实际验收；预置列表不验证账号可用性，不更改独立 inference / Judge。
+专用账号也须安装该版本，模型权限和原生恢复仍需实际验收；CLI 目录不验证账号可用性，不更改独立 inference / Judge。
 wire24 分开记录历史交付 head、当前 PR 观察 head 和 Worker 实际 fetch 基线，允许同来源分支外部 push/rebase/force-push。升级前 drain 并收敛旧执行和未决回执，再更新两端；回滚前先收敛新版任务。历史任务/结果的 JSON 与 digest 保持不变，无数据库列迁移；不自动重跑未知执行或恢复旧 BLOCKED Flow。详见[实施记录](../plan/external-pr-updates.md)。
 wire23 的 assignment 必须包含已核对的 App bot login 和用户 ID；control 在签发时读取 bot 用户，失败不回退个人账号。升级前 drain，待在途执行收敛后协调更新两端；恢复任务领取新凭据，journal 不保存身份或 token，无数据库迁移。
 wire22 的 RevisionTask 冻结 answer/revise 用途；旧 worker 不能接收 answer 并按改码任务运行。升级前收敛在途任务和未确认的旧直接答复；旧 answer 继续按原 marker 核对，不转成 worker 任务重发。历史 context/decision/result digest 不重算，不自动重跑被旧上下文阻塞的批次。

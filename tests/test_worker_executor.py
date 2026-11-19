@@ -40,6 +40,9 @@ class RecordingAgent(CodingAgent):
         self.started: list[tuple[str, Path]] = []
         self.resumed: list[tuple[str, str]] = []
 
+    async def discover_models(self) -> list:
+        return []
+
     def read_history(self, query: HistoryQuery) -> HistoryPage:
         """The scripted coding agent has no native history records."""
         return HistoryPage(session_id=query.session_id, status="not_found")

@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 设置页从在线 Codex / Amp 编码 worker 读取模型和推理强度，同类取并集。部分查询失败时保留成功结果；刷新不会写入设置。新增只读 worker 请求，serve 和 worker 需一同升级至 wire27，不需迁移数据库或升级 code agent。
+
 - 对账调度表合并：`flow_reconcile` 与 `feedback_reconcile` 合并为 `reconcile_checks`，每行是一个 Flow 在一个
   来源上的定时检查，PR 状态检查为 `source='pull_request'` 并保留 `hint_version`。启动时自动迁移两张旧表的行
   （含退避截止、诊断、游标与唤醒计数）后删除旧表，部署前需备份。对账行为、`reconcile_due` 指标与

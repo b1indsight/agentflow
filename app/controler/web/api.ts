@@ -10,6 +10,7 @@ import type {
   FlowTargetPage,
   InferenceNoticePage,
   JobPage,
+  ModelCatalog,
   RepositoryPage,
 } from "./types";
 
@@ -69,6 +70,35 @@ function checkedSettings(value: CodingModelSettings): CodingModelSettings {
 // Mutable settings deliberately bypass the immutable conversation/session caches below.
 export const getSettings = async (signal: AbortSignal) =>
   checkedSettings(await api<CodingModelSettings>("/api/settings", {}, signal));
+/** Read discovery independently of the revision-guarded settings document. */
+export async function getModelCatalog(
+  signal: AbortSignal,
+): Promise<ModelCatalog> {
+  const catalog = await api<ModelCatalog>(
+    "/api/settings/model-catalog",
+    {},
+    signal,
+  );
+  for (const agent of ["codex", "amp"] as const) {
+    const section = catalog?.[agent];
+    if (
+      !section ||
+      !["ok", "partial", "unavailable"].includes(section.status) ||
+      !Array.isArray(section.models) ||
+      !section.models.every(
+        (model) =>
+          model &&
+          typeof model.id === "string" &&
+          model.id &&
+          typeof model.displayName === "string" &&
+          Array.isArray(model.efforts) &&
+          model.efforts.every((level) => typeof level === "string" && level),
+      )
+    )
+      throw new Error("模型目录响应不完整");
+  }
+  return catalog;
+}
 export const updateSettings = async (
   request: Omit<CodingModelSettings, "revision"> & {
     expected_revision: number;
