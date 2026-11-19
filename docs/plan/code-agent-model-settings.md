@@ -204,3 +204,18 @@
 - **触发与原因：** [PR #165 的 recovery 检查](https://github.com/b1indsight/agentflow/actions/runs/43690491444/job/132739912484) 在注册 fixture worker 时失败；新增必填 `coding_agent` 后漏改了 `scripts/smoke/recovery.py` 的直接调用，备份尚未执行。普通 pytest 未运行完整演练，因此没有覆盖这个入口。
 - **修复与边界：** 演练中的编码 worker 显式声明 `coding_agent='codex'`，与现有测试 fixture 一致；保留生产接口必填约束，不以默认值掩盖缺失声明，也不改动设置页、协议或模型执行。
 - **验证：** 在专用 PostgreSQL 17 和同版本 dump / restore 工具上，未修复代码复现相同 TypeError；修复后完整演练确认数据库及 HOME 恢复、原 journal 不变、复制 root 身份被拒绝。恢复 bundle、workspace、worker 注册、coordinator 和真实 remote Session 的相关回归及 Ruff / Mypy 通过。证据位于本线程 `.amp/in/artifacts/code-agent-effort/recovery-ci-{red.log,green.json,pytest.log,ruff.log,mypy.log}`。CI 的 Linux 容器演练待新提交检查，不据本地结果声称全部 CI 通过；仍未执行生产恢复、部署或真实模型调用。
+
+### 2026-11-19 — 提案：设置页按需读取编码 worker 的模型目录
+
+- **目标：** 打开设置或点击「刷新模型」时读取 Codex 和 Amp 当前 CLI 的可见模型及其推理强度。CLI 能列出的新模型无需修改或重新发布前端；不承诺上游刚发布的模型已对该 CLI 或账号开放。替代静态预设，不改变设置保存、任务派发或会话恢复。
+- **来源：** CLI 安装在 worker 镜像。通过已有 worker 连接增加只读 `worker.model_catalog` 请求，不占任务槽，不启动编码会话。先验证镜像固定版本的 Codex 是否支持 `codex debug models` 的默认刷新路径（不用 `--bundled`），否则验证 app-server `model/list` 的可见性、分页和刷新行为；不能将旧磁盘快照伪装成新结果。Amp 使用 `amp plugins show-agent-options --json`，保留 `capabilities.tools=true` 的模型。两端仅返回 ID、显示名、支持的强度，限制耗时、输出大小并清理子进程，不透传原始日志和凭据。
+- **接口与多 worker：** 设置页并行读取原设置与 owner 可读的 `GET /api/settings/model-catalog`。目录按 `codex` / `amp` 分组，组内提供状态及 `models: {id, displayName, efforts}[]`。同类型多个就绪执行 worker 全部返回时，取模型和强度的交集：默认设置可能派给其中任何一台。无就绪 worker、部分查询失败或超时，该组显示不可用并允许重试；另一组不受影响。交集为空时单独提示没有共同模型。目录不入库；不为发现结果改变调度。
+- **交互：** 刷新只换候选项，绝不覆盖当前值或未保存草稿，不写设置或递增 revision。发现失败不以静态模型冒充实时结果，沿用已保存值展示及原有显式保存、版本冲突保护。目录只描述 CLI 报告的能力，不调用模型验证权限。
+- **实施和验收：** 先在固定 CLI 上确认目录合同，再接 worker 查询及 owner API，最后移除前端静态目录。用前后两份只相差一个模型的 CLI 输出验收：同一前端构建刷新后出现新 ID 和对应强度。再测同类 worker 目录不同、单端离线、超时、空目录、保存值已下架以及编辑中刷新；检查现有会话、草稿和设置版本均不受影响。协议变更按项目约定协调升级 server / worker；不做数据库迁移。
+
+### 2026-11-19 — 同类 worker 的目录取并集（待实现）
+
+- **需求修订：** 取代上一条的交集规则。Codex 和 Amp 仍分组展示；同组按模型 ID 去重，每个模型的强度取报告该 ID 的 worker 所列强度的并集。只要一台就绪 worker 列出新模型，就能在刷新后选到它。
+- **部分失败：** 展示成功响应的并集并提示目录不完整；所有查询都失败或没有就绪 worker 时才显示该组不可用。成功返回空目录与查询失败分开处理。
+- **范围和取舍：** 用户计划后续统一更新 worker 的 code agent 版本。本次不升级 CLI，也不改变调度；目录中的模型不保证每台 worker 均可执行。
+- **验收：** 两台同类 worker 分别报告 A、B 和 B、C，刷新后恰好展示 A、B、C；B 的强度合并去重。另一类 worker 报告的模型和强度不得混入。同组一台超时不应隐藏另一台已报告的模型。
