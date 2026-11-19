@@ -47,7 +47,7 @@
 
 ### 明确保留与条件候选
 
-- 保留当前仍支持的 [journal v4/v5 读取](../../app/worker/state/record.py)、[旧 receipt/inbox 读取](../../app/contracts/receipts.py)、[旧布局读取](../../app/worker/state/execution.py)、[manifest 兼容与拒绝规则](../../app/worker/execution/workspaces.py)及[离线 Flow 状态迁移](../../scripts/migrate_flow_states.py)。数据库对旧 workspace 状态 schema 的明确拒绝仍是[当前启动行为](../../app/persistence/database.py)，相应测试保留。
+- 保留当前仍支持的 [journal v4/v5 读取](../../app/worker/state/record.py)、[旧 receipt/inbox 读取](../../app/contracts/receipts.py)、[旧布局读取](../../app/worker/state/execution.py)、[manifest 兼容与拒绝规则](../../app/worker/execution/workspaces.py)及[离线 Flow 状态迁移](https://github.com/b1indsight/agentflow/blob/6600d34dbf14e22f76d835405dd8742ac3f902f5/scripts/migrate_flow_states.py)。数据库对旧 workspace 状态 schema 的明确拒绝仍是[当前启动行为](../../app/persistence/database.py)，相应测试保留。
 - 保留事务回滚、并发领取、跨 Flow 隔离、ACK/stop 未结清、各重启窗口和 VCS 子进程取消/回收。这些行为不能只靠一条正常完整流程替代。
 - `test_remote_e2e` 有真实双端运行时但模拟仓储/执行器，`test_remote_asgi` 有真实 ASGI/数据库但手工发送 worker 报文；目前互补，不能直接互删。后续若合并，必须在现有 ASGI 场景接入已有 WorkerRuntime 路径并承接工具、落盘及业务 ACK 后，才删除 RemoteStore 流程；不另建第三套远程 E2E。
 - `test_stop_preserves_edits_until_next_initial_prepares_new_generation` 暂不直接删除。只有现有 stop 或 failed-initial/resume 流程承接 terminal 已完成后 stop、同 Flow 下一 generation、真实 WorkerExecutor、manifest 字节及旧绑定不变后，才可合并。

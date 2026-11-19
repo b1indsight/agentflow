@@ -134,8 +134,6 @@ def test_flow_lifecycle_sql_writes_have_one_runtime_owner():
     # The delivery store shares the row but must never bypass the lifecycle ledger.
     writers = set()
     for path in Path("app").rglob("*.py"):
-        if path == Path("app/persistence/schema.py"):
-            continue  # Startup backfills are not runtime transitions.
         for node in ast.walk(ast.parse(path.read_text())):
             if (isinstance(node, ast.Constant) and isinstance(node.value, str)
                     and re.search(r"\b(?:UPDATE|INSERT\s+INTO)\s+flows\b", node.value,

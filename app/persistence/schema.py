@@ -31,6 +31,17 @@ CREATE TABLE IF NOT EXISTS flows (
   archived_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
+  is_issue_owner BOOLEAN NOT NULL DEFAULT FALSE CHECK (NOT is_issue_owner OR issue_number IS NOT NULL),
+  delivery_branch TEXT, delivery_base_branch TEXT, delivery_state TEXT, delivery_pr_number INTEGER,
+  delivery_url TEXT, delivery_head_sha TEXT, delivery_title TEXT, delivery_body TEXT,
+  delivery_merged_at TIMESTAMPTZ, delivery_merge_commit_sha TEXT, delivery_version INTEGER,
+  delivery_created_at TIMESTAMPTZ, delivery_updated_at TIMESTAMPTZ,
+  CONSTRAINT flows_delivery_complete CHECK (
+    ROW(delivery_branch,delivery_base_branch,delivery_state,delivery_pr_number,delivery_url,
+        delivery_head_sha,delivery_title,delivery_body,delivery_merged_at,delivery_merge_commit_sha,
+        delivery_version,delivery_created_at,delivery_updated_at) IS NULL
+    OR (delivery_branch IS NOT NULL AND delivery_state IS NOT NULL AND delivery_version IS NOT NULL
+        AND delivery_created_at IS NOT NULL AND delivery_updated_at IS NOT NULL)),
   CHECK ((state='archived') = (archived_at IS NOT NULL)),
   CHECK (state NOT IN ('finalizing','archived') OR archive_reason IS NOT NULL),
   CHECK (archive_reason IS NULL OR state IN ('blocked','finalizing','archived'))
@@ -46,6 +57,9 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_flows_active ON flows(repo, issue_number)
   WHERE state <> 'archived';
+CREATE UNIQUE INDEX IF NOT EXISTS ux_flows_issue_owner ON flows(repo,issue_number) WHERE is_issue_owner;
+CREATE INDEX IF NOT EXISTS ix_flows_delivery_pr ON flows(delivery_pr_number) WHERE delivery_pr_number IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_flows_delivery_head ON flows(delivery_head_sha) WHERE delivery_head_sha IS NOT NULL;
 
 -- 一条 flow 挂多个候选 attempt（§9-2 多方案分支）；MVP 恰好一个。
 CREATE TABLE IF NOT EXISTS attempts (
@@ -173,56 +187,17 @@ CREATE TABLE IF NOT EXISTS events (
   event_type TEXT NOT NULL,
   flow_id BIGINT REFERENCES flows(id),
   payload JSONB,
-  recorded_at TIMESTAMPTZ
+  recorded_at TIMESTAMPTZ,
+  inbox_position BIGINT, body_digest TEXT, received_at TIMESTAMPTZ, state TEXT, attempts INTEGER,
+  next_at TIMESTAMPTZ, claim_token TEXT, claim_expires_at TIMESTAMPTZ, processed_at TIMESTAMPTZ, error_code TEXT,
+  CONSTRAINT ck_event_receipt CHECK (
+    (inbox_position IS NULL AND recorded_at IS NOT NULL AND body_digest IS NULL AND received_at IS NULL
+     AND state IS NULL AND attempts IS NULL AND next_at IS NULL AND claim_token IS NULL
+     AND claim_expires_at IS NULL AND processed_at IS NULL AND error_code IS NULL)
+    OR (inbox_position IS NOT NULL AND body_digest IS NOT NULL AND received_at IS NOT NULL
+        AND state IS NOT NULL AND attempts IS NOT NULL AND next_at IS NOT NULL))
 );
-
-"""
-
-WEBHOOK_SCHEMA = """
-DO $$ BEGIN
- IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='events'::regclass AND attname='recorded_at') THEN
-   ALTER TABLE events RENAME COLUMN processed_at TO recorded_at;
-   ALTER TABLE events ALTER COLUMN recorded_at DROP NOT NULL;
- END IF;
- IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='events'::regclass AND attname='inbox_position') THEN
-   ALTER TABLE events ADD COLUMN inbox_position BIGINT, ADD COLUMN body_digest TEXT,
-     ADD COLUMN received_at TIMESTAMPTZ, ADD COLUMN state TEXT, ADD COLUMN attempts INTEGER,
-     ADD COLUMN next_at TIMESTAMPTZ, ADD COLUMN claim_token TEXT, ADD COLUMN claim_expires_at TIMESTAMPTZ,
-     ADD COLUMN processed_at TIMESTAMPTZ, ADD COLUMN error_code TEXT,
-     ADD CONSTRAINT ck_event_receipt CHECK (
-       (inbox_position IS NULL AND recorded_at IS NOT NULL AND body_digest IS NULL AND received_at IS NULL
-        AND state IS NULL AND attempts IS NULL AND next_at IS NULL AND claim_token IS NULL
-        AND claim_expires_at IS NULL AND processed_at IS NULL AND error_code IS NULL)
-       OR (inbox_position IS NOT NULL AND body_digest IS NOT NULL AND received_at IS NOT NULL
-           AND state IS NOT NULL AND attempts IS NOT NULL AND next_at IS NOT NULL));
- END IF;
-END $$;
 CREATE SEQUENCE IF NOT EXISTS events_inbox_position_seq OWNED BY events.inbox_position;
-DO $$ DECLARE copied BIGINT; BEGIN
- IF to_regclass('webhook_inbox') IS NOT NULL THEN
-   -- The queue owns the shared payload, including NULL after body retention. Old audit
-   -- copies may be stale (e.g. {} after cleanup followed by a post-expiry redelivery).
-   IF EXISTS (SELECT 1 FROM webhook_inbox i JOIN events e USING(delivery_id)
-              WHERE i.event_type<>e.event_type OR (e.payload<>'{}'::jsonb AND i.payload<>e.payload)) THEN
-     RAISE EXCEPTION 'conflicting webhook event types or payloads';
-   END IF;
-   INSERT INTO events(delivery_id,event_type,payload,inbox_position,body_digest,received_at,state,
-                      attempts,next_at,claim_token,claim_expires_at,processed_at,error_code)
-   SELECT delivery_id,event_type,payload,inbox_position,body_digest,received_at,state,
-          attempts,next_at,claim_token,claim_expires_at,processed_at,error_code FROM webhook_inbox
-   ON CONFLICT(delivery_id) DO UPDATE SET
-     (payload,inbox_position,body_digest,received_at,state,attempts,next_at,claim_token,claim_expires_at,
-      processed_at,error_code) = (excluded.payload,excluded.inbox_position,excluded.body_digest,
-      excluded.received_at,excluded.state,excluded.attempts,excluded.next_at,excluded.claim_token,
-      excluded.claim_expires_at,excluded.processed_at,excluded.error_code);
-   GET DIAGNOSTICS copied = ROW_COUNT;
-   IF copied <> (SELECT count(*) FROM webhook_inbox) THEN
-     RAISE EXCEPTION 'incomplete webhook receipt migration';
-   END IF;
-   PERFORM setval('events_inbox_position_seq',max(inbox_position)) FROM webhook_inbox HAVING count(*)>0;
-   DROP TABLE webhook_inbox;
- END IF;
-END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_events_inbox_position ON events(inbox_position) WHERE inbox_position IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_webhook_pending ON events(state, next_at, received_at) WHERE state IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_webhook_order ON events
@@ -414,70 +389,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_inference_request
   ON jobs ((inference->'task'->>'request_id')) WHERE kind='inference';
 """
 
-FLOW_MERGE_SCHEMA = """
-DO $$ DECLARE copied BIGINT; BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='flows'::regclass
-                 AND attname='is_issue_owner' AND NOT attisdropped) THEN
-    ALTER TABLE flows ADD COLUMN is_issue_owner BOOLEAN NOT NULL DEFAULT FALSE
-        CHECK (NOT is_issue_owner OR issue_number IS NOT NULL),
-      ADD COLUMN delivery_branch TEXT, ADD COLUMN delivery_base_branch TEXT,
-      ADD COLUMN delivery_state TEXT, ADD COLUMN delivery_pr_number INTEGER,
-      ADD COLUMN delivery_url TEXT, ADD COLUMN delivery_head_sha TEXT,
-      ADD COLUMN delivery_title TEXT, ADD COLUMN delivery_body TEXT,
-      ADD COLUMN delivery_merged_at TIMESTAMPTZ, ADD COLUMN delivery_merge_commit_sha TEXT,
-      ADD COLUMN delivery_version INTEGER, ADD COLUMN delivery_created_at TIMESTAMPTZ,
-      ADD COLUMN delivery_updated_at TIMESTAMPTZ,
-      ADD CONSTRAINT flows_delivery_complete CHECK (
-        ROW(delivery_branch,delivery_base_branch,delivery_state,delivery_pr_number,delivery_url,
-            delivery_head_sha,delivery_title,delivery_body,delivery_merged_at,delivery_merge_commit_sha,
-            delivery_version,delivery_created_at,delivery_updated_at) IS NULL
-        OR (delivery_branch IS NOT NULL AND delivery_state IS NOT NULL AND delivery_version IS NOT NULL
-            AND delivery_created_at IS NOT NULL AND delivery_updated_at IS NOT NULL));
-  ELSIF to_regclass('issue_flow_owners') IS NOT NULL OR to_regclass('flow_deliveries') IS NOT NULL THEN
-    RAISE EXCEPTION 'Unexpected partially merged Flow schema; reconcile before upgrading';
-  END IF;
-
-  -- Copying coordination facts is not a lifecycle transition. CONSOLE_SCHEMA reinstalls
-  -- the trigger against the new projection before this initialization transaction commits.
-  IF to_regclass('issue_flow_owners') IS NOT NULL OR to_regclass('flow_deliveries') IS NOT NULL THEN
-    DROP TRIGGER IF EXISTS console_fact_changed ON flows;
-  END IF;
-  IF to_regclass('issue_flow_owners') IS NOT NULL THEN
-    UPDATE flows f SET is_issue_owner=TRUE FROM issue_flow_owners o
-      WHERE f.id=o.flow_id AND f.repo=o.repo AND f.issue_number=o.issue_number;
-    GET DIAGNOSTICS copied = ROW_COUNT;
-    IF copied <> (SELECT count(*) FROM issue_flow_owners) THEN
-      RAISE EXCEPTION 'issue_flow_owners references a Flow with a different repo or issue';
-    END IF;
-  END IF;
-  IF to_regclass('flow_deliveries') IS NOT NULL THEN
-    UPDATE flows f SET (delivery_branch,delivery_base_branch,delivery_state,delivery_pr_number,
-      delivery_url,delivery_head_sha,delivery_title,delivery_body,delivery_merged_at,
-      delivery_merge_commit_sha,delivery_version,delivery_created_at,delivery_updated_at) =
-      (d.branch,d.base_branch,d.state,d.pr_number,d.url,d.head_sha,d.title,d.body,d.merged_at,
-       d.merge_commit_sha,d.version,d.created_at,d.updated_at) FROM flow_deliveries d WHERE f.id=d.flow_id;
-    GET DIAGNOSTICS copied = ROW_COUNT;
-    IF copied <> (SELECT count(*) FROM flow_deliveries) THEN
-      RAISE EXCEPTION 'flow_deliveries references a missing Flow';
-    END IF;
-  END IF;
-END $$;
-CREATE UNIQUE INDEX IF NOT EXISTS ux_flows_issue_owner ON flows(repo,issue_number) WHERE is_issue_owner;
-CREATE INDEX IF NOT EXISTS ix_flows_delivery_pr ON flows(delivery_pr_number) WHERE delivery_pr_number IS NOT NULL;
-CREATE INDEX IF NOT EXISTS ix_flows_delivery_head ON flows(delivery_head_sha) WHERE delivery_head_sha IS NOT NULL;
-"""
-
 SCHEMAS = (
     SCHEMA,
-    WEBHOOK_SCHEMA,
     STOP_SCHEMA,
     RESULT_SCHEMA,
     REVIEW_SCHEMA,
     RECONCILE_SCHEMA,
     PROJECT_SCHEMA,
-    FLOW_MERGE_SCHEMA,
     CONSOLE_SCHEMA,
-    "DROP TABLE IF EXISTS issue_flow_owners, flow_deliveries;",
     INFERENCE_SCHEMA,
     FLOW_LEDGER_BACKFILL,
 )

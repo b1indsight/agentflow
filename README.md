@@ -311,7 +311,8 @@ App 需有 Issues write 权限；初始化失败不阻塞服务 readiness，日�
 已核验 webhook 与补偿查询共用自动更正规则：只有实际合并时间加一秒仍早于原归档时间，
 才将 abandoned 的有效结果改为 succeeded。原始归档、合并证据与更正分别作为不可变 activity 保存；
 没有人工更正入口，不改变原归档时间、新轮次、Issue owner 或执行绑定。归档后才合并或顺序不明时只记事实。
-旧四态库启动会拒绝旧状态：先停止消费者与派发、备份数据库，再用 `scripts/migrate_flow_states.py`
+PR #185 前仍有 `issue_flow_owners`、`flow_deliveries` 或 `webhook_inbox` 的六态库须先停写、备份并手工合表，再启动新控制端。空库直接启动。
+更早的四态库须先停止消费者与派发、备份数据库，在[固定旧版本](https://github.com/b1indsight/agentflow/tree/6600d34dbf14e22f76d835405dd8742ac3f902f5)的独立 checkout 中用 `scripts/migrate_flow_states.py`
 预检与显式迁移；存在未知执行、旧未完成计划或归属冲突时必须先核验，不能强制猜测归档。
 其中已应用且通过格式、身份与摘要校验的 v13 结果（不含 inference），会列入预检的 `inbox_conversions`，
 备份原行后仅把 `result_payload.protocol_version` 改为 14，正文和 digest 不变，与六态转换同事务提交。

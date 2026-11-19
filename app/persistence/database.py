@@ -184,8 +184,13 @@ class Database:
                 ).fetchone()
                 if columns is None:
                     raise ValueError(
-                        "legacy Flow schema: stop consumers and run scripts/migrate_flow_states.py"
+                        "legacy Flow schema: use the pre-185 offline migration checkout (see README)"
                     )
+            if connection.execute(
+                "SELECT 1 WHERE to_regclass('issue_flow_owners') IS NOT NULL"
+                " OR to_regclass('flow_deliveries') IS NOT NULL OR to_regclass('webhook_inbox') IS NOT NULL"
+            ).fetchone():
+                raise ValueError("pre-185 schema: stop writers and migrate the three legacy tables offline")
             for schema in SCHEMAS:
                 connection.execute(schema)
 

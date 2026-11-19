@@ -25,7 +25,7 @@
 
 不改 Job/Delivery/Worker 各自的状态机，不重做调度器，不增加状态历史表、schema migration、版本号或通用命令总线。只迁移本项状态写入及直接支撑它们的上下文和元数据调用，不追求清除全仓库每一次 `lock_workflow()`。
 
-运行期约束涵盖 `app/` 和使用当前仓储的 smoke 调用。[四态离线迁移脚本](../../scripts/migrate_flow_states.py#L1-L27) 处理旧 schema、保留原始证据并要求全停机，保持冻结，不执行它，也不让旧状态通过六态运行期策略。
+运行期约束涵盖 `app/` 和使用当前仓储的 smoke 调用。[四态离线迁移脚本](https://github.com/b1indsight/agentflow/blob/6600d34dbf14e22f76d835405dd8742ac3f902f5/scripts/migrate_flow_states.py#L1-L27) 处理旧 schema、保留原始证据并要求全停机，保持冻结，不执行它，也不让旧状态通过六态运行期策略。
 
 ### 纯领域函数定义完整事件语义
 
