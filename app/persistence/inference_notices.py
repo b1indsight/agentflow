@@ -118,9 +118,8 @@ class InferenceNoticeStore(Repository):
                 " AND source='flow' AND kind='inference_exhausted' ORDER BY key,version DESC)"
                 " SELECT current.*,b.state AS batch_state,b.decision IS NOT NULL AS has_decision,"
                 " coalesce(f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
-                " AND d.state='open' AND f.current_attempt_id=b.attempt_id,FALSE) AS live"
+                " AND f.delivery_state='open' AND f.current_attempt_id=b.attempt_id,FALSE) AS live"
                 " FROM current JOIN flows f ON f.id=current.flow_id"
-                " LEFT JOIN flow_deliveries d ON d.flow_id=current.flow_id"
                 " LEFT JOIN review_batches b ON b.id=(current.metadata->>'batch_id')::bigint"
                 " AND b.flow_id=current.flow_id WHERE TRUE"
                 + after

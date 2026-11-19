@@ -13,7 +13,7 @@ from app.github import FeedbackSource
 ReconcileSource = FeedbackSource | Literal["threads"]
 # PR status checks share reconcile_checks with the feedback sources under this source name.
 PR_SOURCE = "pull_request"
-PR_RECONCILE_ELIGIBLE = "d.pr_number IS NOT NULL AND d.state<>'merged'"
+PR_RECONCILE_ELIGIBLE = "f.delivery_pr_number IS NOT NULL AND f.delivery_state<>'merged'"
 
 from app.persistence.repository import Repository
 
@@ -42,9 +42,9 @@ class ReconcileStore(Repository):
         """Recover persisted current merges that the ordinary PR poller intentionally excludes."""
         with self._db.connection() as connection:
             return [row["id"] for row in connection.execute(
-                "SELECT f.id FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
-                " WHERE f.state<>'archived' AND d.state='merged' AND d.pr_number IS NOT NULL"
-                " AND d.merged_at IS NOT NULL AND length(d.merge_commit_sha)>0"
+                "SELECT f.id FROM flows f"
+                " WHERE f.state<>'archived' AND f.delivery_state='merged' AND f.delivery_pr_number IS NOT NULL"
+                " AND f.delivery_merged_at IS NOT NULL AND length(f.delivery_merge_commit_sha)>0"
                 " ORDER BY f.id LIMIT %s", (limit,),
             ).fetchall()]
 
@@ -57,10 +57,10 @@ class ReconcileStore(Repository):
         with self._db.connection() as connection:
             connection.execute(
                 "INSERT INTO reconcile_checks(flow_id,source,next_at)"
-                " SELECT f.id,s.source,%s FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
+                " SELECT f.id,s.source,%s FROM flows f"
                 " CROSS JOIN (VALUES ('issue_comments'),('pr_comments'),('reviews'),('threads')) s(source)"
                 " WHERE f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
-                " AND d.state='open' AND d.pr_number IS NOT NULL"
+                " AND f.delivery_state='open' AND f.delivery_pr_number IS NOT NULL"
                 " AND (s.source<>'issue_comments' OR f.issue_number IS NOT NULL)"
                 " AND NOT EXISTS (SELECT 1 FROM reconcile_checks r"
                 " WHERE r.flow_id=f.id AND r.source=s.source) ORDER BY f.id,s.source"
@@ -74,9 +74,9 @@ class ReconcileStore(Repository):
                 connection.cursor(row_factory=class_row(FeedbackCheck))
                 .execute(
                     "SELECT r.* FROM reconcile_checks r JOIN flows f ON f.id=r.flow_id"
-                    " JOIN flow_deliveries d ON d.flow_id=f.id WHERE r.next_at<=%s AND r.source<>%s"
+                    " WHERE r.next_at<=%s AND r.source<>%s"
                     " AND f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
-                    " AND d.state='open' AND d.pr_number IS NOT NULL"
+                    " AND f.delivery_state='open' AND f.delivery_pr_number IS NOT NULL"
                     " AND (r.source<>'issue_comments' OR f.issue_number IS NOT NULL)"
                     " ORDER BY r.next_at,r.flow_id,r.source LIMIT %s",
                     (self._db.now(), PR_SOURCE, limit),
@@ -132,7 +132,7 @@ class ReconcileStore(Repository):
         with self._db.connection() as connection:
             connection.execute(
                 "INSERT INTO reconcile_checks(flow_id,source,next_at)"
-                " SELECT f.id,%s,%s FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
+                " SELECT f.id,%s,%s FROM flows f"
                 f" WHERE {PR_RECONCILE_ELIGIBLE}"
                 " AND NOT EXISTS (SELECT 1 FROM reconcile_checks r WHERE r.flow_id=f.id AND r.source=%s)"
                 " ORDER BY f.id LIMIT %s ON CONFLICT DO NOTHING",
@@ -143,7 +143,7 @@ class ReconcileStore(Repository):
         with self._db.connection() as connection:
             return connection.cursor(row_factory=class_row(ReconcileState)).execute(
                 "SELECT r.* FROM reconcile_checks r JOIN flows f ON f.id=r.flow_id"
-                " JOIN flow_deliveries d ON d.flow_id=f.id WHERE r.source=%s AND r.next_at<=%s"
+                " WHERE r.source=%s AND r.next_at<=%s"
                 f" AND {PR_RECONCILE_ELIGIBLE}"
                 " ORDER BY r.next_at,r.flow_id LIMIT %s", (PR_SOURCE, self._db.now(), limit),
             ).fetchall()

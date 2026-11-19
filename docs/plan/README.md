@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`flow-event-table-merge.md`](flow-event-table-merge.md) — [PR #185](https://github.com/b1indsight/agentflow/pull/185)，已实现，未部署：Issue 归属与当前交付并入 `flows`，Webhook 收件与业务去重并入 `events`。
+
 - [`reconcile-table-merge.md`](reconcile-table-merge.md) — 已实现，本地全量回归通过，未部署：`flow_reconcile` 与 `feedback_reconcile` 合并为 `reconcile_checks`，PR 检查为 `source='pull_request'` 的一行并保留 `hint_version`；启动时迁移现有行，对账行为与指标不变。
 
 - [`review-version-merge.md`](review-version-merge.md) — [PR #182](https://github.com/b1indsight/agentflow/pull/182)，已实现并通过本地全量回归，未部署：`review_items` 并入 `review_versions`，GitHub 对象按 `(kind, github_id)` 全局识别，新对象的 `item_id` 由其编码生成；删除 `review_pending_edits` 与无读取方的 `review_thread_observations`。冻结的 `(item_id, version)` 与 Worker 协议不变。

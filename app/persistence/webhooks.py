@@ -46,12 +46,16 @@ class WebhookStore(Repository):
                 "#>> '{repository,full_name}', %s), 1))", (Jsonb(payload), delivery_id),
             )
             conn.execute(
-                "INSERT INTO webhook_inbox(delivery_id,event_type,payload,body_digest,received_at,next_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                "INSERT INTO events(delivery_id,event_type,payload,body_digest,received_at,next_at,"
+                "inbox_position,state,attempts) VALUES (%s,%s,%s,%s,%s,%s,nextval('events_inbox_position_seq'),"
+                "'pending',0) ON CONFLICT(delivery_id) DO UPDATE SET payload=excluded.payload,"
+                "body_digest=excluded.body_digest,received_at=excluded.received_at,next_at=excluded.next_at,"
+                "inbox_position=excluded.inbox_position,state='pending',attempts=0 "
+                "WHERE events.inbox_position IS NULL AND events.event_type=excluded.event_type",
                 (delivery_id, event_type, Jsonb(payload), digest, now, now),
             )
             row = conn.execute(
-                "SELECT event_type,body_digest FROM webhook_inbox WHERE delivery_id=%s", (delivery_id,),
+                "SELECT event_type,body_digest FROM events WHERE delivery_id=%s", (delivery_id,),
             ).fetchone()
             if row is None or (row["event_type"], row["body_digest"]) != (event_type, digest):
                 raise DeliveryConflict("delivery identity conflicts with persisted receipt")
@@ -60,13 +64,13 @@ class WebhookStore(Repository):
         now = self._db.now()
         with self._db.connection() as conn:
             row = conn.execute(
-                "WITH candidate AS (SELECT delivery_id FROM webhook_inbox head WHERE "
+                "WITH candidate AS (SELECT delivery_id FROM events head WHERE "
                 "((state='pending' AND next_at<=%s) OR (state='processing' AND claim_expires_at<=%s)) "
-                "AND NOT EXISTS (SELECT 1 FROM webhook_inbox older WHERE older.state != 'done' "
+                "AND NOT EXISTS (SELECT 1 FROM events older WHERE older.state != 'done' "
                 "AND older.inbox_position < head.inbox_position AND "
                 "older.payload #>> '{repository,full_name}' = head.payload #>> '{repository,full_name}') "
                 "ORDER BY inbox_position FOR UPDATE SKIP LOCKED LIMIT 1) "
-                "UPDATE webhook_inbox w SET state='processing',attempts=attempts+1,claim_token=%s,"
+                "UPDATE events w SET state='processing',attempts=attempts+1,claim_token=%s,"
                 "claim_expires_at=%s FROM candidate c WHERE w.delivery_id=c.delivery_id RETURNING w.*",
                 (now, now, uuid4().hex, now + timedelta(seconds=60)),
             ).fetchone()
@@ -76,7 +80,7 @@ class WebhookStore(Repository):
         """Fence a claimed delivery for the complete business transaction."""
         with self._db.connection() as conn:
             return conn.execute(
-                "SELECT delivery_id FROM webhook_inbox WHERE delivery_id=%s AND state='processing' "
+                "SELECT delivery_id FROM events WHERE delivery_id=%s AND state='processing' "
                 "AND claim_token=%s AND claim_expires_at>%s FOR UPDATE",
                 (item.delivery_id, item.claim_token, self._db.now()),
             ).fetchone() is not None
@@ -84,7 +88,7 @@ class WebhookStore(Repository):
     def complete(self, item: Webhook) -> bool:
         with self._db.connection() as conn:
             return conn.execute(
-                "UPDATE webhook_inbox SET state='done',processed_at=%s,error_code=NULL,"
+                "UPDATE events SET state='done',processed_at=%s,error_code=NULL,"
                 "claim_token=NULL,claim_expires_at=NULL WHERE delivery_id=%s "
                 "AND state='processing' AND claim_token=%s RETURNING delivery_id",
                 (self._db.now(), item.delivery_id, item.claim_token),
@@ -95,7 +99,7 @@ class WebhookStore(Repository):
         blocked = permanent or item.attempts >= 10
         with self._db.connection() as conn:
             conn.execute(
-                "UPDATE webhook_inbox SET state=%s,next_at=%s,error_code=%s,"
+                "UPDATE events SET state=%s,next_at=%s,error_code=%s,"
                 "claim_token=NULL,claim_expires_at=NULL WHERE delivery_id=%s "
                 "AND state='processing' AND claim_token=%s",
                 ("blocked" if blocked else "pending",
@@ -106,14 +110,15 @@ class WebhookStore(Repository):
     def list(self, limit: int = 50) -> list[Webhook]:
         with self._db.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM webhook_inbox ORDER BY received_at DESC,delivery_id LIMIT %s", (limit,),
+                "SELECT * FROM events WHERE inbox_position IS NOT NULL ORDER BY received_at DESC,delivery_id LIMIT %s",
+                (limit,),
             ).fetchall()
         return [Webhook.model_validate(row) for row in rows]
 
     def retry(self, delivery_id: str) -> bool:
         with self._db.connection() as conn:
             return conn.execute(
-                "UPDATE webhook_inbox SET state='pending',attempts=0,next_at=%s,error_code=NULL "
+                "UPDATE events SET state='pending',attempts=0,next_at=%s,error_code=NULL "
                 "WHERE delivery_id=%s AND state='blocked' AND payload IS NOT NULL RETURNING delivery_id",
                 (self._db.now(), delivery_id),
             ).fetchone() is not None
@@ -122,25 +127,26 @@ class WebhookStore(Repository):
         """Clear completed payloads after seven days, receipts after ninety; never pending data."""
         now = self._db.now()
         with self._db.transaction() as tx, tx.connection() as conn:
-            rows = conn.execute(
-                "UPDATE webhook_inbox SET payload=NULL WHERE delivery_id IN "
-                "(SELECT delivery_id FROM webhook_inbox WHERE state='done' AND processed_at<%s "
-                "AND payload IS NOT NULL ORDER BY processed_at LIMIT 500) RETURNING delivery_id",
-                (now - timedelta(days=7),),
-            ).fetchall()
-            if rows:
-                conn.execute("UPDATE events SET payload='{}'::jsonb WHERE delivery_id=ANY(%s)",
-                             ([row["delivery_id"] for row in rows],))
             conn.execute(
-                "DELETE FROM webhook_inbox WHERE delivery_id IN (SELECT delivery_id FROM webhook_inbox "
-                "WHERE state='done' AND processed_at<%s ORDER BY processed_at LIMIT 500)",
+                "UPDATE events SET payload=NULL WHERE delivery_id IN "
+                "(SELECT delivery_id FROM events WHERE state='done' AND processed_at<%s "
+                "AND payload IS NOT NULL ORDER BY processed_at LIMIT 500 FOR UPDATE SKIP LOCKED)",
+                (now - timedelta(days=7),),
+            )
+            conn.execute(
+                "WITH expired AS (SELECT delivery_id,recorded_at FROM events WHERE state='done' AND processed_at<%s "
+                "ORDER BY processed_at LIMIT 500 FOR UPDATE SKIP LOCKED), forgotten AS ("
+                "DELETE FROM events USING expired x WHERE events.delivery_id=x.delivery_id AND x.recorded_at IS NULL) "
+                "UPDATE events SET payload=NULL,inbox_position=NULL,body_digest=NULL,received_at=NULL,state=NULL,"
+                "attempts=NULL,next_at=NULL,claim_token=NULL,claim_expires_at=NULL,processed_at=NULL,error_code=NULL "
+                "FROM expired x WHERE events.delivery_id=x.delivery_id AND x.recorded_at IS NOT NULL",
                 (now - timedelta(days=90),),
             )
 
     def event_seen(self, delivery_id: str) -> bool:
         with self._db.connection() as connection:
             row = connection.execute(
-                "SELECT 1 FROM events WHERE delivery_id=%s", (delivery_id,)
+                "SELECT 1 FROM events WHERE delivery_id=%s AND recorded_at IS NOT NULL", (delivery_id,)
             ).fetchone()
         return row is not None
 
@@ -150,8 +156,9 @@ class WebhookStore(Repository):
         """Atomically reserve a delivery and report whether this caller won."""
         with self._db.connection() as connection:
             row = connection.execute(
-                "INSERT INTO events(delivery_id, event_type, flow_id, payload, processed_at)"
-                " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (delivery_id) DO NOTHING"
+                "INSERT INTO events(delivery_id, event_type, flow_id, payload, recorded_at)"
+                " VALUES (%s,%s,%s,%s,%s) ON CONFLICT (delivery_id) DO UPDATE"
+                " SET recorded_at=excluded.recorded_at,flow_id=excluded.flow_id WHERE events.recorded_at IS NULL"
                 " RETURNING delivery_id",
                 (delivery_id, event_type, flow_id, Jsonb(payload), self._db.now()),
             ).fetchone()

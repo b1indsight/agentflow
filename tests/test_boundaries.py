@@ -130,15 +130,21 @@ def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[st
     assert not contains_forbidden(modules, forbidden)
 
 
-def test_flow_sql_writes_have_one_runtime_owner():
-    # Any other writer would bypass the transition policy and the Flow ledger.
+def test_flow_lifecycle_sql_writes_have_one_runtime_owner():
+    # The delivery store shares the row but must never bypass the lifecycle ledger.
     writers = set()
     for path in Path("app").rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
             if (isinstance(node, ast.Constant) and isinstance(node.value, str)
                     and re.search(r"\b(?:UPDATE|INSERT\s+INTO)\s+flows\b", node.value,
                                   re.IGNORECASE)):
-                writers.add(path.as_posix())
+                if path == Path("app/persistence/deliveries.py"):
+                    assignments = re.search(r"UPDATE flows SET (.+?) WHERE", node.value, re.IGNORECASE | re.DOTALL)
+                    assert assignments and all(
+                        part.strip().startswith("delivery_") for part in assignments[1].split(",")
+                    ), node.value
+                else:
+                    writers.add(path.as_posix())
     assert writers == {"app/persistence/flows.py"}
 
 

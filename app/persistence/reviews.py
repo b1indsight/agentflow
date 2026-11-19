@@ -382,10 +382,9 @@ class ReviewStore(Repository):
                 connection.cursor(row_factory=class_row(ReviewBatch))
                 .execute(
                     "SELECT b.* FROM review_batches b JOIN flows f ON f.id=b.flow_id"
-                    " JOIN flow_deliveries d ON d.flow_id=f.id"
                     " WHERE b.state='ready' AND b.job_id IS NULL AND f.state IN ('queued','running','review')"
                     " AND f.archive_reason IS NULL"
-                    " AND b.attempt_id=f.current_attempt_id AND d.state='open' ORDER BY b.id"
+                    " AND b.attempt_id=f.current_attempt_id AND f.delivery_state='open' ORDER BY b.id"
                 )
                 .fetchall()
             )

@@ -227,7 +227,7 @@ def test_direct_tasks_never_enter_issue_project_projections(store):
     projections = store.projects.list_projections()
     assert [(row.flow_id, row.issue_number) for row in projections] == [(issue.id, 7)]
     with store.connection() as connection:
-        assert connection.execute("SELECT 1 FROM issue_flow_owners WHERE flow_id=%s", (direct.id,)).fetchone() is None
+        assert connection.execute("SELECT 1 FROM flows WHERE is_issue_owner AND id=%s", (direct.id,)).fetchone() is None
 
 
 async def converge(sync, times=3):

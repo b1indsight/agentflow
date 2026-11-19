@@ -11,13 +11,13 @@
 
 - **账本**：`console_activity` 中由业务事务写入的 Flow 事实行，只追加、不可改；
 - **状态表**：`flows`，是账本在同一事务内更新的投影，业务判断、加锁和唯一约束继续读它；
-- **其他状态库**：Job、交付、反馈、Worker、对账进度等表保持各自权威，不由账本重建。
+- **其他状态**：Job、当前交付、反馈、Worker、对账进度等由各自的仓储维护，不由账本重建。
 
 范围只覆盖 `flows` 这一张表。按顺序重放某个 Flow 的事实，得到与 `flows` 当前行在比较列上一致的结果。
 
 不在范围内：
 
-- 重建 `jobs`、`flow_deliveries`、`review_*`、`workers` 等表；
+- 重建当前交付或 `jobs`、`review_*`、`workers` 等表；
 - 把租约、心跳、claim、分页游标、退避时间写入账本；
 - 把账本当作灾难恢复手段。其他表丢失后，只凭账本无法恢复执行与交付；
 - 改变控制台时间线、HTTP API、Worker 协议或 GitHub 行为。
@@ -30,14 +30,14 @@ PostgreSQL 仍是唯一运行时数据库。全部表按职责分为五类，每
 |---|---|---|
 | Flow 事实账本 | 只追加的业务事实，Flow 状态的唯一可信来源 | `console_activity` 中 `source='flow'` 且 `kind` 属于[事实目录](#6-事实目录)的行 |
 | Flow 状态表 | 账本的同事务投影，供判断、加锁和约束使用 | `flows` |
-| 业务状态与专用证据 | 各自领域的权威事实，账本只引用其 ID | `attempts`、`jobs`、`flow_deliveries`、`flow_executions`、`flow_tool_calls`、`execution_stops`、`result_applications`、`result_effects`、`events`、`review_versions`、`review_buffers`、`review_batches`、`webhook_inbox`、`issue_flow_owners`、`runtime_settings`、`project_destinations`、`worker_file_links` |
-| 协调数据 | 谁占用什么、处理到哪里、下次何时处理；不是业务事实 | `workers`、`reconcile_checks`、`project_projections`、`console_sync`、`console_installation_backoff`，以及 `jobs` 的租约、心跳、准备和核验退避列、`webhook_inbox` 的消费 claim 列 |
+| 业务状态与专用证据 | 各自领域的权威事实，账本只引用其 ID | `attempts`、`jobs`、`flow_executions`、`flow_tool_calls`、`execution_stops`、`result_applications`、`result_effects`、`events`、`review_versions`、`review_buffers`、`review_batches`、`runtime_settings`、`project_destinations`、`worker_file_links` |
+| 协调数据 | 谁占用什么、处理到哪里、下次何时处理；不是业务事实 | `workers`、`reconcile_checks`、`project_projections`、`console_sync`、`console_installation_backoff`，以及 `jobs` 的租约、心跳、准备和核验退避列、`events` 的消费 claim 列 |
 | 展示投影与采集归档 | 只为控制台读取服务，不参与业务判断 | `console_flows`，以及 `console_activity` 中的其余行 |
 
 几点说明：
 
 - `jobs` 同时含业务事实（种类、终态结果、接收与应用时间）和协调列（lease、heartbeat、
-  assignment token）；`webhook_inbox` 同时含原始事件和消费 claim。两张表整体归“业务状态与专用证据”，
+  assignment token）；`events` 同时含原始事件和消费 claim。两张表整体归“业务状态与专用证据”，
   其中的协调列按“协调数据”对待。
 - 协调数据并非都可以随意丢弃。例如 `workers` 的 generation 参与派发围栏。它们不进入账本的原因是
   不描述 Flow 的业务进展，而且写入频繁。
@@ -129,6 +129,7 @@ PR #171 已把 Flow 状态写入收拢到 `FlowStore.transition(flow, FlowEvent)
 | `updated_at` | 账本 | 最后一条状态转换事实的 `occurred_at`；`titled`、`merge`、`archive_correction` 不推进 |
 | `current_attempt_id` | 指针 | `FlowStore.set_current_attempt`，不由账本重建；`round_resumed` 时清空 |
 | `title_job_id` | 指针 | `FlowStore.set_title_job`，不由账本重建 |
+| `is_issue_owner`、`delivery_*` | Issue 展示归属与当前交付 | 创建/恢复时选择展示归属；交付写入保留独立版本与时间戳。这些列不由 Flow 生命周期账本重放。 |
 
 唯一行为变化：设置 `current_attempt_id` 不再推进 `updated_at`，也不再回写未变化的 `installation_id`。
 控制台卡片的更新时间取多表最大值，已包含 `attempts.updated_at`。

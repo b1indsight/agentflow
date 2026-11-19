@@ -332,7 +332,7 @@ M2 已加入类型化 GraphQL 线程/comment 分页、共享预算、原线程�
 | execution policy | 否 | worker config / `CodexAgent` | full access 需专用 account/container/VM；目录只表达所有权 |
 | VCS | 否 | `agent_guidance/verify_pushed_outcome` | Agent 自探测；worker 在 tool 前用固定 remote 和净化、限时命令验证 ancestry/clean/remote SHA |
 
-INITIAL 复用原 title inference job，一次返回 `title` 与英文 kebab-case `branch_slug`；control 直接校验两个字段，沿用原有标题写入和 inference 结果保存，从该结果读取 slug 后才创建 delivery、派发编码。不新增命名对象、分支列或分支占名写入，实际分支仍由 `flow_deliveries.branch` 保存。等待使用独立异步 preparation，不持有事务或阻塞 inference 槽；逻辑调用仍限 30 秒。命名失败不会生成 ID 分支。
+INITIAL 复用原 title inference job，一次返回 `title` 与英文 kebab-case `branch_slug`；control 直接校验两个字段，沿用原有标题写入和 inference 结果保存，从该结果读取 slug 后才创建 delivery、派发编码。实际分支由 `flows.delivery_branch` 保存，不做分支占名写入。等待使用独立异步 preparation，不持有事务或阻塞 inference 槽；逻辑调用仍限 30 秒。命名失败不会生成 ID 分支。
 重试沿用已有 delivery 分支或原 inference 结果，后续 round 从 delivery 的实际分支去掉当前轮次后缀，再加 `-round-N`。已有 delivery/PR 不重命名；首次派发前只读检查远端同名 ref，拒绝接管，不自动添加数字后缀。该检查不构成远端原子占名，也不在数据库中预留名称。
 worker 内的 Code Agent 在 Flow repo 完成 branch/bookmark、commit 和
 push；worker 在转发 `flow.open_pr` 前核验，control 再读取 GitHub ref 核对 SHA 后才创建/复用 PR，最后以
@@ -392,17 +392,15 @@ cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时�
 使用 pool 的 `dict_row` 默认值。SQL、JSONB 适配和原子操作由对应仓储显式维护，
 事务边界与共用锁由 Database 提供，没有引入 ORM。
 
-- `flows`：issue 级状态，`(repo, issue)` 仅允许一个非终态 flow；
+- `flows`：Flow 生命周期、Issue 展示归属和当前交付（分支、PR、独立版本和时间戳），`(repo, issue)` 仅允许一个非终态 flow；
 - `flow_executions`：Flow 到具体 worker/workspace/generation 的生命周期 binding 与 recovery deadline，活跃位置唯一；
-- `flow_deliveries`：每 Flow 唯一 branch/base/PR、交付状态和版本；
 - `flow_tool_calls`：fenced command 的参数与成功交付回执 response，支持同 call id 重放；
 - `attempts`：一次运行/恢复尝试的 session 与 revision cycles，不拥有 worker、branch 或 PR；
 - `jobs`：queued/running/done/failed、worker/workspace/generation/token/start、lease/recovery deadline、result inbox/digest 与尝试次数；
 - `result_applications`：按源 job 唯一保存冻结的结果计划；
 - `result_effects`：有序 GitHub 操作、claim/fencing、远端回执、退避时间和最后错误；
 - `workers`：以 `(worker_id, workspace)` 为复合主键，一位置一行；默认无仓库行保存连接/epoch/限额/推理槽，各仓库行保存代际、库存状态和当前编码 job；
-- `events`：delivery 去重和 payload 审计；
-- `webhook_inbox`：202 前持久接收的原始事件、消费 claim、重试与保留状态；
+- `events`：按 delivery ID 保存收件队列和独立的业务去重登记，完成收件过期不删除业务凭据；
 - `execution_stops`：绑定到具体执行与 workspace/generation 的停止意图、凭据 digest 与确认状态；
 - `review_versions`：按全局 `(kind, github_id)` 识别的反馈对象的不可变版本，版本号最大的一行为当前版本；
   含独立 relay/consume 时间和已核验 addressed 依据。新对象的 `item_id` 为 `github_id*4+kind` 编码，升级前的对象保留原 ID；

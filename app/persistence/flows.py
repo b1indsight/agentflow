@@ -112,8 +112,7 @@ class FlowStore(Repository):
             connection.cursor(row_factory=class_row(Flow)) as cursor,
         ):
             return cursor.execute(
-                "SELECT f.* FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
-                " WHERE f.repo=%s AND d.pr_number=%s ORDER BY f.id DESC LIMIT 1",
+                "SELECT * FROM flows WHERE repo=%s AND delivery_pr_number=%s ORDER BY id DESC LIMIT 1",
                 (repo, pr_number),
             ).fetchone()
 
@@ -299,7 +298,7 @@ class FlowStore(Repository):
         """Only the selected Flow may change the Issue's status labels."""
         with self._db.connection() as connection:
             return connection.execute(
-                "SELECT 1 FROM issue_flow_owners WHERE repo=%s AND issue_number=%s AND flow_id=%s",
+                "SELECT 1 FROM flows WHERE repo=%s AND issue_number=%s AND id=%s AND is_issue_owner",
                 (flow.repo, flow.issue_number, flow.id),
             ).fetchone() is not None
 
@@ -309,11 +308,11 @@ class FlowStore(Repository):
             return
         with self._db.connection() as connection:
             connection.execute(
-                "INSERT INTO issue_flow_owners(repo,issue_number,flow_id) VALUES (%s,%s,%s)"
-                " ON CONFLICT(repo,issue_number) DO UPDATE SET flow_id=excluded.flow_id,"
-                " version=issue_flow_owners.version+1",
+                "UPDATE flows SET is_issue_owner=FALSE WHERE repo=%s AND issue_number=%s"
+                " AND is_issue_owner AND id<>%s",
                 (flow.repo, flow.issue_number, flow.id),
             )
+            connection.execute("UPDATE flows SET is_issue_owner=TRUE WHERE id=%s AND NOT is_issue_owner", (flow.id,))
 
     def get_flow_execution(self, flow_id: int) -> FlowExecution | None:
         with (

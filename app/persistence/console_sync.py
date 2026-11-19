@@ -51,9 +51,9 @@ class ConsoleSyncStore(Repository):
             row = connection.execute(
                 "SELECT s.flow_id,s.source,CASE WHEN s.source='worker' AND s.limitations ?| %s"
                 " THEN NULL ELSE s.cursor END AS cursor,s.failures,f.repo,f.issue_number,"
-                "f.current_round_no AS round_no,d.pr_number,f.installation_id,f.created_at"
+                "f.current_round_no AS round_no,f.delivery_pr_number AS pr_number,f.installation_id,f.created_at"
                 " FROM console_sync s JOIN flows f ON f.id=s.flow_id"
-                " LEFT JOIN flow_deliveries d ON d.flow_id=f.id WHERE s.pending AND s.next_at<=%s"
+                " WHERE s.pending AND s.next_at<=%s"
                 " AND (s.source='worker' OR NOT EXISTS (SELECT 1 FROM console_installation_backoff b"
                 " WHERE b.installation_id=f.installation_id AND b.until_at>%s))"
                 " AND (s.claim_until IS NULL OR s.claim_until<%s) ORDER BY s.next_at,s.flow_id,s.source"
@@ -279,10 +279,9 @@ class ConsoleSyncStore(Repository):
         observations = webhook_observations(event_type, payload)
         with self._db.transaction() as tx, tx.connection() as connection:
             flows = connection.execute(
-                "SELECT f.id,f.current_round_no,d.pr_number FROM flows f"
-                " LEFT JOIN flow_deliveries d ON d.flow_id=f.id"
+                "SELECT f.id,f.current_round_no,f.delivery_pr_number AS pr_number FROM flows f"
                 " WHERE lower(f.repo)=lower(%s) AND (f.issue_number=%s"
-                " OR d.pr_number=ANY(%s) OR (%s::text IS NOT NULL AND d.head_sha=%s)) ORDER BY f.id",
+                " OR f.delivery_pr_number=ANY(%s) OR (%s::text IS NOT NULL AND f.delivery_head_sha=%s)) ORDER BY f.id",
                 (repo, issue_number, sorted(pull_numbers), sha, sha),
             ).fetchall()
             owners: dict[int, set[int | None]] = {

@@ -430,7 +430,7 @@ def test_append_agent_task_refuses_unsafe_states(console_runtime, store, flow_re
         elif scenario == "blocked":
             connection.execute("UPDATE flows SET state=%s WHERE id=%s", (scenario, flow.id))
         elif scenario in ("closed", "merged"):
-            connection.execute("UPDATE flow_deliveries SET state=%s WHERE flow_id=%s", (scenario, flow.id))
+            connection.execute("UPDATE flows SET delivery_state=%s WHERE id=%s", (scenario, flow.id))
         elif scenario == "no_binding":
             connection.execute("UPDATE flow_executions SET released_at=now() WHERE flow_id=%s", (flow.id,))
         elif scenario == "no_attempt":

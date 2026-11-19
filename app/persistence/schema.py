@@ -31,6 +31,17 @@ CREATE TABLE IF NOT EXISTS flows (
   archived_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
+  is_issue_owner BOOLEAN NOT NULL DEFAULT FALSE CHECK (NOT is_issue_owner OR issue_number IS NOT NULL),
+  delivery_branch TEXT, delivery_base_branch TEXT, delivery_state TEXT, delivery_pr_number INTEGER,
+  delivery_url TEXT, delivery_head_sha TEXT, delivery_title TEXT, delivery_body TEXT,
+  delivery_merged_at TIMESTAMPTZ, delivery_merge_commit_sha TEXT, delivery_version INTEGER,
+  delivery_created_at TIMESTAMPTZ, delivery_updated_at TIMESTAMPTZ,
+  CONSTRAINT flows_delivery_complete CHECK (
+    ROW(delivery_branch,delivery_base_branch,delivery_state,delivery_pr_number,delivery_url,
+        delivery_head_sha,delivery_title,delivery_body,delivery_merged_at,delivery_merge_commit_sha,
+        delivery_version,delivery_created_at,delivery_updated_at) IS NULL
+    OR (delivery_branch IS NOT NULL AND delivery_state IS NOT NULL AND delivery_version IS NOT NULL
+        AND delivery_created_at IS NOT NULL AND delivery_updated_at IS NOT NULL)),
   CHECK ((state='archived') = (archived_at IS NOT NULL)),
   CHECK (state NOT IN ('finalizing','archived') OR archive_reason IS NOT NULL),
   CHECK (archive_reason IS NULL OR state IN ('blocked','finalizing','archived'))
@@ -46,12 +57,9 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_flows_active ON flows(repo, issue_number)
   WHERE state <> 'archived';
-
-CREATE TABLE IF NOT EXISTS issue_flow_owners (
- repo TEXT NOT NULL, issue_number INTEGER NOT NULL,
- flow_id BIGINT NOT NULL REFERENCES flows(id), version BIGINT NOT NULL DEFAULT 1,
- PRIMARY KEY(repo,issue_number)
-);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_flows_issue_owner ON flows(repo,issue_number) WHERE is_issue_owner;
+CREATE INDEX IF NOT EXISTS ix_flows_delivery_pr ON flows(delivery_pr_number) WHERE delivery_pr_number IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_flows_delivery_head ON flows(delivery_head_sha) WHERE delivery_head_sha IS NOT NULL;
 
 -- 一条 flow 挂多个候选 attempt（§9-2 多方案分支）；MVP 恰好一个。
 CREATE TABLE IF NOT EXISTS attempts (
@@ -155,25 +163,6 @@ CREATE TABLE IF NOT EXISTS flow_executions (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_flow_executions_workspace_active
   ON flow_executions(worker_id,workspace) WHERE released_at IS NULL;
 
-CREATE TABLE IF NOT EXISTS flow_deliveries (
-  flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
-  branch TEXT NOT NULL,
-  base_branch TEXT,
-  state TEXT NOT NULL,
-  pr_number INTEGER,
-  url TEXT,
-  head_sha TEXT,
-  title TEXT,
-  body TEXT,
-  merged_at TIMESTAMPTZ,
-  merge_commit_sha TEXT,
-  version INTEGER NOT NULL DEFAULT 0,
-  created_at TIMESTAMPTZ NOT NULL,
-  updated_at TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ix_flow_deliveries_pr
-  ON flow_deliveries(pr_number) WHERE pr_number IS NOT NULL;
-
 CREATE TABLE IF NOT EXISTS flow_tool_calls (
   call_id TEXT PRIMARY KEY,
   flow_id BIGINT NOT NULL REFERENCES flows(id),
@@ -198,29 +187,20 @@ CREATE TABLE IF NOT EXISTS events (
   event_type TEXT NOT NULL,
   flow_id BIGINT REFERENCES flows(id),
   payload JSONB,
-  processed_at TIMESTAMPTZ NOT NULL
+  recorded_at TIMESTAMPTZ,
+  inbox_position BIGINT, body_digest TEXT, received_at TIMESTAMPTZ, state TEXT, attempts INTEGER,
+  next_at TIMESTAMPTZ, claim_token TEXT, claim_expires_at TIMESTAMPTZ, processed_at TIMESTAMPTZ, error_code TEXT,
+  CONSTRAINT ck_event_receipt CHECK (
+    (inbox_position IS NULL AND recorded_at IS NOT NULL AND body_digest IS NULL AND received_at IS NULL
+     AND state IS NULL AND attempts IS NULL AND next_at IS NULL AND claim_token IS NULL
+     AND claim_expires_at IS NULL AND processed_at IS NULL AND error_code IS NULL)
+    OR (inbox_position IS NOT NULL AND body_digest IS NOT NULL AND received_at IS NOT NULL
+        AND state IS NOT NULL AND attempts IS NOT NULL AND next_at IS NOT NULL))
 );
-
-"""
-
-WEBHOOK_SCHEMA = """
-CREATE TABLE IF NOT EXISTS webhook_inbox (
-    inbox_position BIGINT GENERATED ALWAYS AS IDENTITY,
-    delivery_id TEXT PRIMARY KEY,
-    event_type TEXT NOT NULL,
-    payload JSONB,
-    body_digest TEXT NOT NULL,
-    received_at TIMESTAMPTZ NOT NULL,
-    state TEXT NOT NULL DEFAULT 'pending',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    next_at TIMESTAMPTZ NOT NULL,
-    claim_token TEXT,
-    claim_expires_at TIMESTAMPTZ,
-    processed_at TIMESTAMPTZ,
-    error_code TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_webhook_pending ON webhook_inbox(state, next_at, received_at);
-CREATE INDEX IF NOT EXISTS ix_webhook_order ON webhook_inbox
+CREATE SEQUENCE IF NOT EXISTS events_inbox_position_seq OWNED BY events.inbox_position;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_events_inbox_position ON events(inbox_position) WHERE inbox_position IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_webhook_pending ON events(state, next_at, received_at) WHERE state IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_webhook_order ON events
  ((payload #>> '{repository,full_name}'), inbox_position) WHERE state != 'done';
 """
 
@@ -411,7 +391,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_inference_request
 
 SCHEMAS = (
     SCHEMA,
-    WEBHOOK_SCHEMA,
     STOP_SCHEMA,
     RESULT_SCHEMA,
     REVIEW_SCHEMA,

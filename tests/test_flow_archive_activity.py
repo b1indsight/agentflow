@@ -58,7 +58,7 @@ def authority(store, flow_id):
             "jobs": store.jobs.list_jobs(flow_id),
             "attempts": store.flows.list_attempts(flow_id),
             "execution": store.flows.get_flow_execution(flow_id),
-            "owners": connection.execute("SELECT * FROM issue_flow_owners").fetchall(),
+            "owners": connection.execute("SELECT id FROM flows WHERE is_issue_owner ORDER BY id").fetchall(),
         }
 
 

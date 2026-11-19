@@ -70,9 +70,9 @@ class ProjectStore(Repository):
             connection.execute(
                 "INSERT INTO project_projections(repo,issue_number,project_id,flow_id,config_key,desired_status,next_at)"
                 " SELECT lower(repo),issue_number,%s,id,%s,'todo',%s FROM ("
-                " SELECT f.* FROM flows f JOIN issue_flow_owners owner ON owner.flow_id=f.id"
+                " SELECT f.* FROM flows f"
                 " JOIN project_destinations d"
-                " ON d.repo=%s AND d.project_id=%s WHERE lower(f.repo)=d.repo"
+                " ON d.repo=%s AND d.project_id=%s WHERE f.is_issue_owner AND lower(f.repo)=d.repo"
                 " AND (f.state<>'archived' OR f.updated_at>=d.enabled_at)"
                 " AND NOT EXISTS (SELECT 1 FROM project_projections p WHERE p.repo=d.repo"
                 " AND p.project_id=d.project_id AND p.issue_number=f.issue_number)"
@@ -120,8 +120,7 @@ class ProjectStore(Repository):
                 " WHEN c.phase='queued' THEN 'todo' WHEN c.phase='running' THEN 'in_progress'"
                 " WHEN c.phase='review' THEN 'in_review' ELSE c.phase END AS status"
                 " FROM flows f JOIN console_facts c ON c.id=f.id"
-                " JOIN issue_flow_owners owner ON owner.flow_id=f.id"
-                " WHERE lower(f.repo)=%s AND f.issue_number=%s",
+                " WHERE f.is_issue_owner AND lower(f.repo)=%s AND f.issue_number=%s",
                 (row.repo, row.issue_number),
             ).fetchone()
             assert fact is not None

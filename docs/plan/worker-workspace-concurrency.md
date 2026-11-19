@@ -128,7 +128,7 @@ Session 保持有界 FIFO。有效消息突发填满队列时暂停 reader，由
 
 新建数据库直接创建复合主键 schema。旧 workers 单列主键数据库启动时明确报错，要求停写并核对真实 worker-root 的 workspace 身份后显式迁移；不能从 worker_id 猜造位置。当前不自动迁移旧数据库，也不将删除库、删除目录或伪造 ACK 当成迁移办法。
 
-既有 Flow 四态迁移脚本只安装自身需要的 Flow 所有权、活跃索引和 console 投影结构，不执行最新完整 schema，不改动历史 worker、执行绑定和 stop 结构。其 fingerprint 已反映实际 DDL；完成 Flow 状态迁移不等于完成 workspace 身份迁移。相关隔离验证见[历史 Flow 迁移测试](../../tests/test_flow_state_migration.py)。
+既有 Flow 四态迁移脚本只安装自身需要的 Flow 所有权、活跃索引和 console 投影结构，不执行最新完整 schema，不改动历史 worker、执行绑定和 stop 结构。其 fingerprint 已反映实际 DDL；完成 Flow 状态迁移不等于完成 workspace 身份迁移。相关隔离验证见[历史 Flow 迁移测试](https://github.com/b1indsight/agentflow/blob/6600d34dbf14e22f76d835405dd8742ac3f902f5/tests/test_flow_state_migration.py)。
 
 旧 journal/manifest 能证明身份的部分保留并转换；缺少目标或结清凭据的历史记录保留且拒绝不安全接单，需要核对实际部署数据。多绑定运行后不能直接回退到只理解单执行的版本。
 

@@ -7,7 +7,7 @@ service remembering an outbox call. Only explicit display facts enter this archi
 CONSOLE_SCHEMA = """
 CREATE OR REPLACE VIEW console_facts AS
 SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
- GREATEST(f.updated_at,COALESCE(d.updated_at,f.updated_at),
+ GREATEST(f.updated_at,COALESCE(f.delivery_updated_at,f.updated_at),
           COALESCE(j.updated_at,f.updated_at),COALESCE(a.updated_at,f.updated_at)) AS updated_at,
  CASE WHEN f.state='finalizing' THEN 'running' ELSE f.state END AS phase,
  CASE WHEN f.state='archived' THEN 'archived'
@@ -18,15 +18,15 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  WHEN j.state='running' AND j.recovery_deadline IS NOT NULL THEN 'recovering'
  WHEN j.state IN ('queued','running') THEN j.kind || ':' || j.state
  WHEN j.state='failed' THEN 'execution_failed'
- WHEN d.state='merged' THEN 'awaiting_archive'
- WHEN d.state='open' THEN 'awaiting_review'
+ WHEN f.delivery_state='merged' THEN 'awaiting_archive'
+ WHEN f.delivery_state='open' THEN 'awaiting_review'
  ELSE 'unknown' END AS action,
  COALESCE(x.worker_id,j.assigned_worker_id) AS worker_id,
  (f.state='archived' OR x.released_at IS NOT NULL)
  AS worker_historical,
  COALESCE(a.revision_cycles,0) AS revision_cycles,
- d.pr_number,d.branch,d.state AS delivery_state,d.head_sha,
- d.title AS delivery_title,d.body AS delivery_body,j.id AS job_id,
+ f.delivery_pr_number AS pr_number,f.delivery_branch AS branch,f.delivery_state,f.delivery_head_sha AS head_sha,
+ f.delivery_title,f.delivery_body,j.id AS job_id,
  j.state AS job_state,j.kind AS job_kind,j.attempt AS job_attempt,
  j.started_at,j.result_applied_at,
  CASE WHEN j.last_error IS NOT NULL OR j.prepare_last_error IS NOT NULL
@@ -34,7 +34,7 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  a.id AS attempt_id,a.codex_session_id,a.session_generation,a.last_revision_summary,
  f.current_round_no,f.archive_reason,
  f.archive_summary,f.archived_at,f.title AS task_title
-FROM flows f LEFT JOIN flow_deliveries d ON d.flow_id=f.id
+FROM flows f
 LEFT JOIN flow_executions x ON x.flow_id=f.id
 LEFT JOIN attempts a ON a.id=f.current_attempt_id
 LEFT JOIN LATERAL (SELECT candidate.*
@@ -50,7 +50,6 @@ CREATE TABLE IF NOT EXISTS console_flows (
 CREATE INDEX IF NOT EXISTS ix_console_phase ON console_flows ((facts->>'phase'),flow_id DESC);
 CREATE INDEX IF NOT EXISTS ix_console_repo ON console_flows ((lower(facts->>'repo')),flow_id DESC);
 CREATE INDEX IF NOT EXISTS ix_console_flow_issue ON flows (lower(repo),issue_number);
-CREATE INDEX IF NOT EXISTS ix_console_delivery_head ON flow_deliveries(head_sha) WHERE head_sha IS NOT NULL;
 CREATE TABLE IF NOT EXISTS console_activity (
  flow_id BIGINT NOT NULL REFERENCES console_flows(flow_id), version BIGINT NOT NULL,
  key TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL,
@@ -159,8 +158,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 DO $$ DECLARE target TEXT; BEGIN
- FOREACH target IN ARRAY ARRAY['flows','jobs','attempts','flow_deliveries',
-                               'flow_executions','result_effects'] LOOP
+ FOREACH target IN ARRAY ARRAY['flows','jobs','attempts','flow_executions','result_effects'] LOOP
  EXECUTE format('CREATE OR REPLACE TRIGGER console_fact_changed AFTER INSERT OR UPDATE ON %I'
                 ' FOR EACH ROW EXECUTE FUNCTION console_fact_changed()',target);
  END LOOP;
