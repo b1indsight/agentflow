@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- [README](README.md) 改为首次启动、创建和查看 Flow 的使用指南；排障、升级和[本地验证](docs/verification/README.md)按模块查阅。合并重复测试，运行行为不变。
+
 - `issue_flow_owners` 与 `flow_deliveries` 并入 `flows`，`webhook_inbox` 并入 `events`。保留 Issue 展示归属、当前交付版本和 Webhook 的独立收件/业务登记状态。已有库须停写、备份并手工合表后再启动新控制端；启动不会执行本次升级，不支持新旧控制端混跑，未部署。
 
 - 设置页从在线 Codex / Amp 编码 worker 读取模型和推理强度，同类取并集。部分查询失败时保留成功结果；刷新不会写入设置。新增只读 worker 请求，serve 和 worker 需一同升级至 wire27，不需迁移数据库或升级 code agent。

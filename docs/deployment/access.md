@@ -1,7 +1,7 @@
 # 单账号登录：Cloudflare Access
 
 用户 HTTP API 使用 Cloudflare Access 的签名身份凭证，并且只允许部署配置中的一个 owner
-邮箱。保护只读 Web 控制台、静态资源及[会话查询 API](../architecture/conversation-api.md)。
+邮箱。控制台页面、静态资源、任务创建与[会话查询 API](../architecture/conversation-api.md) 都使用这一身份。
 后端认证已提供；真实域名、GitHub 登录和 MFA 必须在部署环境完成下面的配置和验收。
 
 ## 1. 创建登录与访问策略
@@ -52,12 +52,12 @@ ingress:
     path: ^/webhook$
     service: http://127.0.0.1:8000
   - hostname: admin.example.com
-    path: ^/(console(/.*)?|api/(repos|flows(/[1-9][0-9]*(/(archive|jobs|conversation|activity(/(content|versions))?))?)?))$
+    path: ^/(console(/.*)?|api/(repos|flow-targets|settings(/model-catalog)?|files/[^/]+|flows(/[1-9][0-9]*(/(archive|resume|retry|agent-tasks|jobs|inference-notices|conversation|activity(/(content|versions))?))?)?))$
     service: http://127.0.0.1:8000
   - service: http_status:404
 ```
 
-Docker 和 Kubernetes 的 Cloudflare 模板提供了默认注释掉的管理路由，按实际 origin 启用。
+Docker 和 Kubernetes 的 Cloudflare 模板默认注释掉管理路由。启用时核对路径清单：仅转发 `/api/repos` 和 `/api/flows` 的旧模板无法加载新建 Flow 所需的 `/api/flow-targets`；用上面的路径规则并替换实际 origin。
 源站只监听 loopback 或受控内部网络；不额外向公网开放 serve 端口。不要公开整个应用，
 `/docs`、`/openapi.json`、Worker、metrics 和探针均不通过管理域名暴露。
 Webhook 使用另一个域名，不套用户登录，仍必须通过 GitHub HMAC；Worker 使用内部 WSS/token。

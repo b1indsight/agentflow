@@ -28,18 +28,18 @@
 
 | 范围 | 状态 | 当前事实 |
 |---|---|---|
-| 配置与领域契约 | 已验证（自动化） | serve/worker 独立配置、wire24 task/result/tool/recovery/stop/conversation 消息和分页 inventory、answer/revise 任务用途、纯文本任务与可空 Issue、按 Flow 分文件的 journal v5、历史交付/本轮同步基线与 session generation、批次/item-version/context digest 身份有覆盖 |
+| 配置与领域契约 | 已验证（自动化） | serve/worker 独立配置、协议消息、分页 inventory、answer/revise 任务、纯文本输入与可空 Issue、逐 Flow journal、交付基线与反馈批次身份有覆盖；当前版本和兼容范围见[升级说明](../operations/upgrade.md) |
 | PostgreSQL 持久层 | 已验证（自动化） | Runtime 管理共享 Database，服务自行创建具体仓储；显式事务与共用锁保护 flow/attempt/job、binding、结果回执与反馈批次；聚合 Store 用于 CLI、live smoke 和测试 |
 | Flow 事实账本 | 已验证（自动化） | `flows` 的每次账本列变化同事务追加一条不可变 Flow 事实；存量 Flow 启动时补快照；`flowtool flow verify` 重放比较，测试夹具对每个 PostgreSQL 用例校验，见 [Flow 事实账本与状态表](flow-ledger.md) |
 | Webhook Ingress | 已验证（自动化） | HMAC 验签后、202 前持久化 inbox；后台消费者在每条 receipt 事务内创建服务/路由，提交后通知；失败退避、重放和请求体限制有覆盖 |
 | Event Router | 已验证（M2 F1 自动化） | 反馈 delivery/版本/deadline 原子写入，持久 settle、强信号授权、显式 action、同 Flow 冻结批次串行和重启恢复已覆盖 |
-| M3 合并与清理 | F1/F2/F3 已合并 | 原 worker 提交清理凭据后，持久恢复 Issue/PR 完成标签和固定归档说明；全部回写后原子成功、释放与 ACK；真实 M3 闭环待验收 |
+| 合并与清理 | 已实现、有自动化覆盖 | 确认当前 PR 已合并即成功归档；原 Worker 的停止与工作区释放、GitHub 通知独立收尾。真实闭环待验收，见[端到端流程](workflows.md) |
 | Control/Worker 边界 | 已验证（Features 1–3） | 多 worker 鉴权/调度、Flow 生命周期 binding、tool multiplex、busy reconnect、result replay 与 journal secret 负向覆盖 |
 | Worker workspace 并发 | 本地实现、自动化验证 | workers 复合主键，一 Flow 独占一个位置；按需求补充库存，worker 可在不同 workspace 并行执行；默认无仓库推理目录、逐 job ACK/停止/恢复；旧数据库物理身份迁移仍是部署前置条件，见[实施记录](../plan/worker-workspace-concurrency.md) |
 | Control Service / Job Coordinator | 部分 | Issue 或持久任务输入/default branch prepare、原子创建、tool fencing、INITIAL 成功后创建 PR、原线程回复/保守 resolve 与持久恢复已接线；冲突自动处理与真实副作用 E2E 未完成 |
 | Codex / Context / Sandbox / VCS | 部分 | Flow repo、临时凭据、首轮 MCP、修订 resume/一次性 fallback、Git/jj clean/remote/lineage 双端核验有自动化；GitHub-only egress 与真实多轮 run 未验证 |
 | GitHub Client | 部分 | githubkit 0.16 App/installation 认证、Issue/repository/ref/PR、单仓库 Contents capability 与错误映射有隔离测试；M2 线程分页、回复、resolve 及竞态恢复有自动化；真实 App smoke 待验证 |
-| Judge / 通用推理 | 已验证（adapter / Job 自动化） | wire24 推理 Job 复用统一领取/结果/恢复；Judge 仅按相关 PR/反馈线程/引用片段派发 answer/revise 或保留 wait/ignore，不生成最终答复；answer 由 worker 回答并比较本地提交不变，control 比较冻结 PR head。推理优先 controller 托管 bub mini worker，否则使用普通 worker 默认无仓库 workspace 的独立 Codex/Amp 会话；持久预算/重试及执行记录通知不变，真实 provider smoke 待执行 |
+| Judge / 通用推理 | 已验证（adapter / Job 自动化） | 推理 Job 复用统一领取、结果与恢复；Judge 按相关 PR、反馈线程和引用片段判定 answer/revise/wait/ignore，不生成最终答复。优先由 controller 托管的 bub mini worker 推理，否则使用普通 worker 的独立推理会话；真实 provider smoke 待执行。见 [Review 循环](review-loop.md) |
 | PR / 反馈对账 | 已实现、有自动化覆盖 | 独立有界循环读取已追踪 PR 的 merge/close/reopen 及 Issue/PR/review/线程反馈；cursor、退避和诊断持久化，不补建漏失的新 Flow trigger |
 | Projects v2 | 已实现、有自动化覆盖 | 可选组织看板配置、资源 API、独立投影同步及 check/status/retry；远端失败不改写 Flow，真实看板待验收 |
 | 取消 / drain / 停机 | 已实现、有自动化覆盖 | 持久 stop intent、执行 nonce、进程组取消与停止凭据握手；未知执行/未决 effects 保留占用；drain 不派新 Flow，已有绑定继续收尾 |

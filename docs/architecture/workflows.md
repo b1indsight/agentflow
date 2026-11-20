@@ -12,7 +12,7 @@
   → Started / Heartbeat；INITIAL 获得临发 scoped push capability
   → Codex commit/push → worker-local flow.open_pr MCP → control tool ledger
   → worker 核验本地 VCS/remote；Result 与持久 tool outcome 核对
-  → control 再核对 GitHub ref → find-or-open 唯一 PR → AcceptResultResponse；保留 ACTIVE 与 binding
+  → control 再核对 GitHub ref → find-or-open 唯一 PR → AcceptResultResponse；进入 review，保留原工作区
   → review/comment → 持久反馈与 settle → 冻结下一批
   → control 本地 Judge 判定 revise/answer/wait/ignore；授权 Request Changes 经 grace 直达 revise
   → revise：同 repo/branch/PR resume 或一次性 session 兜底 → 双端交付核验
@@ -34,25 +34,18 @@
 4. Code Agent commit/push 后调用 `flow.open_pr`；worker 与 control 依次核验远端 SHA，先持久化
    PR 意图；INITIAL 终态结果核验成功后 control 才创建/复用唯一 PR、设置标签并请求审核；
 5. 用户在 GitHub 提交 review、inline comment 或对话评论；
-6. Event Router 持久化反馈，settle 后由 control 的 Judge 作前置判断；只有 revise 创建 revision job，
-   answer/ignore/wait 直接处理批次。授权 Request Changes 经 grace 直达修订；
+6. Event Router 持久化反馈，settle 后 Judge 选择答复、修订或等待等动作。answer 和 revise 都派发到原 Worker；answer 须确认本地提交和远端 PR head 未改动。授权 Request Changes 经 grace 可直达修订，见 [Review 循环](review-loop.md)；
 7. revise 由同一 worker 恢复 Codex 会话并 push，control 核验交付、处理线程，无未决反馈时重新请求审核；
 8. 用户根据仓库自身 CI 和 review 在网页人工 Approve + Merge；
-9. `pull_request.closed (merged=true)` 触发 MERGED 和 archive job；
-10. worker 清理工作区，control 归档记录并更新 GitHub 状态。
-
-步骤 3–7 已实现并合并，具备隔离自动化覆盖，真实 GitHub App/Codex/bub E2E 待执行。
-步骤 8 由用户人工完成；M3 F1 已实现步骤 9 的原子合并与后续任务收敛，迟到结果不能恢复编码。
-步骤 10 已接入 F2 原 worker 清理凭据与 F3 状态回写：Issue/PR 增量更新标签、各一条固定归档说明，
-回写失败保留 ACTIVE Flow 和原 binding，成功后才原子完成并 ACK。真实 M3 闭环待验收，见
-[F3 实施与验收](../plan/m3-archive-status.md)。
+9. Webhook 或对账确认当前 PR 已合并后，control 在同一事务中记录合并、成功归档、停止请求和通知意图；
+10. 原 Worker 确认执行已退出、远端操作结清后释放工作区绑定。GitHub 通知独立恢复；下一 INITIAL 独占目录后清理旧副本。原 Worker 离线或通知失败都不撤销归档，见[归档与资源回收](../operations/upgrade.md#合并归档与资源回收分离)。
 
 ## 6. 对账、取消与会话查询
 
 - **PR / 反馈对账**：独立循环读取已追踪 PR 的 merge/close/reopen，以及 Issue/PR 普通评论、
-  review 正文和行内线程；持久化分页进度和退避。close 保留绑定并暂挂，reopen 核验基线后
-  恢复；对账不补建漏失的新 Flow trigger，不追溯执行旧评论命令。
-- **取消**：事务内保存 CANCELLED 和 stop intent，阻止新派发与 GitHub 写操作；worker 取消
+  review 正文和行内线程；持久化分页进度和退避。未合并关闭进入废弃收尾，重开不自动恢复；对账不补建漏失的新 Flow trigger，不追溯执行旧评论命令。
+- **跨轮反馈**：恢复后，以本轮首个 INITIAL 的持久创建时间为界；同秒、更早或缺少创建时间的原 Issue 评论不进入新批次，编辑旧评论也不会改变归属。新 PR 上的评论和 Review 无此时间限制。普通反馈每次每来源至多 50 条，线程每次至多 20 条评论；不以分页片段判定线程可以 resolve。
+- **取消**：事务内记录结束本轮和停止意图，阻止新派发；worker 取消
   执行并回收持有的进程组，journal 保存停止凭据。control 确认凭据且已发送 effects 收敛后
   才释放绑定；未知旧进程继续阻塞。取消不回滚已发生的远端操作，合并事实仍进入原归档路径。
 - **Drain**：持久标记 worker 不接新 Flow；已绑定 Flow 的修订/归档仍继续，不隐式取消业务。
@@ -81,8 +74,8 @@
 | 4 | INITIAL 结果核验并应用 | `delivery_applied` | `review` |
 | 5–6 | 反馈批次创建修订 Job | `job_enqueued` | `queued` |
 | 7 | 修订 Job 派发、结果应用 | `job_claimed`，随后 `delivery_applied` | `review` |
-| 9 | 合并事件或对账发现合并 | `finalization_requested`，收尾条件满足后 `archive` | `archived` |
-| 10 | 原 Worker 清理结果应用 | `cleanup_applied`，随后 `archive` | `archived` |
+| 9 | 确认当前 PR 合并 | `merge`、`archive` | `archived` |
+| 10 | 原 Worker 停止、释放与通知收尾 | 不再重复归档 | `archived` |
 
 异常与运维路径：
 

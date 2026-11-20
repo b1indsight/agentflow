@@ -107,3 +107,17 @@
 - **流程复用：** Controller 更换连接和 coding/inference 并发复用现有 `remote_flow` 的本地 Git、实际 executor、MCP、数据库和业务 ACK，编码成功必须经过真实交付校验。双端停止将暂停点移到外部 coding agent，保留 tracked/untracked/ignored 编辑、同一位置和 inode 复用、generation 推进，以及丢失 ACK 不影响新 writer 的断言。
 - **生命周期与故障：** ASGI/readiness 使用实际启动和关闭；关闭故障注入仍执行真实资源释放。重连继续使用活的 WorkerRuntime，进程重启则从持久 journal 重建；保留注册前停止、连接独占、离线完成、回执重放与恢复 fencing 等不同窗口。没有新增产品机制，本次不另做复杂度消融。
 - **验证状态：** 独立 PostgreSQL 上未排除文件的 Python 全量通过，无失败或跳过；最终辅助修改后再次通过 Worker 客户端和 history 检查，Ruff、Mypy 通过。结果与日志保存在[同一审查记录](https://ampcode.com/artifacts/91fae6c8-e2aa-4b62-b02a-c04dbd22dc8c)。本批继续使用原 PR，具体发布状态见审查记录。
+
+### 2026-11-20：继续精简测试，按读者用途拆分 README（提案）
+
+- **测试取舍：** 从现有场景查找重复执行同一入口、检查同一结果的用例，记录“删去哪条 → 哪条继续保护这个行为”。例如，Codex 的 `_start_args` 成功用例可考虑并入 `CodexAgent.start` 的现有启动测试，在实际传给子进程的参数上检查目录、权限与 broker；`trusted_host=False` 的拒绝仍需独立验证。不同故障窗口、权限边界和协议契约分别保留。不设删例数量目标，不改产品或 CI。
+- **首页：** 面向第一次使用和自行部署的人，保留用途、先决条件、如何创建第一个 Flow、在哪里看结果、常用命令与安全提示。读者应能区分“Worker 已连接”和“已具备编码权限”，并能找到控制台构建与 Access 接入步骤。
+- **模块文档：** Control 调度、恢复和 Review 规则归 `docs/architecture/`；Worker 安装、身份、工作目录和隔离归 `docs/deployment/`；排障、备份、协议升级和回退归 `docs/operations/`；打包、测试及真实环境验收归 `docs/verification/`。已有说明只链接，缺失的补到负责该模块的页面。历史测试数字留在原实施记录，不作为当前验收结论。
+- **验收：** 以最新主线为基准，先运行拟改的测试，再核对每个删除项的输入、断言和故障阶段。对关键合并项临时破坏被保护的行为，确认保留用例仍能报错。最后用独立 PostgreSQL 跑全量 pytest、Ruff 和 Mypy；核对 README 中的命令、相对链接和仓库内对旧锚点的引用。其他任务的工作区改动保持原样。
+
+### 2026-11-20：承接测试与文档验收
+
+- Codex 启动成功的参数断言并入 `test_adapter_returns_raw_output_without_interpreting_business_schema`，直接检查传给子进程的 `-C`、`-s` 和 broker；启动与恢复的拒绝用例保留。reviewer 与 allowlist 独立解析并入 CSV/JSON 配置用例，保留不同名单与默认标签的断言。
+- 删除只检查数据库探针返回真的独立测试：`test_background_label_discovery_does_not_block_readiness_and_stops_with_server` 已通过真实 PostgreSQL 和 HTTP 断言 `/readyz` 返回 200。连接失败用例保留 `/healthz` 200、`/readyz` 503 和错误不泄露，去掉重复探测。未删超时或停机竞态。反馈对账共用测试正文，保留 webhook 已存命令与普通评论被编辑为命令两种输入，以及随后恢复普通反馈的断言。
+- 首页面向安装和第一次交付，迁出的操作说明见[排障](../operations/runbook.md)、[升级](../operations/upgrade.md)和[本地验证](../verification/README.md)。同步修正架构页的归档时点和 Access 示例漏掉的控制台路由。未改产品、部署模板或 CI。
+- 在独立进程中令 Codex 指向错误的 cwd、令健康数据库误报未就绪，承接测试分别在启动参数和 HTTP 状态断言处失败。正常实现上以本机 TCP PostgreSQL 17 跑完整 pytest，无失败；纯 Git 参数不适用的 jj 元数据场景按原规则跳过，jj 对应用例通过。Ruff、Mypy、控制台构建和 sdist/wheel 打包通过，wheel 含控制台入口。新增相对链接、首页 CLI 选项与管理域名路由正反例已核对，未测试线上登录、GitHub 或模型调用。

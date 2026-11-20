@@ -292,28 +292,13 @@ async def test_observed_review_then_authorized_submission_preserves_request_chan
     assert settle(store)[0].kind.value == "revision"
 
 
-async def test_edit_to_command_supersedes_feedback_and_later_edit_recovers(store, review_flow, feedback_resources):
+@pytest.mark.parametrize("webhook_body", ["Change old code", "/flow stop"], ids=["edited", "unchanged"])
+async def test_poll_marks_command_inert_and_later_edit_recovers(store, review_flow, feedback_resources, webhook_body):
     flow, clock = review_flow
-    ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="Change old code"))
+    # Polling must suppress a command even when the webhook already stored the same text.
+    ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body=webhook_body))
     github = GitHub(clock)
     github.pages["issue_comments", None] = Batch(items=[page(clock).items[0].model_copy(update={"body": "/flow stop"})])
-    await poller(store, github)._sweep()
-    assert store.reviews.pending(flow.id) == []
-    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
-    clock.now += timedelta(seconds=301)
-    github.pages["issue_comments", None] = page(clock)
-    await poller(store, github)._sweep()
-    assert store.reviews.pending(flow.id)[0].body == "Please add a bound."
-
-
-async def test_poll_marks_same_webhook_command_body_inert(store, review_flow, feedback_resources):
-    flow, clock = review_flow
-    ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="/flow stop"))
-    github = GitHub(clock)
-    github.pages["issue_comments", None] = Batch(items=[
-        page(clock).items[0].model_copy(update={"body": "/flow stop"}),
-    ])
-    # An edited command can reach storage before polling identifies it as inert.
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id) == []
     assert store.flows.get_flow(flow.id).state is FlowState.REVIEW

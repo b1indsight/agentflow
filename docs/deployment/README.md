@@ -201,6 +201,8 @@ worker 不自动读取 `.env`，上述加载仅针对 worker 私有文件。回�
 `uv run flowtool workers`，确认 `worker-1` 在线。保留 worker root、journal 和会话数据，
 不要为重启临时更换 identity/root。启动注册成功尚不代表真实编码闭环已通过。
 
+只做本机连接验证时，保留 ID、token、loopback WS 地址及明文 WS 开关，不启用 `FLOWTOOL_TRUSTED_HOST_EXECUTION`。需要调整断线重连时，在 Worker 环境设置 `FLOWTOOL_RECONNECT_MIN_BACKOFF`、`FLOWTOOL_RECONNECT_MAX_BACKOFF` 和 `FLOWTOOL_RECONNECT_JITTER`；服务端的心跳、租约与恢复宽限期则在 [control 配置](../../env.example)中设置。
+
 正式 uv Git 安装的 Worker 使用原安装入口 `flowtool worker --update`，自动查询最新版、
 原地更新并核验后退出。操作者先停共享安装的全部 Worker，成功后按原方式重启；
 源码检出不执行此命令。安装合同与恢复边界见 [Worker 更新](worker-update.md)。

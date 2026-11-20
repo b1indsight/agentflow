@@ -3,6 +3,18 @@
 首版为单 serve、固定 worker ID/root/HOME。部署入口见 [部署文档](../deployment/README.md)，
 不新增部署 CLI；Cloudflare 只属于接入部署。生产环境完整恢复与 RPO/RTO 尚未验收。
 
+## Flow 卡住时先看什么
+
+在能访问数据库的 control 环境运行 `flowtool flow show <id>`。分别检查准备错误、PR 与反馈来源的上次成功和下次检查时间、执行绑定及未完成的 GitHub 回写。内部执行错误留在详情和日志中，不会作为 GitHub 评论发布。
+
+| 阶段 | 默认行为与配置 |
+|---|---|
+| 派发前读取 GitHub | 临时错误遵守 Retry-After，保留原 Worker 绑定。`FLOWTOOL_PREPARE_MAX_FAILURES` 默认 5，`FLOWTOOL_PREPARE_RETRY_WINDOW_SECONDS` 默认 900；重启不重置预算。这不覆盖凭据签发或 Worker 执行。 |
+| 查询已追踪 PR | `FLOWTOOL_RECONCILE_INTERVAL_SECONDS` 默认 300；`FLOWTOOL_RECONCILE_BATCH_SIZE` 默认 64；`FLOWTOOL_RECONCILE_CONCURRENCY` 默认 4。补查不会补建漏失的 Issue 触发。 |
+| 已接收结果等待确认 | `FLOWTOOL_RESULT_RECOVERY_CONCURRENCY` 默认 4（1–64），`FLOWTOOL_RESULT_RECOVERY_BATCH_SIZE` 默认 64（1–1000）。结果恢复与租约回收分别进行。 |
+
+修复明确的失败后可运行 `flowtool flow retry <id>`。若修订已推送、只是通知被明确拒绝，只重试失败的通知，不重新编码；发送结果不明时先查远端回执，不盲目重发。已归档的 Flow 不通过 retry 开始新一轮。显式恢复用 `flowtool flow resume <id> --expected-round N`；无 PR 的调查可用 `flowtool flow finish <id> succeeded --summary '调查结论' --expected-round N`。用 `flowtool flow history <id> --round N` 核对轮次。
+
 ## Linux systemd（手动更新）
 
 先按直接进程文档安装固定 commit 的 `/opt/flowtool/.venv`，worker 另外安装同镜像版本的
@@ -53,6 +65,8 @@ failed 可重投或 retry，running/停旧后的 incomplete 直接按原镜像�
 先保存时间、部署 commit/digest、delivery/Flow/job/worker ID、停止/恢复边界，避免记录 token/正文。
 用 `flowtool workers`、`flowtool inbox status` 及 [日志指标](observability.md) 确认状态；
 用 `flowtool --help` 查看现有 flow 查询命令。不要直接改数据库状态或清 journal 解锁。
+
+没有控制台时，在 control 环境用 `flowtool flow create OWNER/REPO --installation-id N --content-file PATH` 提交任务；`--content-file -` 从标准输入读取，也可改用 `--content TEXT`。已有 Issue 则改用 `--issue-number N`，不要同时提供内容。可选组织 Projects 的状态与重试命令见 [GitHub App 接入](../architecture/github-app.md)。
 
 | 场景 | 操作与继续条件 |
 | --- | --- |

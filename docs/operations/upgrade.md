@@ -1,9 +1,14 @@
 # 当前版本部署与重启
 
-当前格式为 wire protocol v25、worker journal v5、执行 ResultInbox v1、Control 合并通知 inbox v2、workspace manifest v3。
-文件链接扩展只新增 `worker_file_links` 表，不改变现有 journal/inbox；两端必须协调升级到 v25。
+当前格式为 wire protocol v27、worker journal v5、执行 ResultInbox v1、Control 合并通知 inbox v2、workspace manifest v3。serve 和 worker 拒绝不匹配的在线协议；在维护窗口停止新分配，等待在途准备、推理、执行和已发远端操作收敛，再备份并协调更新两端。设置页的模型目录查询不需要更换原生 CLI 或转换 journal。
 首次部署选择新数据库/schema 与新 worker root，serve/worker 固定到同一 commit/镜像 digest；
 schema 初始化只创建当前结构。合并归档调整不增加 DDL；前置的[多工作区并发版本](../plan/worker-workspace-concurrency.md)仍须独立核验 workers 结构及物理位置迁移。
+
+## 升级前核对数据库与工作区
+
+- 仍有 `issue_flow_owners`、`flow_deliveries` 或 `webhook_inbox` 的六态库须先停写、备份并按[合表记录](../plan/flow-event-table-merge.md)手工迁移，再启动新控制端。直接输入的任务没有 Issue；首次写入后，即使任务已归档，也不能直接降级到只支持 Issue 的版本。
+- 更早的四态库须在[固定旧版本](https://github.com/b1indsight/agentflow/tree/6600d34dbf14e22f76d835405dd8742ac3f902f5)单独检出 `scripts/migrate_flow_states.py`。先预检，核实未知执行与归属冲突；应用时须提供 `--apply --expect-report <预检指纹>`。数据、schema 或迁移规则变化后重做预检。仅校验通过且已应用的 v13 非推理结果可列入 `inbox_conversions`，备份原行并转换到 v14；不转换在线协议或 Worker journal。
+- 四态迁移不会迁移旧的单行 Worker 主键。须分别核对实际 Worker 身份、root 与 workspace，再迁移到 `(worker_id, workspace)`。保留原 ID、root、HOME 和逐 Flow journal；不要靠复制目录或替换 ID 接管未结执行。更新方式见 [Worker 安装与更新](../deployment/worker-update.md)。
 
 ## 合并归档与资源回收分离
 

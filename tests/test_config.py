@@ -69,6 +69,7 @@ def test_judge_credentials_stay_out_of_config_serialization_and_code_agent_envir
 def test_settings_parse_allowlist_environment_formats(monkeypatch, tmp_path, value, expected) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("FLOWTOOL_ALLOWLIST", value)
+    monkeypatch.setenv("FLOWTOOL_REVIEWERS", "carol,dave")
     monkeypatch.setenv(
         "FLOWTOOL_DATABASE_URL", "postgresql://flowtool:secret@db.example/flowtool"
     )
@@ -78,20 +79,9 @@ def test_settings_parse_allowlist_environment_formats(monkeypatch, tmp_path, val
     settings = ServerSettings()  # type: ignore[call-arg]
 
     assert settings.allowlist == expected
-    assert settings.database_url == "postgresql://flowtool:secret@db.example/flowtool"
-
-
-def test_reviewers_are_configured_independently_from_trigger_allowlist(monkeypatch) -> None:
-    monkeypatch.setenv("FLOWTOOL_ALLOWLIST", "alice,bob")
-    monkeypatch.setenv("FLOWTOOL_REVIEWERS", "carol,dave")
-    monkeypatch.setenv("FLOWTOOL_DATABASE_URL", "postgresql://localhost/flowtool")
-    monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker-1":"secret"}')
-
-    settings = ServerSettings()  # type: ignore[call-arg]
-
-    assert settings.allowlist == ["alice", "bob"]
     assert settings.reviewers == ["carol", "dave"]
     assert settings.in_review_label == "flow:in-review"
+    assert settings.database_url == "postgresql://flowtool:secret@db.example/flowtool"
 
 
 def test_serve_settings_require_unique_nonempty_worker_credentials(monkeypatch) -> None:
