@@ -185,7 +185,8 @@ def test_coding_summary_display_preserves_archives_paging_and_version_comparison
     summary = "## 完成\n\n- **修复** JSON 展示\n\n" + "中文😀带引号\"和反斜线\\\n" * 210
     payload: dict[str, object] = {"summary": summary, "vcs_backend_used": "jj" if revision else "git"}
     if revision:
-        payload.update(addressed=[], deferred=[], needs_clarification=[])
+        payload.update(addressed=[], deferred=[], needs_clarification=["先选范围？", "再选分支？"])
+    display = summary + ("\n\n待澄清：\n\n- 先选范围？\n- 再选分支？" if revision else "")
     raw = json.dumps(payload)
     original = Observation(
         key="worker:summary",
@@ -200,16 +201,17 @@ def test_coding_summary_display_preserves_archives_paging_and_version_comparison
     page = archive.page(flow.id)
     item = page.items[0]
     assert item.body == summary[:2000]
-    assert item.body_length == len(summary)
+    assert item.body_length == len(display)
     text, offset = "", 0
     while True:
         part = archive.content(flow.id, item.key, item.version, offset, 997)
-        assert part.total == len(summary)
+        assert part.total == len(display)
         text += part.text
         if part.next_offset is None:
             break
         offset = part.next_offset
-    assert text == summary
+    assert text == display
+    assert not archive.append(flow.id, original)  # A repeated Worker scan reuses the same record.
     assert archive.versions(flow.id, item.key).items == page.items
     with store._db.connection() as connection:
         row = connection.execute(

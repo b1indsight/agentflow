@@ -9,8 +9,11 @@ from typing import Literal
 from loguru import logger
 from pluggy import PluginManager
 
+from app.contracts.protocol import RevisionTaskResult, Succeeded
+from app.contracts.receipts import decode_result_inbox
 from app.controler.workflow.archive import verify_archive, verify_merge_notice
 from app.controler.workflow.lifecycle import close_delivery, record_merge
+from app.controler.workflow.plans import coding_failure_status
 from app.domain.flow_policy import FlowEvent
 from app.domain.models import (
     WORKING_STATES,
@@ -18,13 +21,14 @@ from app.domain.models import (
     DeliveryState,
     Flow,
     FlowState,
+    Job,
     JobKind,
     JobState,
     WorkerView,
 )
 from app.github import PullRequestMerge
-from app.github.console import Observation
 from app.persistence.activity import ActivityStore
+from app.persistence.agent_inputs import AgentInputStore
 from app.persistence.assignments import AssignmentStore
 from app.persistence.console_sync import ConsoleSyncStore
 from app.persistence.database import Database
@@ -293,65 +297,89 @@ class ControlService:
         self._jobs_available()
 
     def append_agent_task(self, flow_id: int, instruction: str, request_id: str) -> None:
-        """Atomically append an Agent task using the Flow's existing revision pipeline."""
+        """Accept messages independently of whether this round can dispatch work now."""
         with self.flows.locked(flow_id) as context:
             tx, fresh = context.database, context.flow
             if fresh is None:
                 raise AgentTaskRejected("flow_not_found")
-            jobs = self.jobs.using(tx)
-            history = jobs.list_jobs(flow_id)
-            # Preserve idempotency for tasks persisted before the input path was renamed.
-            previous = next((job for job in history
-                if (job.payload or {}).get("agent_task_request_id",
-                    (job.payload or {}).get("console_request_id")) == request_id), None)
+            inputs = AgentInputStore(tx)
+            previous = inputs.previous(flow_id, request_id)
             if previous is not None:
-                if (previous.payload or {}).get("instruction") != instruction:
+                if previous != instruction:
                     raise AgentTaskRejected("agent_task_request_conflict")
                 return
-            delivery = self.deliveries.using(tx).get_delivery(flow_id)
-            execution = self.flows.using(tx).get_flow_execution(flow_id)
-            reviews = self.reviews.using(tx)
-            if (
-                fresh.state is not FlowState.REVIEW
-                or fresh.current_attempt_id is None
-                or fresh.installation_id is None
-                or delivery is None
-                or delivery.state is not DeliveryState.OPEN
-                or execution is None
-                or execution.released_at is not None
-            ):
+            if fresh.state is FlowState.ARCHIVED:
                 raise AgentTaskRejected("agent_task_unavailable")
-            if (
-                self.stops.using(tx).has_pending(flow_id)
-                or any(job.state in {JobState.QUEUED, JobState.RUNNING} for job in history)
-                or jobs.reopen_blocked(flow_id)
-                or reviews.has_active_batch(flow_id)
-            ):
-                raise AgentTaskRejected("agent_task_busy")
-            batch = reviews.create_batch(
-                fresh, trigger="strong", feedback=[],
-                open_points=reviews.waiting_open_points(flow_id),
-            )
-            job = jobs.enqueue_job(fresh, JobKind.REVISION, {
-                "batch_id": batch.id, "instruction": instruction,
-                "purpose": "revise", "agent_task_request_id": request_id,
+            inputs.record(fresh, request_id, instruction)
+            queued = self._queue_agent_inputs(tx, fresh, request_id)
+        if queued:
+            self._jobs_available()
+
+    def dispatch_pending_inputs(self) -> None:
+        """Recover queued messages after a busy execution settles or the controller restarts."""
+        for flow_id in AgentInputStore(self.database).ready_flows():
+            with self.flows.locked(flow_id) as context:
+                queued = context.flow and self._queue_agent_inputs(context.database, context.flow)
+            if queued:
+                self._jobs_available()
+
+    def _queue_agent_inputs(self, tx: Database, flow: Flow, request_id: str | None = None) -> bool:
+        if flow.archive_reason or flow.state not in {FlowState.REVIEW, FlowState.BLOCKED}:
+            return False
+        jobs, reviews = self.jobs.using(tx), self.reviews.using(tx)
+        delivery = self.deliveries.using(tx).get_delivery(flow.id)
+        execution = self.flows.using(tx).get_flow_execution(flow.id)
+        if (flow.current_attempt_id is None or flow.installation_id is None or not delivery
+                or delivery.state is not DeliveryState.OPEN or not execution or execution.released_at
+                or self.stops.using(tx).has_pending(flow.id) or jobs.reopen_blocked(flow.id)
+                or any(job.state in {JobState.QUEUED, JobState.RUNNING} for job in jobs.list_jobs(flow.id))):
+            return False
+        failed = jobs.latest_failed_job(flow.id) if flow.state is FlowState.BLOCKED else None
+        if flow.state is FlowState.BLOCKED and (not failed or failed.kind is not JobKind.REVISION
+                                                 or (failed.payload or {}).get("purpose") == "answer"):
+            return False
+        if not failed and reviews.has_active_batch(flow.id):
+            return False
+        notes = AgentInputStore(tx).take(flow)
+        if not notes:
+            return False
+        if failed:
+            self.flows.using(tx).transition(flow, FlowEvent.RETRY_REQUESTED)
+            self._retry_revision(tx, flow, failed, notes)
+        else:
+            batch = reviews.create_batch(flow, trigger="strong", feedback=[],
+                                         open_points=reviews.waiting_open_points(flow.id))
+            job = jobs.enqueue_job(flow, JobKind.REVISION, {
+                "batch_id": batch.id, "instruction": "\n\n".join(notes),
+                "purpose": "revise", "agent_task_request_id": request_id, "owner_messages": notes,
             })
             reviews.advance(batch.id, job)
-            ActivityStore(tx).append(
-                flow_id,
-                Observation(
-                    key=f"agent_task:{request_id}",
-                    source="agent_task",
-                    kind="message",
-                    round_no=fresh.current_round_no,
-                    author="user",
-                    body=instruction,
-                    occurred_at=tx.now(),
-                    updated_at=tx.now(),
-                    metadata={"job_id": job.id, "attempt_id": fresh.current_attempt_id},
-                ),
-            )
-        self._jobs_available()
+        return True
+
+    def _retry_revision(self, tx: Database, flow: Flow, failed: Job, notes: list[str]) -> None:
+        payload = dict(failed.payload or {})
+        if payload.get("purpose", "revise") == "revise":
+            payload.pop("revision", None)  # Freeze a fresh retry assignment; keep the original receipt intact.
+            status = "上次修订未完成，请从当前工作区继续。"
+            uncalled = failed.dispatch_authorized_at is None and failed.started_at is None
+            if failed.result_payload is not None and failed.result_digest is not None:
+                terminal = decode_result_inbox(failed.result_payload, job_id=failed.id,
+                                               assignment_token=failed.assignment_token,
+                                               result_digest=failed.result_digest).terminal
+                if isinstance(terminal, Succeeded) and isinstance(terminal.result, RevisionTaskResult):
+                    result = terminal.result
+                    if result.exit_code:
+                        status = coding_failure_status(result)
+                    uncalled = not result.invocations and not result.last_message
+            if uncalled:
+                # A preflight failure never delivered these instructions to the conversation.
+                prior = payload.get("owner_messages")
+                if prior is None and (payload.get("agent_task_request_id") or payload.get("console_request_id")):
+                    prior = [payload["instruction"]]
+                notes = [*(prior or []), *notes]
+            payload.update(retry_status=status, instruction="\n\n".join(notes), owner_messages=notes)
+        job = self.jobs.using(tx).enqueue_job(flow, JobKind.REVISION, payload)
+        self.reviews.using(tx).retry(failed, job)
 
     def retry(self, flow: Flow) -> bool:
         """Requeue eligible work, returning False when an active Flow needs no retry."""
@@ -360,7 +388,6 @@ class ControlService:
             flows_tx = self.flows.using(tx)
             jobs_tx = self.jobs.using(tx)
             result_store_tx = self.result_store.using(tx)
-            reviews_tx = self.reviews.using(tx)
             stops_tx = self.stops.using(tx)
             assignments_tx = self.assignments.using(tx)
             tx.serialize_issue(flow.repo, flow.issue_number)
@@ -447,16 +474,13 @@ class ControlService:
                         "retry_delivery_merged", "a merged PR cannot retry coding or review jobs"
                     )
                 flows_tx.transition(fresh, FlowEvent.RETRY_REQUESTED)
-                replacement = jobs_tx.enqueue_job(
-                    fresh,
-                    kind,
-                    payload=failed_job.payload
-                    if failed_job
-                    else ({"issue_number": fresh.issue_number}
-                          if fresh.issue_number is not None else {}),
-                )
                 if failed_job is not None and kind is JobKind.REVISION:
-                    reviews_tx.retry(failed_job, replacement)
+                    notes = (AgentInputStore(tx).take(fresh)
+                             if (failed_job.payload or {}).get("purpose") != "answer" else [])
+                    self._retry_revision(tx, fresh, failed_job, notes)
+                else:
+                    jobs_tx.enqueue_job(fresh, kind, payload=failed_job.payload if failed_job else (
+                        {"issue_number": fresh.issue_number} if fresh.issue_number is not None else {}))
         if fresh.state is FlowState.ARCHIVED:
             self.notify_merge(fresh)
         else:

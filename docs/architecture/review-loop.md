@@ -92,6 +92,7 @@ answer 显式要求仅回答、不修改代码、不 commit/push，覆盖旧编�
 
 revise 的退出码之外，worker 要求完整 schema、Git/jj backend、正确 branch、干净工作区和一致的本地/远端 SHA；
 worker 先 fetch 原分支，确认本地没有脏文件或无法证明已发布的提交，再安全同步到 fetch 得到的 R。R 可以晚于 PR 观察值，也不必继承历史 delivery head。Git 与 colocated jj 均保留未发布工作；不会自动 stash、强推或在途 rebase。
+显式重试失败的 revise 时保留原工作区，只读记录远端基线 R，不执行上述同步；本地领先、远端领先或分叉均交给原 agent 处理。续跑消息只包含失败状态和用户补充，不生成提交差异。原会话不可用则报告失败，不另起会话。普通 revise 和只读 answer 不变。
 成功结果必须提供实际 `baseline_sha=R`。control 查询原 open PR 与 ref，核验来源仓库、base/branch、最终本地/远端提交一致，且最终提交等于 R 或继承 R，随后将交付事实及 addressed 声明冻结入 ResultPlan。只有成功结果更新 delivery head/base；评论、resolve 和 re-review 使用冻结任务/结果的 PR 事实。结果重放复用已核验事实与副作用回执。
 允许 SHA 不变的明确 no-op；是否有新提交比较最终提交与 R，外部提交不算 Agent 的新修订。没有新提交或有 deferred/clarification/遗漏项时不请求 review。编码后的并发更新由普通 push 和结果/effect 校验拒绝，保留现场与反馈，不自动重新编码。
 

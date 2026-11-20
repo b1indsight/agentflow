@@ -242,16 +242,17 @@ async def worktree_registered(seed: Path, repo: Path) -> bool:
 
 
 async def prepare_vcs_context(
-    repo_path: Path, branch: str, *, remote: str = "origin"
+    repo_path: Path, branch: str, *, remote: str = "origin", ignore_working_copy: bool = False,
 ) -> VcsExecutionContext:
     """Snapshot candidate backend revisions without selecting a backend for CodingAgent."""
 
     git_base = await _optional_stdout("git", "rev-parse", "HEAD", cwd=repo_path)
+    jj = ("jj", "--ignore-working-copy") if ignore_working_copy else ("jj",)
     jj_base = await _optional_stdout(
-        "jj", "log", "-r", "@", "--no-graph", "-T", "commit_id ++ \"\\n\"", cwd=repo_path
+        *jj, "log", "-r", "@", "--no-graph", "-T", "commit_id ++ \"\\n\"", cwd=repo_path
     )
     jj_ancestor = await _optional_stdout(
-        "jj",
+        *jj,
         "log",
         "-r",
         "parents(@)",
@@ -384,9 +385,9 @@ async def local_commit(repo_path: Path) -> str:
 
 async def prepare_revision_context(
     repo_path: Path, branch: str, previous_head_sha: str,
-    push_token: SecretStr | None = None,
+    push_token: SecretStr | None = None, *, explicit_retry: bool = False,
 ) -> VcsExecutionContext:
-    """Synchronize a clean, published checkout to the source branch's fetched snapshot.
+    """Capture the remote baseline; synchronize the checkout only on an ordinary revision.
 
     The previous delivery proves local work was published; it does not constrain the new remote
     history. Fetch objects without importing jj refs first, so an unsafe checkout cannot cause
@@ -394,20 +395,30 @@ async def prepare_revision_context(
     """
     if not repo_path.is_dir():
         raise VcsVerificationError("binding", "existing Flow repository is missing")
-    await require_idle_repository(repo_path)
-    context = await prepare_vcs_context(repo_path, branch)
+    if explicit_retry:
+        require_repository(repo_path)
+    else:
+        await require_idle_repository(repo_path)
+    context = await prepare_vcs_context(repo_path, branch, ignore_working_copy=explicit_retry)
     if context.git_base_sha is None or context.git_remote_url is None:
         raise VcsVerificationError("binding", "revision requires Git or colocated jj metadata")
     await _required_stdout("branch", "git", "check-ref-format", f"refs/heads/{branch}", cwd=repo_path)
     if context.jj_base_sha is not None:
         _require_unchanged_remote(context.jj_remote_url or "", context.git_remote_url)
         local = await _required_stdout(
-            "branch", "jj", "log", "-r", branch, "--no-graph", "-T", "commit_id", cwd=repo_path,
+            "branch", "jj", "--ignore-working-copy", "log", "-r", branch,
+            "--no-graph", "-T", "commit_id", cwd=repo_path,
         )
         _require_jj_working_at(context.jj_base_sha, context.jj_ancestor_sha, local)
     else:
         local = context.git_base_sha
         await _require_git_branch(context)
+    if explicit_retry:
+        # The original agent owns any unfinished reconciliation. Anchor delivery to the live
+        # remote tip without fetching, importing, or touching either side's refs.
+        baseline = await _remote_sha(context.git_remote_url, branch, push_token)
+        return replace(context, git_base_sha=baseline, push_token=push_token,
+                       jj_ancestor_sha=baseline if context.jj_base_sha else None)
     fetched = await _fetch_revision(context, push_token)
     unpublished = await _required_stdout(
         "baseline", "git", "rev-list", local, "--not", previous_head_sha, fetched, "--",
@@ -610,7 +621,9 @@ async def _require_clean(*args: str, cwd: Path) -> None:
 
 
 async def _jj_remote_url(repo_path: Path, remote: str) -> str:
-    remotes = await _required_stdout("push", "jj", "git", "remote", "list", cwd=repo_path)
+    remotes = await _required_stdout(
+        "push", "jj", "--ignore-working-copy", "git", "remote", "list", cwd=repo_path,
+    )
     for line in remotes.splitlines():
         name, separator, url = line.partition(" ")
         if name == remote and separator and url.strip():

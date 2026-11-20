@@ -35,7 +35,7 @@ from tests.access import AccessIssuer
 from tests.flow_fixtures import apply_flow_event, enqueue_job
 from tests.github import RecordingGitHub
 from tests.test_cancel_drain import running
-from tests.test_coordinator import apply_result, coordinator
+from tests.test_coordinator import apply_result, coordinator, prepare_initial
 from tests.test_merge import route_merge
 from tests.test_revision_delivery import verified_result
 from tests.test_workflow_transactions import accepted_coding
@@ -418,7 +418,7 @@ async def test_append_agent_task_uses_revision_pipeline_and_records_input_once(
     "queued", "running", "pending_result", "unknown_execution", "triage", "stop",
 ])
 @pytest.mark.ledger_unverified
-def test_append_agent_task_refuses_unsafe_states(console_runtime, store, flow_ready_for_agent_task, scenario):
+def test_append_agent_task_accepts_without_starting_unsafe_work(console_runtime, store, flow_ready_for_agent_task, scenario):
     flow = flow_ready_for_agent_task
     with store.connection() as connection:
         if scenario in ("archived", "finalizing"):
@@ -453,9 +453,80 @@ def test_append_agent_task_refuses_unsafe_states(console_runtime, store, flow_re
     with TestClient(create_app(console_runtime)) as client:
         response = client.post(f"/api/flows/{flow.id}/agent-tasks", headers=console_runtime.issuer.headers(),
                                json={"instruction": "继续", "request_id": str(uuid4())})
-        assert response.status_code == 409
+        assert response.status_code == (409 if scenario == "archived" else 200)
+        page = client.get(f"/api/flows/{flow.id}/activity", headers=console_runtime.issuer.headers()).json()
+        messages = [item["body"] for item in page["items"] if item["source"] == "agent_task"]
+        assert messages == ([] if scenario == "archived" else ["继续"])
     assert len(store.jobs.list_jobs(flow.id)) == 1
     console_runtime.gateway.wake_all.assert_not_called()
+
+
+async def test_queued_messages_reach_first_session_in_order_after_restart(store, recording_resources):
+    # No PR or worker exists when either message is received.
+    service = ControlService(database=store.database)
+    flow = service.create_flow("owner/repo", None, 42, task_content="Original task")
+    service.append_agent_task(flow.id, "First note", str(uuid4()))
+    service.append_agent_task(flow.id, "Second note", str(uuid4()))
+    register_worker(store, "worker-1", repo=flow.repo, epoch="epoch")
+    job = store.assignments.assign_job("worker-1", "token", "epoch")
+    github = RecordingGitHub()
+    github.refs = {}
+    subject = coordinator(store, github)
+    first = await prepare_initial(subject, job)
+    replay = await subject.prepare(job)
+    assert first.task_content == replay.task_content == "Original task\n\nFirst note\n\nSecond note"
+
+
+@pytest.mark.parametrize("when", ["during_execution", "after_failure"])
+async def test_message_resumes_failed_revision_once(store, recording_resources, when):
+    job, result = accepted_coding(store, receive=False)
+    service = ControlService(database=store.database)
+    request_id = str(uuid4())
+    if when == "during_execution":
+        service.append_agent_task(job.flow_id, "Continue the review", request_id)
+        assert store.jobs.list_jobs(job.flow_id)[-1].id == job.id
+    subject = coordinator(store, RecordingGitHub())
+    result.exit_code, result.failure_stage = 124, "execution"
+    result.failure_detail = "Codex: no new stdout/stderr for 600s; execution timed out"
+    assert await apply_result(subject, job, result) is JobState.FAILED
+    assert store.flows.get_flow(job.flow_id).state is FlowState.BLOCKED
+    if when == "after_failure":
+        service.append_agent_task(job.flow_id, "Continue the review", request_id)
+    restarted = ControlService(database=store.database)
+    restarted.dispatch_pending_inputs()
+    restarted.append_agent_task(job.flow_id, "Continue the review", request_id)
+    restarted.dispatch_pending_inputs()
+    replacement, = [later for later in store.jobs.list_jobs(job.flow_id) if later.id > job.id]
+    assert replacement.kind is JobKind.REVISION
+    assert result.failure_detail in replacement.payload["retry_status"]
+    assert replacement.payload["instruction"] == "Continue the review"
+    assert replacement.payload["batch_id"] == job.payload["batch_id"]
+
+
+async def test_retry_delivers_owner_input_that_failed_before_agent_invocation(
+    store, flow_ready_for_agent_task, recording_resources,
+):
+    # The failed job was Started by a worker, but the original conversation never saw the question.
+    flow = flow_ready_for_agent_task
+    service = ControlService(database=store.database)
+    service.append_agent_task(flow.id, "Keep the existing tests", str(uuid4()))
+    job = store.assignments.assign_job("worker-1", "first", "epoch")
+    github = RecordingGitHub()
+    github.pull_request = PullRequest(repo=flow.repo, number=17, state="open", head_branch="flow/7",
+                                      head_sha="abc123", head_repository=flow.repo, base_branch="main")
+    subject = coordinator(store, github)
+    task = await subject.prepare(job)
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-1", "first", "epoch")
+    subject.mark_started(job, task, "worker-1")
+    failed = verified_result(task, exit_code=65, last_message="", invocations=[], output=None,
+                             failure_stage="baseline", failure_detail="local branch has unpublished commits")
+    assert await apply_result(subject, job, failed) is JobState.FAILED
+    report_settled(store, job.id, epoch="epoch")
+    service.append_agent_task(flow.id, "Finish the review", str(uuid4()))
+    followup = await subject.prepare(store.assignments.assign_job("worker-1", "retry", "epoch"))
+    assert followup.session_id == task.session_id
+    assert followup.instruction == "Keep the existing tests\n\nFinish the review"
+    assert "baseline: local branch has unpublished commits" in followup.retry_status
 
 
 def test_append_agent_task_requires_owner_same_origin_and_valid_input(console_runtime, store, flow_ready_for_agent_task):

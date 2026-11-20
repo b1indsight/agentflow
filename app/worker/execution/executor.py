@@ -36,6 +36,7 @@ from app.worker.execution.prompts import (
     build_initial_correction_prompt,
     build_initial_prompt,
     build_revision_prompt,
+    build_revision_retry_prompt,
 )
 from app.worker.execution.vcs import (
     VcsExecutionContext,
@@ -289,19 +290,24 @@ class WorkerExecutor:
             self.state.bind_workspace(binding)
             workspace = self.workspaces.path(binding)
             context = CodingExecutionContext(github=capability)
+            if task.retry_status is not None and not task.session_id:
+                raise VcsVerificationError("session", "original coding session is missing")
             answer_sha = await local_commit(workspace) if task.purpose == "answer" else None
             vcs_context = None if answer_sha is not None else await prepare_revision_context(
                 workspace, task.branch, task.previous_head_sha or task.expected_head_sha,
-                capability.token,
+                capability.token, explicit_retry=task.retry_status is not None,
             )
             if vcs_context is not None:
                 result.baseline_sha = vcs_context.jj_ancestor_sha or vcs_context.git_base_sha
                 await self.workspaces.configure_git_identity(
                     binding, capability.bot_login, capability.bot_user_id,
                 )
-            prompt = build_revision_prompt(
-                task, self._repo_conventions(workspace), baseline_sha=result.baseline_sha,
-            )
+            if task.retry_status is not None:
+                prompt = build_revision_retry_prompt(task.retry_status, task.instruction)
+            else:
+                prompt = build_revision_prompt(
+                    task, self._repo_conventions(workspace), baseline_sha=result.baseline_sha,
+                )
             schema_path = _write_output_schema(RevisionCodingOutput)
             run = None
             if task.session_id:
@@ -314,6 +320,8 @@ class WorkerExecutor:
                     invocation = RevisionExecutionRecord(mode="resume", session_id=task.session_id,
                                                     exit_code=1, failure="session_unavailable")
                     result.invocations = self.state.finish_invocation(invocation)
+                    if task.retry_status is not None:
+                        raise VcsVerificationError("session", "original coding session is unavailable") from None
                     # A rejection is insufficient if anything changed while resume was attempted.
                     if answer_sha is not None:
                         if await local_commit(workspace) != answer_sha:

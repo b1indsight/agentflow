@@ -239,7 +239,7 @@ export async function appendAgentTask(
         agent_task_busy:
           "Flow 仍有任务、反馈处理或结果待确认，请刷新后再发送。",
         agent_task_unavailable:
-          "仅支持已有打开的 PR 和有效执行绑定的活跃 Flow。",
+          "当前 Flow 无法接收消息，请刷新确认是否已归档。",
         agent_task_request_conflict:
           "此请求已用于其他内容，请刷新核对后再发送。",
         flow_not_found: "Flow 不存在，请返回看板。",
@@ -251,7 +251,7 @@ export async function appendAgentTask(
       if (refusals[error.message]) throw new Error(refusals[error.message]);
     }
     throw new Error(
-      "无法确认是否已发送。请先用顶部刷新核对；当前页面重试会复用请求，避免重复创建任务。",
+      "无法确认是否已发送。请先用顶部刷新核对；当前页面重试会复用请求，避免重复记录。",
     );
   }
 }

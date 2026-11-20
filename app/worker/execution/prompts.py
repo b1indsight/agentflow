@@ -97,6 +97,18 @@ def _format_item(item: ReviewFeedback) -> str:
             f"{item.author} says: {item.body}")
 
 
+def build_revision_retry_prompt(status: str, instruction: str) -> str:
+    """Continue the original conversation without replaying Judge or repository snapshots."""
+    parts = [
+        f"Retry status: {status}",
+        ("Continue this revision in the existing checkout and PR. Preserve local and remote work "
+         "and reconcile any differences before an ordinary push. Do not force-push."),
+    ]
+    if instruction:
+        parts.append(f"User instructions:\n{instruction}")
+    return "\n\n".join(parts)
+
+
 def build_revision_prompt(
     task: RevisionTask, repo_conventions: str, *, baseline_sha: str | None,
 ) -> str:

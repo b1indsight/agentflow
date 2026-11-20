@@ -97,9 +97,12 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(
             "content": ConversationContent(name="shell\0", arguments="x" * 3000),
         }
     )
+    result = item.model_copy(update={"id": "record-3", "content": ConversationContent(
+        text='{"summary":"Done","vcs_backend_used":"git","needs_clarification":["First?","Second?"]}',
+    )})
     conversations.read = AsyncMock(
         return_value=ConversationPage(
-            flow_id=flow.id, items=[item, tool], next_cursor="eof-checkpoint"
+            flow_id=flow.id, items=[item, tool, result], next_cursor="eof-checkpoint"
         )
     )
     sync = ConsoleSynchronizer(Mock(spec=GitHubApp), conversations, database=store._db)
@@ -136,6 +139,9 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(
     assert again.round_no == flow.current_round_no
     await sync.sync(again)
     assert archive.page(flow.id).snapshot == first.snapshot
+    [answer] = [i for i in first.items if i.key == f"worker:{attempt.id}:0:record-3"]
+    assert (answer.source, answer.author) == ("worker", "assistant")
+    assert answer.body == "Done\n\n待澄清：\n\n- First?\n- Second?"
 
 
 def test_reconnect_and_publication_use_the_same_lock_order(store):

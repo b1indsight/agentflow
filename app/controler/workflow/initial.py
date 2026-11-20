@@ -27,6 +27,7 @@ from app.domain.models import (
     JobState,
 )
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
+from app.persistence.agent_inputs import AgentInputStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
@@ -127,6 +128,7 @@ class InitialPreparation:
             current_delivery.base_branch = repository.default_branch
             deliveries_tx.update_delivery(current_delivery)
             delivery = current_delivery
+            task_content = AgentInputStore(tx).initial_content(fresh, job, task_content)
         return InitialTask(
             flow_id=flow.id,
             attempt_id=attempt.id,

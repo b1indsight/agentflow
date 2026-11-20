@@ -473,6 +473,8 @@ function DetailPanel({
   const [pending, setPending] = useState<
     "archive" | "resume" | "retry" | "agent-task" | null
   >(null);
+  const [acceptedInputs, setAcceptedInputs] = useState(0);
+  const lastActivityRefresh = useRef(refresh);
   const writing = useRef(false);
   const [writeError, setWriteError] = useState("");
   const [writeNotice, setWriteNotice] = useState("");
@@ -1133,7 +1135,8 @@ function DetailPanel({
                           key={id}
                           id={id}
                           root={detail}
-                          refresh={refresh}
+                          refresh={refresh + acceptedInputs}
+                          lastRefresh={lastActivityRefresh}
                         />
                       </OpenWorkerFile>
                     ),
@@ -1201,12 +1204,13 @@ function DetailPanel({
           </TabsContent>
         </div>
         <AgentTaskInput
-          disabledReason={
-            pending !== null
-              ? "正在提交，请稍候。"
-              : flow.lifecycle !== "review" || !flow.pr_number
-                ? "等待当前任务完成并进入待审核后发送，可先填写补充要求。"
-                : ""
+          busy={pending !== null}
+          mode={
+            flow.lifecycle === "archived"
+              ? "archived"
+              : flow.lifecycle === "finalizing" || flow.archive_reason !== null
+                ? "note"
+                : "active"
           }
           onSubmit={async (instruction, requestId) => {
             if (writing.current) throw new Error("正在提交其他操作，请稍候。");
@@ -1215,12 +1219,14 @@ function DetailPanel({
             try {
               const value = await appendAgentTask(id, instruction, requestId);
               onChanged();
-              if (mounted.current)
+              if (mounted.current) {
+                setAcceptedInputs((count) => count + 1);
                 setFlow((prior) =>
                   prior && prior.state_version > value.state_version
                     ? prior
                     : value,
                 );
+              }
             } finally {
               writing.current = false;
               if (mounted.current) setPending(null);
@@ -1236,13 +1242,15 @@ function Conversation({
   id,
   root,
   refresh,
+  lastRefresh,
 }: {
   id: number;
   root: React.RefObject<HTMLElement | null>;
   refresh: number;
+  lastRefresh: React.RefObject<number>;
 }) {
   const { state, load, onRange, onAnchor, readProvenance, retry } =
-    useConversation(id);
+    useConversation(id, refresh, lastRefresh);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -1307,13 +1315,6 @@ function Conversation({
     },
     [rowByKey, state.records, onAnchor],
   );
-  const previousRefresh = useRef(refresh);
-  useEffect(() => {
-    if (previousRefresh.current !== refresh) {
-      previousRefresh.current = refresh;
-      load(true);
-    }
-  }, [refresh, load]);
   useEffect(() => {
     if (state.snapshot === null || state.busy || state.error || !state.has_more)
       return;

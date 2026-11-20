@@ -373,17 +373,22 @@ for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
     let current: FlowDetail = {
       ...flow,
-      lifecycle: "review",
-      phase: "review",
-      action: "awaiting_review",
-      reason: "等待后续要求",
-      next_condition: "继续工作",
+      pr_number: null,
+      pr_url: null,
+      reason: "正在编码",
+      next_condition: "等待执行结果",
       sources: [],
     };
     await page.route("**/api/flows/42", (route) =>
       route.fulfill({ json: current }),
     );
     const requests: { instruction: string; request_id: string }[] = [];
+    const messages: ActivityItem[] = [activity];
+    await page.route("**/api/flows/42/activity?**", (route) =>
+      route.fulfill({
+        json: activityPage(messages, 0, messages.length, messages.length + 1),
+      }),
+    );
     let finish = () => {};
     const committed = new Promise<void>((resolve) => {
       finish = resolve;
@@ -393,19 +398,26 @@ for (const width of [1440, 390]) {
       requests.push(route.request().postDataJSON());
       if (requests.length === 1) return route.abort("failed");
       await committed;
-      current = {
-        ...current,
-        lifecycle: "queued",
-        phase: "queued",
-        action: "revision:queued",
-        state_version: 3,
-      };
+      const { instruction, request_id } = requests[1];
+      messages.push({
+        ...activity,
+        key: `agent_task:${request_id}`,
+        version: 3,
+        source: "agent_task",
+        author: "user",
+        kind: "message",
+        title: "",
+        body: instruction,
+        body_length: instruction.length,
+        previous_version: null,
+      });
       return route.fulfill({ json: current });
     });
     await page.goto("/#flow/42/conversation");
     const composer = page.getByRole("form", { name: "与 Agent 交流" });
     const input = composer.getByRole("textbox", { name: "补充要求" });
-    const send = composer.getByRole("button", { name: "发送", exact: true });
+    const send = composer.getByRole("button");
+    await expect(send).toHaveAccessibleName("发送");
     await expect(send).toBeDisabled();
     await input.fill("   ");
     await expect(send).toBeDisabled();
@@ -422,16 +434,15 @@ for (const width of [1440, 390]) {
     expect(requests).toHaveLength(0);
     await expect(send).toBeEnabled();
     await expect(input).toHaveCSS("border-radius", "0px");
-    await page.screenshot({
-      path: `../../../.amp/in/artifacts/revision-input-${width}-default.png`,
+    await composer.screenshot({
+      path: `../../../.amp/in/artifacts/active-flow-input-${width}-default.png`,
     });
     await input.press("Control+Enter");
-    await expect(composer.getByRole("alert")).toContainText(
-      "无法确认是否已发送",
-    );
+    await expect(send).toHaveAccessibleName("重试发送");
+    await expect(send).toHaveAttribute("title", /无法确认是否已发送/);
     await expect(input).toHaveValue("补充键盘导航\n保留原有行为");
-    await page.screenshot({
-      path: `../../../.amp/in/artifacts/revision-input-${width}-error.png`,
+    await composer.screenshot({
+      path: `../../../.amp/in/artifacts/active-flow-input-${width}-error.png`,
     });
     await send.click();
     await expect(input).toBeDisabled();
@@ -442,23 +453,102 @@ for (const width of [1440, 390]) {
     expect(requests[0]).toEqual(requests[1]);
     expect(requests[0].instruction).toBe("补充键盘导航\n保留原有行为");
     expect(requests[0].request_id).toMatch(/^[0-9a-f-]{36}$/);
-    await page.screenshot({
-      path: `../../../.amp/in/artifacts/revision-input-${width}-pending.png`,
+    await composer.screenshot({
+      path: `../../../.amp/in/artifacts/active-flow-input-${width}-pending.png`,
     });
+    if (width === 390)
+      await page.getByRole("tab", { name: "执行记录", exact: true }).click();
     finish();
-    await expect(composer.getByRole("status")).toContainText(
-      "Agent 任务已排队",
-    );
+    await expect(send).toHaveAccessibleName("消息已记录");
     await expect(input).toHaveValue("");
     await expect(send).toBeDisabled();
-    await page.screenshot({
-      path: `../../../.amp/in/artifacts/revision-input-${width}-success.png`,
+    if (width === 390)
+      await page.getByRole("tab", { name: "会话", exact: true }).click();
+    await expect(
+      page.locator(`[data-entry="agent_task:${requests[1].request_id}"]`),
+    ).toContainText("保留原有行为");
+    await composer.screenshot({
+      path: `../../../.amp/in/artifacts/active-flow-input-${width}-success.png`,
     });
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
       ),
     ).toBe(true);
+  });
+
+  test(`closing Flow accepts notes but archived Flow rejects input at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    let current: FlowDetail = {
+      ...archivedFlow,
+      lifecycle: "finalizing",
+      phase: "running",
+      action: "finalizing",
+      archived_at: null,
+    };
+    await page.route("**/api/flows/42", (route) =>
+      route.fulfill({ json: current }),
+    );
+    const question = "已完成第一步。\n\n待澄清：\n\n- 下一步使用哪个分支？";
+    const failure =
+      "运行退出码 65。baseline: local branch has unpublished commits";
+    const rows = [
+      {
+        ...activity,
+        key: "worker:1:0:1",
+        kind: "message",
+        source: "worker",
+        author: "assistant",
+        title: "message",
+        body: question,
+        body_length: question.length,
+        previous_version: null,
+      },
+      {
+        ...activity,
+        key: "workflow_result:3",
+        kind: "failure",
+        source: "workflow_result",
+        author: "Worker",
+        title: "任务 #3 失败",
+        body: failure,
+        body_length: failure.length,
+        previous_version: null,
+      },
+    ];
+    await page.route("**/api/flows/42/activity?**", (route) =>
+      route.fulfill({ json: activityPage(rows, 0, rows.length) }),
+    );
+    let writes = 0;
+    await page.route("**/api/flows/42/agent-tasks", (route) => {
+      writes++;
+      expect(route.request().postDataJSON().instruction).toBe("记录收尾事项");
+      return route.fulfill({ json: current });
+    });
+    await page.goto("/#flow/42/conversation");
+    const composer = page.getByRole("form", { name: "与 Agent 交流" });
+    const input = composer.getByRole("textbox");
+    await expect(input).toHaveAccessibleName("收尾留言");
+    await expect(
+      page.getByRole("listitem").filter({ hasText: "下一步使用哪个分支？" }),
+    ).toBeVisible();
+    await expect(page.getByText(failure)).toBeVisible();
+    await input.fill("记录收尾事项");
+    await input.press("Control+Enter");
+    await expect(composer.getByRole("status")).toContainText("已记录");
+    await composer.screenshot({
+      path: `../../../.amp/in/artifacts/active-flow-input-${width}-finalizing.png`,
+    });
+    current = archivedFlow;
+    await page.reload();
+    await expect(input).toBeDisabled();
+    await expect(composer.getByRole("button")).toBeDisabled();
+    expect(writes).toBe(1);
+    await composer.screenshot({
+      path: `../../../.amp/in/artifacts/active-flow-input-${width}-archived.png`,
+    });
   });
 
   test(`standard tabs keep focus, panels and route history synchronized at ${width}px`, async ({
@@ -6597,7 +6687,8 @@ test("worker file requests cancel on tab changes and cannot overwrite a later fi
   const started = page.waitForRequest(`**/api/files/${ids[0]}`);
   await page.getByRole("link", { name: "文件0", exact: true }).click();
   const request = await started;
-  await expect(page.getByRole("status")).toContainText("正在读取文件");
+  const viewer = page.getByRole("region", { name: "文件查看器" });
+  await expect(viewer.getByRole("status")).toContainText("正在读取文件");
   await page.getByRole("tab", { name: "会话", exact: true }).click();
   await expect.poll(() => request.failure()?.errorText).toBeTruthy();
   await page.getByRole("link", { name: "文件1", exact: true }).click();

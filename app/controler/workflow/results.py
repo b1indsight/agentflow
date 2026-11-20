@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import datetime
 
 from loguru import logger
 from pluggy import PluginManager
@@ -28,7 +29,7 @@ from app.controler.config import ServerSettings
 from app.controler.workflow.archive import archive_plan, merge_notice_plan, verify_archive
 from app.controler.workflow.effects import ResultEffects
 from app.controler.workflow.initial import BRANCH_SLUG_PATTERN, initial_plan
-from app.controler.workflow.plans import delivered_pr_number, failed_plan
+from app.controler.workflow.plans import coding_failure_status, delivered_pr_number, failed_plan
 from app.controler.workflow.revisions import frozen_revision, revision_plan, verify_revision_result
 from app.domain.flow_policy import FlowEvent
 from app.domain.inference_models import InferenceError, InferenceFailure
@@ -46,6 +47,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import BatchState
 from app.github import GitHubApp
+from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
@@ -55,6 +57,29 @@ from app.persistence.jobs import JobStore
 from app.persistence.results import ResultStore
 from app.persistence.reviews import ReviewStore
 from app.plugins import emit_hook
+
+
+def _coding_failure(job: Job, now: datetime) -> Observation:
+    """Expose a safe diagnostic from the verified inbox even without a native Agent transcript."""
+    assert job.result_payload is not None and job.result_digest is not None
+    inbox = decode_result_inbox(job.result_payload, job_id=job.id, assignment_token=job.assignment_token,
+                                result_digest=job.result_digest)
+    author, body = "FlowTool", "控制端处理任务结果失败。"
+    if isinstance(inbox.terminal, Failed):
+        if inbox.source == "worker":
+            author, body = "Worker", "Worker 报告任务失败。"
+    elif isinstance(inbox.terminal, Succeeded):
+        result = inbox.terminal.result
+        assert isinstance(result, (InitialTaskResult, RevisionTaskResult))
+        if result.exit_code:
+            author, body = "Worker", coding_failure_status(result)
+        else:
+            body = "Worker 返回退出码 0，但控制端处理任务结果失败。"
+    return Observation(
+        key=f"workflow_result:{job.id}", source="workflow_result", kind="failure",
+        round_no=job.round_no, author=author, occurred_at=now, updated_at=now,
+        title=f"任务 #{job.id} 失败", body=body, metadata={"job_id": job.id, "kind": job.kind.value},
+    )
 
 
 class ResultApplication:
@@ -267,6 +292,8 @@ class ResultApplication:
                 result_store_tx.skip_remaining(job_id, failure or plan.error or "result failed")
             if not jobs_tx.complete_persisted_result(job_id, state):
                 raise ResultPending("result has not reached its atomic completion boundary")
+            if state is JobState.FAILED and current.kind in {JobKind.INITIAL, JobKind.REVISION}:
+                ActivityStore(tx).append(flow.id, _coding_failure(current, tx.now()))
             if current.round_no == flow.current_round_no:
                 # Even a failed INITIAL retains its checkout. Explicit finalization
                 # must confirm stop/reclamation before releasing this round's binding.

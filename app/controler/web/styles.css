@@ -882,12 +882,6 @@ svg {
   border-top: 1px solid var(--line);
   background: var(--paper);
 }
-.flow-input label {
-  display: block;
-  margin-bottom: 8px;
-  font-weight: 600;
-  font-size: var(--text-control);
-}
 .flow-input textarea {
   display: block;
   width: 100%;
@@ -920,12 +914,7 @@ svg {
 .flow-input .btn {
   flex-shrink: 0;
 }
-.flow-input p {
-  margin: 8px 0 0;
-  font-size: var(--text-control);
-  overflow-wrap: anywhere;
-}
-.flow-input [role="alert"] {
+.flow-input .btn[data-state="error"] {
   color: var(--destructive);
 }
 .detail-head {

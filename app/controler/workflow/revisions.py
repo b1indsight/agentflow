@@ -39,6 +39,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import BatchState, ReviewBatch
 from app.github import GitHubApp, GitHubError, PullRequest, Repository
+from app.persistence.agent_inputs import AgentInputStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
@@ -75,7 +76,9 @@ async def prepare_revision(
     assert flow.installation_id is not None
     repository = github.installation(flow.installation_id).repository(flow.repo)
     delivery = required_delivery(flow, deliveries=deliveries)
-    purpose = (job.payload or {}).get("purpose", "revise")
+    payload = job.payload or {}
+    purpose = payload.get("purpose", "revise")
+    retry_status = payload.get("retry_status") if purpose == "revise" else None
     if attempt.revision_cycles + 1 > settings.max_revision_cycles:
         await fail(job, "已达最大修订轮数，暂停。")
         return JobState.FAILED
@@ -95,7 +98,7 @@ async def prepare_revision(
             ref = await reads.read(job, lambda: repository.fetch_ref(delivery.branch))
             mismatch = ref.branch != delivery.branch
         if not mismatch:
-            task_content = await reads.task_content(job, flow, repository)
+            task_content = "" if retry_status is not None else await reads.task_content(job, flow, repository)
     except GitHubError as exc:
         raise PreparationReadFailure(exc) from exc
     if mismatch:
@@ -120,8 +123,9 @@ async def prepare_revision(
         task_content=task_content,
         previous_summary=attempt.last_revision_summary,
         open_points=batch.open_points,
-        context=batch.context,
-        instruction=(job.payload or {}).get("instruction", "Address the review feedback."),
+        context=batch.context if retry_status is None else None,
+        retry_status=retry_status,
+        instruction=payload.get("instruction", "Address the review feedback." if retry_status is None else ""),
         feedback=batch.feedback,
     )
     with flows.locked(flow.id) as locked:
@@ -150,7 +154,7 @@ async def prepare_revision(
                     current.lease_expires_at is None
                     or current.lease_expires_at <= tx.now()))):
             return JobState.QUEUED
-        if batch.context is not None and (
+        if retry_status is None and batch.context is not None and (
             batch.context.pull_request is None
             or (batch.context.pull_request.head_sha, batch.context.pull_request.base_sha,
                 batch.context.pull_request.base_branch)
@@ -161,6 +165,13 @@ async def prepare_revision(
             return JobState.DONE
         if threads is not None:
             reviews_tx.freeze_threads(current, threads)
+        current_payload = current.payload or {}
+        if (purpose == "revise" and current_payload.get("revision") is None
+                and (messages := AgentInputStore(tx).take(fresh))):
+            task.instruction = "\n\n".join(filter(None, [task.instruction, *messages]))
+            current.payload = {
+                **current_payload, "owner_messages": [*current_payload.get("owner_messages", []), *messages],
+            }
         return reviews_tx.freeze_revision(current, task)
 
 
@@ -344,6 +355,8 @@ def revision_mismatch(task: RevisionTask, result: RevisionTaskResult) -> str | N
         return "revision lacks its synchronized coding baseline"
     if result.previous_session_id != task.session_id or not result.session_id:
         return "revision session does not match the frozen assignment"
+    if task.retry_status is not None and result.mode != "resume":
+        return "explicit revision retry must resume the original session"
     if result.mode == "resume":
         if (result.session_id != task.session_id
                 or result.session_generation != task.session_generation

@@ -72,6 +72,13 @@ TASK: dict[str, JsonValue] = {
     "task_content": "test",
     "branch": "flow/3",
 }
+REVISION: dict[str, JsonValue] = {
+    "kind": "revision", "flow_id": 3, "attempt_id": 7, "batch_id": 1,
+    "repo": "owner/repo", "repo_identity": "w:owner/repo", "branch": "flow/3",
+    "base_branch": "main", "pr_number": 17, "expected_head_sha": "abc",
+    "session_id": None, "session_generation": 0, "instruction": "Fix feedback",
+    "task_content": "test\n\nOriginal requirements", "previous_summary": "", "open_points": [], "feedback": [],
+}
 FLOW: dict[str, JsonValue] = {
     **IDENTITY,
     "flow_id": 3,
@@ -97,21 +104,11 @@ SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
             }),
             True,
         ),
-        (
-            "server",
-            call("worker.execute", {
-                **IDENTITY, **LOCATION, "flow_id": 3,
-                "task": {
-                    "kind": "revision", "flow_id": 3, "attempt_id": 7, "batch_id": 1,
-                    "repo": "owner/repo", "repo_identity": "w:owner/repo", "branch": "flow/3",
-                    "base_branch": "main", "pr_number": 17, "expected_head_sha": "abc",
-                    "session_id": None, "session_generation": 0, "instruction": "Fix feedback",
-                    "task_content": "test\n\nOriginal requirements",
-                    "previous_summary": "", "open_points": [], "feedback": [],
-                },
-            }),
-            True,
-        ),
+        ("server", call("worker.execute", {**IDENTITY, **LOCATION, "flow_id": 3, "task": REVISION}), True),
+        ("server", call("worker.execute", {**IDENTITY, **LOCATION, "flow_id": 3,
+            "task": {**REVISION, "retry_status": "Interrupted"}}), True),
+        ("server", call("worker.execute", {**IDENTITY, **LOCATION, "flow_id": 3,
+            "task": {**REVISION, "purpose": "answer", "retry_status": "Interrupted"}}), False),
         ("server", call("worker.stop", FENCE), True),
         ("server", call("worker.history", {"session_id": SESSION, "cursor": "bad-cursor"}), True),
         ("server", call("worker.history", {"session_id": "https://ampcode.com/T-x"}), False),
@@ -302,7 +299,7 @@ def test_mixed_control_ack_and_business_have_independent_identities() -> None:
         [terminal_item, accept, history], control="heartbeat", **IDENTITY, ack=True, ack_id="c" * 32
     )
     parsed = parse_worker_message(json.dumps(data))
-    assert PROTOCOL_VERSION == 27
+    assert PROTOCOL_VERSION == 28
     assert isinstance(parsed.payload[0], ExecuteResult)
     assert parsed.payload[0].terminal() == terminal
     assert isinstance(parsed.payload[1], AcceptResultRequest)
