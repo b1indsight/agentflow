@@ -47,66 +47,18 @@ class Store:
 
     def _bind_repositories(self, db: Database) -> None:
         self._db = db
-        self._flows = FlowStore(db)
-        self._deliveries = DeliveryStore(db)
-        self._jobs = JobStore(db)
-        self._workers = WorkerStore(db)
-        self._assignments = AssignmentStore(db)
-        self._inference = InferenceStore(db)
-        self._stops = StopStore(db)
-        self._results = ResultStore(db)
-        self._reviews = ReviewStore(db)
-        self._webhooks = WebhookStore(db)
-        self._reconcile = ReconcileStore(db)
-        self._projects = ProjectStore(db)
-
-    @property
-    def flows(self) -> FlowStore:
-        return self._flows
-
-    @property
-    def deliveries(self) -> DeliveryStore:
-        return self._deliveries
-
-    @property
-    def jobs(self) -> JobStore:
-        return self._jobs
-
-    @property
-    def workers(self) -> WorkerStore:
-        return self._workers
-
-    @property
-    def assignments(self) -> AssignmentStore:
-        return self._assignments
-
-    @property
-    def inference(self) -> InferenceStore:
-        return self._inference
-
-    @property
-    def stops(self) -> StopStore:
-        return self._stops
-
-    @property
-    def results(self) -> ResultStore:
-        return self._results
-
-    @property
-    def reviews(self) -> ReviewStore:
-        return self._reviews
-
-    @property
-    def webhooks(self) -> WebhookStore:
-        return self._webhooks
-
-    @property
-    def reconcile(self) -> ReconcileStore:
-        return self._reconcile
-
-    @property
-    def projects(self) -> ProjectStore:
-        return self._projects
+        self.flows = FlowStore(db)
+        self.deliveries = DeliveryStore(db)
+        self.jobs = JobStore(db)
+        self.workers = WorkerStore(db)
+        self.assignments = AssignmentStore(db)
+        self.inference = InferenceStore(db)
+        self.stops = StopStore(db)
+        self.results = ResultStore(db)
+        self.reviews = ReviewStore(db)
+        self.webhooks = WebhookStore(db)
+        self.reconcile = ReconcileStore(db)
+        self.projects = ProjectStore(db)
 
     @property
     def database_url(self) -> str:
@@ -126,9 +78,6 @@ class Store:
             bound = copy(self)
             bound._bind_repositories(db)
             yield bound
-
-    def serialize_issue(self, repo: str, issue_number: int) -> None:
-        self._db.serialize_issue(repo, issue_number)
 
     def lock_workflow(self, flow_id: int) -> Flow | None:
         return self._db.lock_workflow(flow_id)

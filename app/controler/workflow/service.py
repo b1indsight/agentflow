@@ -189,7 +189,7 @@ class ControlService:
                 raise ValueError("archived execution is not released")
             ConsoleSyncStore(tx).reset_round(fresh.id)
             ReconcileStore(tx).reset_round(fresh.id)
-            resumed = flows.start_round(fresh)
+            resumed = flows.transition(fresh, FlowEvent.ROUND_RESUMED)
             delivery = self.deliveries.using(tx).get_delivery(resumed.id)
             if delivery is not None:
                 stem = delivery.branch

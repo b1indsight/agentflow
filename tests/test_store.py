@@ -158,11 +158,26 @@ def test_enqueue_requires_a_workflow_transaction(store: Store, kind: JobKind) ->
     assert store.flows.get_flow(flow.id) == flow
 
 
+def test_create_current_attempt_rejects_stale_round_without_leaving_an_attempt(store: Store) -> None:
+    # Preparation can hold an old Flow after resume; a rejected bind must also undo the insert.
+    service = ControlService(database=store.database)
+    stale = service.create_flow("owner/repo", 8, installation_id=12)
+    assert stale is not None
+    service.cancel(stale)
+    flow = service.resume(stale, expected_round_no=1)
+    current = store.flows.create_current_attempt(flow)
+    other = store.flows.create_attempt(flow.id)
+    with pytest.raises(ValueError, match="round is no longer current"):
+        store.flows.create_current_attempt(stale)
+    assert stale.current_attempt_id is None
+    assert store.flows.get_flow(flow.id) == flow
+    assert flow.current_attempt_id == current.id
+    assert store.flows.list_attempts(flow.id) == [current, other]
+
+
 def test_attempt_and_job_lifecycle_round_trip(store: Store) -> None:
     flow = store.flows.create_flow("owner/repo", 8, installation_id=12)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
+    attempt = store.flows.create_current_attempt(flow)
     delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
     register_worker(store, "worker-1", repo=flow.repo)
 

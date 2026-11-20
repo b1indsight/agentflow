@@ -81,9 +81,7 @@ class InitialPreparation:
                 return JobState.DONE
             attempt = flows_tx.get_current_attempt(fresh)
             if attempt is None:
-                attempt = flows_tx.create_attempt(fresh.id)
-                fresh.current_attempt_id = attempt.id
-                flows_tx.set_current_attempt(fresh)
+                attempt = flows_tx.create_current_attempt(fresh)
             delivery = deliveries_tx.get_delivery(fresh.id)
             flow = fresh
         try:

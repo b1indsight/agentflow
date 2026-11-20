@@ -1,39 +1,25 @@
 """Inference Job exhaustion notices with independent activity-ledger snapshot paging."""
 
-import base64
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import Field
 
 from app.contracts.console import ConsoleFailure, InferenceNotice, InferenceNoticePage
 from app.domain.inference_models import InferenceSummary
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
+from app.persistence.cursor import Cursor
 from app.persistence.records import Row
 from app.persistence.repository import Repository
 
 
-class NoticeCursor(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+class NoticeCursor(Cursor):
     query: Literal["inference-notices"] = "inference-notices"
     flow: int = Field(gt=0)
     snapshot: int = Field(ge=0)
     time: datetime
     key: str = Field(min_length=1, max_length=512)
-
-    def encode(self) -> str:
-        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode()
-
-    @classmethod
-    def decode(cls, value: str, flow_id: int) -> "NoticeCursor":
-        try:
-            result = cls.model_validate_json(base64.b64decode(value, altchars=b"-_", validate=True))
-            if result.flow != flow_id:
-                raise ValueError("foreign cursor")
-            return result
-        except (ValueError, ValidationError):
-            raise ConsoleFailure("cursor_invalid") from None
 
 
 def _notice(row: Row) -> InferenceNotice:
@@ -92,7 +78,9 @@ class InferenceNoticeStore(Repository):
              limit: int = 20) -> InferenceNoticePage:
         if not 1 <= limit <= 100:
             raise ConsoleFailure("limit_invalid")
-        position = NoticeCursor.decode(cursor, flow_id) if cursor else None
+        position = NoticeCursor.decode(cursor) if cursor else None
+        if position is not None and position.flow != flow_id:
+            raise ConsoleFailure("cursor_invalid")
         with self._db.connection() as connection:
             head = connection.execute(
                 "SELECT activity_version FROM console_flows WHERE flow_id=%s", (flow_id,),

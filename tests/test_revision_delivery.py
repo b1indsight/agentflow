@@ -1065,8 +1065,8 @@ async def test_empty_review_body_is_not_an_unresolved_obligation(revision_contro
     assert store.reviews.pending(job.flow_id) == []
     with store.connection() as connection:
         consumed = connection.execute(
-            "SELECT item_id,version FROM review_versions WHERE consumed_at IS NOT NULL"
+            "SELECT item_id,version,addressed_sha,addressed_job_id FROM review_versions WHERE consumed_at IS NOT NULL"
         ).fetchall()
-    assert {(r["item_id"], r["version"]) for r in consumed} == {
-        (f.item_id, f.version) for f in task.feedback
+    assert {(r["item_id"], r["version"], r["addressed_sha"], r["addressed_job_id"]) for r in consumed} == {
+        (f.item_id, f.version, result.commit_sha, job.id) for f in task.feedback
     }

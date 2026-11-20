@@ -450,20 +450,6 @@ class ReviewStore(Repository):
             ).fetchall()
         return [ReviewFeedback(item_id=r["id"], version=r["version"], **r["content"]) for r in rows]
 
-    def record_addressed(
-        self, batch_id: int, refs: list[FeedbackRef], sha: str, job_id: int,
-    ) -> None:
-        batch = self.get_batch(batch_id)
-        members = {(f.item_id, f.version) for f in batch.feedback}
-        with self._db.connection() as connection:
-            for ref in refs:
-                if (ref.item_id, ref.version) not in members:
-                    raise ValueError("addressed feedback is outside batch")
-                connection.execute(
-                    "UPDATE review_versions SET addressed_sha=%s,addressed_job_id=%s"
-                    " WHERE item_id=%s AND version=%s", (sha, job_id, ref.item_id, ref.version),
-                )
-
     def observe_threads(
         self, flow_id: int, snapshot: ReviewThreads, baseline: list[ReviewFeedback],
         *, boundary: int | None = None, settle_seconds: float = 0,
@@ -617,18 +603,22 @@ class ReviewStore(Repository):
         state: BatchState,
         consumed: list[FeedbackRef],
         open_points: list[str],
+        *,
+        addressed_by: tuple[str, int] | None = None,
     ) -> None:
-        """Apply exact version acknowledgements within the caller's workflow transaction."""
+        """Consume frozen versions; only a verified revision supplies its (SHA, job ID)."""
         batch = self.get_batch(batch_id)
         members = {(f.item_id, f.version) for f in batch.feedback}
         if any((f.item_id, f.version) not in members for f in consumed):
             raise ValueError("result tried to consume feedback outside its frozen batch")
+        sha, job_id = addressed_by if addressed_by is not None else (None, None)
         with self._db.connection() as connection:
             for item in consumed:
                 connection.execute(
-                    "UPDATE review_versions SET consumed_at=COALESCE(consumed_at,%s)"
+                    "UPDATE review_versions SET consumed_at=COALESCE(consumed_at,%s),"
+                    " addressed_sha=COALESCE(%s,addressed_sha),addressed_job_id=COALESCE(%s,addressed_job_id)"
                     " WHERE item_id=%s AND version=%s",
-                    (self._db.now(), item.item_id, item.version),
+                    (self._db.now(), sha, job_id, item.item_id, item.version),
                 )
             connection.execute(
                 "UPDATE review_batches SET state=%s,open_points=%s WHERE id=%s",

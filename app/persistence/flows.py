@@ -230,10 +230,6 @@ class FlowStore(Repository):
             if getattr(replayed, column) != getattr(stored, column)
         }
 
-    def start_round(self, flow: Flow) -> Flow:
-        """Advance the archived round under the caller's Issue/workflow reservation."""
-        return self.transition(flow, FlowEvent.ROUND_RESUMED)
-
     def list_flows(self, *, active_only: bool = False) -> list[Flow]:
         query = "SELECT * FROM flows"
         if active_only:
@@ -257,6 +253,15 @@ class FlowStore(Repository):
                 (now, now, flow_id),
             ).fetchone()
         return required(row)
+
+    def create_current_attempt(self, flow: Flow) -> Attempt:
+        """Create and select an Attempt atomically, rolling back if the round changed."""
+        with self._db.transaction() as tx:
+            flows = self.using(tx)
+            attempt = flows.create_attempt(flow.id)
+            flows.set_current_attempt(flow.model_copy(update={"current_attempt_id": attempt.id}))
+        flow.current_attempt_id = attempt.id
+        return attempt
 
     def get_attempt(self, attempt_id: int) -> Attempt | None:
         with (
