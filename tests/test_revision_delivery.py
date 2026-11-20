@@ -448,7 +448,7 @@ async def test_jj_baseline_path_transitions_preserve_retained_leaves(
         if operation == "revision":
             await prepare_revision_context(repo, task.branch, previous)
         else:
-            await vcs.align_repository(repo, revision_collaborator, task.branch)
+            await vcs.align_repository(repo, revision_collaborator, baseline)
     if retained:
         assert await local_commit(repo) == before
         assert (path / "nested/tracked").read_text() == "old tracked contents"

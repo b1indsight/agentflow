@@ -153,7 +153,7 @@ async def test_slow_preparation_does_not_overwrite_other_repository_inventory(tm
     async def delayed(*args, **kwargs):
         entered.set()
         await finish.wait()
-        await original(*args, **kwargs)
+        return await original(*args, **kwargs)
 
     monkeypatch.setattr(workspaces, "ensure_seed", delayed)
     pending = asyncio.create_task(claim(pool, 1, target))
@@ -384,7 +384,8 @@ async def test_failed_preparation_ack_does_not_mutate_selected_target(
     assert pool.manifest_path.read_bytes() == before
     item = next(i for i in pool.inventory() if i.workspace == target.workspace)
     assert item.generation == target.generation
-    assert item.flow_id == (1 if during_claim else None)
+    # Seed refresh now fails before the local binding, so ACK has no allocation to settle.
+    assert item.flow_id is None
     assert restarted.load().acknowledged
     assert "pool_acknowledged" not in json.loads(restarted.path.read_text())
     restarted.record_received(received.model_copy(update={"job_id": 2, "assignment_token": "next"}))

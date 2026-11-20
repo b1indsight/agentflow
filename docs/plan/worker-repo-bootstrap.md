@@ -883,3 +883,29 @@ installation token 做 GitHub clone/push/PR 写入验收。PR 保持 draft；独
   丢 ACK 重连 **1 failed**。三组均捕获预期回归；不修改产品文件，不保留临时测试。
   日志为本地 `.amp/in/artifacts/worker-cancel-tests-trim-{targeted,pytest,static,mutations}.log`。
   本轮无新增产品机制，无需增加复杂性消融；上述检查仅验证保留测试的故障敏感性。
+
+### [012] — 2026-11-17 — 新分配默认使用最新远端基线
+
+- 按 #180 的修订要求，本条取代初始计划中“已有 seed 不 fetch”和“新任务仅对齐本地基线”
+  的限制；每次新分配完整副本或临时 worktree 前，使用当前 assignment 凭据 fetch
+  任务 remote 的 `base_branch`，并固定本次取得的提交。首次原子 clone 不额外重复 fetch。
+- 已有 seed 仅更新 Git 对象库的私有 `refs/flowtool/base`，不移动 checkout、本地分支、
+  remote-tracking refs 或 jj bookmarks；Git 与 colocated/non-colocated jj 完整副本均可使用
+  远端快照。复用工作区继续保留 ignored 缓存，缓存冲突和脏状态仍明确拒绝。
+- fetch 在登记新 allocation 前完成；远端不可达或分支缺失时不回退旧提交，也不隔离干净
+  的空闲位置。原 Flow 仍持有绑定时直接复用，REVISION 不刷新，以保留进行中的工作。
+- 回归覆盖新副本、复用副本、新建与回收后的 worktree、远端基线改写、非默认 remote/分支、
+  Git/jj seed 状态保护、缓存保护与 fetch 失败后重试；旧实现下新增刷新场景 **5 failed**。
+
+### [013] — 2026-11-20 — 合并主线 workspace 分配模型
+
+- 按 #180 的“处理冲突”要求合并 `main`，保留 controller 指定位置和 generation、manifest v3、
+  目录身份校验、停止后清理与进行中 Flow 的原地恢复，不恢复旧版 worker 自选分配及隔离状态。
+- 将 [012] 的远端同步接入 `claim`：同仓库串行获取远端快照，在修改本地绑定前完成 fetch；
+  fetch 后重新读取共享 manifest，保留等待期间其他仓库登记的库存。完整副本及新建/复用
+  worktree 均按固定 SHA 对齐，重复确认原绑定仍保留 Flow 的当前修改。
+- README 保留主线精简结构，同步说明迁入部署指南。更新测试的 controller 分配/释放调用，
+  将主线新增的 jj 路径转换测试改为传固定 SHA，保留文件/目录转换和 ignored 缓存保护断言。
+- 本轮 Ruff、Mypy 与 jj 路径转换定向 8 项通过；PostgreSQL 全量验证及审查证据保存在
+  `.amp/in/artifacts/worker-workspace-sync/merge-*`。首次全量发现的 4 项失败均来自上述旧分支名调用。
+- 上轮披露的首次 clone 同名 tag 边界问题不在本次冲突处理范围内，继续保留为未修复项。

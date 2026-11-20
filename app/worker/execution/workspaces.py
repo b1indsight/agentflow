@@ -338,51 +338,54 @@ class RepositoryWorkspaces:
         *, base_branch: str, remote: str,
         push_token: SecretStr | None,
     ) -> WorkspaceBinding:
-        """Claim exactly the advertised fence, then prepare it outside the manifest transaction."""
+        """Refresh the baseline, then claim and prepare exactly the advertised allocation."""
         owner, name = validate_repository(repository)
         if flow_id <= 0 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]*", base_branch):
             raise VcsVerificationError("bootstrap", "invalid Flow or base branch")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", remote):
             raise VcsVerificationError("bootstrap", "invalid task remote")
-        manifest = self._load()
-        slot = next((s for s in manifest.slots if s.slot_id == workspace), None)
-        if slot is None or slot.repository != repository or generation < slot.generation:
-            raise VcsVerificationError("workspace", "assigned workspace identity or generation mismatch")
-        binding = WorkspaceBinding(repository=repository, slot_id=workspace,
-                                   flow_id=flow_id, generation=generation)
-        if slot.binding is not None and slot.binding != binding and generation == slot.generation:
-            raise VcsVerificationError("workspace", "assigned workspace is still bound")
-        if slot.binding == binding and slot.directory_identity is not None:
-            path = self._verify_slot(slot)
-            if any(path.iterdir()):
-                require_repository(path)
-                return binding
-        # A failed bootstrap can leave an owned empty directory or a removed partial copy.
-        # Retry preparation in place; a populated existing repository keeps its Flow's edits.
-        for previous in manifest.slots:
-            if previous.slot_id != workspace and previous.binding is not None and previous.binding.flow_id == flow_id:
-                # Runtime has joined/validated this Flow before accepting its new INITIAL.
-                previous.binding = None
-        if generation > slot.generation:
-            slot.release_job_id = slot.release_assignment_token = None
-        slot.binding, slot.generation = binding, generation
-        self._write(manifest)
-        path = self._materialize(slot)
-        self._write(manifest)
-        # The seed and its worktree registry are shared; the manifest and independent repos are not.
+        # Serialize seed refreshes and preparation, without blocking other repositories.
         async with self._repository_lock(repository):
-            await self._prepare(binding, slot.kind, path, owner, name,
-                                base_branch, remote, push_token)
-        self._verify_slot(self._owned(self._load(), binding))
-        return binding
+            manifest = self._load()
+            slot = next((s for s in manifest.slots if s.slot_id == workspace), None)
+            if slot is None or slot.repository != repository or generation < slot.generation:
+                raise VcsVerificationError("workspace", "assigned workspace identity or generation mismatch")
+            binding = WorkspaceBinding(repository=repository, slot_id=workspace,
+                                       flow_id=flow_id, generation=generation)
+            if slot.binding is not None and slot.binding != binding and generation == slot.generation:
+                raise VcsVerificationError("workspace", "assigned workspace is still bound")
+            if slot.binding == binding and slot.directory_identity is not None:
+                path = self._verify_slot(slot)
+                if any(path.iterdir()):
+                    require_repository(path)
+                    return binding
+            seed = self._managed(Path("repos", owner, name))
+            seed.parent.mkdir(parents=True, exist_ok=True)
+            # A failed fetch must not make a retry mistake stale contents for an active Flow.
+            revision = await ensure_seed(seed, repository, base_branch, remote, push_token)
+            # Other repositories may have updated the shared manifest while fetching.
+            manifest = self._load()
+            slot = next(s for s in manifest.slots if s.slot_id == workspace)
+            # A failed bootstrap can leave an owned empty directory or a removed partial copy.
+            # Retry preparation in place; a populated existing repository keeps its Flow's edits.
+            for previous in manifest.slots:
+                if previous.slot_id != workspace and previous.binding is not None and previous.binding.flow_id == flow_id:
+                    # Runtime has joined/validated this Flow before accepting its new INITIAL.
+                    previous.binding = None
+            if generation > slot.generation:
+                slot.release_job_id = slot.release_assignment_token = None
+            slot.binding, slot.generation = binding, generation
+            self._write(manifest)
+            path = self._materialize(slot)
+            self._write(manifest)
+            await self._prepare(binding, slot.kind, path, seed, revision)
+            self._verify_slot(self._owned(self._load(), binding))
+            return binding
 
     async def _prepare(
         self, binding: WorkspaceBinding, kind: Literal["copy", "worktree"], path: Path,
-        owner: str, name: str, base_branch: str, remote: str, push_token: SecretStr | None,
+        seed: Path, revision: str,
     ) -> None:
-        seed = self._managed(Path("repos", owner, name))
-        seed.parent.mkdir(parents=True, exist_ok=True)
-        await ensure_seed(seed, binding.repository, base_branch, remote, push_token)
         slot = self._owned(self._load(), binding)
         self._verify_slot(slot)
         empty = not any(path.iterdir())
@@ -400,7 +403,7 @@ class RepositoryWorkspaces:
                 if (path / ".git").is_file():
                     raise VcsVerificationError("workspace", "full copy has external Git metadata")
                 await clean_repository(path)
-                await align_repository(path, seed, base_branch)
+                await align_repository(path, seed, revision)
             except BaseException:
                 if copying:
                     self._verify_slot(self._owned(self._load(), binding))
@@ -414,12 +417,12 @@ class RepositoryWorkspaces:
                 raise VcsVerificationError("workspace", "overflow requires a standalone Git seed")
             if empty:
                 await _required_stdout("workspace", "git", "worktree", "add", "--detach",
-                                       str(path), f"refs/heads/{base_branch}", cwd=seed)
+                                       str(path), revision, cwd=seed)
             else:
                 await self._verify_worktree(path, seed)
                 await clean_repository(path)
                 await _required_stdout("workspace", "git", "checkout", "--no-overwrite-ignore",
-                                       "--detach", f"refs/heads/{base_branch}", cwd=path)
+                                       "--detach", revision, cwd=path)
 
     async def release(self, binding: WorkspaceBinding, *, job_id: int, token: str) -> Cleanup:
         """Perform the archive's cleanup without changing controller-owned allocation.

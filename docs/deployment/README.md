@@ -250,7 +250,12 @@ INITIAL 使用当前 endpoint 和 token 引用；无当前 broker 的 REVISION/f
   App 需授权该仓库且具备 Contents write；worker 不持有 App 私钥，不新增 PR/Issue 权限。
   PR 仍经本地 MCP `open_pr` 提交交付意图，由 controler 在结果通过校验后创建或复用。
 - INITIAL 自动 clone 缺失/空的 `<worker_root>/repos/<owner>/<repo>`，使用任务的基线分支及
-  remote。已有 seed 不自动 fetch、checkout、reset 或改写 remote；保持所需的已提交基线可用。
+  remote。每次新分配位置前，已有 seed 使用本轮任务凭据 fetch 远端 `base_branch`，完整副本
+  与临时 worktree 都从本次固定的远端提交开始；未推送的 seed 提交不作为新任务基线。
+  同步只更新 Git 对象库的私有 ref，不移动 seed checkout、本地分支、remote-tracking refs
+  或 jj bookmarks，兼容 Git 和 colocated/non-colocated jj 完整副本。fetch 失败时不回退旧代码，
+  也不修改位置的绑定与代次；修复后可重试同一分配。重复确认进行中 Flow 的原绑定不刷新，
+  REVISION 沿用其 PR 分支准备流程，不切换到 INITIAL 基线。
   空远端、缺分支、非空非仓库目录、symlink、缺 gh 或过期能力均在编码前失败。SSH remote
   不在当前核验范围内，使用不含凭据的 HTTPS URL。项目依赖、LFS/submodule 另行准备。
 - 执行目录位于 `<worker_root>/workspaces/<owner>/<repo>/<slot_id>`；

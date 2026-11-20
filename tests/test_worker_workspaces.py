@@ -26,6 +26,7 @@ def managed_seed(tmp_path: Path) -> tuple[Path, Path]:
     (target / ".gitignore").write_text(".venv/\nbuild/\n")
     _git("add", ".gitignore", cwd=target)
     _git("commit", "-m", "ignore caches", cwd=target)
+    _git("push", "origin", "main", cwd=target)
     return root, remote
 
 
@@ -203,6 +204,86 @@ async def test_pool_reuses_warm_copy_bounds_overflow_and_fences_late_archive(tmp
     assert pool.lookup("owner/repo", 2) == replacement and worktree.exists()
 
 
+@pytest.mark.parametrize("location", ["copy", "reused-copy", "worktree"])
+async def test_allocations_refresh_remote_baseline_without_changing_seed_or_active_flow(
+    tmp_path, location,
+):
+    # Each new Flow must see merged remote changes even while the seed's checkout stays old.
+    root, remote = managed_seed(tmp_path)
+    seed = root / "repos/owner/repo"
+    pool = RepositoryWorkspaces(root, "worker-a", limit=2)
+    previous = None
+    if location != "copy":
+        first = await acquire(pool, 1)
+        if location == "reused-copy":
+            await release(pool, first)
+            previous = first
+
+    publisher = tmp_path / "publisher"
+    shutil.copytree(seed, publisher)
+    (publisher / "README.md").write_text("latest remote baseline\n")
+    _git("commit", "-am", "advance remote baseline", cwd=publisher)
+    _git("push", "origin", "main", cwd=publisher)
+    assert await asyncio.to_thread(subprocess.check_output,
+        ["git", "show", "main:README.md"], cwd=remote, text=True,
+    ) == "latest remote baseline\n"
+
+    binding = await acquire(pool, 2, previous=previous)
+    assert (pool.path(binding) / "README.md").read_text() == "latest remote baseline\n"
+    assert (seed / "README.md").read_text() == "base\n"
+    if location == "worktree":
+        (pool.path(first) / "README.md").write_text("ongoing work\n")
+        assert await acquire(pool, 1) == first
+        assert (pool.path(first) / "README.md").read_text() == "ongoing work\n"
+
+    # A newer allocation after stop must refresh too, without losing its ignored caches.
+    (pool.path(binding) / ".venv").mkdir()
+    (pool.path(binding) / ".venv/keep").write_text("warm cache")
+    (publisher / "README.md").write_text("next remote baseline\n")
+    _git("commit", "-am", "advance remote again", cwd=publisher)
+    _git("push", "origin", "main", cwd=publisher)
+    reused = await acquire(pool, 3, previous=binding)
+    assert pool.path(reused) == pool.path(binding)
+    assert (pool.path(reused) / "README.md").read_text() == "next remote baseline\n"
+    assert (pool.path(reused) / ".venv/keep").read_text() == "warm cache"
+
+    # Follow the remote even if its base is rewritten, without rewriting the seed branch.
+    seed_sha = (await asyncio.to_thread(
+        subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=seed, text=True,
+    )).strip()
+    _git("update-ref", "refs/heads/main", seed_sha, cwd=remote)
+    rewritten = await acquire(pool, 4, previous=reused)
+    assert (pool.path(rewritten) / "README.md").read_text() == "base\n"
+    assert (pool.path(rewritten) / ".venv/keep").read_text() == "warm cache"
+
+
+@pytest.mark.parametrize("failure", ["missing-branch", "unreachable"])
+async def test_refresh_failure_does_not_reuse_stale_code_or_change_allocation(tmp_path, failure):
+    root, remote = managed_seed(tmp_path)
+    seed = root / "repos/owner/repo"
+    pool = RepositoryWorkspaces(root, "worker-a", limit=1)
+    binding = await acquire(pool, 1)
+    await release(pool, binding)
+    before = pool.manifest_path.read_bytes()
+    if failure == "missing-branch":
+        _git("update-ref", "-d", "refs/heads/main", cwd=remote)
+    else:
+        remote.rename(tmp_path / "offline.git")
+    with pytest.raises(VcsVerificationError) as error:
+        await acquire(pool, 2, previous=binding)
+    assert error.value.stage == "bootstrap"
+    assert pool.manifest_path.read_bytes() == before
+    assert (pool.path(binding) / "README.md").read_text() == "base\n"
+    if failure == "unreachable":
+        (tmp_path / "offline.git").rename(remote)
+    (seed / "README.md").write_text("recovered remote baseline\n")
+    _git("commit", "-am", "advance recovered remote", cwd=seed)
+    _git("push", "origin", "main", cwd=seed)
+    reused = await acquire(pool, 2, previous=binding)
+    assert reused.slot_id == binding.slot_id
+    assert (pool.path(reused) / "README.md").read_text() == "recovered remote baseline\n"
+
+
 @pytest.mark.parametrize("overflow", [False, True])
 async def test_duplicate_claim_preserves_ongoing_flow_content_after_restart(tmp_path, overflow):
     # Repeated binding verification must not reset an active Flow back to the seed baseline.
@@ -334,6 +415,7 @@ async def test_bootstrap_clones_atomically_with_current_token_and_task_baseline(
     from app.worker.execution import vcs
     original = vcs._run
     clones = []
+    refreshes = []
 
     async def local_remote(*args, **kwargs):
         if "clone" in args:
@@ -343,6 +425,11 @@ async def test_bootstrap_clones_atomically_with_current_token_and_task_baseline(
             clones.append(args)
             args = tuple(str(remote) if arg == "https://github.com/owner/repo.git" else arg
                          for arg in args)
+        elif "fetch" in args and "environment" in kwargs:
+            assert kwargs["environment"]["FLOWTOOL_PUSH_TOKEN"] == "push-token"
+            assert "push-token" not in " ".join(args)
+            assert "+refs/heads/trunk:refs/flowtool/base" in args
+            refreshes.append(args)
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(vcs, "_run", local_remote)
@@ -357,6 +444,18 @@ async def test_bootstrap_clones_atomically_with_current_token_and_task_baseline(
                                    text=True)).strip() == "upstream"
     assert await asyncio.to_thread(subprocess.check_output,
                                    ["git", "show", "HEAD:README.md"], cwd=repo) == b"base\n"
+    assert not refreshes  # A new clone already obtained the current remote baseline.
+    await release(pool, binding)
+    _git("checkout", "trunk", cwd=seed)
+    (seed / "README.md").write_text("updated trunk\n")
+    _git("commit", "-am", "advance non-default baseline", cwd=seed)
+    _git("push", "origin", "trunk", cwd=seed)
+    reused = await pool.claim("owner/repo", 2, binding.slot_id, binding.generation + 1,
+                              base_branch="trunk", remote="upstream",
+                              push_token=assignment_secret().push.token)
+    assert (pool.path(reused) / "README.md").read_text() == "updated trunk\n"
+    assert len(refreshes) == 1 and len(clones) == 1
+    assert "push-token" not in (target / ".git/config").read_text()
     assert not list(target.parent.glob("repo.clone-*"))
     assert "push-token" not in (root / "workspace-pool.json").read_text()
 
@@ -418,6 +517,7 @@ async def test_reuse_refuses_baseline_that_would_overwrite_ignored_cache(tmp_pat
     (seed / ".venv/keep").write_text("new tracked source")
     _git("add", "-f", ".venv/keep", cwd=seed)
     _git("commit", "-m", "new baseline conflicts with old cache", cwd=seed)
+    _git("push", "origin", "main", cwd=seed)
     with pytest.raises(VcsVerificationError):
         await acquire(pool, 2, previous=binding)
     assert (repo / ".venv/keep").read_text() == "cache must survive"
@@ -432,6 +532,7 @@ async def test_jj_reuse_preserves_cache_with_unusual_paths_or_blocking_ancestors
     (seed / ".gitignore").write_text(".venv\nbuild/\n")
     _git("add", ".gitignore", cwd=seed)
     _git("commit", "-m", "ignore cache files as well as directories", cwd=seed)
+    _git("push", "origin", "main", cwd=seed)
     await _jj("git", "init", "--colocate", cwd=seed, env={"PATH": os.environ["PATH"]})
     pool = RepositoryWorkspaces(root, "worker-a", limit=1)
     binding = await acquire(pool, 1)
@@ -455,6 +556,7 @@ async def test_jj_reuse_preserves_cache_with_unusual_paths_or_blocking_ancestors
     (seed / ".venv" / name).write_text("new tracked source")
     _git("add", "-f", f".venv/{name}", cwd=seed)
     _git("commit", "-m", "new baseline conflicts with cache", cwd=seed)
+    _git("push", "origin", "main", cwd=seed)
     with pytest.raises(VcsVerificationError, match="overwrite retained cache"):
         await acquire(pool, 2, previous=binding)
     assert preserved.read_text() == "cache must survive"
@@ -464,9 +566,11 @@ async def test_jj_reuse_preserves_cache_with_unusual_paths_or_blocking_ancestors
 
 @pytest.mark.skipif(shutil.which("jj") is None, reason="jj is not installed")
 @pytest.mark.parametrize("colocated", [True, False])
-async def test_jj_copy_can_return_to_pool_and_reuse_committed_baseline(tmp_path, colocated):
+async def test_jj_copy_refreshes_remote_without_moving_seed_bookmarks(tmp_path, colocated):
     root, remote = managed_seed(tmp_path)
     seed = root / "repos/owner/repo"
+    publisher = tmp_path / "publisher"
+    shutil.copytree(seed, publisher)
     environment = {"PATH": os.environ["PATH"]}
     if colocated:
         await _jj("git", "init", "--colocate", cwd=seed, env=environment)
@@ -478,13 +582,18 @@ async def test_jj_copy_can_return_to_pool_and_reuse_committed_baseline(tmp_path,
     binding = await acquire(pool, 1)
     assert (pool.path(binding) / ".jj").is_dir()
     assert await release(pool, binding) == "released"
-    (seed / "README.md").write_text("updated committed baseline\n")
-    await _jj("describe", "-m", "advance the seed baseline", cwd=seed, env=environment)
-    await _jj("bookmark", "set", "main", "-r", "@", cwd=seed, env=environment)
-    await _jj("new", cwd=seed, env=environment)
+    state_command = ["jj", "log", "-r", "@ | main | main@origin", "--no-graph", "-T", "commit_id"]
+    before = await asyncio.to_thread(subprocess.check_output, state_command, cwd=seed, env=environment)
+    (publisher / "README.md").write_text("updated committed baseline\n")
+    _git("commit", "-am", "advance remote baseline", cwd=publisher)
+    _git("push", "origin", "main", cwd=publisher)
     reused = await acquire(pool, 2, previous=binding)
     assert pool.path(reused) == pool.path(binding)
     assert (pool.path(reused) / "README.md").read_text() == "updated committed baseline\n"
+    assert (seed / "README.md").read_text() == "base\n"
+    assert await asyncio.to_thread(
+        subprocess.check_output, state_command, cwd=seed, env=environment,
+    ) == before
 
 
 @pytest.mark.skipif(shutil.which("jj") is None, reason="jj is not installed")
