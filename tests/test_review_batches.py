@@ -1,13 +1,19 @@
 """Durable feedback must survive crashes without consuming a newer discussion version."""
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
+from app.domain.context_models import ReviewContext
+from app.domain.flow_policy import FlowEvent
+from app.domain.judge_models import JudgeDecision
 from app.domain.models import (
     DeliveryState,
     FlowState,
@@ -18,27 +24,33 @@ from app.domain.models import (
     Verdict,
 )
 from app.domain.review_models import BatchState, FeedbackUpdate, ReviewBatch
-from app.github import GitHubError, GitHubErrorKind, PullRequest
+from app.github import PullRequest
 from app.persistence.jobs import JobStore
 from app.persistence.reviews import ReviewStore
 from app.persistence.store import Store
+from tests.flow_fixtures import apply_flow_event
 from tests.github import RecordingGitHub
-from tests.review_memory import judge_decision
+from tests.review_memory import feedback_threads, judge_decision, review_context
 from tests.test_coordinator import coordinator
+
+
+def open_flow(store, issue_number=7, pr_number=17):
+    flow = store.flows.create_flow("owner/repo", issue_number, 42)
+    attempt = store.flows.create_attempt(flow.id)
+    flow.current_attempt_id = attempt.id
+    store.flows.set_current_attempt(flow)
+    flow = apply_flow_event(store, flow, FlowEvent.DELIVERY_APPLIED)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+    delivery.pr_number, delivery.state = pr_number, DeliveryState.OPEN
+    store.deliveries.update_delivery(delivery)
+    return flow
 
 
 @pytest.fixture
 def review_flow(store, monkeypatch):
     clock = SimpleNamespace(now=datetime(2026, 9, 7, tzinfo=UTC))
     monkeypatch.setattr(store._db, "_clock", lambda: clock.now)
-    flow = store.flows.create_flow("owner/repo", 7, 42)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
-    delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
-    store.deliveries.update_delivery(delivery)
-    return flow, clock
+    return open_flow(store), clock
 
 
 def feedback(clock, github_id=101, **changes):
@@ -74,6 +86,45 @@ def settle(store):
 def claim(store, clock):
     clock.now += timedelta(seconds=76)
     return settle(store)
+
+
+@pytest.mark.parametrize("legacy_column", [False, True])
+def test_legacy_frozen_context_keeps_digest_and_completed_decision(store, review_flow, legacy_column):
+    # Old snapshots lack task_content. Adding a serialized null would invalidate saved decisions.
+    if legacy_column:
+        with store.connection() as connection:
+            connection.execute(
+                "ALTER TABLE review_batches ADD COLUMN answer_dispatched BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+    flow, clock = review_flow
+    ingest(store, flow, feedback(clock))
+    batch = batch_for(store, claim(store, clock)[0])
+    legacy = review_context(batch.id).model_dump_json(exclude={"task_content"})
+    digest = hashlib.sha256(legacy.encode()).hexdigest()
+    snapshot = ReviewContext.model_validate_json(legacy)
+    assert snapshot.task_content is None
+    assert snapshot.model_dump_json() == legacy and snapshot.digest == digest
+    decision = JudgeDecision(
+        context_digest=digest, session_id="legacy", model="fake",
+        verdict=TriageVerdict(verdict=Verdict.ANSWER, confidence=1, reason="Known", answer="Ten"),
+    )
+    with store.transaction() as tx:
+        tx.lock_workflow(flow.id)
+        assert tx.reviews.freeze_context(batch, snapshot) == snapshot
+        tx.reviews.record_decision(batch, decision)
+        tx.reviews.complete(batch.id, BatchState.COMPLETED, list(batch.feedback), [])
+    with store.connection() as connection:
+        stored = connection.execute(
+            "SELECT context FROM review_batches WHERE id=%s", (batch.id,),
+        ).fetchone()["context"]
+        assert "task_content" not in stored
+    restarted = Store(store.database_url, clock=lambda: clock.now)
+    try:
+        fresh = restarted.reviews.get_batch(batch.id)
+        assert fresh.context.digest == digest and fresh.decision == decision
+        assert fresh.state is BatchState.COMPLETED
+    finally:
+        restarted.close()
 
 
 def test_delivery_and_feedback_are_one_transaction(store, review_flow, monkeypatch):
@@ -217,6 +268,29 @@ def test_same_number_in_different_github_namespaces_remains_distinct(store, revi
     assert len({f.item_id for f in batch.feedback}) == 2
 
 
+def test_unchanged_comment_from_another_flow_is_not_new_feedback(store, review_flow):
+    # A Flow resumed on the same Issue polls comments already handled by its predecessor.
+    earlier, clock = review_flow
+    comment = feedback(clock, 202, kind=ReviewItemKind.CONVERSATION, body="Keep the limit at 10.")
+    ingest(store, earlier, comment)
+    later = open_flow(store, issue_number=8, pr_number=18)
+
+    def poll(update):
+        with store.transaction() as tx:
+            tx.lock_workflow(later.id)
+            tx.reviews.observe_feedback(later.id, later.current_attempt_id, [update],
+                                        tx.reviews.observation_boundary(), 75)
+
+    poll(comment)
+    assert store.reviews.pending(later.id) == []
+    clock.now += timedelta(seconds=1)
+    poll(comment.model_copy(update={"body": "Use 20 instead.", "updated_at": clock.now}))
+    assert [(f.item_id, f.version, f.body) for f in store.reviews.pending(later.id)] == [
+        (202 * 4 + 3, 2, "Use 20 instead."),
+    ]
+    assert store.reviews.pending(earlier.id) == []
+
+
 def test_empty_request_changes_waits_for_inline_then_bypasses_judge(store, review_flow):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, body="", signal="request_changes"))
@@ -255,7 +329,6 @@ async def test_bot_mentions_always_enter_triage(
     body = "@flowtool[bot] add a bound"
     settings = SimpleNamespace(
         allowlist=["alice"],
-        bot_login="flowtool[bot]",
         trigger_label="flow",
         settle_seconds=75,
         submit_grace_seconds=15,
@@ -265,6 +338,7 @@ async def test_bot_mentions_always_enter_triage(
             database=store.database,
         ),
         settings,
+        bot_login="flowtool[bot]",
         database=store.database,
     )
     # An allowlisted author's direct request still needs Judge.
@@ -313,7 +387,6 @@ async def test_review_actions_have_explicit_dispatch_semantics(
     _, clock = review_flow
     settings = SimpleNamespace(
         allowlist=["alice"],
-        bot_login="flowtool[bot]",
         trigger_label="flow",
         settle_seconds=75,
         submit_grace_seconds=15,
@@ -323,6 +396,7 @@ async def test_review_actions_have_explicit_dispatch_semantics(
             database=store.database,
         ),
         settings,
+        bot_login="flowtool[bot]",
         database=store.database,
     )
     router.dispatch(
@@ -346,16 +420,16 @@ async def test_review_actions_have_explicit_dispatch_semantics(
     assert [j.trigger if isinstance(j, ReviewBatch) else j.kind for j in jobs] == ([] if expected is None else [expected])
 
 
-def test_failed_batch_retry_restores_ownership_and_cancel_fences_old_work(store, review_flow):
+def test_blocked_batch_retry_preserves_frozen_feedback_without_dispatching(store, review_flow):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock, signal="request_changes"))
     job = claim(store, clock)[0]
     with store.transaction() as tx:
-        tx.lock_workflow(flow.id)
-        flow.state = FlowState.FAILED
-        tx.flows.update_flow(flow)
-        tx.jobs.cancel_jobs(flow.id)
+        flow = apply_flow_event(tx, flow, FlowEvent.RESULT_FAILED)
+        assert tx.reviews.get_batch(batch_for(tx, job).id).state is BatchState.READY
+        tx.assignments.retire_queued_work(flow.id)
     assert store.reviews.get_batch(batch_for(store, job).id).state is BatchState.CANCELLED
+    assert settle(store) == []
     ControlService(
         database=store.database,
     ).retry(flow)
@@ -367,6 +441,7 @@ def test_failed_batch_retry_restores_ownership_and_cancel_fences_old_work(store,
 
 async def run_triage(store, flow, batch, verdict, *, before_apply=None, github=None):
     github = github or RecordingGitHub()
+    github.threads = feedback_threads(batch.feedback)
     subject = coordinator(store, github)
     async def decide(context):
         if before_apply:
@@ -405,49 +480,8 @@ async def test_revise_confidence_boundary_and_unresolved_points_persist(
         assert not claim(store, clock)
 
 
-@pytest.mark.parametrize("receipt", [True, False])
-async def test_answer_recovery_waits_for_receipt_and_preserves_a_new_version(
-    store, review_flow, receipt, recording_resources, monkeypatch,
-):
-    comment = PullRequest.comment
-
-    async def lost_response(pr, body):
-        if receipt:
-            await comment(pr, body)
-        raise GitHubError(GitHubErrorKind.TRANSIENT, "comment")
-
-    monkeypatch.setattr(PullRequest, "comment", lost_response)
-
-    flow, clock = review_flow
-    ingest(store, flow, feedback(clock))
-    job = claim(store, clock)[0]
-    github = RecordingGitHub()
-    with pytest.raises(GitHubError):
-        await run_triage(store, flow, job, TriageVerdict(
-            verdict=Verdict.ANSWER, answer="The bound is ten.", confidence=0.8,
-        ), github=github)
-    batch = batch_for(store, job)
-    assert batch.state is BatchState.READY
-    assert len(store.reviews.pending(flow.id)) == 1
-    assert batch.decision.verdict.answer == "The bound is ten."
-    clock.now += timedelta(seconds=20)
-    ingest(store, flow, feedback(clock, body="A new request"), "edit")
-    restarted = Store(store.database_url, clock=lambda: clock.now)
-    try:
-        await coordinator(restarted, github).triage(restarted.reviews.get_batch(job.id),
-            SimpleNamespace(triage=AsyncMock(side_effect=AssertionError("saved decision must be reused"))))
-        await coordinator(restarted, github).triage(restarted.reviews.get_batch(job.id),
-            SimpleNamespace(triage=AsyncMock(side_effect=AssertionError("saved decision must be reused"))))
-        assert len(github.comments) == int(receipt)
-        assert [(f.github_id, f.version) for f in restarted.reviews.pending(flow.id)] == [(101, 2)]
-        assert batch_for(restarted, job).state is (BatchState.COMPLETED if receipt else BatchState.READY)
-        assert restarted.jobs.list_jobs(flow.id) == []
-    finally:
-        restarted.close()
-
-
 @pytest.mark.parametrize("change", ["cancel", "closed", "head"])
-async def test_answer_rechecks_lifecycle_and_remote_head_before_sending(
+async def test_answer_rechecks_lifecycle_and_remote_head_before_queueing(
     store, review_flow, change, recording_resources, monkeypatch,
 ):
     read = PullRequest.refetch
@@ -477,9 +511,10 @@ async def test_answer_rechecks_lifecycle_and_remote_head_before_sending(
                 database=store.database,
             ).cancel(flow)
 
-    await run_triage(store, flow, job, TriageVerdict(verdict=Verdict.ANSWER, answer="Reply"),
+    await run_triage(store, flow, job, TriageVerdict(verdict=Verdict.ANSWER, instruction="Explain the bound"),
                      github=github, before_apply=change_state)
     assert github.comments == []
+    assert store.jobs.list_jobs(flow.id) == []
     assert len(store.reviews.pending(flow.id)) == 1
 
 
@@ -498,26 +533,6 @@ async def test_ignore_consumes_frozen_input_once_and_leaves_newer_version(store,
     assert [(f.github_id, f.version) for f in store.reviews.pending(flow.id)] == [(101, 2)]
 
 
-async def test_revise_transfers_batch_to_one_derived_job(store, review_flow, recording_resources):
-    flow, clock = review_flow
-    ingest(store, flow, feedback(clock))
-    job = claim(store, clock)[0]
-    _, github, _ = await run_triage(
-        store,
-        flow,
-        job,
-        TriageVerdict(verdict=Verdict.REVISE, confidence=0.9, instruction="Fix the bound"),
-    )
-    revisions = [j for j in store.jobs.list_jobs(flow.id) if j.kind is JobKind.REVISION]
-    assert len(revisions) == 1
-    assert batch_for(store, revisions[0]).id == batch_for(store, job).id
-    assert github.comments == []
-    ingest(store, flow, feedback(clock, 102), "next")
-    assert claim(store, clock) == []
-
-
-
-
 @pytest.mark.parametrize("outcome", [BatchState.COMPLETED, BatchState.WAITING])
 def test_retry_after_successful_replacement_does_not_select_historical_failure(
     store, review_flow, outcome,
@@ -528,7 +543,8 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     service = ControlService(
         database=store.database,
     )
-    service.cancel(flow)
+    flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
+    store.assignments.retire_queued_work(flow.id)
     service.retry(flow)
     replacement = store.jobs.list_jobs(flow.id)[-1]
     batch = batch_for(store, replacement)
@@ -536,15 +552,18 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (replacement.id,))
 
-    # A later idle cancellation must not resurrect the old failure whose owner was replaced.
+    # A new round must not resurrect the old failure whose owner was replaced.
     service.cancel(flow)
-    service.retry(flow)
+    with pytest.raises(ValueError, match="archived"):
+        service.retry(flow)
+    resumed = service.resume(flow, expected_round_no=flow.current_round_no)
     assert store.jobs.get_job(original.id).state is JobState.FAILED
     assert store.jobs.list_jobs(flow.id)[-1].kind is JobKind.INITIAL
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert resumed.state is FlowState.QUEUED
+    assert resumed.current_round_no == flow.current_round_no + 1
 
 
-async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store, review_flow, recording_resources):
+async def test_answer_carries_waiting_questions_into_worker_task(store, review_flow, recording_resources):
     flow, clock = review_flow
     ingest(store, flow, feedback(clock))
     job = claim(store, clock)[0]
@@ -554,17 +573,17 @@ async def test_answer_uses_frozen_decision_once_and_consumes_after_comment(store
     ingest(store, flow, feedback(clock, 102, body="Please explain it."), "reply")
     job = claim(store, clock)[0]
     _, github, _ = await run_triage(store, flow, job, TriageVerdict(
-        verdict=Verdict.ANSWER, answer="Ten is the configured retry limit.", confidence=0.9,
+        verdict=Verdict.ANSWER, instruction="Explain the configured retry limit.", confidence=0.9,
     ))
     batch = batch_for(store, job)
     assert "Why is the limit 10?" in batch.context.open_points
-    assert batch.decision.verdict.answer == "Ten is the configured retry limit."
-    assert len(github.comments) == 1
-    assert github.comments[0].startswith("Ten is the configured retry limit.")
-    assert "#discussion_r102" in github.comments[0]
-    assert batch.state is BatchState.COMPLETED
-    assert not store.reviews.pending(flow.id)
-    assert all(item.kind.value != "answer" for item in store.jobs.list_jobs(flow.id))
+    assert batch.decision.verdict.instruction == "Explain the configured retry limit."
+    task, = store.jobs.list_jobs(flow.id)
+    assert task.kind is JobKind.REVISION and task.payload["purpose"] == "answer"
+    assert task.payload["instruction"] == "Explain the configured retry limit."
+    assert batch.job_id == task.id and batch.state is BatchState.READY
+    assert store.reviews.pending(flow.id)
+    assert github.comments == []
 
 
 @pytest.mark.parametrize("approval_id", [101, 102])
@@ -582,11 +601,11 @@ async def test_approval_invalidates_body_without_waking_waiting_feedback(
         ),
         SimpleNamespace(
             allowlist=["alice"],
-            bot_login="flowtool[bot]",
             trigger_label="flow",
             settle_seconds=75,
             submit_grace_seconds=15,
         ),
+        bot_login="flowtool[bot]",
         database=store.database,
     )
     # Both a fresh approval and approval of an existing review must leave discussion asleep.
@@ -601,43 +620,109 @@ async def test_approval_invalidates_body_without_waking_waiting_feedback(
         assert all(f.kind is not ReviewItemKind.REVIEW_BODY for f in store.reviews.pending(flow.id))
 
 
-@pytest.mark.parametrize("final_body", ["C", "A"])
-def test_same_second_out_of_order_edits_reconcile_after_restart(
-    store, review_flow, monkeypatch, final_body,
-):
-    flow, clock = review_flow
-    ingest(store, flow, feedback(clock, body="A"))
+LEGACY_REVIEW_SCHEMA = """
+DROP TABLE review_versions;
+ALTER TABLE review_buffers ADD COLUMN generation BIGINT NOT NULL DEFAULT 1,
+  ADD COLUMN force_triage BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE review_batches ADD COLUMN generation BIGINT NOT NULL DEFAULT 1,
+  ADD UNIQUE(flow_id,generation);
+CREATE TABLE review_items (
+  id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  flow_id BIGINT NOT NULL REFERENCES flows(id), kind TEXT NOT NULL, github_id BIGINT NOT NULL,
+  version INTEGER NOT NULL, observed_at TIMESTAMPTZ NOT NULL, UNIQUE(flow_id,kind,github_id)
+);
+CREATE TABLE review_versions (
+  item_id BIGINT NOT NULL REFERENCES review_items(id), version INTEGER NOT NULL,
+  attempt_id BIGINT NOT NULL REFERENCES attempts(id), source_delivery TEXT, content JSONB NOT NULL,
+  relayed_at TIMESTAMPTZ, consumed_at TIMESTAMPTZ, addressed_sha TEXT,
+  addressed_job_id BIGINT REFERENCES jobs(id), signal_retired BOOLEAN NOT NULL DEFAULT FALSE,
+  observation_seq BIGINT GENERATED ALWAYS AS IDENTITY, PRIMARY KEY(item_id,version)
+);
+CREATE TABLE review_pending_edits (
+  source_delivery TEXT PRIMARY KEY, item_id BIGINT NOT NULL REFERENCES review_items(id),
+  attempt_id BIGINT NOT NULL REFERENCES attempts(id), previous_body TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL, content JSONB NOT NULL
+);
+CREATE TABLE review_thread_observations (
+  flow_id BIGINT NOT NULL REFERENCES flows(id), thread_id TEXT NOT NULL,
+  fetched_at TIMESTAMPTZ NOT NULL, snapshot JSONB NOT NULL, PRIMARY KEY(flow_id,thread_id)
+);
+"""
 
-    def edit(repository, delivery, previous, body):
-        return repository.reviews.ingest(
-            flow.id, delivery, "pull_request_review_comment",
-            {"changes": {"body": {"from": previous}}}, feedback(clock, body=body),
-            settle_seconds=75, submit_grace_seconds=15,
+
+def legacy_reviews(store, rows):
+    """Recreate the pre-merge review tables (frozen from 72a9f6b) holding (flow, versions) rows."""
+    with store.connection() as connection:
+        connection.execute(LEGACY_REVIEW_SCHEMA)
+        for flow, versions in rows:
+            current = versions[-1]
+            item = connection.execute(
+                "INSERT INTO review_items(flow_id,kind,github_id,version,observed_at)"
+                " VALUES(%s,%s,%s,%s,%s) RETURNING id",
+                (flow.id, current.kind, current.github_id, len(versions), current.updated_at),
+            ).fetchone()["id"]
+            for version, update in enumerate(versions, 1):
+                connection.execute(
+                    "INSERT INTO review_versions(item_id,version,attempt_id,source_delivery,content)"
+                    " VALUES(%s,%s,%s,%s,%s)",
+                    (item, version, flow.current_attempt_id, f"legacy-{item}-{version}",
+                     Jsonb(update.model_dump(mode="json") | {"inert": False})),
+                )
+        first_flow, first_versions = rows[0]
+        connection.execute(
+            "INSERT INTO review_pending_edits VALUES('queued',1,%s,'B',%s,'{}')",
+            (first_flow.current_attempt_id, first_versions[0].updated_at),
+        )
+        connection.execute(
+            "INSERT INTO review_thread_observations VALUES(%s,'T1',now(),'{}')", (first_flow.id,),
         )
 
-    # GitHub timestamps have second precision; C may arrive before its predecessor B.
-    edit(store, "C", "B", final_body)
-    append_version = ReviewStore._append_version
 
-    def crash_after_replaying_c(self, *args, **kwargs):
-        changed = append_version(self, *args, **kwargs)
-        if args[2] == "C":
-            raise RuntimeError("replay interrupted")
-        return changed
+def test_legacy_review_tables_merge_once_and_keep_frozen_identities(store, review_flow):
+    flow, clock = review_flow
+    legacy_reviews(store, [
+        (flow, [feedback(clock, body="A"), feedback(clock, body="B")]),
+        (flow, [feedback(clock, 202, kind=ReviewItemKind.CONVERSATION, body="C")]),
+    ])
+    store.init_db()
+    store.init_db()
+    with store.connection() as connection:
+        remaining = [
+            connection.execute("SELECT to_regclass(%s) AS name", (table,)).fetchone()["name"]
+            for table in ("review_items", "review_pending_edits", "review_thread_observations")
+        ]
+        rows = connection.execute(
+            "SELECT item_id,version,kind,github_id FROM review_versions ORDER BY 1,2"
+        ).fetchall()
+        current = connection.execute(
+            "SELECT DISTINCT ON (kind,github_id) item_id,version FROM review_versions"
+            " ORDER BY kind,github_id,version DESC"
+        ).fetchall()
+        dropped = connection.execute(
+            "SELECT table_name,column_name FROM information_schema.columns"
+            " WHERE table_schema=current_schema() AND table_name LIKE 'review%%'"
+            " AND column_name IN ('generation','force_triage','signal_retired')"
+        ).fetchall()
+    assert remaining == [None, None, None]
+    assert dropped == []
+    assert [tuple(row.values()) for row in rows] == [
+        (1, 1, "inline", 101), (1, 2, "inline", 101), (2, 1, "conversation", 202),
+    ]
+    assert sorted(tuple(row.values()) for row in current) == [(1, 2), (2, 1)]
+    # Upgraded objects keep their frozen item IDs; only new objects use the encoded identity.
+    clock.now += timedelta(seconds=1)
+    assert ingest(store, flow, feedback(clock, body="D"), "after-upgrade")
+    assert ingest(store, flow, feedback(clock, 303), "new-object")
+    assert [(f.item_id, f.version) for f in store.reviews.pending(flow.id)] == [
+        (1, 3), (2, 1), (303 * 4 + 2, 1),
+    ]
 
-    with monkeypatch.context() as patch:
-        patch.setattr(ReviewStore, "_append_version", crash_after_replaying_c)
-        with pytest.raises(RuntimeError, match="replay interrupted"):
-            edit(store, "B", "A", "B")
-    assert not store.webhooks.event_seen("B")
-    assert store.reviews.pending(flow.id)[0].body == "A"
-    restarted = Store(store.database_url, clock=lambda: clock.now)
-    try:
-        edit(restarted, "B", "A", "B")
-        assert restarted.reviews.pending(flow.id)[0].body == final_body
-        assert not edit(restarted, "C", "B", final_body)
-        batch = batch_for(restarted, claim(restarted, clock)[0])
-        assert batch.feedback[0].body == final_body
-        assert batch.feedback[0].version == 3
-    finally:
-        restarted.close()
+
+def test_legacy_object_shared_by_flows_stops_the_upgrade(store, review_flow):
+    flow, clock = review_flow
+    other = open_flow(store, issue_number=8, pr_number=18)
+    legacy_reviews(store, [(flow, [feedback(clock)]), (other, [feedback(clock)])])
+    with pytest.raises(psycopg.errors.RaiseException, match="several Flows"):
+        store.init_db()
+    with store.connection() as connection:
+        assert connection.execute("SELECT count(*) AS n FROM review_items").fetchone()["n"] == 2

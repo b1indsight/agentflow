@@ -2,10 +2,12 @@
 
 import asyncio
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 
 from app.controler.reconciliation.feedback import FeedbackReconciler
+from app.domain.flow_policy import FlowEvent
 from app.domain.models import (
     DeliveryState,
     FlowState,
@@ -24,7 +26,9 @@ from app.github import (
 )
 from app.persistence.reconciliation import ReconcileStore
 from app.persistence.store import Store
+from tests.flow_fixtures import apply_flow_event
 from tests.github import RecordingGitHub, record_call
+from tests.test_github_client import AsyncEndpoint, app_client, response
 from tests.test_review_batches import batch_for, claim, feedback, ingest, run_triage, settle
 from tests.test_review_batches import (
     review_flow as review_flow,  # noqa: PLC0414 - fixture re-export
@@ -97,7 +101,40 @@ async def test_three_missing_sources_are_ingested_once_without_webhook_or_strong
     assert {number for number, _, _ in github.calls} == {7, 17}
     with store.connection() as connection:
         assert connection.execute("SELECT count(*) n FROM events").fetchone()["n"] == 0
-        assert connection.execute("SELECT generation FROM review_buffers").fetchone()["generation"] == 3
+
+
+async def test_direct_feedback_skips_issue_seed_and_stale_issue_check_but_keeps_pr_sources(store, feedback_resources):
+    # A stale or manually inserted Issue scan must also be inert, not just absent from new seeds.
+    flow = store.flows.create_flow("owner/repo", None, 42, task_content="Direct")
+    attempt = store.flows.create_attempt(flow.id)
+    flow.current_attempt_id = attempt.id
+    store.flows.set_current_attempt(flow)
+    flow = apply_flow_event(store, flow, FlowEvent.DELIVERY_APPLIED)
+    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
+    store.deliveries.update_delivery(delivery)
+    clock = SimpleNamespace(now=store.now())
+    github = GitHub(clock)
+    for i, source in enumerate(("pr_comments", "reviews")):
+        github.pages[source, None] = page(clock, 101 + i)
+    reconciler = poller(store, github)
+    reconciler.reconcile_store.feedback_seed(64)
+    # The due PR check shares reconcile_checks and must stay with the PR reconciler.
+    reconciler.reconcile_store.hint(flow.id)
+    checks = reconciler.reconcile_store.feedback_due(64)
+    assert {check.source for check in checks} == {"pr_comments", "reviews", "threads"}
+    assert [check.flow_id for check in reconciler.reconcile_store.due(64)] == [flow.id]
+    with store.connection() as connection:
+        connection.execute("INSERT INTO reconcile_checks(flow_id,source,next_at) VALUES(%s,'issue_comments',%s)",
+                           (flow.id, store.now()))
+    stale = reconciler.reconcile_store.feedback_get(flow.id, "issue_comments")
+    await reconciler._check(stale)
+    assert github.calls == []
+    assert "issue_comments" not in {check.source for check in reconciler.reconcile_store.feedback_due(64)}
+    await reconciler._sweep()
+    assert {(number, source) for number, source, _ in github.calls} == {(17, "pr_comments"), (17, "reviews")}
+    assert {item.github_id for item in store.reviews.pending(flow.id)} == {101, 102}
+    assert any(call["operation"] == "fetch_threads" for call in github.resource_calls)
 
 
 async def test_continuation_survives_failure_and_restart(store, review_flow, feedback_resources):
@@ -173,24 +210,36 @@ async def test_review_edits_and_invalidation_preserve_versions(store, review_flo
     )])
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id)[0].version == 2
+    due = "SELECT due_at FROM review_buffers"
+    with store.connection() as connection:
+        edited_due = connection.execute(due).fetchone()["due_at"]
     clock.now += timedelta(seconds=301)
     github.pages["reviews", None] = page(clock, state="approved")
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id) == []
+    # Invalidation is not new discussion, so it must not move the settle deadline.
     with store.connection() as connection:
-        assert connection.execute("SELECT generation FROM review_buffers").fetchone()["generation"] == 2
+        assert connection.execute(due).fetchone()["due_at"] == edited_due
 
 
 @pytest.mark.parametrize("field,value", [("is_bot", True), ("body", "/flow stop"),
-                                         ("state", "pending"), ("author", "flowtool[bot]")])
-async def test_old_commands_and_bots_never_wake_or_control(store, review_flow, field, value, feedback_resources):
+                                         ("state", "pending"), ("author", "Flowtool-bot[bot]")])
+async def test_old_commands_and_bots_never_wake_or_control(
+    store, review_flow, field, value, feedback_resources, monkeypatch,
+):
     flow, clock = review_flow
     github = GitHub(clock)
+    github._bot_login = None
+    get_app = AsyncEndpoint(response(SimpleNamespace(id=1, slug="flowtool-bot")))
+    app_client(monkeypatch, lambda **kwargs: SimpleNamespace(
+        rest=SimpleNamespace(apps=SimpleNamespace(async_get_authenticated=get_app)),
+    ))
     item = page(clock).items[0].model_copy(update={field: value})
     github.pages["reviews", None] = Batch(items=[item])
     await poller(store, github)._sweep()
+    assert store.reconcile.feedback_get(flow.id, "reviews").last_success_at is not None
     assert store.reviews.pending(flow.id) == []
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
 
 
 async def test_page_absence_never_infers_deletion(store, review_flow, feedback_resources):
@@ -243,46 +292,16 @@ async def test_observed_review_then_authorized_submission_preserves_request_chan
     assert settle(store)[0].kind.value == "revision"
 
 
-async def test_polling_missing_predecessor_applies_the_queued_successor(store, review_flow, feedback_resources):
+@pytest.mark.parametrize("webhook_body", ["Change old code", "/flow stop"], ids=["edited", "unchanged"])
+async def test_poll_marks_command_inert_and_later_edit_recovers(store, review_flow, feedback_resources, webhook_body):
     flow, clock = review_flow
-    ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="A"))
-    github = GitHub(clock)
-    github.pages["issue_comments", None] = Batch(items=[page(clock).items[0].model_copy(update={"body": "B"})])
-
-    def arriving():
-        store.reviews.ingest(flow.id, "b-c", "issue_comment", {"changes": {"body": {"from": "B"}}},
-            feedback(clock, kind=ReviewItemKind.CONVERSATION, body="C"), settle_seconds=75, submit_grace_seconds=15)
-
-    github.before_return = arriving
-    await poller(store, github)._sweep()
-    assert store.reviews.pending(flow.id)[0].body == "C"
-
-
-async def test_edit_to_command_supersedes_feedback_and_later_edit_recovers(store, review_flow, feedback_resources):
-    flow, clock = review_flow
-    ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="Change old code"))
+    # Polling must suppress a command even when the webhook already stored the same text.
+    ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body=webhook_body))
     github = GitHub(clock)
     github.pages["issue_comments", None] = Batch(items=[page(clock).items[0].model_copy(update={"body": "/flow stop"})])
     await poller(store, github)._sweep()
     assert store.reviews.pending(flow.id) == []
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
-    clock.now += timedelta(seconds=301)
-    github.pages["issue_comments", None] = page(clock)
-    await poller(store, github)._sweep()
-    assert store.reviews.pending(flow.id)[0].body == "Please add a bound."
-
-
-async def test_poll_marks_same_webhook_command_body_inert(store, review_flow, feedback_resources):
-    flow, clock = review_flow
-    ingest(store, flow, feedback(clock, kind=ReviewItemKind.CONVERSATION, body="/flow stop"))
-    github = GitHub(clock)
-    github.pages["issue_comments", None] = Batch(items=[
-        page(clock).items[0].model_copy(update={"body": "/flow stop"}),
-    ])
-    # An edited command can reach storage before polling identifies it as inert.
-    await poller(store, github)._sweep()
-    assert store.reviews.pending(flow.id) == []
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
     clock.now += timedelta(seconds=301)
     github.pages["issue_comments", None] = page(clock)
     await poller(store, github)._sweep()
@@ -388,3 +407,64 @@ async def test_source_pool_is_bounded_and_cancellation_joins_reads(store, review
     with pytest.raises(asyncio.CancelledError):
         await task
     assert github.maximum == 2 and github.active == 0
+
+
+@pytest.mark.parametrize("source", ["poll", "webhook"])
+async def test_resumed_round_rejects_old_issue_comments_even_if_first_seen_or_edited(
+    store, review_flow, feedback_resources, source,
+):
+    # Cursor reset must not attach unseen historical Issue comments to the new Attempt.
+    from types import SimpleNamespace
+
+    from app.controler.events.router import EventRouter
+    from app.controler.workflow.service import ControlService
+
+    flow, clock = review_flow
+    service = ControlService(database=store.database)
+    service.cancel(flow)
+    clock.now += timedelta(seconds=10, microseconds=500_000)
+    started = clock.now
+    resumed = service.resume(flow, expected_round_no=1)
+    # An INITIAL retry / late preparation must not move the round's feedback boundary.
+    clock.now += timedelta(seconds=10)
+    store.assignments.retire_queued_work(flow.id)
+    resumed.current_attempt_id = store.flows.create_attempt(flow.id).id
+    store.flows.set_current_attempt(resumed)
+    resumed = apply_flow_event(store, resumed, FlowEvent.DELIVERY_APPLIED)
+    delivery = store.deliveries.get_delivery(flow.id)
+    if delivery is None:
+        delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}-round-2")
+    delivery.state, delivery.pr_number = DeliveryState.OPEN, 18
+    store.deliveries.update_delivery(delivery)
+    created = [
+        started - timedelta(days=1),  # Old, never ingested; updated after resume below.
+        started.replace(microsecond=0),  # GitHub cannot disambiguate this second.
+        None,  # Missing creation evidence must not fall back to updated_at.
+        started.replace(microsecond=0) + timedelta(seconds=1),
+    ]
+    if source == "poll":
+        github = GitHub(clock)
+        github.pages["issue_comments", None] = Batch(items=[
+            RemoteFeedback(github_id=101 + i, author="alice", body="newly observed",
+                           updated_at=clock.now, created_at=timestamp)
+            for i, timestamp in enumerate(created)
+        ])
+        await poller(store, github)._sweep()
+        assert store.reconcile.feedback_get(flow.id, "issue_comments").last_success_at is not None
+    else:
+        router = EventRouter(service, SimpleNamespace(
+            allowlist={"alice"}, settle_seconds=75, submit_grace_seconds=15,
+        ), bot_login="flowtool[bot]", database=store.database)
+        for i, timestamp in enumerate(created):
+            router.dispatch("issue_comment", f"round-comment-{i}", {
+                "repository": {"full_name": flow.repo}, "issue": {"number": flow.issue_number},
+                "sender": {"login": "alice"}, "action": "edited",
+                "comment": {"id": 101 + i, "user": {"login": "alice"}, "body": "newly observed",
+                            "created_at": timestamp.isoformat() if timestamp else None,
+                            "updated_at": clock.now.isoformat()},
+            })
+            assert store.webhooks.event_seen(f"round-comment-{i}")
+    assert [item.github_id for item in store.reviews.pending(flow.id)] == [104]
+    clock.now += timedelta(seconds=76)
+    batch = store.reviews.claim_due()[0]
+    assert [item.github_id for item in batch.feedback] == [104]

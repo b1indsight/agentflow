@@ -1,12 +1,34 @@
+import asyncio
+import json
+import os
+import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
 
+from app.contracts.conversation import HistoryPage, HistoryQuery
+from app.contracts.protocol import (
+    InferenceRequest,
+    InferenceResult,
+    Register,
+    ServerMessage,
+    call_header,
+    message_header,
+    parse_worker_message,
+)
+from app.domain.inference_models import InferenceError, InferenceMessage, InferenceTask
+from app.domain.models import CodingExecutionResult
 from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
+from app.worker.execution.vcs import _run
 from app.worker.runtime import WorkerRootLock, WorkerRuntime
+from tests.test_remote_e2e import QueueConnection
+from tests.test_worker_client import ScriptedConnection, assignment_message, registered_message
+from tests.test_worker_session import _assignment
+from tests.worker_fixtures import run_worker
 
 
 def test_worker_root_lock_prevents_a_second_process_root_owner(tmp_path: Path) -> None:
@@ -51,7 +73,11 @@ def test_worker_root_rejects_sequential_identity_reuse(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("backend,expected,timeout", [(None, CodexAgent, 23), ("amp", AmpCodingAgent, 47)])
-def test_runtime_selects_agent_and_its_revision_deadline(tmp_path, monkeypatch, backend, expected, timeout):
+@pytest.mark.parametrize("trusted_host", [False, True])
+async def test_runtime_shares_configured_agent_for_coding_and_history(
+    tmp_path, monkeypatch, backend, expected, timeout, trusted_host,
+):
+    # Sharing must include history requests and multiple Flows, without changing coding authorization.
     monkeypatch.setattr("app.worker.runtime.configure_logging", lambda *args: None)
     if backend is None:
         monkeypatch.delenv("FLOWTOOL_CODING_AGENT", raising=False)
@@ -59,8 +85,210 @@ def test_runtime_selects_agent_and_its_revision_deadline(tmp_path, monkeypatch, 
         monkeypatch.setenv("FLOWTOOL_CODING_AGENT", backend)
     settings = WorkerSettings(worker_id="worker", worker_token=SecretStr("secret"),
                               worker_root=tmp_path, serve_ws_url="wss://control.example/connect",
-                              codex_run_timeout_seconds=23, amp_run_timeout_seconds=47)
+                              codex_run_timeout_seconds=23, amp_run_timeout_seconds=47,
+                              trusted_host_execution=trusted_host, execution_isolation="container")
     runtime = WorkerRuntime(settings)
-    assert isinstance(runtime.client.executor.code_agent, expected)
-    assert runtime.client.executor.code_agent.timeout == timeout
-    assert runtime.client.executor.revision_timeout == timeout
+    execution = runtime._create_execution(3)
+    other = runtime._create_execution(4)
+    agent = execution.executor.code_agent
+    assert runtime.executions == {}
+    assert execution.state.flow_id == 3
+    assert execution.executor.workspaces is runtime.workspaces
+    assert isinstance(agent, expected)
+    assert agent.timeout == timeout
+    assert agent.trusted_host is trusted_host
+    assert agent.max_output_bytes == 8 * 1024 * 1024
+
+    session_id = ("T-" if backend == "amp" else "") + "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    page = HistoryPage(session_id=session_id, status="unsupported")
+    monkeypatch.setattr(expected, "read_history", lambda self, query: HistoryPage(
+        session_id=query.session_id, status="not_found",
+    ))
+    monkeypatch.setattr(agent, "read_history", lambda query: page)
+    assert await runtime.read_history(HistoryQuery(session_id=session_id)) == page
+    assert other.executor.code_agent is agent
+
+
+@pytest.mark.parametrize("backend,expected", [("codex", CodexAgent), ("amp", AmpCodingAgent)])
+async def test_runtime_inference_uses_shared_agent_with_call_local_configuration(
+    tmp_path, monkeypatch, backend, expected,
+):
+    # Inference and coding can overlap: inference must never reconfigure their shared agent.
+    monkeypatch.setattr("app.worker.runtime.configure_logging", lambda *args: None)
+    runtime = WorkerRuntime(WorkerSettings(
+        worker_id="worker", worker_token=SecretStr("secret"), worker_root=tmp_path,
+        serve_ws_url="wss://control.example/connect", coding_agent=backend,
+        trusted_host_execution=True, execution_isolation="container",
+    ))
+    runtime.initialize()
+    agent = runtime._agents[backend]
+    original_fields = vars(agent).copy()
+    assert runtime._create_execution(3).executor.code_agent is agent
+    messages = [
+        {"role": "system", "content": "Summarize only the supplied facts"},
+        {"role": "user", "content": 'Facts with quotes: "hello" and 中文'},
+    ]
+    calls = []
+
+    async def start(self, prompt, cwd, *, output_schema=None, context=None, model=None,
+                    effort=None, max_output_bytes=None, timeout_seconds=None):
+        assert self is agent and cwd == runtime.workspaces.inference_path and cwd.is_dir()
+        assert context is None and model is None and effort is None
+        assert "Return only the requested result" in prompt
+        assert prompt.endswith(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
+        calls.append((output_schema, max_output_bytes, timeout_seconds))
+        return CodingExecutionResult("answer-session", '"Answer"', 0, model="observed-model")
+
+    monkeypatch.setattr(expected, "start", start)
+    outgoing, incoming = asyncio.Queue(), asyncio.Queue()
+    serving = asyncio.create_task(run_worker(runtime, QueueConnection(outgoing, incoming)))
+    try:
+        registration = parse_worker_message(await asyncio.wait_for(outgoing.get(), 2))
+        assert isinstance(registration, Register)
+        assert registration.inference.adapter_version == f"{backend}/v1"
+        await incoming.put(registered_message().model_dump_json())
+        task = InferenceTask(messages=[InferenceMessage(**message) for message in messages],
+                             output_schema={"type": "string"}, max_output_bytes=64, timeout_seconds=5)
+        call = InferenceRequest(**call_header(task.request_id), method="worker.infer", job_id=1,
+                                assignment_token="token", arguments=task)
+        await incoming.put(ServerMessage(**message_header("epoch-1"), control=None,
+                                         payload=[call]).model_dump_json())
+        async with asyncio.timeout(2):
+            while True:
+                message = parse_worker_message(await outgoing.get())
+                output = next((item for item in message.payload if isinstance(item, InferenceResult)), None)
+                if output is not None:
+                    break
+        assert output.reply_to == call.message_id and output.assignment_token == "token"
+        assert output.output.adapter_version == f"{backend}/v1" and output.output.model == "observed-model"
+        output.output.validate_for(task)
+        assert calls == [({"type": "string"}, 64, 5)]
+        assert vars(agent) == original_fields
+    finally:
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+
+
+async def test_inference_requires_trusted_host_opt_in(tmp_path):
+    runtime = WorkerRuntime(WorkerSettings(
+        worker_id="worker", worker_token=SecretStr("secret"), worker_root=tmp_path,
+        serve_ws_url="wss://unused",
+    ))
+    assert runtime.inference_capability() is None
+    with pytest.raises(InferenceError) as rejected:
+        await runtime.infer(InferenceTask(messages=[InferenceMessage(role="user", content="Answer")]))
+    assert rejected.value.failure.code == "configuration"
+
+
+@pytest.mark.parametrize("kind,exit_code,expected", [
+    ("timeout", 124, "execution_timeout"),  # The only renamed code.
+    ("invalid_response", 1, "invalid_response"),  # Other agent failures keep their code.
+    (None, 7, "backend_error"),  # An untyped nonzero exit is still a failure.
+])
+async def test_runtime_translates_agent_failures_to_external_inference_errors(
+    tmp_path, monkeypatch, kind, exit_code, expected,
+):
+    runtime = WorkerRuntime(WorkerSettings(
+        worker_id="worker", worker_token=SecretStr("secret"), worker_root=tmp_path,
+        serve_ws_url="wss://unused", trusted_host_execution=True, execution_isolation="container",
+    ))
+    runtime.initialize()
+
+    async def run(*args, **kwargs):
+        return CodingExecutionResult(None, "", exit_code, failure_kind=kind,
+                                     failure_detail="private backend diagnostics")
+
+    monkeypatch.setattr(runtime._agents["codex"], "_run", run)
+    with pytest.raises(InferenceError) as failed:
+        await runtime.infer(InferenceTask(messages=[InferenceMessage(role="user", content="Answer")]))
+    assert failed.value.failure.code == expected
+    assert failed.value.backend == "codex/v1"
+    assert "private" not in str(failed.value)
+
+
+@pytest.mark.parametrize("shutdown", ["stop", "cancel"])
+async def test_runtime_keeps_root_locked_until_owned_process_cleanup_finishes(tmp_path, monkeypatch, shutdown):
+    # Process shutdown must survive repeated caller cancellation, without inventing a stop receipt.
+    monkeypatch.setattr("app.worker.runtime.configure_logging", lambda *args: None)
+    cleaning, release = asyncio.Event(), asyncio.Event()
+    ready = tmp_path / "pids"
+    script = ("import os,subprocess,sys,time; from pathlib import Path; "
+              "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+              "Path(sys.argv[1]).write_text(str(os.getpid())+' '+str(child.pid)); time.sleep(60)")
+
+    class Executor:
+        async def execute(self, task, secret=None, *, tool_caller):
+            process = asyncio.create_task(_run(sys.executable, "-c", script, str(ready)))
+            try:
+                await asyncio.shield(process)
+            finally:
+                cleaning.set()
+                await release.wait()
+                process.cancel()
+                await asyncio.gather(process, return_exceptions=True)
+
+    @asynccontextmanager
+    async def connect(*args, **kwargs):
+        inventory = await runtime.workspaces.provision("owner/repo")
+        slot = next(item for item in inventory if item.repository == "owner/repo")
+        connection = ScriptedConnection()
+        connection.messages[1] = assignment_message(_assignment(
+            workspace=slot.workspace, generation=slot.generation,
+        )).model_dump_json()
+        yield connection
+
+    monkeypatch.setattr("app.worker.runtime.connect", connect)
+    runtime = WorkerRuntime(WorkerSettings(worker_id="worker", worker_token=SecretStr("secret"),
+        worker_root=tmp_path, serve_ws_url="wss://control.example/connect"))
+    create_execution = runtime._create_execution
+
+    def owned_execution(flow_id):
+        execution = create_execution(flow_id)
+        execution.executor = Executor()
+        return execution
+
+    monkeypatch.setattr(runtime, "_create_execution", owned_execution)
+    running = asyncio.create_task(runtime.run())
+    second = WorkerRootLock(tmp_path)
+    try:
+        async with asyncio.timeout(5):
+            while not ready.exists():
+                await asyncio.sleep(0.01)
+        pids = list(map(int, ready.read_text().split()))
+        if shutdown == "stop":
+            runtime.stop()
+        else:
+            running.cancel()
+        await asyncio.wait_for(cleaning.wait(), 2)
+        for _ in range(2):
+            running.cancel()
+            await asyncio.sleep(0)
+        assert not running.done()
+        with pytest.raises(RuntimeError, match="already in use"):
+            second.acquire()
+        for pid in pids:
+            os.kill(pid, 0)
+        release.set()
+        if shutdown == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(running, 5)
+        else:
+            await asyncio.wait_for(running, 5)
+        async with asyncio.timeout(5):
+            for pid in pids:
+                while True:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    await asyncio.sleep(0.01)
+        assert set(runtime.executions) == {3}
+        record = runtime.executions[3].state.load()
+        assert record.state == "started" and record.stopped is None and record.terminal is None
+        assert not record.acknowledged
+        second.acquire()
+    finally:
+        second.release()
+        release.set()
+        runtime.stop()
+        await asyncio.gather(running, return_exceptions=True)

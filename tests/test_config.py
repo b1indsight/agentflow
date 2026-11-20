@@ -69,6 +69,7 @@ def test_judge_credentials_stay_out_of_config_serialization_and_code_agent_envir
 def test_settings_parse_allowlist_environment_formats(monkeypatch, tmp_path, value, expected) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("FLOWTOOL_ALLOWLIST", value)
+    monkeypatch.setenv("FLOWTOOL_REVIEWERS", "carol,dave")
     monkeypatch.setenv(
         "FLOWTOOL_DATABASE_URL", "postgresql://flowtool:secret@db.example/flowtool"
     )
@@ -78,20 +79,9 @@ def test_settings_parse_allowlist_environment_formats(monkeypatch, tmp_path, val
     settings = ServerSettings()  # type: ignore[call-arg]
 
     assert settings.allowlist == expected
-    assert settings.database_url == "postgresql://flowtool:secret@db.example/flowtool"
-
-
-def test_reviewers_are_configured_independently_from_trigger_allowlist(monkeypatch) -> None:
-    monkeypatch.setenv("FLOWTOOL_ALLOWLIST", "alice,bob")
-    monkeypatch.setenv("FLOWTOOL_REVIEWERS", "carol,dave")
-    monkeypatch.setenv("FLOWTOOL_DATABASE_URL", "postgresql://localhost/flowtool")
-    monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker-1":"secret"}')
-
-    settings = ServerSettings()  # type: ignore[call-arg]
-
-    assert settings.allowlist == ["alice", "bob"]
     assert settings.reviewers == ["carol", "dave"]
     assert settings.in_review_label == "flow:in-review"
+    assert settings.database_url == "postgresql://flowtool:secret@db.example/flowtool"
 
 
 def test_serve_settings_require_unique_nonempty_worker_credentials(monkeypatch) -> None:
@@ -142,6 +132,15 @@ def test_worker_settings_do_not_require_control_plane_secrets(monkeypatch, tmp_p
         monkeypatch.setenv("FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT", value)
         with pytest.raises(ValidationError, match="worker_repo_workspace_limit"):
             WorkerSettings(**settings.model_dump(exclude={"worker_repo_workspace_limit"}))
+
+
+@pytest.mark.parametrize("backend", ["AMP", "CODEX"])
+@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf"])
+def test_coding_idle_timeout_must_be_positive_and_finite(monkeypatch, backend, timeout):
+    monkeypatch.setenv(f"FLOWTOOL_{backend}_RUN_TIMEOUT_SECONDS", timeout)
+    with pytest.raises(ValidationError, match=f"{backend.lower()}_run_timeout_seconds"):
+        WorkerSettings(worker_id="worker", worker_token=SecretStr("secret"),
+                       serve_ws_url="wss://control.example/connect")
 
 
 def test_worker_rejects_full_access_without_external_isolation() -> None:

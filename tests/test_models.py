@@ -1,4 +1,4 @@
-from app.domain.models import InitialCodingOutput
+from app.worker.execution.executor import InitialCodingOutput
 
 
 def test_initial_codex_result_has_a_strict_required_schema() -> None:

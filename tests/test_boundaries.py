@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 
 @pytest.mark.parametrize("operation", [
+    "import app.communication.gateway",
     "import app.worker.runtime",
     "import app.cli",
     """
@@ -35,7 +37,7 @@ original = ('{"repository":{"full_name":"octo/repo"},"issue":{"number":7},'
             '"options":{"todo":"T","in_progress":"W","in_review":"R","blocked":"B","done":"D"}}}')
 assert Document.model_validate_json(original).model_dump_json() == original
 """,
-], ids=["worker-startup", "cli-entrypoint", "resource-json-restoration"])
+], ids=["gateway", "worker-startup", "cli-entrypoint", "resource-json-restoration"])
 def test_worker_data_paths_do_not_load_control_plane_dependencies(operation: str) -> None:
     # Shared logging previously pulled SQL stores into worker startup transitively.
     # A fresh interpreter observes real imports without pytest's loaded modules.
@@ -47,6 +49,8 @@ def test_worker_data_paths_do_not_load_control_plane_dependencies(operation: str
     modules = set(json.loads(result.stdout))
     # The public entry point includes binding types; restoring facts needs no SDK or authentication.
     forbidden = {"app.controler", "app.persistence", "psycopg", "githubkit", "bub"}
+    if operation.startswith("import app.communication."):
+        forbidden |= {"app.worker", "fastapi", "starlette", "websockets"}
     assert not contains_forbidden(modules, forbidden), sorted(
         module for module in modules if contains_forbidden({module}, forbidden)
     )
@@ -84,6 +88,8 @@ _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
 
 
 @pytest.mark.parametrize(("package", "forbidden"), [
+    ("communication", {"app.controler", "app.worker", "app.persistence", "app.telemetry",
+                       "psycopg", "githubkit", "fastapi", "starlette", "websockets", "bub"}),
     ("domain", {"app.contracts", "app.controler", "app.worker", "app.persistence",
                 "app.telemetry", "psycopg", "githubkit", "fastapi"}),
     ("contracts", {"app.controler", "app.worker", "app.persistence",
@@ -97,6 +103,12 @@ _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
     ("controler/workflow/lifecycle.py", {"app.controler.workflow.results", "app.controler.workflow.effects",
                                         "app.controler.workflow.service", "app.controler.workflow.tools"}),
     ("controler/workflow/initial.py", {"app.controler"}),
+    ("controler/workflow/preparation.py", {"app.controler"}),
+    ("controler/workflow/plans.py", {"app.controler"}),
+    ("controler/workflow/revisions.py", {"app.controler.workflow.coordinator",
+                                        "app.controler.workflow.results", "app.controler.workflow.service"}),
+    ("controler/workflow/archive.py", {"app.controler.workflow.coordinator",
+                                      "app.controler.workflow.results", "app.controler.workflow.service"}),
     ("controler/workflow/effects.py", {"app.controler.workflow.tools"}),
     ("controler/events", _SERVER_ENTRYPOINTS | {"app.controler.workers", "app.controler.reconciliation"}),
     ("controler/workers", _SERVER_ENTRYPOINTS | {"app.controler.events", "app.controler.reconciliation"}),
@@ -111,4 +123,40 @@ _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
 def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[str]) -> None:
     modules = imported_modules(Path("app") / package)
     assert modules, f"No imports found in {package}; check the package path"
+    if package == "controler/workflow/initial.py":
+        # INITIAL owns preparation and plans; neither leaf may depend on orchestration.
+        leaves = {"app.controler.workflow.preparation", "app.controler.workflow.plans"}
+        modules = {module for module in modules if not contains_forbidden({module}, leaves)}
     assert not contains_forbidden(modules, forbidden)
+
+
+def test_flow_lifecycle_sql_writes_have_one_runtime_owner():
+    # The delivery store shares the row but must never bypass the lifecycle ledger.
+    writers = set()
+    for path in Path("app").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and re.search(r"\b(?:UPDATE|INSERT\s+INTO)\s+flows\b", node.value,
+                                  re.IGNORECASE)):
+                if path == Path("app/persistence/deliveries.py"):
+                    assignments = re.search(r"UPDATE flows SET (.+?) WHERE", node.value, re.IGNORECASE | re.DOTALL)
+                    assert assignments and all(
+                        part.strip().startswith("delivery_") for part in assignments[1].split(",")
+                    ), node.value
+                else:
+                    writers.add(path.as_posix())
+    assert writers == {"app/persistence/flows.py"}
+
+
+def test_persistence_stores_import_each_other_at_module_level():
+    # A function-level import hides a dependency cycle between stores. The one left keeps
+    # review cancellation inside the Flow state write's transaction (flows -> reviews).
+    deferred = set()
+    for path in Path("app/persistence").glob("*.py"):
+        for scope in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(scope):
+                if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("app.persistence"):
+                    deferred.add((path.name, node.module))
+    assert deferred == {("flows.py", "app.persistence.reviews")}

@@ -1,23 +1,45 @@
 """Permanent collected versions and per-Flow committed reading snapshots."""
 
-import base64
 import hashlib
 import json
 from datetime import datetime
 from difflib import unified_diff
 
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.contracts.console import ActivityItem, ActivityPage, ConsoleFailure, ContentPage
+from app.domain.flow_policy import ORIGIN_KINDS, FlowFact
 from app.github.console import Observation
 from app.persistence.console import ConsoleStore
+from app.persistence.cursor import Cursor
 from app.persistence.records import Row
 from app.persistence.repository import Repository
 
+_FLOW_FACT_TITLES = {
+    "created": "Flow 创建",
+    "snapshot": "账本起点快照",
+    "job_enqueued": "任务入队",
+    "job_claimed": "任务已派发",
+    "assignment_requeued": "派发收回后重新排队",
+    "execution_uncertain": "执行状态无法确认",
+    "result_failed": "结果失败",
+    "delivery_baseline_rejected": "PR 分支已变化",
+    "delivery_applied": "交付已应用",
+    "finalization_requested": "请求收尾",
+    "cleanup_applied": "清理结果已应用",
+    "retry_requested": "请求重试",
+    "round_resumed": "开启新轮次",
+    "archive": "Flow 归档",
+    "merge": "已确认合并",
+    "archive_correction": "归档结果自动更正",
+    "titled": "标题已生成",
+}
+_ROUND_FACTS = frozenset({"archive", "merge", "archive_correction", "round_resumed"})
+# Keep in sync with console_preserve_evidence: every other source='flow' kind is the ledger.
+_NON_LEDGER_SQL = "('state','baseline','inference_exhausted')"
 
-class ActivityCursor(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+
+class ActivityCursor(Cursor):
     flow: int
     snapshot: int
     time: datetime
@@ -26,28 +48,31 @@ class ActivityCursor(BaseModel):
     versions: str | None = None
     revision: int = 0
 
-    def encode(self) -> str:
-        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode()
 
-    @classmethod
-    def decode(cls, token: str) -> "ActivityCursor":
-        try:
-            return cls.model_validate_json(base64.b64decode(token, altchars=b"-_", validate=True))
-        except (ValueError, ValidationError) as error:
-            raise ConsoleFailure("cursor_invalid") from error
-
-
-# GitHub effect receipts are transport metadata, not conversation text. This expression
-# stays in PostgreSQL so projections and paged reads never transfer an unbounded body.
-def _display_body(body: str, source: str) -> str:
+# Decode coding-result summaries and hide GitHub transport receipts at the same boundary.
+# Keeping this in PostgreSQL gives previews, paging and diffs one body without unbounded reads.
+def _display_body(alias: str) -> str:
+    prefix = f"{alias}." if alias else ""
+    body, source = f"{prefix}body", f"{prefix}source"
+    questions = f"{body}::jsonb->'needs_clarification'"
     return (
+        f"CASE WHEN {source}='worker' AND {prefix}kind='message'"
+        f" AND {prefix}author='assistant' AND pg_input_is_valid({body},'jsonb') THEN "
+        # A valid JSONB guard also rejects NUL/invalid surrogates before decoding native text.
+        f"CASE WHEN jsonb_typeof({body}::jsonb->'summary')='string'"
+        f" AND {body}::jsonb->>'vcs_backend_used' IN ('git','jj')"
+        f" THEN ({body}::jsonb->>'summary') || CASE WHEN jsonb_typeof({questions})='array'"
+        " THEN coalesce(E'\\n\\n待澄清：\\n\\n' || (SELECT string_agg('- ' || (q #>> '{}'),"
+        f" E'\\n' ORDER BY n) FROM jsonb_array_elements({questions}) WITH ORDINALITY AS points(q,n)"
+        " WHERE jsonb_typeof(q)='string' AND btrim(q #>> '{}')<>''), '') ELSE '' END"
+        f" ELSE {body} END ELSE "
         f"CASE WHEN {source}='worker' THEN {body} ELSE "
-        f"regexp_replace({body}, E'\\n\\n<!-- flowtool:effect:[0-9a-f]{{64}} -->$', '') END"
+        f"regexp_replace({body}, E'\\n\\n<!-- flowtool:effect:[0-9a-f]{{64}} -->$', '') END END"
     )
 
 
-_CURRENT_DISPLAY_BODY = _display_body("current.body", "current.source")
-_PREVIOUS_DISPLAY_BODY = _display_body("p.body", "p.source")
+_CURRENT_DISPLAY_BODY = _display_body("current")
+_PREVIOUS_DISPLAY_BODY = _display_body("p")
 
 
 # Metadata-only observations do not make a comment look edited. The predecessor
@@ -61,7 +86,7 @@ _PREVIOUS = (
     " ORDER BY p.updated_at DESC,p.version DESC LIMIT 1) END AS previous_version"
 )
 _SELECT = (
-    "key,version,source,kind,occurred_at,updated_at,observed_at,author,title,"
+    "key,version,round_no,source,kind,occurred_at,updated_at,observed_at,author,title,"
     f"left({_CURRENT_DISPLAY_BODY},2000) AS body,length({_CURRENT_DISPLAY_BODY}) AS body_length,"
     "url,parent_key,deleted,metadata,"
     "(source!='flow' AND source!='worker' AND occurred_at<%s) AS prior," + _PREVIOUS
@@ -72,6 +97,103 @@ class ActivityStore(Repository):
     """Serialize publication with its archive rows, without sequence/commit visibility gaps."""
 
     def append(self, flow_id: int, item: Observation) -> bool:
+        """Collect external versions without allowing them to impersonate workflow evidence."""
+        if item.source == "flow" or item.key.startswith("flow:"):
+            raise ValueError("Flow evidence requires the internal activity writer")
+        return self._append(flow_id, item)
+
+    def append_flow(
+        self,
+        flow_id: int,
+        round_no: int,
+        kind: str,
+        *,
+        occurred_at: datetime,
+        metadata: dict[str, str | int | bool | None],
+    ) -> bool:
+        """Append one immutable Flow ledger fact, sharing the ordinary publication fence.
+
+        Call from the workflow transaction after validating the fact. These records
+        are durable evidence, not mutable display-object versions or a round entity.
+        A repeated once-per-round fact is idempotent; a conflicting one is rejected.
+        """
+        if round_no < 1 or kind not in _FLOW_FACT_TITLES:
+            raise ValueError("invalid Flow activity identity")
+        with self._db.transaction() as tx, tx.connection() as connection:
+            head = connection.execute(
+                "SELECT activity_version FROM console_flows WHERE flow_id=%s FOR UPDATE",
+                (flow_id,),
+            ).fetchone()
+            if head is None:
+                raise ConsoleFailure("flow_not_found", 404)
+            if kind in _ROUND_FACTS:
+                key = f"flow:{flow_id}:round:{round_no}:{kind}"
+            elif kind in ORIGIN_KINDS:
+                key = f"flow:{flow_id}:{kind}"
+            else:
+                # Repeatable transitions are identified by the version this lock reserves.
+                key = f"flow:{flow_id}:fact:{head['activity_version'] + 1}"
+            item = Observation(
+                key=key, round_no=round_no, source="flow", kind=kind,
+                occurred_at=occurred_at, updated_at=occurred_at, author="FlowTool",
+                title=_FLOW_FACT_TITLES[kind], metadata=metadata,
+            )
+            if kind in _ROUND_FACTS:
+                previous = ActivityStore(tx).flow_event(flow_id, round_no, kind)
+                if previous is not None:
+                    if previous != item:
+                        raise ValueError("conflicting immutable Flow activity")
+                    return False
+            return ActivityStore(tx)._append(flow_id, item)
+
+    def flow_facts(self, flow_id: int) -> list[FlowFact]:
+        """Read the Flow ledger in replay order, skipping display and notice rows."""
+        with self._db.connection() as connection:
+            rows = connection.execute(
+                "SELECT kind,round_no,occurred_at,metadata FROM console_activity"
+                f" WHERE flow_id=%s AND source='flow' AND kind NOT IN {_NON_LEDGER_SQL}"
+                " ORDER BY version",
+                (flow_id,),
+            ).fetchall()
+        return [FlowFact.model_validate(row) for row in rows]
+
+    def flow_event(self, flow_id: int, round_no: int, kind: str) -> Observation | None:
+        """Read original workflow evidence, never the folded conversation projection."""
+        with self._db.connection() as connection:
+            row = connection.execute(
+                "SELECT key,round_no,source,kind,occurred_at,updated_at,author,title,body,"
+                " url,parent_key,deleted,metadata FROM console_activity"
+                " WHERE flow_id=%s AND round_no=%s AND source='flow' AND kind=%s",
+                (flow_id, round_no, kind),
+            ).fetchone()
+        return Observation.model_validate(row) if row else None
+
+    def archived(self, flow_id: int, round_no: int) -> Observation | None:
+        return self.flow_event(flow_id, round_no, "archive")
+
+    def archived_pr(self, repo: str, pr_number: int) -> tuple[int, int] | None:
+        with self._db.connection() as connection:
+            row = connection.execute(
+                "SELECT flow_id,round_no FROM console_activity"
+                " WHERE source='flow' AND kind='archive'"
+                " AND lower(metadata->>'repo')=lower(%s) AND (metadata->>'pr_number')::integer=%s",
+                (repo, pr_number),
+            ).fetchone()
+        return (row["flow_id"], row["round_no"]) if row else None
+
+    def history(self, flow_id: int, round_no: int) -> list[ActivityItem]:
+        """Read the ordered internal audit for a round, without hiding earlier facts."""
+        with self._db.connection() as connection:
+            rows = connection.execute(
+                "SELECT key,version,round_no,source,kind,occurred_at,updated_at,observed_at,author,"
+                "title,body,length(body) AS body_length,url,parent_key,deleted,metadata,"
+                "FALSE AS prior FROM console_activity WHERE flow_id=%s AND round_no=%s"
+                " AND source='flow' ORDER BY version",
+                (flow_id, round_no),
+            ).fetchall()
+        return [ActivityItem.model_validate(row) for row in rows]
+
+    def _append(self, flow_id: int, item: Observation) -> bool:
         # PostgreSQL TEXT/JSONB cannot store NUL. Keep its visible escape and disclose
         # the encoding; hash the original so a literal escape is a different version.
         content = item.model_dump(mode="json", exclude={"source"})
@@ -109,10 +231,15 @@ class ActivityStore(Repository):
             if row is None:
                 raise ConsoleFailure("flow_not_found", 404)
             previous = connection.execute(
-                "SELECT parent_key,digest FROM console_activity WHERE flow_id=%s"
+                "SELECT parent_key,digest,round_no FROM console_activity WHERE flow_id=%s"
                 " AND key=%s ORDER BY version DESC LIMIT 1",
                 (flow_id, item.key),
             ).fetchone()
+            if previous and previous["round_no"] is not None:
+                if item.round_no is not None and item.round_no != previous["round_no"]:
+                    raise ValueError("activity object cannot move to another round")
+                item = item.model_copy(update={"round_no": previous["round_no"]})
+                content["round_no"] = previous["round_no"]
             if previous and previous["parent_key"] and item.parent_key is None:
                 item = item.model_copy(update={"parent_key": previous["parent_key"]})
                 content["parent_key"] = previous["parent_key"]
@@ -133,12 +260,13 @@ class ActivityStore(Repository):
                 return False
             version = row["activity_version"] + 1
             connection.execute(
-                "INSERT INTO console_activity(flow_id,version,key,source,kind,occurred_at,updated_at,"
+                "INSERT INTO console_activity(flow_id,version,round_no,key,source,kind,occurred_at,updated_at,"
                 "author,title,body,url,parent_key,deleted,metadata,digest)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     flow_id,
                     version,
+                    item.round_no,
                     item.key,
                     item.source,
                     item.kind,
@@ -261,12 +389,12 @@ class ActivityStore(Repository):
         with self._db.connection() as connection:
             rows = connection.execute(
                 "WITH old AS (SELECT DISTINCT ON(key) key,version,occurred_at,deleted,title,body,source,"
-                "metadata,author,url,parent_key"
+                "metadata,author,kind,url,parent_key"
                 " FROM console_activity"
                 " WHERE flow_id=%s AND version<=%s AND source!='flow'"
                 " ORDER BY key,deleted DESC,updated_at DESC,version DESC),"
                 " new AS (SELECT DISTINCT ON(key) key,version,occurred_at,deleted,title,body,source,"
-                "metadata,author,url,parent_key"
+                "metadata,author,kind,url,parent_key"
                 " FROM console_activity"
                 " WHERE flow_id=%s AND version<=%s AND source!='flow'"
                 " ORDER BY key,deleted DESC,updated_at DESC,version DESC)"
@@ -274,9 +402,9 @@ class ActivityStore(Repository):
                 " WHEN n.occurred_at<(SELECT max(occurred_at) FROM old) THEN 'backfilled' ELSE 'new' END AS kind,"
                 " count(*) AS n FROM new n LEFT JOIN old o USING(key)"
                 " WHERE n.version IS DISTINCT FROM o.version AND (o.key IS NULL OR (n.title,"
-                + _display_body("n.body", "n.source")
+                + _display_body("n")
                 + ",n.deleted,n.metadata,n.author,n.url,n.parent_key) IS DISTINCT FROM (o.title,"
-                + _display_body("o.body", "o.source")
+                + _display_body("o")
                 + ",o.deleted,o.metadata,o.author,o.url,o.parent_key)) GROUP BY 1",
                 (flow_id, before, flow_id, after),
             ).fetchall()
@@ -373,9 +501,9 @@ class ActivityStore(Repository):
         with self._db.connection() as connection:
             row = connection.execute(
                 "SELECT substring("
-                + _display_body("body", "source")
+                + _display_body("")
                 + " FROM %s FOR %s) AS text,length("
-                + _display_body("body", "source")
+                + _display_body("")
                 + ") AS n"
                 " FROM console_activity WHERE flow_id=%s AND key=%s AND version=%s",
                 (offset + 1, limit, flow_id, key, version),
@@ -411,7 +539,7 @@ class ActivityStore(Repository):
                 raise ConsoleFailure("previous_version_not_found", 404)
             old = connection.execute(
                 "SELECT left("
-                + _display_body("body", "source")
+                + _display_body("")
                 + ",65537) AS body,left(title,4097) AS title"
                 " FROM console_activity WHERE flow_id=%s AND key=%s AND version=%s",
                 (flow_id, key, previous),

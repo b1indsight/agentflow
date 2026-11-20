@@ -1,17 +1,24 @@
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
 from app.contracts.conversation import ConversationFailure, HistoryQuery
-from app.worker.execution.amp_process import AmpProcessResult
-from app.worker.state import history
-from app.worker.state.amp_history import AmpHistory
-from app.worker.state.history import CodexHistory
+from app.worker.coding_agent import CodingAgent
+from app.worker.execution import codex
+from app.worker.execution.amp_agent import AmpCodingAgent, AmpProcessResult
+from app.worker.execution.codex import CodexAgent
 
 SESSION = "019eac3b-a60c-7a93-a442-3718f660fc8c"
 AMP_SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
+
+
+def codex_agent(root: Path, monkeypatch: pytest.MonkeyPatch) -> CodingAgent:
+    """Read test rollouts through the public agent API, without coding authorization."""
+    monkeypatch.setenv("CODEX_HOME", str(root))
+    return CodexAgent()
 
 
 def rollout(root: Path, records: list[dict]) -> Path:
@@ -27,7 +34,7 @@ def message(role: str, text: str) -> dict:
             "content": [{"type": "input_text" if role == "user" else "output_text", "text": text}]}}
 
 
-def test_history_roles_tools_pagination_and_live_tail(tmp_path: Path) -> None:
+def test_history_roles_tools_pagination_and_live_tail(tmp_path: Path, monkeypatch) -> None:
     path = rollout(tmp_path, [
         message("user", "Fix PR feedback"),
         {"type": "event_msg", "payload": {"type": "user_message", "message": "duplicate"}},
@@ -39,27 +46,27 @@ def test_history_roles_tools_pagination_and_live_tail(tmp_path: Path) -> None:
         {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1",
                                                "output": "passed"}},
     ])
-    reader = CodexHistory(tmp_path)
-    first = reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=2))
+    reader = codex_agent(tmp_path, monkeypatch)
+    first = reader.read_history(HistoryQuery(session_id=SESSION, cursor=None, limit=2))
     assert [(item.role, item.kind) for item in first.items] == [("user", "message"), ("assistant", "message")]
     assert first.has_more
-    second = reader.query(HistoryQuery(session_id=SESSION, cursor=first.next_cursor, limit=100))
+    second = reader.read_history(HistoryQuery(session_id=SESSION, cursor=first.next_cursor, limit=100))
     assert [(item.role, item.call_id) for item in second.items] == [("assistant", "c1"), ("tool", "c1")]
     assert not second.has_more
     # Codex appends JSONL while a running session is being viewed: do not consume a partial line.
     tail = json.dumps(message("assistant", "Done"))
     with path.open("a") as file:
         file.write(tail[:20])
-    partial = reader.query(HistoryQuery(session_id=SESSION, cursor=second.next_cursor, limit=100))
+    partial = reader.read_history(HistoryQuery(session_id=SESSION, cursor=second.next_cursor, limit=100))
     assert partial.items == []
     with path.open("a") as file:
         file.write(tail[20:] + "\n")
-    final = reader.query(HistoryQuery(session_id=SESSION, cursor=partial.next_cursor, limit=100))
+    final = reader.read_history(HistoryQuery(session_id=SESSION, cursor=partial.next_cursor, limit=100))
     assert final.items[0].content.text == "Done"
     assert final.items[0].id not in {item.id for item in first.items + second.items}
 
 
-def test_history_rejects_symlink_escape_and_wrong_session(tmp_path: Path) -> None:
+def test_history_rejects_symlink_escape_and_wrong_session(tmp_path: Path, monkeypatch) -> None:
     outside = tmp_path / "outside"
     path = rollout(outside, [message("user", "other account")])
     root = tmp_path / "codex"
@@ -67,51 +74,53 @@ def test_history_rejects_symlink_escape_and_wrong_session(tmp_path: Path) -> Non
     (root / "sessions" / path.name).symlink_to(path)
     # A rollout-looking symlink must never expose files outside the worker's history root.
     with pytest.raises(ConversationFailure, match="history_unreadable"):
-        CodexHistory(root).query(HistoryQuery(session_id=SESSION, cursor=None, limit=10))
+        codex_agent(root, monkeypatch).read_history(HistoryQuery(session_id=SESSION, cursor=None, limit=10))
     path = rollout(tmp_path / "wrong", [])
     path.write_text(json.dumps({"type": "session_meta", "payload": {"id": "other-session"}}) + "\n")
     with pytest.raises(ConversationFailure, match="history_unreadable"):
-        CodexHistory(tmp_path / "wrong").query(HistoryQuery(session_id=SESSION, cursor=None, limit=10))
+        codex_agent(tmp_path / "wrong", monkeypatch).read_history(
+            HistoryQuery(session_id=SESSION, cursor=None, limit=10),
+        )
 
 
-def test_history_reports_unknown_records_and_truncates_text(tmp_path: Path) -> None:
+def test_history_reports_unknown_records_and_truncates_text(tmp_path: Path, monkeypatch) -> None:
     rollout(tmp_path, [message("user", "x" * 20000),
                        {"type": "response_item", "payload": {"type": "future_item"}}])
-    page = CodexHistory(tmp_path).query(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
+    page = codex_agent(tmp_path, monkeypatch).read_history(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
     assert page.items[0].truncated
     assert len(page.items[0].content.text) < 20000
     assert page.status == "unsupported"
 
 
-def test_history_archive_and_truncated_source(tmp_path: Path) -> None:
+def test_history_archive_and_truncated_source(tmp_path: Path, monkeypatch) -> None:
     first = rollout(tmp_path, [message("user", "initial")])
     archived = tmp_path / "archived_sessions" / first.name
     archived.parent.mkdir()
     first.rename(archived)
-    reader = CodexHistory(tmp_path)
-    page = reader.query(HistoryQuery(session_id=SESSION, limit=1))
+    reader = codex_agent(tmp_path, monkeypatch)
+    page = reader.read_history(HistoryQuery(session_id=SESSION, limit=1))
     assert page.items[0].content.text == "initial"
     assert not page.has_more
     archived.write_text("")
     with pytest.raises(ConversationFailure, match="cursor_invalid"):
-        reader.query(HistoryQuery(session_id=SESSION, cursor=page.next_cursor, limit=1))
+        reader.read_history(HistoryQuery(session_id=SESSION, cursor=page.next_cursor, limit=1))
 
 
-def test_history_prefers_active_file_over_archived_copy(tmp_path: Path) -> None:
+def test_history_prefers_active_file_over_archived_copy(tmp_path: Path, monkeypatch) -> None:
     # During archival, both copies may be present; the active source takes priority.
     path = rollout(tmp_path, [message("user", "active")])
     archived = tmp_path / "archived_sessions" / path.name
     archived.parent.mkdir()
     archived.write_text(path.read_text().replace('"active"', '"archived"'))
-    page = CodexHistory(tmp_path).query(HistoryQuery(session_id=SESSION))
+    page = codex_agent(tmp_path, monkeypatch).read_history(HistoryQuery(session_id=SESSION))
     assert [item.content.text for item in page.items] == ["active"]
 
 
 @pytest.mark.parametrize("inside_record", [False, True])
-def test_history_rejects_cursor_before_metadata_or_inside_record(tmp_path: Path, inside_record: bool) -> None:
+def test_history_rejects_cursor_before_metadata_or_inside_record(tmp_path: Path, inside_record: bool, monkeypatch) -> None:
     path = rollout(tmp_path, [message("user", "first")])
-    reader = CodexHistory(tmp_path)
-    page = reader.query(HistoryQuery(session_id=SESSION))
+    reader = codex_agent(tmp_path, monkeypatch)
+    page = reader.read_history(HistoryQuery(session_id=SESSION))
     resumed = HistoryQuery(session_id=SESSION, cursor=page.next_cursor)
     _, identity = resumed.position
     assert identity is not None
@@ -121,49 +130,68 @@ def test_history_rejects_cursor_before_metadata_or_inside_record(tmp_path: Path,
     offset = metadata_size + 1 if inside_record else 0
     cursor = resumed.cursor_at(offset, identity)
     with pytest.raises(ConversationFailure, match="cursor_invalid"):
-        reader.query(HistoryQuery(session_id=SESSION, cursor=cursor))
+        reader.read_history(HistoryQuery(session_id=SESSION, cursor=cursor))
 
 
 def test_history_malformed_limits_and_secret_filter(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "private-key-value")
     path = rollout(tmp_path, [message("assistant", "private-key-value Bearer abc123 ghp_testsecret")])
-    reader = CodexHistory(tmp_path)
-    text = reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=100)).items[0].content.text
+    reader = codex_agent(tmp_path, monkeypatch)
+    text = reader.read_history(HistoryQuery(session_id=SESSION, cursor=None, limit=100)).items[0].content.text
     assert "private-key-value" not in text and "abc123" not in text and "ghp_testsecret" not in text
     with path.open("a") as file:
         file.write("invalid-json\n")
     with pytest.raises(ConversationFailure, match="history_unreadable"):
-        reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
+        reader.read_history(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
     rollout(tmp_path, [message("user", "x" * 300000)])
     with pytest.raises(ConversationFailure, match="history_limit"):
-        reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
+        reader.read_history(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
 
 
 def test_history_scan_budget_returns_continuation(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(history, "MAX_SCAN", 1)
+    monkeypatch.setattr(codex, "MAX_SCAN", 1)
     rollout(tmp_path, [{"type": "turn_context", "payload": {}}, message("user", "later")])
-    reader = CodexHistory(tmp_path)
-    page = reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
+    reader = codex_agent(tmp_path, monkeypatch)
+    page = reader.read_history(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
     assert page.items == [] and page.has_more
-    page = reader.query(HistoryQuery(session_id=SESSION, cursor=page.next_cursor, limit=100))
+    page = reader.read_history(HistoryQuery(session_id=SESSION, cursor=page.next_cursor, limit=100))
     assert page.items[0].content.text == "later"
 
 
-def test_history_refuses_special_files_and_racing_directory_symlink(tmp_path: Path) -> None:
+def test_history_refuses_special_files_and_racing_directory_symlink(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "codex"
     path = rollout(root, [])
     path.unlink()
     os.mkfifo(path)
-    reader = CodexHistory(root)
+    reader = codex_agent(root, monkeypatch)
     with pytest.raises(ConversationFailure, match="history_unreadable"):
-        reader.query(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
+        reader.read_history(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
     # Exercise the open boundary independently: a directory can be swapped after discovery.
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "data").write_text("private")
     (root / "link").symlink_to(outside, target_is_directory=True)
-    with pytest.raises(OSError):
-        reader._open(root / "link" / "data")
+    monkeypatch.setattr(codex.CodexHistory, "_path", lambda *_args: root / "link" / "data")
+    with pytest.raises(ConversationFailure, match="history_unreadable"):
+        reader.read_history(HistoryQuery(session_id=SESSION))
+
+
+def test_amp_export_keeps_total_deadline_despite_continuous_progress(monkeypatch):
+    # A slow export must not consume an unlimited history request budget.
+    monkeypatch.setattr("app.worker.execution.amp_agent.AMP_BIN", sys.executable)
+    monkeypatch.setattr("app.worker.execution.amp_agent.EXPORT_TIMEOUT", 0.4)
+    payload = json.dumps({"id": AMP_SESSION, "messages": []})
+    script = ("import os,time\nfor _ in range(14):\n os.write(2,b'progress'); time.sleep(.05)\n"
+              f"print({payload!r})")
+
+    run_process = AmpCodingAgent.run_process
+
+    async def export(*args, **kwargs):
+        return await run_process(["-c", script], **kwargs)
+
+    monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
+    with pytest.raises(ConversationFailure, match="query_timeout"):
+        AmpCodingAgent().read_history(HistoryQuery(session_id=AMP_SESSION))
 
 
 def test_amp_history_maps_public_blocks_and_invalidates_edited_prefix(monkeypatch) -> None:
@@ -179,35 +207,46 @@ def test_amp_history_maps_public_blocks_and_invalidates_edited_prefix(monkeypatc
     second = native("user", "M-second", [
         {"type": "tool_result", "toolUseID": "TU-1", "run": {"result": {"output": "done"}}},
     ])
-    reader = AmpHistory()
+    # Amp inserts CI/subscription events as user messages; only native metadata identifies them.
+    notice = native("user", "M-notice", [{"type": "text", "text": "GitHub update for this thread."}])
+    notice["meta"] = {"fromAutomation": True, "automationType": "event"}
+    human = native("user", "M-human", notice["content"])
+    human["meta"] = {"fromAutomation": False}
+    second["meta"] = {"fromAutomation": True}
+    reader = AmpCodingAgent()
     monkeypatch.setenv("AMP_API_KEY", "private-key-value")
-    monkeypatch.setattr("app.worker.state.amp_history.CACHE_SECONDS", 0)
+    monkeypatch.setattr("app.worker.execution.amp_agent.CACHE_SECONDS", 0)
     messages = [first]
 
     async def export(*args, **kwargs):
         return AmpProcessResult(json.dumps({"id": AMP_SESSION, "messages": messages}).encode(), b"", 0)
 
-    monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
-    page = reader.query(HistoryQuery(session_id=AMP_SESSION, limit=2))
+    monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
+    page = reader.read_history(HistoryQuery(session_id=AMP_SESSION, limit=2))
     assert [(item.role, item.kind, item.id) for item in page.items] == [
         ("assistant", "message", f"{AMP_SESSION}:M-first:1"),
         ("assistant", "tool_call", f"{AMP_SESSION}:M-first:2"),
     ]
     assert "private-key-value" not in page.items[0].content.text
     # A native user tool_result is deliberately exposed as the existing tool role.
-    messages.append(second)
-    next_page = reader.query(HistoryQuery(session_id=AMP_SESSION, cursor=page.next_cursor))
-    assert [(item.role, item.call_id) for item in next_page.items] == [("tool", "TU-1")]
+    messages.extend([second, notice, human])
+    next_page = reader.read_history(HistoryQuery(session_id=AMP_SESSION, cursor=page.next_cursor))
+    assert [(item.role, item.kind, item.call_id) for item in next_page.items] == [
+        ("tool", "tool_result", "TU-1"),
+        ("system", "message", None),
+        ("user", "message", None),
+    ]
+    assert next_page.items[1].content.text == next_page.items[2].content.text == notice["content"][0]["text"]
 
     edited = native("assistant", "M-first", [{"type": "text", "text": "changed"}])
     messages[0] = edited
     with pytest.raises(ConversationFailure, match="cursor_invalid"):
-        reader.query(HistoryQuery(session_id=AMP_SESSION, cursor=page.next_cursor))
+        reader.read_history(HistoryQuery(session_id=AMP_SESSION, cursor=page.next_cursor))
 
 
 def test_amp_history_pages_inside_native_messages_and_bounds_bytes(monkeypatch) -> None:
     # One native message may contain more blocks than a page: the cursor must advance.
-    reader = AmpHistory()
+    reader = AmpCodingAgent()
     message = {"role": "assistant", "protocolMessageID": "M-many", "content": [
         {"type": "text", "text": "字" * 8192} for _ in range(50)
     ]}
@@ -215,10 +254,10 @@ def test_amp_history_pages_inside_native_messages_and_bounds_bytes(monkeypatch) 
     async def export(*args, **kwargs):
         return AmpProcessResult(json.dumps({"id": AMP_SESSION, "messages": [message]}, ensure_ascii=False).encode(), b"", 0)
 
-    monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
-    first = reader.query(HistoryQuery(session_id=AMP_SESSION, limit=1))
+    monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
+    first = reader.read_history(HistoryQuery(session_id=AMP_SESSION, limit=1))
     assert len(first.items) == 1 and first.has_more
-    rest = reader.query(HistoryQuery(session_id=AMP_SESSION, cursor=first.next_cursor))
+    rest = reader.read_history(HistoryQuery(session_id=AMP_SESSION, cursor=first.next_cursor))
     assert rest.items[0].id == f"{AMP_SESSION}:M-many:1" and rest.has_more
     assert len(rest.model_dump_json().encode()) < 262144
 
@@ -243,10 +282,10 @@ def test_amp_history_redacts_other_clients_access_tokens(monkeypatch) -> None:
     async def export(*args, **kwargs):
         return AmpProcessResult(json.dumps({"id": AMP_SESSION, "messages": [message]}).encode(), b"", 0)
 
-    monkeypatch.setattr("app.worker.state.amp_history.run_amp", export)
-    reader = AmpHistory()
+    monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
+    reader = AmpCodingAgent()
     for _ in range(2):
-        page = reader.query(HistoryQuery(session_id=AMP_SESSION))
+        page = reader.read_history(HistoryQuery(session_id=AMP_SESSION))
         assert len(page.items) == 3
         assert token not in page.model_dump_json()
         assert page.items[0].content.text == "line\n[REDACTED]"

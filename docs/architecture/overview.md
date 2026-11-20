@@ -42,11 +42,12 @@ M0 已验收基础设施切片；M1–M4 功能及 M5 部署、接收、运维�
 │ 独立循环：租约 / 结果恢复 / 反馈合批 / PR与反馈对账    │
 │           Projects 同步 / 指标采集                    │
 │ 各服务自建仓储，共享 Database                        │
+│ ServerCallbacks / Broker + Gateway / Session × worker│
 └──────────────┬───────────────────┬───────────────────┘
                │                   │ 认证 WebSocket
                ▼                   ▼
 ┌────────────────────┐  ┌──────────────────────────────┐
-│ PostgreSQL         │  │ Worker Client + Session       │
+│ PostgreSQL         │  │ Runtime + Gateway + Session  │
 │ 状态、结果、回执   │  │ journal / 历史查询 / 停止握手 │
 │ 批次、对账进度     │  │ Executor → Codex / repo / VCS │
 └────────────────────┘  └──────────────────────────────┘
@@ -62,6 +63,16 @@ M0 已验收基础设施切片；M1–M4 功能及 M5 部署、接收、运维�
   Git/jj，worker 只验证事实。
 
 Runtime 创建并关闭共享 Database，装配共享的结果应用、effects、工具和 conversation broker。
+两端 Runtime 持有相同的 Gateway / Session：server 管多 worker，worker 至多登记一个 server。
+Gateway 驱动统一的 Session 事件入口；Dispatcher 按 `package.method` 精确路由请求，普通回复按
+`reply_to` 找原调用，经过可选 `on_reply` 再交付。所有 payload 与拒收均走 FIFO，无 history 旁路。
+server 每连接挂载 ServerCallbacks；worker 平级挂载 WorkerStateCallbacks / WorkerBusinessCallbacks。
+状态类管理连接和执行状态协议；业务类注册 worker.history，通过 before_wait 管理工具观察，
+通过 Dispatcher 接收回复与已授权的拒收。两类互不持有或调用，在同一 driver 串行处理。
+Broker 持有查询 Future 与限额，从 Registration 取得配对的 Session/Dispatcher；慢业务回调与 history 互相等待。
+server 接入函数只负责认证与首条 message，WorkerRuntime 直接负责主动拨号、重连与连接任务回收；
+wire v17 双端协调升级。
+执行 Task、durable 工具 Future 和停止清理由 WorkerExecution 长期持有，journal 由 ExecutionState 保存。
 服务自行创建所需仓储；Webhook 每条 receipt 在事务内创建 ControlService/EventRouter，
 事务外执行提交后通知。聚合 Store 只用于 CLI 运维、live smoke 和测试。
 依据：[运行时装配](../../app/controler/runtime.py)、[事件消费](../../app/controler/events/webhooks.py)、
@@ -69,3 +80,41 @@ Runtime 创建并关闭共享 Database，装配共享的结果应用、effects�
 
 GitHub、Judge、push capability 和结果回执恢复已有实现与自动化；真实 GitHub/Codex/bub
 闭环、生产部署和恢复演练仍需单独验收，不能从图中推断它们已经端到端可用。
+
+## 4. 数据架构
+
+PostgreSQL 是唯一运行时数据库，由 control 独占。表按职责分为五类：
+
+```diagram
+┌──────────────────── 业务事务（control） ────────────────────┐
+│                                                             │
+│  ② 追加 Flow 事实            ① 同事务更新状态表              │
+│  ┌───────────────────┐       ┌──────────────┐               │
+│  │ console_activity  │ ────▶ │ flows        │ ◀── 调度、对账 │
+│  │ source='flow' 的  │ 投影  │ 六态、轮次、 │     API、CLI  │
+│  │ 事实行（只追加）  │       │ 归档结论     │     读取      │
+│  └─────────┬─────────┘       └──────────────┘               │
+│            │ 不复制其他表                                    │
+│            ▼                                                │
+│  ┌──────────────────────────────────────────────┐           │
+│  │ 业务状态与专用证据：jobs、flow_tool_calls、   │           │
+│  │ attempts、review_*、result_*、events 等       │           │
+│  └──────────────────────────────────────────────┘           │
+│  ┌──────────────────────────────────────────────┐           │
+│  │ 协调数据：workers、租约与 claim、对账游标、   │           │
+│  │ 退避时间（不是业务事实，不进入账本）          │           │
+│  └──────────────────────────────────────────────┘           │
+└─────────────────────────────────────────────────────────────┘
+                 │ 触发器刷新
+                 ▼
+  展示投影与采集归档：console_flows、console_activity 的其余行
+```
+
+- **Flow 事实账本**是 Flow 状态的唯一可信来源：每次改变 `flows` 的业务列，都同事务追加一条以事件
+  命名的事实。重放一个 Flow 的事实可以得到与 `flows` 当前行一致的结果。
+- **`flows` 状态表**是账本的同事务投影。业务判断、行锁和唯一约束继续使用它，读路径不变。
+- **其他表**保持各自的权威，不由账本重建。
+- **协调数据**记录谁占用什么、处理到哪里，不进入账本。
+
+`flowtool flow verify` 重放比较；账本之前的 Flow 从启动时补录的快照开始重放。
+完整分类、事实目录和写入规则见 [Flow 事实账本与状态表](flow-ledger.md)。

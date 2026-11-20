@@ -1,3 +1,4 @@
+import { RefreshCw } from "lucide-react";
 import type { SourceStatus } from "./types";
 
 // These are upstream history limits, not failures that another sync can repair.
@@ -198,8 +199,15 @@ export function ConversationSources({
               .join("；")}
             。已读取的内容仍可查看。
           </p>
-          <button type="button" disabled={busy} onClick={refresh}>
-            {busy ? "正在检查更新…" : "重新同步"}
+          <button
+            type="button"
+            aria-label={busy ? "正在检查更新…" : "重新同步"}
+            title={busy ? "正在检查更新…" : "重新同步"}
+            disabled={busy}
+            onClick={refresh}
+          >
+            <RefreshCw aria-hidden="true" />
+            {busy && "正在检查更新…"}
           </button>
         </div>
       )}

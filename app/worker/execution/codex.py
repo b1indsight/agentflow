@@ -1,70 +1,58 @@
-"""CodingAgent adapter for Codex CLI in a trusted Flow-owned repository."""
+"""Codex coding execution and read-only native rollout history."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import re
 import signal
+import stat
 import tempfile
+import threading
 from collections.abc import Mapping
 from pathlib import Path
+from typing import BinaryIO
 
 from loguru import logger
 
+from app.contracts.catalog import CatalogModel
+from app.contracts.conversation import (
+    ConversationContent,
+    ConversationFailure,
+    HistoryItem,
+    HistoryPage,
+    HistoryQuery,
+)
 from app.domain.models import (
     CodingExecutionContext,
     CodingExecutionResult,
     SessionUnavailable,
 )
-from app.worker.execution.credentials import git_credential_environment
+from app.worker.coding_agent import CodingAgent
+from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 from app.worker.execution.gh import github_environment
+from app.worker.execution.idle import wait_for_inactivity
+from app.worker.model_catalog import read_model_catalog
 
 CODEX_BIN = "codex"
+MAX_LINE = 256 * 1024
+MAX_SCAN = 8 * 1024 * 1024
+MAX_PAGE = 256 * 1024
 
 
-_CODEX_ENVIRONMENT_KEYS = frozenset(
-    {
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "TERM",
-        "TMPDIR",
-        "CODEX_HOME",
-        "OPENAI_API_KEY",
-        "CODEX_API_KEY",
-        "CODEX_ACCESS_TOKEN",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-    }
-)
+class _OutputLimit(Exception):
+    pass
 
 
 def _codex_environment(
     source: Mapping[str, str] | None = None,
     context: CodingExecutionContext | None = None,
 ) -> dict[str, str]:
-    """Build a minimal environment with only the optional scoped push credential."""
+    """Inherit native CLI/MCP configuration, then inject only current task capabilities."""
 
-    values = os.environ if source is None else source
-    environment = {
-        key: value for key, value in values.items() if key in _CODEX_ENVIRONMENT_KEYS
-    }
+    environment = inherited_agent_environment(os.environ if source is None else source)
     if context is not None:
         environment.update(git_credential_environment(context.github.token if context.github else None))
         if context.mcp_token is not None:
@@ -131,56 +119,63 @@ def _parse_thread_id(jsonl_text: str) -> str | None:
     return None
 
 
-class CodexAgent:
-    """实现 ports.CodingAgent。"""
+class CodexAgent(CodingAgent):
+    """Adapt Codex coding requests and native history to the worker CodingAgent contract."""
 
-    def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0):
+    backend = "codex"
+
+    def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0,
+                 max_output_bytes: int = 8 * 1024 * 1024):
         self.trusted_host = trusted_host
         self.timeout = timeout
+        self.max_output_bytes = max_output_bytes
+        self._history = CodexHistory()
 
-    async def start(
-        self,
-        task: str,
-        cwd: Path,
-        *,
-        output_schema: Path | None = None,
-        context: CodingExecutionContext | None = None,
-    ) -> CodingExecutionResult:
-        args = _start_args(task, cwd, trusted_host=self.trusted_host, context=context)
-        return await self._run(args, output_schema, cwd=cwd, parse_thread=True, context=context)
+    async def discover_models(self) -> list[CatalogModel]:
+        def parse(row: dict) -> CatalogModel | None:
+            if row["visibility"] != "list":
+                return None
+            levels = row["supported_reasoning_levels"]
+            if not isinstance(levels, list):
+                raise TypeError
+            return CatalogModel(id=row["slug"], displayName=row["display_name"],
+                                efforts=[level["effort"] for level in levels])
 
-    async def resume(
-        self, session_id: str, prompt: str, *, cwd: Path, output_schema: Path | None = None,
-        context: CodingExecutionContext | None = None,
+        # Omit --bundled to use Codex's native refresh policy.
+        return await read_model_catalog([CODEX_BIN, "debug", "models"], _codex_environment(), parse)
+
+    def read_history(self, query: HistoryQuery) -> HistoryPage:
+        """Read native rollout history independently of coding authorization."""
+        return self._history.query(query)
+
+    async def _run(
+        self, prompt: str, cwd: Path, *, session_id: str | None = None,
+        output_schema: Path | None = None, context: CodingExecutionContext | None = None,
+        model: str | None = None, effort: str | None = None, max_output_bytes: int,
     ) -> CodingExecutionResult:
+        """Supervise Codex's native stream and bounded final-message file."""
         if not self.trusted_host:
             raise RuntimeError(
                 "Codex trusted-host full-access execution requires "
                 "FLOWTOOL_TRUSTED_HOST_EXECUTION=true"
             )
-        # CLI 0.153.4 accepts config overrides on resume, but not start's -C/-s flags.
-        # Override the saved broker/environment for every process, including recovered sessions.
-        args = [
-            CODEX_BIN, "exec", "resume", session_id, prompt,
-            "--json", "--skip-git-repo-check",
-            "-c", f"cwd={json.dumps(str(cwd))}",
-            "-c", 'sandbox_mode="danger-full-access"',
-            *_mcp_args(context),
-            "-c", 'shell_environment_policy.inherit="all"',
-        ]
-        return await self._run(args, output_schema, cwd=cwd, parse_thread=False,
-                               session_id=session_id, context=context)
-
-    async def _run(
-        self,
-        args: list[str],
-        output_schema: Path | None,
-        *,
-        cwd: Path,
-        parse_thread: bool,
-        session_id: str | None = None,
-        context: CodingExecutionContext | None = None,
-    ) -> CodingExecutionResult:
+        if session_id is None:
+            args = _start_args(prompt, cwd, trusted_host=self.trusted_host, context=context)
+        else:
+            # CLI 0.153.4 accepts config overrides on resume, but not start's -C/-s flags.
+            # Replace saved capabilities for every process, including recovered sessions.
+            args = [
+                CODEX_BIN, "exec", "resume", session_id, prompt,
+                "--json", "--skip-git-repo-check",
+                "-c", f"cwd={json.dumps(str(cwd))}",
+                "-c", 'sandbox_mode="danger-full-access"',
+                *_mcp_args(context),
+                "-c", 'shell_environment_policy.inherit="all"',
+            ]
+        if model is not None:
+            args.extend(["--model", model])
+        if effort is not None:
+            args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
         with tempfile.TemporaryDirectory(prefix="flowtool-coding-") as directory:
             run_directory = Path(directory)
             environment = _codex_environment(context=context)
@@ -191,7 +186,7 @@ class CodexAgent:
             if output_schema is not None:
                 args += ["--output-schema", str(output_schema)]
 
-            logger.info("codex run started: resume={} output_schema={}", not parse_thread, output_schema is not None)
+            logger.info("codex run started: resume={} output_schema={}", session_id is not None, output_schema is not None)
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -201,23 +196,86 @@ class CodexAgent:
                 cwd=cwd,
                 start_new_session=True,
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
-            except TimeoutError:
-                logger.error("codex run timed out after {}s", self.timeout)
-                return CodingExecutionResult(session_id=session_id, last_message="", exit_code=124)
-            finally:
-                # Reap the group before removing its wrapper/config, including surviving children
-                # after a successful CLI exit. Cancellation must propagate only after this step.
+            stdout, stderr = bytearray(), bytearray()
+            loop = asyncio.get_running_loop()
+            last_activity = loop.time()
+
+            async def read(stream: asyncio.StreamReader | None, buffer: bytearray) -> None:
+                nonlocal last_activity
+                assert stream is not None
+                while chunk := await stream.read(65536):
+                    last_activity = loop.time()
+                    available = 8 * 1024 * 1024 - len(buffer)
+                    buffer.extend(chunk[:available])
+                    if len(chunk) > available:
+                        raise _OutputLimit
+
+            tasks = [asyncio.create_task(read(proc.stdout, stdout)),
+                     asyncio.create_task(read(proc.stderr, stderr)),
+                     asyncio.create_task(proc.wait())]
+            io = asyncio.gather(*tasks)
+
+            async def cleanup() -> None:
+                # Reap the group before removing its wrapper/config, including surviving children.
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                await proc.wait()
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(io, return_exceptions=True)
+
+                async def discard(stream: asyncio.StreamReader | None) -> None:
+                    assert stream is not None
+                    while await stream.read(8192):
+                        pass
+
+                # As in the Amp backend, replace bounded readers with discard readers.
+                # Overflow can pause a pipe, so waiting for exit alone can never finish.
+                draining = asyncio.gather(proc.wait(), discard(proc.stdout), discard(proc.stderr))
+                try:
+                    await asyncio.wait_for(draining, timeout=5)
+                except TimeoutError:
+                    logger.warning("Codex cleanup exceeded its limit after termination; a descendant may hold a pipe")
+                finally:
+                    draining.cancel()
+                    await asyncio.gather(draining, return_exceptions=True)
+
+            try:
+                await wait_for_inactivity(io, timeout=self.timeout, last_activity=lambda: last_activity)
+            except TimeoutError:
+                timeout_detail = f"Codex: no new stdout/stderr for {self.timeout:g}s; execution timed out"
+                logger.error(timeout_detail)
+                return CodingExecutionResult(session_id=session_id, last_message="", exit_code=124,
+                                             failure_detail=timeout_detail, failure_kind="timeout")
+            except _OutputLimit:
+                return CodingExecutionResult(session_id=session_id, last_message="", exit_code=1,
+                    failure_detail="Codex execution output exceeded byte limit", failure_kind="output_limit")
+            finally:
+                stopping = asyncio.create_task(cleanup())
+                cancelled = False
+                while not stopping.done():
+                    try:
+                        await asyncio.shield(stopping)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                stopping.result()
+                if cancelled:
+                    raise asyncio.CancelledError
 
             jsonl = stdout.decode(errors="replace")
-            sid = _parse_thread_id(jsonl)
-            last_message = last_file.read_text() if last_file.exists() else ""
+            sid = _parse_thread_id(jsonl) or session_id
+            raw = b""
+            if last_file.exists():
+                with last_file.open("rb") as stream:
+                    # The common final check cannot bound disk reads after native execution.
+                    raw = stream.read(max_output_bytes + 1)
+            if len(raw) > max_output_bytes:
+                return CodingExecutionResult(session_id=sid, last_message="", exit_code=1,
+                    failure_detail="Codex final answer exceeded byte limit", failure_kind="output_limit")
+            last_message = raw.decode()
             detail = stderr.decode(errors="replace") if proc.returncode else None
             if context is not None:
                 tokens = [context.mcp_token, context.github.token if context.github else None]
@@ -237,5 +295,198 @@ class CodexAgent:
                     raise SessionUnavailable("Codex rejected the saved session before execution")
             return CodingExecutionResult(
                 session_id=sid, last_message=last_message, exit_code=proc.returncode or 0,
-                failure_detail=detail[-4000:] if detail else None,
+                failure_detail=detail[-4000:] if detail else None, model=model,
             )
+
+
+class CodexHistory:
+    """Read only explicit session IDs under the same CODEX_HOME used by Codex exec.
+
+    Rollout response_item records are canonical; event_msg duplicates and reasoning
+    records are deliberately excluded. Each page scans at most 8 MiB of complete lines.
+    """
+
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = (root or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))).resolve()
+        self._reads = threading.BoundedSemaphore(2)
+
+    def query(self, query: HistoryQuery) -> HistoryPage:
+        """Read one validated session query without blocking the event loop's caller."""
+        # Hold the permit in the thread: cancelling to_thread cannot stop file I/O.
+        if not self._reads.acquire(blocking=False):
+            raise ConversationFailure("query_busy")
+        try:
+            return self._read(query)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ConversationFailure("history_unreadable") from exc
+        finally:
+            self._reads.release()
+
+    def _path(self, session_id: str) -> Path | None:
+        # Prefer the active copy during archival; opening validates the candidate.
+        count = 0
+        for directory in (self.root / "sessions", self.root / "archived_sessions"):
+            if not directory.exists():
+                continue
+            if directory.is_symlink():
+                # followlinks=False does not protect the walk's starting directory.
+                raise ConversationFailure("history_unreadable")
+            for parent, dirs, names in os.walk(directory, followlinks=False, onerror=self._walk_error):
+                count += len(dirs) + len(names)
+                if count > 50000:
+                    raise ConversationFailure("history_limit")
+                for name in names:
+                    if not name.startswith("rollout-") or not name.endswith(".jsonl"):
+                        continue
+                    if name[-42:-6] != session_id:
+                        continue
+                    return Path(parent) / name
+        return None
+
+    @staticmethod
+    def _walk_error(error: OSError) -> None:
+        raise error
+
+    def _read(self, query: HistoryQuery) -> HistoryPage:
+        """Locate the source, validate its position, and read one bounded page."""
+        path = self._path(query.session_id)
+        if path is None:
+            if query.cursor is not None:
+                raise ConversationFailure("cursor_invalid")
+            return HistoryPage(session_id=query.session_id, status="not_found")
+        with self._open(path) as file:
+            identity = self._seek_history(file, query)
+            return self._read_page(file, query, identity)
+
+    @staticmethod
+    def _seek_history(file: BinaryIO, query: HistoryQuery) -> str:
+        """Validate the source and cursor, seek to the first record, and return its identity."""
+        offset, previous_identity = query.position
+        file_stat = os.fstat(file.fileno())
+        # Report a stale cursor before parsing metadata, even if the file was emptied.
+        if previous_identity is not None and offset > file_stat.st_size:
+            raise ConversationFailure("cursor_invalid")
+        meta_line = file.readline(MAX_LINE + 1)
+        if len(meta_line) > MAX_LINE or not meta_line.endswith(b"\n"):
+            raise ConversationFailure("history_unreadable")
+        meta = json.loads(meta_line)
+        if meta.get("type") != "session_meta" or meta.get("payload", {}).get("id") != query.session_id:
+            raise ConversationFailure("history_unreadable")
+        identity = f"{file_stat.st_dev}:{file_stat.st_ino}:{hashlib.sha256(meta_line).hexdigest()}"
+        if previous_identity is None:
+            return identity
+        # Query validation cannot detect file replacement or a cursor inside a record.
+        if identity != previous_identity or offset < len(meta_line):
+            raise ConversationFailure("cursor_invalid")
+        file.seek(offset - 1)
+        if file.read(1) != b"\n":
+            raise ConversationFailure("cursor_invalid")
+        return identity
+
+    def _read_page(self, file: BinaryIO, query: HistoryQuery, identity: str) -> HistoryPage:
+        """Scan complete records, retaining the offset of any unconsumed record."""
+        page = HistoryPage(session_id=query.session_id)
+        offset = file.tell()
+        scanned = size = 0
+        while True:
+            raw = file.readline(MAX_LINE + 1)
+            if len(raw) > MAX_LINE:
+                raise ConversationFailure("history_limit")
+            if not raw.endswith(b"\n"):
+                # Leave a partially written final record for the next poll.
+                break
+            scanned += len(raw)
+            item, unsupported = self._item(json.loads(raw), query.session_id, offset)
+            if unsupported:
+                page.status = "unsupported"
+            if item is not None:
+                item_size = len(item.model_dump_json().encode())
+                if len(page.items) >= query.limit or size + item_size > MAX_PAGE:
+                    # Keep offset before this record: it belongs to the next page.
+                    page.has_more = True
+                    break
+                page.items.append(item)
+                size += item_size
+            offset = file.tell()
+            if scanned >= MAX_SCAN:
+                page.has_more = self._has_complete_line(file)
+                break
+        page.next_cursor = query.cursor_at(offset, identity)
+        return page
+
+    def _open(self, path: Path) -> BinaryIO:
+        # Resolve each component with no-follow opens: checking resolve() alone has a
+        # race if a writable directory is replaced by a symlink between check and open.
+        parts = path.relative_to(self.root).parts
+        directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in parts[:-1]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                os.close(directory)
+                directory = child
+            descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        finally:
+            os.close(directory)
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            raise ConversationFailure("history_unreadable")
+        return os.fdopen(descriptor, "rb")
+
+    @staticmethod
+    def _has_complete_line(file: BinaryIO) -> bool:
+        return file.readline(MAX_LINE + 1).endswith(b"\n")
+
+    @staticmethod
+    def _item(row: dict, session_id: str, offset: int) -> tuple[HistoryItem | None, bool]:
+        if row.get("type") != "response_item":
+            return None, False
+        payload = row.get("payload", {})
+        kind = payload.get("type")
+        if kind == "reasoning" or payload.get("phase") == "analysis" or payload.get("channel") == "analysis":
+            return None, False
+        data = {"id": f"{session_id}:{offset}", "timestamp": row.get("timestamp")}
+        truncated = False
+
+        def text(value: str) -> str:
+            nonlocal truncated
+            if not isinstance(value, str):
+                raise TypeError("non-text history field")
+            # Known runtime credentials and common token forms must not leak via tool text.
+            for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "FLOWTOOL_WORKER_TOKEN"):
+                secret = os.environ.get(key)
+                if secret:
+                    value = value.replace(secret, "[REDACTED]")
+            value = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,})",
+                           "[REDACTED]", value)
+            value = re.sub(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/-]+", r"\1[REDACTED]", value)
+            truncated |= len(value) > 8192
+            return value[:8192]
+
+        if kind == "message":
+            role = payload.get("role")
+            if role not in {"user", "assistant", "system", "developer"}:
+                return None, True
+            blocks = payload.get("content", [])
+            unsupported = any(block.get("type") not in {"input_text", "output_text"} for block in blocks)
+            content = ConversationContent(text=text("\n".join(
+                block["text"] for block in blocks if block.get("type") in {"input_text", "output_text"}
+            )))
+            data.update(role=role, kind="message", content=content)
+        elif kind in {"function_call", "custom_tool_call"}:
+            unsupported = False
+            content = ConversationContent(name=payload["name"], arguments=text(
+                payload["arguments"] if kind == "function_call" else payload["input"],
+            ))
+            data.update(role="assistant", kind="tool_call", call_id=payload["call_id"], content=content)
+        elif kind in {"function_call_output", "custom_tool_call_output"}:
+            unsupported = False
+            output = payload["output"]
+            if isinstance(output, list):
+                unsupported = any(block.get("type") not in {"input_text", "output_text"} for block in output)
+                output = "\n".join(block["text"] for block in output
+                                   if block.get("type") in {"input_text", "output_text"})
+            data.update(role="tool", kind="tool_result", call_id=payload["call_id"],
+                        content=ConversationContent(text=text(output)))
+        else:
+            return None, True
+        return HistoryItem.model_validate({**data, "truncated": truncated}), unsupported

@@ -5,14 +5,15 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from app.contracts.protocol import PROTOCOL_VERSION, RevisionTask
-from app.contracts.result_models import EffectState, ResolveEffect, ResultPending
+from app.contracts.protocol import RevisionTask
+from app.contracts.result_models import EffectState, LabelEffect, ResolveEffect, ResultPending
 from app.controler.workflow.service import ControlService
 from app.domain.models import (
     AddressedComment,
     DeferredComment,
     DeliveryState,
     FlowState,
+    JobKind,
     JobState,
     ReviewItemKind,
 )
@@ -29,6 +30,7 @@ from app.github import (
     ReviewThreads,
 )
 from app.persistence.jobs import JobStore
+from tests.flow_fixtures import enqueue_job
 from tests.github import NATIVE_THREAD_REFETCH, record_call
 from tests.test_archive_status import archive_adapter
 from tests.test_coordinator import coordinator
@@ -37,6 +39,7 @@ from tests.test_review_resolution import human, snapshot
 from tests.test_revision_delivery import revision_output, verified_result
 from tests.test_revision_recovery import RevisionGitHub, accept
 from tests.test_revision_recovery import revision_resources as revision_resources  # noqa: PLC0414
+from tests.workspace_fixtures import register_worker, report_settled
 
 
 class ThreadGitHub(RevisionGitHub):
@@ -111,7 +114,12 @@ async def thread_revision(store, request, thread_resources):
     attempt.codex_session_id = "old-session"
     store.flows.update_attempt(attempt)
     flow.current_attempt_id = attempt.id
-    store.flows.update_flow(flow)
+    store.flows.set_current_attempt(flow)
+    register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
+    initial = enqueue_job(store, flow.id, JobKind.INITIAL)
+    assert store.assignments.assign_job("worker-a", "initial", "epoch") is not None
+    assert store.assignments.finish_assignment(initial.id, "worker-a", "initial", JobState.DONE, "epoch")
+    report_settled(store, initial.id, epoch="epoch")
     delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
     delivery.head_sha, delivery.base_branch = "baseline", "main"
@@ -131,12 +139,11 @@ async def thread_revision(store, request, thread_resources):
     if mode == "incomplete":
         github.thread = github.thread.model_copy(update={"complete": False})
     settle(store)
-    store.workers.worker_connected("worker-a", PROTOCOL_VERSION, "epoch")
-    job = store.workers.assign_job("worker-a", "token", "epoch")
+    job = store.assignments.assign_job("worker-a", "token", "epoch")
     subject = coordinator(store, github)
     task = await subject.prepare(job)
     assert isinstance(task, RevisionTask)
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     github.sha = "baseline" if mode == "noop" else "revision"
     addressed, deferred = [], []
@@ -241,7 +248,7 @@ async def test_racing_input_survives_ack_and_prevents_rereview(store, thread_rev
         pending = store.reviews.pending(flow.id)
         assert len(pending) == 1
         assert pending[0].github_id == (1 if change == "edited" else 2)
-    assert store.flows.get_flow(flow.id).state is FlowState.ACTIVE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
 
 
 @pytest.mark.parametrize("operation", ["reply_review_thread", "resolve_review_thread"])
@@ -341,25 +348,31 @@ async def test_same_second_round_trip_keeps_the_latest_webhook_version(store, th
     assert github.resolves == [] and github.review_requests == []
 
 
-async def test_remote_predecessor_releases_the_queued_webhook_edit(store, thread_revision):
+async def test_missing_status_label_does_not_suppress_revision_or_reviewers(
+    store,
+    thread_revision,
+    monkeypatch,
+):
+    # A display failure is not unresolved review feedback and must not suppress re-review.
     flow, job, github, subject = thread_revision
-    # C's webhook arrives before B. GraphQL supplies B, so the stored B→C edit must follow it.
-    latest = FeedbackUpdate(kind=ReviewItemKind.INLINE, github_id=1, author="alice",
-                            body="Latest", updated_at=human().updated_at)
-    assert not store.reviews.ingest(flow.id, "edit-c", "pull_request_review_comment",
-        {"changes": {"body": {"from": "Intermediate"}}}, latest,
-        settle_seconds=0, submit_grace_seconds=0)
-    github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(human(body="Intermediate"), *github.thread.comments.items[1:]))})
-    await subject.results.apply(job.id)
-    assert [(f.version, f.body) for f in store.reviews.pending(flow.id)] == [(3, "Latest")]
-    with store.connection() as connection:
-        assert connection.execute("SELECT COUNT(*) AS n FROM review_pending_edits").fetchone()["n"] == 0
-    assert not store.reviews.ingest(flow.id, "late-edit-b", "pull_request_review_comment",
-        {"changes": {"body": {"from": human().body}}}, latest.model_copy(update={"body": "Intermediate"}),
-        settle_seconds=0, submit_grace_seconds=0)
-    queued = settle(store)
-    assert len(queued) == 1
-    assert batch_for(store, queued[0]).feedback[0].body == "Latest"
+
+    async def missing(issue, label):
+        raise GitHubError(
+            GitHubErrorKind.NOT_FOUND, "add_label", status_code=404, request_rejected=True
+        )
+
+    monkeypatch.setattr(Issue, "add_label", missing)
+    assert await subject.results.apply(job.id) is JobState.DONE
+    assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
+    assert store.deliveries.get_delivery(flow.id).head_sha == "revision"
+    assert store.reviews.pending(flow.id) == []
+    record = next(
+        r for r in store.results.list_effects(job.id) if isinstance(r.payload, LabelEffect)
+    )
+    assert record.state is EffectState.SKIPPED and record.receipt is None
+    assert github.review_requests == [["carol"]]
+    assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
+    assert github.review_requests == [["carol"]]
 
 
 @pytest.mark.parametrize("query,write", [("fetch_labels", "labels"), ("fetch_reviewers", "review_requests")])
@@ -429,6 +442,7 @@ async def test_next_revision_combines_valid_historical_coverage_on_the_same_pr(
 ):
     flow, first, github, subject = thread_revision
     await subject.results.apply(first.id)
+    report_settled(store, first.id, epoch="epoch")
     assert github.resolves == []
     new = human(3, reply_to_id=1, body="Decision made; finish the remaining change")
     github.thread = github.thread.model_copy(update={"comments": Batch[ReviewComment](items=(*github.thread.comments.items, new))})
@@ -437,12 +451,12 @@ async def test_next_revision_combines_valid_historical_coverage_on_the_same_pr(
         updated_at=new.updated_at, signal="request_changes", submitted=True,
     ), settle_seconds=0, submit_grace_seconds=0)
     settle(store)
-    job = store.workers.assign_job("worker-a", "token", "epoch")
+    job = store.assignments.assign_job("worker-a", "token", "epoch")
     task = await subject.prepare(job)
     assert isinstance(task, RevisionTask)
     assert task.expected_head_sha == "revision" and task.session_id == "old-session"
     assert [f.github_id for f in task.feedback] == [2, 3]
-    assert store.workers.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
+    assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     github.sha = "revision2"
 

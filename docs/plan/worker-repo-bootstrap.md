@@ -896,3 +896,16 @@ installation token 做 GitHub clone/push/PR 写入验收。PR 保持 draft；独
   的空闲位置。原 Flow 仍持有绑定时直接复用，REVISION 不刷新，以保留进行中的工作。
 - 回归覆盖新副本、复用副本、新建与回收后的 worktree、远端基线改写、非默认 remote/分支、
   Git/jj seed 状态保护、缓存保护与 fetch 失败后重试；旧实现下新增刷新场景 **5 failed**。
+
+### [013] — 2026-11-20 — 合并主线 workspace 分配模型
+
+- 按 #180 的“处理冲突”要求合并 `main`，保留 controller 指定位置和 generation、manifest v3、
+  目录身份校验、停止后清理与进行中 Flow 的原地恢复，不恢复旧版 worker 自选分配及隔离状态。
+- 将 [012] 的远端同步接入 `claim`：同仓库串行获取远端快照，在修改本地绑定前完成 fetch；
+  fetch 后重新读取共享 manifest，保留等待期间其他仓库登记的库存。完整副本及新建/复用
+  worktree 均按固定 SHA 对齐，重复确认原绑定仍保留 Flow 的当前修改。
+- README 保留主线精简结构，同步说明迁入部署指南。更新测试的 controller 分配/释放调用，
+  将主线新增的 jj 路径转换测试改为传固定 SHA，保留文件/目录转换和 ignored 缓存保护断言。
+- 本轮 Ruff、Mypy 与 jj 路径转换定向 8 项通过；PostgreSQL 全量验证及审查证据保存在
+  `.amp/in/artifacts/worker-workspace-sync/merge-*`。首次全量发现的 4 项失败均来自上述旧分支名调用。
+- 上轮披露的首次 clone 同名 tag 边界问题不在本次冲突处理范围内，继续保留为未修复项。

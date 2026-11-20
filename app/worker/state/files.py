@@ -5,6 +5,15 @@ import tempfile
 from pathlib import Path
 
 
+def sync_directory(path: Path) -> None:
+    """Persist directory entries after publishing, moving or removing private records."""
+    directory = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def write_private_record(path: Path, payload: str) -> None:
     """Fsync both the replacement file and its parent before returning."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -18,11 +27,7 @@ def write_private_record(path: Path, payload: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        sync_directory(path.parent)
     finally:
         if temporary is not None and os.path.exists(temporary):
             os.unlink(temporary)

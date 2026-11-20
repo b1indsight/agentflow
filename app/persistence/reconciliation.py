@@ -11,12 +11,21 @@ from pydantic import BaseModel
 from app.github import FeedbackSource
 
 ReconcileSource = FeedbackSource | Literal["threads"]
-PR_RECONCILE_ELIGIBLE = "f.state<>'succeeded' AND d.pr_number IS NOT NULL AND d.state<>'merged'"
+# PR status checks share reconcile_checks with the feedback sources under this source name.
+PR_SOURCE = "pull_request"
+PR_RECONCILE_ELIGIBLE = "f.delivery_pr_number IS NOT NULL AND f.delivery_state<>'merged'"
+_FEEDBACK_RECONCILE_ELIGIBLE = (
+    "f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
+    " AND f.delivery_state='open' AND f.delivery_pr_number IS NOT NULL"
+    " AND (s.source<>'issue_comments' OR f.issue_number IS NOT NULL)"
+)
 
 from app.persistence.repository import Repository
 
 
 class ReconcileState(BaseModel):
+    """A PR status check: the reconcile_checks row whose source is PR_SOURCE."""
+
     flow_id: int
     next_at: datetime
     last_success_at: datetime | None = None
@@ -34,31 +43,52 @@ class FeedbackCheck(ReconcileState):
 class ReconcileStore(Repository):
     """Use the database connection, including the caller's workflow transaction."""
 
+    def merged_backlog(self, limit: int) -> list[int]:
+        """Recover persisted current merges that the ordinary PR poller intentionally excludes."""
+        with self._db.connection() as connection:
+            return [row["id"] for row in connection.execute(
+                "SELECT f.id FROM flows f"
+                " WHERE f.state<>'archived' AND f.delivery_state='merged' AND f.delivery_pr_number IS NOT NULL"
+                " AND f.delivery_merged_at IS NOT NULL AND length(f.delivery_merge_commit_sha)>0"
+                " ORDER BY f.id LIMIT %s", (limit,),
+            ).fetchall()]
+
+    def reset_round(self, flow_id: int) -> None:
+        """A new delivery starts fresh PR/feedback observations in the resume transaction."""
+        with self._db.connection() as connection:
+            connection.execute("DELETE FROM reconcile_checks WHERE flow_id=%s", (flow_id,))
+
     def feedback_seed(self, limit: int) -> None:
         with self._db.connection() as connection:
             connection.execute(
-                "INSERT INTO feedback_reconcile(flow_id,source,next_at)"
-                " SELECT f.id,s.source,%s FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
+                "INSERT INTO reconcile_checks(flow_id,source,next_at)"
+                " SELECT f.id,s.source,%s FROM flows f"
                 " CROSS JOIN (VALUES ('issue_comments'),('pr_comments'),('reviews'),('threads')) s(source)"
-                " WHERE f.state='active' AND d.state='open' AND d.pr_number IS NOT NULL"
-                " AND NOT EXISTS (SELECT 1 FROM feedback_reconcile r"
+                f" WHERE {_FEEDBACK_RECONCILE_ELIGIBLE}"
+                " AND NOT EXISTS (SELECT 1 FROM reconcile_checks r"
                 " WHERE r.flow_id=f.id AND r.source=s.source) ORDER BY f.id,s.source"
-                " LIMIT %s ON CONFLICT DO NOTHING", (self._db.now(), limit),
+                " LIMIT %s ON CONFLICT DO NOTHING",
+                (self._db.now(), limit),
             )
 
     def feedback_due(self, limit: int) -> list[FeedbackCheck]:
         with self._db.connection() as connection:
-            return connection.cursor(row_factory=class_row(FeedbackCheck)).execute(
-                "SELECT r.* FROM feedback_reconcile r JOIN flows f ON f.id=r.flow_id"
-                " JOIN flow_deliveries d ON d.flow_id=f.id WHERE r.next_at<=%s"
-                " AND f.state='active' AND d.state='open' AND d.pr_number IS NOT NULL"
-                " ORDER BY r.next_at,r.flow_id,r.source LIMIT %s", (self._db.now(), limit),
-            ).fetchall()
+            return (
+                connection.cursor(row_factory=class_row(FeedbackCheck))
+                .execute(
+                    "SELECT s.* FROM reconcile_checks s JOIN flows f ON f.id=s.flow_id"
+                    " WHERE s.next_at<=%s AND s.source<>%s"
+                    f" AND {_FEEDBACK_RECONCILE_ELIGIBLE}"
+                    " ORDER BY s.next_at,s.flow_id,s.source LIMIT %s",
+                    (self._db.now(), PR_SOURCE, limit),
+                )
+                .fetchall()
+            )
 
     def feedback_get(self, flow_id: int, source: ReconcileSource) -> FeedbackCheck | None:
         with self._db.connection() as connection:
             return connection.cursor(row_factory=class_row(FeedbackCheck)).execute(
-                "SELECT * FROM feedback_reconcile WHERE flow_id=%s AND source=%s",
+                "SELECT * FROM reconcile_checks WHERE flow_id=%s AND source=%s",
                 (flow_id, source),
             ).fetchone()
 
@@ -69,7 +99,7 @@ class ReconcileStore(Repository):
         now = self._db.now()
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE feedback_reconcile SET cursor=%s,next_at=%s,failures=0,"
+                "UPDATE reconcile_checks SET cursor=%s,next_at=%s,failures=0,"
                 " last_error=CASE WHEN %s AND scan_incomplete THEN 'scan incomplete; retry full scan' ELSE %s END,"
                 " last_success_at=CASE WHEN %s AND NOT scan_incomplete THEN %s ELSE last_success_at END,"
                 " scan_incomplete=CASE WHEN %s THEN FALSE ELSE scan_incomplete OR %s END"
@@ -82,7 +112,7 @@ class ReconcileStore(Repository):
     def feedback_failed(self, check: FeedbackCheck, delay: float, reason: str) -> None:
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE feedback_reconcile SET next_at=%s,failures=failures+1,last_error=%s"
+                "UPDATE reconcile_checks SET next_at=%s,failures=failures+1,last_error=%s"
                 " WHERE flow_id=%s AND source=%s",
                 (self._db.now() + timedelta(seconds=delay), reason, check.flow_id, check.source),
             )
@@ -91,58 +121,63 @@ class ReconcileStore(Repository):
         """Wake a healthy numbered check without bypassing a persisted failure deadline."""
         with self._db.connection() as connection:
             connection.execute(
-                "INSERT INTO flow_reconcile(flow_id,next_at,hint_version) VALUES(%s,%s,1)"
-                " ON CONFLICT(flow_id) DO UPDATE SET hint_version=flow_reconcile.hint_version+1,"
-                " next_at=CASE WHEN flow_reconcile.failures=0 THEN LEAST(flow_reconcile.next_at,EXCLUDED.next_at)"
-                " ELSE flow_reconcile.next_at END", (flow_id, self._db.now()),
+                "INSERT INTO reconcile_checks(flow_id,source,next_at,hint_version) VALUES(%s,%s,%s,1)"
+                " ON CONFLICT(flow_id,source) DO UPDATE SET hint_version=reconcile_checks.hint_version+1,"
+                " next_at=CASE WHEN reconcile_checks.failures=0"
+                " THEN LEAST(reconcile_checks.next_at,EXCLUDED.next_at)"
+                " ELSE reconcile_checks.next_at END", (flow_id, PR_SOURCE, self._db.now()),
             )
 
     def seed(self, limit: int) -> None:
         """Incrementally register existing tracked PRs; never infer new Flows from GitHub."""
         with self._db.connection() as connection:
             connection.execute(
-                "INSERT INTO flow_reconcile(flow_id,next_at)"
-                " SELECT f.id,%s FROM flows f JOIN flow_deliveries d ON d.flow_id=f.id"
+                "INSERT INTO reconcile_checks(flow_id,source,next_at)"
+                " SELECT f.id,%s,%s FROM flows f"
                 f" WHERE {PR_RECONCILE_ELIGIBLE}"
-                " AND NOT EXISTS (SELECT 1 FROM flow_reconcile r WHERE r.flow_id=f.id)"
-                " ORDER BY f.id LIMIT %s ON CONFLICT DO NOTHING", (self._db.now(), limit),
+                " AND NOT EXISTS (SELECT 1 FROM reconcile_checks r WHERE r.flow_id=f.id AND r.source=%s)"
+                " ORDER BY f.id LIMIT %s ON CONFLICT DO NOTHING",
+                (PR_SOURCE, self._db.now(), PR_SOURCE, limit),
             )
 
     def due(self, limit: int) -> list[ReconcileState]:
         with self._db.connection() as connection:
             return connection.cursor(row_factory=class_row(ReconcileState)).execute(
-                "SELECT r.* FROM flow_reconcile r JOIN flows f ON f.id=r.flow_id"
-                " JOIN flow_deliveries d ON d.flow_id=f.id WHERE r.next_at<=%s"
+                "SELECT r.* FROM reconcile_checks r JOIN flows f ON f.id=r.flow_id"
+                " WHERE r.source=%s AND r.next_at<=%s"
                 f" AND {PR_RECONCILE_ELIGIBLE}"
-                " ORDER BY r.next_at,r.flow_id LIMIT %s", (self._db.now(), limit),
+                " ORDER BY r.next_at,r.flow_id LIMIT %s", (PR_SOURCE, self._db.now(), limit),
             ).fetchall()
 
     def get(self, flow_id: int) -> ReconcileState | None:
         with self._db.connection() as connection:
             return connection.cursor(row_factory=class_row(ReconcileState)).execute(
-                "SELECT * FROM flow_reconcile WHERE flow_id=%s", (flow_id,),
+                "SELECT * FROM reconcile_checks WHERE flow_id=%s AND source=%s",
+                (flow_id, PR_SOURCE),
             ).fetchone()
 
     def succeeded(self, flow_id: int, delay: float, diagnostic: str | None = None, *, hint_version: int) -> None:
         now = self._db.now()
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE flow_reconcile SET last_success_at=%s,"
+                "UPDATE reconcile_checks SET last_success_at=%s,"
                 " next_at=CASE WHEN hint_version=%s THEN %s ELSE %s END,failures=0,last_error=%s"
-                " WHERE flow_id=%s", (now, hint_version, now + timedelta(seconds=delay), now, diagnostic, flow_id),
+                " WHERE flow_id=%s AND source=%s",
+                (now, hint_version, now + timedelta(seconds=delay), now, diagnostic, flow_id, PR_SOURCE),
             )
 
     def failed(self, flow_id: int, delay: float, reason: str) -> None:
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE flow_reconcile SET next_at=%s,failures=failures+1,last_error=%s"
-                " WHERE flow_id=%s", (self._db.now() + timedelta(seconds=delay), reason, flow_id),
+                "UPDATE reconcile_checks SET next_at=%s,failures=failures+1,last_error=%s"
+                " WHERE flow_id=%s AND source=%s",
+                (self._db.now() + timedelta(seconds=delay), reason, flow_id, PR_SOURCE),
             )
 
     def defer(self, flow_id: int) -> None:
         """A stale read is neither a successful observation nor a transport failure."""
         with self._db.connection() as connection:
             connection.execute(
-                "UPDATE flow_reconcile SET next_at=%s,last_error='workflow changed during query'"
-                " WHERE flow_id=%s", (self._db.now() + timedelta(seconds=5), flow_id),
+                "UPDATE reconcile_checks SET next_at=%s,last_error='workflow changed during query'"
+                " WHERE flow_id=%s AND source=%s", (self._db.now() + timedelta(seconds=5), flow_id, PR_SOURCE),
             )

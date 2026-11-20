@@ -5,15 +5,15 @@ from __future__ import annotations
 import psycopg
 from pydantic import BaseModel
 
-from app.persistence.reconciliation import PR_RECONCILE_ELIGIBLE
+from app.persistence.reconciliation import PR_RECONCILE_ELIGIBLE, PR_SOURCE
 
 # One statement gives a consistent snapshot and one total SQL execution budget.
 SNAPSHOT_SQL = f"""
 WITH due_reconcile AS (
- SELECT r.next_at FROM flow_reconcile r JOIN flows f ON f.id=r.flow_id
- JOIN flow_deliveries d ON d.flow_id=f.id WHERE r.next_at<=now() AND {PR_RECONCILE_ELIGIBLE}
+ SELECT r.next_at FROM reconcile_checks r JOIN flows f ON f.id=r.flow_id
+ WHERE r.source='{PR_SOURCE}' AND r.next_at<=now() AND {PR_RECONCILE_ELIGIBLE}
 ), ages AS (
- SELECT 'inbox' AS queue, min(received_at) AS oldest FROM webhook_inbox WHERE state != 'done'
+ SELECT 'inbox' AS queue, min(received_at) AS oldest FROM events WHERE state != 'done'
  UNION ALL SELECT 'jobs', min(created_at) FROM jobs WHERE state='queued'
  UNION ALL SELECT 'recovery', min(result_received_at) FROM jobs
    WHERE result_received_at IS NOT NULL AND result_applied_at IS NULL
@@ -21,15 +21,15 @@ WITH due_reconcile AS (
  UNION ALL SELECT 'reconcile', min(next_at) FROM due_reconcile
  UNION ALL SELECT 'projects', min(next_at) FROM project_projections WHERE desired_version > synced_version
 )
-SELECT 'inbox' AS family, state AS a, '' AS b, count(*)::float8 AS value FROM webhook_inbox GROUP BY state
+SELECT 'inbox' AS family, state AS a, '' AS b, count(*)::float8 AS value FROM events WHERE state IS NOT NULL GROUP BY state
 UNION ALL SELECT 'jobs', kind, state, count(*) FROM jobs GROUP BY kind,state
-UNION ALL SELECT 'workers', status, '', count(*) FROM workers GROUP BY status
+UNION ALL SELECT 'workers', status, '', count(*) FROM workers WHERE repository IS NULL GROUP BY status
 UNION ALL SELECT 'bindings_active', '', '', count(*) FROM flow_executions WHERE released_at IS NULL
 UNION ALL SELECT 'archive_pending_age_seconds', '', '',
  COALESCE(GREATEST(0,extract(epoch FROM now()-min(j.created_at))),0)
  FROM jobs j JOIN flows f ON f.id=j.flow_id
  JOIN flow_executions e ON e.flow_id=f.id AND e.released_at IS NULL
- WHERE f.state='active' AND j.kind='archive' AND j.state IN ('queued','running','failed')
+ WHERE f.state IN ('finalizing','blocked') AND j.kind='archive' AND j.state IN ('queued','running','failed')
  AND NOT EXISTS (SELECT 1 FROM jobs newer WHERE newer.flow_id=j.flow_id
                  AND newer.kind='archive' AND newer.id>j.id)
 UNION ALL SELECT 'recovery_pending', '', '', count(*) FROM jobs

@@ -50,17 +50,16 @@ class ReviewBatch(BaseModel):
     id: int
     flow_id: int
     attempt_id: int
-    generation: int
     state: BatchState
     trigger: Literal["discussion", "strong"]
     job_id: int | None
+    inference_job_id: int | None = None
     feedback: list[ReviewFeedback]
     open_points: list[str]
     created_at: datetime
     context: ReviewContext | None = None
     threads: ReviewThreads | None = None
     decision: JudgeDecision | None = None
-    answer_dispatched: bool = False
 
     @property
     def discussion(self) -> str:
