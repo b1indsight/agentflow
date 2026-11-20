@@ -42,7 +42,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[27] = 27
+PROTOCOL_VERSION: Literal[28] = 28
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -105,11 +105,18 @@ class RevisionTask(ProtocolModel):
     )
     session_id: str | None
     session_generation: int = Field(ge=0)
+    retry_status: str | None = Field(default=None, exclude_if=lambda value: value is None)
     instruction: str
     task_content: str
     previous_summary: str
     open_points: list[str]
     context: ReviewContext | None = None
+
+    @model_validator(mode="after")
+    def _retry_is_coding_only(self) -> Self:
+        if self.retry_status is not None and self.purpose != "revise":
+            raise ValueError("answer-only tasks cannot request a coding retry")
+        return self
 
 
 class RevisionExecutionRecord(ProtocolModel):
@@ -675,7 +682,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[27]
+    protocol_version: Literal[28]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -882,7 +889,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[27]
+    protocol_version: Literal[28]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

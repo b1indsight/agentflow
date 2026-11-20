@@ -1,20 +1,53 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Send } from "lucide-react";
+import { Check, CircleAlert, LoaderCircle, Send } from "lucide-react";
 import { FlowTaskInput } from "./FlowTaskInput";
+
+const composerCopy = {
+  active: {
+    label: "补充要求",
+    placeholder: "补充要求、回答问题，或告诉 Agent 下一步做什么…",
+  },
+  note: {
+    label: "收尾留言",
+    placeholder: "记录本轮的收尾事项…",
+  },
+  archived: {
+    label: "本轮消息",
+    placeholder: "本轮已归档",
+  },
+};
 
 /** Append an Agent task; task editing is shared with Flow creation. */
 export function AgentTaskInput({
   onSubmit,
-  disabledReason,
+  mode,
+  busy,
 }: {
   onSubmit: (instruction: string, requestId: string) => Promise<void>;
-  disabledReason: string;
+  mode: keyof typeof composerCopy;
+  busy: boolean;
 }) {
   const id = useId();
   const [instruction, setInstruction] = useState("");
-  const [pending, setPending] = useState(false);
+  const [status, setStatus] = useState<"idle" | "pending" | "sent" | "error">(
+    "idle",
+  );
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  const { label, placeholder } = composerCopy[mode];
+  const disabled = busy || status === "pending" || mode === "archived";
+  const icon = {
+    idle: Send,
+    pending: LoaderCircle,
+    sent: Check,
+    error: CircleAlert,
+  };
+  const Icon = icon[status];
+  const feedback = {
+    idle: "发送",
+    pending: "正在发送…",
+    sent: "消息已记录",
+    error: "重试发送",
+  }[status];
   const request = useRef<{ instruction: string; id: string } | null>(null);
   const writing = useRef(false);
   const mounted = useRef(true);
@@ -26,11 +59,10 @@ export function AgentTaskInput({
   }, []);
   const send = async () => {
     const text = instruction.trim();
-    if (writing.current || disabledReason || !text) return;
+    if (writing.current || disabled || !text) return;
     writing.current = true;
-    setPending(true);
+    setStatus("pending");
     setError("");
-    setNotice("");
     try {
       // Reuse the identity after a lost response, even if the user switches tabs.
       if (request.current?.instruction !== text)
@@ -39,16 +71,17 @@ export function AgentTaskInput({
       if (mounted.current) {
         setInstruction("");
         request.current = null;
-        setNotice("已发送，Agent 任务已排队。可在会话和执行记录中查看进展。");
+        setStatus("sent");
       }
     } catch (error) {
-      if (mounted.current)
+      if (mounted.current) {
+        setStatus("error");
         setError(
           error instanceof Error ? error.message : "发送失败，请刷新核对。",
         );
+      }
     } finally {
       writing.current = false;
-      if (mounted.current) setPending(false);
     }
   };
   return (
@@ -60,38 +93,42 @@ export function AgentTaskInput({
         void send();
       }}
     >
-      <label htmlFor={id}>继续工作</label>
       <FlowTaskInput
-        id={id}
-        aria-label="补充要求"
+        aria-label={label}
         aria-describedby={`${id}-hint`}
-        placeholder="补充要求、回答问题，或告诉 Agent 下一步做什么…"
+        placeholder={placeholder}
         rows={2}
         maxLength={16000}
         value={instruction}
-        disabled={pending}
+        disabled={disabled}
         onValueChange={(value) => {
           setInstruction(value);
           setError("");
-          setNotice("");
+          setStatus("idle");
         }}
         onSubmitShortcut={() => void send()}
       />
       <div className="flow-input-actions">
-        <small id={`${id}-hint`}>
-          {disabledReason || "沿用当前 Flow · Ctrl / ⌘ + Enter 发送"}
-        </small>
+        <small id={`${id}-hint`}>Ctrl / ⌘ + Enter 发送</small>
         <button
           type="submit"
           className="btn"
-          disabled={pending || Boolean(disabledReason) || !instruction.trim()}
+          aria-label={feedback}
+          title={error || feedback}
+          data-state={status}
+          disabled={disabled || !instruction.trim()}
         >
-          <Send />
-          {pending ? "正在发送…" : "发送"}
+          <Icon
+            aria-hidden="true"
+            className={
+              status === "pending" ? "motion-safe:animate-spin" : undefined
+            }
+          />
         </button>
       </div>
-      {error && <p role="alert">{error}</p>}
-      {notice && <p role="status">{notice}</p>}
+      <span className="sr-only" role="status">
+        {status === "idle" ? "" : error || feedback}
+      </span>
     </form>
   );
 }

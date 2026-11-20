@@ -36,6 +36,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import FeedbackUpdate
 from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteRef, Repository
+from app.persistence.agent_inputs import AgentInputStore
 from tests.flow_fixtures import enqueue_job
 from tests.github import RecordingGitHub, record_call
 from tests.review_memory import judge_decision
@@ -219,6 +220,43 @@ async def test_changed_pr_rebuilds_judge_context_before_unstarted_revision(store
     assert isinstance(prepared, RevisionTask) and prepared.expected_head_sha == "external"
     assert prepared.context.digest != context.digest
     assert store.reviews.get_batch(batch.id).decision.context_digest == prepared.context.digest
+
+
+async def test_explicit_retry_freezes_pending_input_once_despite_stale_judge_context(
+    store, pending_revision,
+):
+    # A collaborator push invalidates the Judge snapshot, not the user's explicit continuation.
+    flow, job, task, github, subject = pending_revision
+    batch = store.reviews.for_job(job)
+    repo = github.installation(flow.installation_id).repository(flow.repo)
+    context = await build_review_context(repo, flow, batch, task.pr_number)
+    store.reviews.freeze_context(batch, context)
+    github.sha = "collaborator"
+    payload = {**store.jobs.get_job(job.id).payload, "retry_status": "Previous delivery failed",
+               "instruction": "Preserve both changes", "owner_messages": ["Preserve both changes"]}
+    del payload["revision"]  # The service enqueues a new job, not the failed assignment.
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET payload=%s WHERE id=%s", (Jsonb(payload), job.id))
+    with store.flows.locked(flow.id) as locked:
+        inputs = AgentInputStore(locked.database)
+        inputs.record(locked.flow, "first", "First queued request")
+        inputs.record(locked.flow, "second", "Second queued request")
+    prepared = await subject.prepare(store.jobs.get_job(job.id))
+    assert isinstance(prepared, RevisionTask) and prepared.retry_status == payload["retry_status"]
+    assert prepared.context is None
+    assert prepared.instruction == "Preserve both changes\n\nFirst queued request\n\nSecond queued request"
+    assert prepared.expected_head_sha == github.sha and prepared.previous_head_sha == task.previous_head_sha
+    assert prepared.feedback == task.feedback and prepared.session_id == task.session_id
+    frozen = store.jobs.get_job(job.id).payload
+    assert frozen["revision"] == prepared.model_dump(mode="json")
+    assert frozen["owner_messages"] == ["Preserve both changes", "First queued request", "Second queued request"]
+    with store.flows.locked(flow.id) as locked:
+        inputs = AgentInputStore(locked.database)
+        assert inputs.take(locked.flow) == []
+        inputs.record(locked.flow, "late", "For the next turn")
+    assert await subject.prepare(store.jobs.get_job(job.id)) == prepared
+    with store.flows.locked(flow.id) as locked:
+        assert AgentInputStore(locked.database).take(locked.flow) == ["For the next turn"]
 
 
 @pytest.mark.parametrize("baseline", [None, "unrelated"])

@@ -61,6 +61,9 @@ CREATE TABLE IF NOT EXISTS console_activity (
  PRIMARY KEY(flow_id,version)
 );
 ALTER TABLE console_activity ADD COLUMN IF NOT EXISTS round_no INTEGER CHECK(round_no>0);
+ALTER TABLE console_activity ADD COLUMN IF NOT EXISTS awaiting_agent BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS ix_console_pending_agent ON console_activity(flow_id,round_no,version)
+ WHERE awaiting_agent;
 CREATE INDEX IF NOT EXISTS ix_console_activity_round ON console_activity(flow_id,round_no,version);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_console_flow_evidence ON console_activity(flow_id,round_no,kind)
  WHERE source='flow' AND kind IN ('archive','merge','archive_correction');

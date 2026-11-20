@@ -1,11 +1,41 @@
 """Shared result-plan construction, without effect execution or transaction ownership."""
 
+import re
 from collections.abc import Sequence
 from typing import Literal
 
+from app.contracts.protocol import InitialTaskResult, RevisionTaskResult
 from app.contracts.result_models import Effect, LabelEffect, ResultPlan, ReviewersEffect
 from app.domain.models import Flow, FlowState, JobState
 from app.persistence.deliveries import DeliveryStore
+
+_PUBLIC_STAGES = {
+    "baseline", "binding", "bootstrap", "branch", "commit", "delivery", "discovery",
+    "execution", "push", "result", "session", "workspace",
+}
+# Only fixed Worker diagnostics (or the strictly numeric timeout) belong in chat or retry prompts.
+_PUBLIC_DETAILS = {
+    "local branch has unpublished commits", "checkout does not match the fetched coding baseline",
+    "local VCS state changed after revision preparation", "remote changed after revision preparation",
+    "unregistered workspace unexpectedly exists", "repository has uncommitted changes",
+    "remote branch is missing", "local commit does not match the remote branch",
+    "original coding session is missing", "original coding session is unavailable",
+    "missing strict revision output or session", "Amp execution output exceeded byte limit",
+    "Codex execution output exceeded byte limit",
+}
+
+
+def coding_failure_status(result: InitialTaskResult | RevisionTaskResult) -> str:
+    """Describe a coding outcome without copying command stderr, URLs or native final messages."""
+    status = f"运行退出码 {result.exit_code}。"
+    stage, detail = result.failure_stage, result.failure_detail or ""
+    if stage is None or stage not in _PUBLIC_STAGES:
+        return status
+    if detail in _PUBLIC_DETAILS or re.fullmatch(
+        r"(?:Amp|Codex): no new stdout/stderr for [0-9]{1,6}(?:\.[0-9]{1,6})?s; execution timed out", detail,
+    ):
+        return f"{status}{stage}: {detail}"
+    return status + stage
 
 
 def failed_plan(base: ResultPlan, reason: str) -> ResultPlan:

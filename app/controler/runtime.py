@@ -254,6 +254,7 @@ class ServerRuntime:
             await asyncio.sleep(self.settings.worker_sweep_interval)
 
     def _settle_reviews(self) -> None:
+        self.service.dispatch_pending_inputs()
         if self.reviews.claim_due():
             self.gateway.wake_all()
 

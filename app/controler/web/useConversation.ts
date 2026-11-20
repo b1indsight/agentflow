@@ -301,7 +301,11 @@ export async function readConversationProvenance(
  * Keep read identities and opaque cursors after body eviction. WindowList owns all pixel restoration;
  * callers report raw mounted indexes with onRange and the latest raw reading key with onAnchor.
  */
-export function useConversation(flowId: number) {
+export function useConversation(
+  flowId: number,
+  refresh: number,
+  lastRefresh: React.RefObject<number>,
+) {
   const [state, setState] = useState(() => cache.get(flowId) ?? empty());
   const current = useRef(state),
     controller = useRef<AbortController | null>(null),
@@ -406,10 +410,19 @@ export function useConversation(flowId: number) {
       onRange(wanted.current);
   }, [state.busy, state.error, state.items, onRange]);
   useEffect(() => {
-    // StrictMode deliberately aborts the first mount; do not retain its in-flight flag.
-    if (current.current.snapshot === null) void read(null);
-    return () => controller.current?.abort();
-  }, [flowId, read]);
+    // The detail owns this watermark: a send on another tab must refresh even a cached snapshot.
+    // Don't consume it when a tab switch or StrictMode aborts the in-flight read.
+    let mounted = true;
+    if (lastRefresh.current !== refresh) {
+      void read(null, true).then(() => {
+        if (mounted) lastRefresh.current = refresh;
+      });
+    } else if (current.current.snapshot === null) void read(null);
+    return () => {
+      mounted = false;
+      controller.current?.abort();
+    };
+  }, [read, refresh, lastRefresh]);
   return {
     state,
     load,

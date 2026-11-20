@@ -54,13 +54,18 @@ class ActivityCursor(Cursor):
 def _display_body(alias: str) -> str:
     prefix = f"{alias}." if alias else ""
     body, source = f"{prefix}body", f"{prefix}source"
+    questions = f"{body}::jsonb->'needs_clarification'"
     return (
         f"CASE WHEN {source}='worker' AND {prefix}kind='message'"
         f" AND {prefix}author='assistant' AND pg_input_is_valid({body},'jsonb') THEN "
         # A valid JSONB guard also rejects NUL/invalid surrogates before decoding native text.
         f"CASE WHEN jsonb_typeof({body}::jsonb->'summary')='string'"
         f" AND {body}::jsonb->>'vcs_backend_used' IN ('git','jj')"
-        f" THEN {body}::jsonb->>'summary' ELSE {body} END ELSE "
+        f" THEN ({body}::jsonb->>'summary') || CASE WHEN jsonb_typeof({questions})='array'"
+        " THEN coalesce(E'\\n\\n待澄清：\\n\\n' || (SELECT string_agg('- ' || (q #>> '{}'),"
+        f" E'\\n' ORDER BY n) FROM jsonb_array_elements({questions}) WITH ORDINALITY AS points(q,n)"
+        " WHERE jsonb_typeof(q)='string' AND btrim(q #>> '{}')<>''), '') ELSE '' END"
+        f" ELSE {body} END ELSE "
         f"CASE WHEN {source}='worker' THEN {body} ELSE "
         f"regexp_replace({body}, E'\\n\\n<!-- flowtool:effect:[0-9a-f]{{64}} -->$', '') END END"
     )

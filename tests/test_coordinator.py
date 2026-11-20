@@ -29,6 +29,7 @@ from app.controler.workflow.tools import FlowToolService
 from app.domain.inference_models import InferenceCapability, InferenceFailure, InferenceOutput
 from app.domain.models import DeliveryState, FlowState, Job, JobKind, JobState
 from app.github import GitHubApp
+from app.persistence.activity import ActivityStore
 from app.persistence.store import Store
 from app.plugins import get_plugin_manager
 from tests.flow_fixtures import enqueue_job
@@ -431,6 +432,12 @@ async def test_initial_failure_after_open_pr_request_has_no_github_pr_side_effec
     assert await apply_result(subject, job, result) is JobState.FAILED
     assert github.opened == []
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.OPENING
+    # A persisted result may be all we have when the Worker transcript is unavailable.
+    assert await subject.results.apply(job.id) is JobState.FAILED
+    [failure] = ActivityStore(store.database).page(flow.id).items
+    assert (failure.author, failure.source) == ("Worker", "workflow_result")
+    assert failure.metadata["job_id"] == job.id
+    assert "退出码 1" in failure.body and "failed" not in failure.body
 
 
 @pytest.mark.parametrize("stage,detail,reason", [
@@ -459,6 +466,12 @@ async def test_initial_failure_keeps_diagnostics_local(store, prepared_initial, 
     assert store.results.list_effects(job.id) == []
     assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
     assert store.jobs.get_job(job.id).last_error == f"编码失败{reason}。未开 PR。"
+    [failure] = ActivityStore(store.database).page(flow.id).items
+    if stage:
+        assert stage in failure.body
+    if detail and stage:
+        assert detail in failure.body
+    assert "ignored raw message" not in failure.body and "[REDACTED]" not in failure.body
 
 
 @pytest.mark.parametrize("version", [1, 14, 15])
@@ -490,6 +503,8 @@ async def test_recovery_applies_unassigned_control_failure_without_rewriting_inb
     assert persisted.result_payload == accepted.result_payload
     assert persisted.result_digest == accepted.result_digest == terminal_digest(terminal)
     assert persisted.last_error == "preparation failed"
+    [failure] = ActivityStore(store.database).page(flow.id).items
+    assert failure.author == "FlowTool" and terminal.error not in failure.body
     assert github.comments == []
     assert store.results.list_effects(job.id) == []
     assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED

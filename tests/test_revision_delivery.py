@@ -49,6 +49,7 @@ from app.github import (
     ReviewThread,
     ReviewThreads,
 )
+from app.persistence.activity import ActivityStore
 from app.worker.execution import vcs
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.vcs import (
@@ -183,6 +184,81 @@ class RevisionAgent:
         self.efforts.append(effort)
         self.calls.append(("start", context, prompt))
         return CodingExecutionResult("new-session", revision_output().model_dump_json(), 0)
+
+
+@pytest.mark.parametrize("relationship", ["local-ahead", "remote-ahead", "diverged"])
+async def test_explicit_retry_leaves_branch_reconciliation_to_original_session(
+    revision_workspace, revision_collaborator, relationship,
+):
+    # A failed push can leave commits on either side. Only the resumed agent may reconcile them.
+    root, repo, task, secret, pool = revision_workspace
+    baseline = task.expected_head_sha
+    if relationship != "local-ahead":
+        baseline = publish_external(revision_collaborator, task)
+    if relationship != "remote-ahead":
+        _git("commit", "--allow-empty", "-m", "Local work awaiting push", cwd=repo)
+    before = await asyncio.to_thread(subprocess.check_output, ["git", "show-ref"], cwd=repo)
+    task = task.model_copy(update={"retry_status": "Previous push failed.",
+                                   "instruction": "Keep my changes."})
+
+    class ReconcilingAgent(RevisionAgent):
+        async def resume(self, session_id, prompt, *, cwd, output_schema=None, context=None):
+            assert session_id == task.session_id
+            assert await asyncio.to_thread(subprocess.check_output, ["git", "show-ref"], cwd=cwd) == before
+            assert "Previous push failed." in prompt and "Keep my changes." in prompt
+            assert task.task_content not in prompt and task.expected_head_sha not in prompt
+            assert baseline not in prompt
+            _git("pull", "--no-rebase", "origin", task.branch, cwd=cwd)
+            _git("push", "origin", task.branch, cwd=cwd)
+            return await super().resume(session_id, prompt, cwd=cwd, context=context)
+
+    agent = ReconcilingAgent(repo)
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
+                                  workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
+    assert result.exit_code == 0, result.failure_detail
+    assert result.baseline_sha == baseline
+    assert result.clean_worktree and result.remote_sha == result.commit_sha
+    assert [call[0] for call in agent.calls] == ["resume"]
+
+
+async def test_retry_keeps_unfinished_edits_but_does_not_accept_an_unpushed_commit(
+    revision_workspace, revision_backend,
+):
+    # Even a jj inspection can snapshot unfinished edits; leave the working copy to the session.
+    root, repo, task, secret, pool = revision_workspace
+    before = await local_commit(repo)
+    (repo / "README.md").write_text("unfinished\n")
+    task = task.model_copy(update={"retry_status": "Delivery interrupted"})
+
+    class UnpublishedAgent(RevisionAgent):
+        async def resume(self, session_id, prompt, *, cwd, output_schema=None, context=None):
+            assert await local_commit(cwd) == before
+            assert (cwd / "README.md").read_text() == "unfinished\n"
+            if revision_backend is VcsKind.JJ:
+                env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+                await _jj("commit", "-m", "Local change", cwd=cwd, env=env)
+                await _jj("bookmark", "set", task.branch, "-r", "@-", cwd=cwd, env=env)
+            else:
+                _git("commit", "-am", "Local change", cwd=cwd)
+            return CodingExecutionResult(session_id, revision_output(vcs_backend_used=revision_backend).model_dump_json(), 0)
+
+    result = await WorkerExecutor(root, UnpublishedAgent(repo), state=ExecutionState(root, 1), worker_id="w",
+                                  workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
+    assert len(result.invocations) == 1 and result.invocations[0].mode == "resume"
+    assert result.exit_code != 0 and result.failure_stage == "push"
+
+
+@pytest.mark.parametrize("session", [None, "session-1"])
+async def test_explicit_retry_reports_missing_session_without_fallback(revision_workspace, session):
+    # Starting a fresh conversation would silently lose the failed agent's in-flight work.
+    root, repo, task, secret, pool = revision_workspace
+    task = task.model_copy(update={"retry_status": "Push failed", "session_id": session})
+    agent = RevisionAgent(repo, "missing")
+    result = await WorkerExecutor(root, agent, state=ExecutionState(root, 1), worker_id="w",
+                                  workspaces=pool).execute(task, secret, tool_caller=RecordingToolCaller())
+    assert result.exit_code != 0 and result.failure_stage == "session"
+    assert [call[0] for call in agent.calls] == (["resume"] if session else [])
+    assert result.session_generation == task.session_generation
 
 
 @pytest.mark.parametrize("rewrite", [False, True])
@@ -742,14 +818,23 @@ async def test_control_preserves_omitted_feedback_and_does_not_rereview_noop(rev
     assert "已按 review 更新" not in github.comments[0]
 
 
-async def test_failed_revision_keeps_diagnostics_local(revision_control):
+@pytest.mark.parametrize("stage,detail,public", [
+    ("workspace", "unregistered workspace unexpectedly exists", True),
+    ("baseline", "local branch has unpublished commits", True),
+    ("baseline", "local branch has unpublished commits: /private/token", False),
+])
+async def test_failed_revision_keeps_diagnostics_local(revision_control, stage, detail, public):
     # A failed execution must preserve feedback and binding without notifying PR participants.
     store, github, job, subject, task = revision_control
-    result = verified_result(task, exit_code=65, output=None, failure_stage="workspace",
-                             failure_detail="unregistered workspace unexpectedly exists",
+    result = verified_result(task, exit_code=65, output=None, failure_stage=stage,
+                             failure_detail=detail,
                              invocations=[])
     assert await apply_result(subject, job, result) is JobState.FAILED
-    assert "unregistered workspace unexpectedly exists" in store.jobs.get_job(job.id).last_error
+    assert detail in store.jobs.get_job(job.id).last_error
+    [failure] = [item for item in ActivityStore(store.database).page(job.flow_id).items
+                 if item.kind == "failure"]
+    assert failure.author == "Worker" and stage in failure.body
+    assert (detail in failure.body) is public
     assert store.results.list_effects(job.id) == []
     assert github.comments == github.review_requests == []
     assert [(f.item_id, f.version) for f in store.reviews.pending(job.flow_id)] == [
