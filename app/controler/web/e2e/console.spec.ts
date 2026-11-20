@@ -6270,7 +6270,7 @@ for (const width of [1440, 390]) {
     await expect(page.getByLabel("文件源码", { exact: true })).toContainText(
       "<script>window.fileExecuted=true</script>",
     );
-    // Inspect untrusted source, excluding the pager's own trusted SVG button icons.
+    // Inspect untrusted source separately from the toolbar icons.
     await expect(
       page
         .getByLabel("文件源码", { exact: true })
@@ -6287,11 +6287,14 @@ for (const width of [1440, 390]) {
     await page.screenshot({
       path: `../../../.amp/in/artifacts/numbered-file-long-${width}.png`,
     });
-    await page.getByRole("button", { name: "下一段", exact: true }).click();
-    await expect(page.getByLabel("文件源码分段浏览")).toContainText("8193");
-    // A character-budget split continues the same physical line, including when it wraps.
-    await expect(numbers).toHaveCount(1);
-    await expect(numbers.first()).toHaveAttribute("data-line-number", "4");
+    const readsBeforeScroll = reads.length;
+    await root.evaluate((node) => (node.scrollTop = node.scrollHeight));
+    await expect
+      .poll(() => page.getByLabel("文件源码", { exact: true }).textContent())
+      .toBe(source);
+    await expect(numbers).toHaveCount(4);
+    await expect(numbers.last()).toHaveAttribute("data-line-number", "4");
+    expect(reads).toHaveLength(readsBeforeScroll);
     const expand = page.getByRole("button", { name: "展开详情标题" });
     if (width === 390) {
       await expect(expand).toBeVisible();
@@ -6483,19 +6486,22 @@ for (const width of [1440, 390]) {
       selection.addRange(range);
     });
     await page.keyboard.press("ControlOrMeta+c");
-    // Native <pre> selection omits its final rendered line break, but preserves inner CRLF.
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
-      first.slice(0, -2),
+      first,
     );
     await page.evaluate(() => window.getSelection()?.removeAllRanges());
     await page.screenshot({
       path: `../../../.amp/in/artifacts/numbered-file-code-${width}.png`,
     });
-    await page.getByRole("button", { name: "下一段", exact: true }).click();
-    await expect(numbers).toHaveCount(35);
-    await expect(numbers.first()).toHaveAttribute("data-line-number", "201");
+    await expect(
+      page.getByRole("button", { name: /^(上一段|下一段)$/ }),
+    ).toHaveCount(0);
+    await page
+      .locator(".detail-body")
+      .evaluate((node) => (node.scrollTop = node.scrollHeight));
+    await expect(numbers).toHaveCount(235);
     await expect(numbers.last()).toHaveAttribute("data-line-number", "235");
-    expect(await preview.textContent()).toBe(source.slice(first.length));
+    expect(await preview.textContent()).toBe(source);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
@@ -6506,15 +6512,12 @@ for (const width of [1440, 390]) {
         .locator(".detail-body")
         .evaluate((node) => node.scrollWidth <= node.clientWidth),
     ).toBe(true);
-    await page.locator(".detail-body").evaluate((node) => (node.scrollTop = 0));
-    await expect(numbers.first()).toBeInViewport();
-    await expect(page.getByRole("tab", { name: "example.ts" })).toBeVisible();
+    await numbers.last().scrollIntoViewIfNeeded();
     await page.screenshot({
       path: `../../../.amp/in/artifacts/numbered-file-next-${width}.png`,
     });
-    await page.getByRole("button", { name: "上一段", exact: true }).click();
-    expect(await preview.textContent()).toBe(first);
-    await expect(numbers.first()).toHaveAttribute("data-line-number", "1");
+    await page.locator(".detail-body").evaluate((node) => (node.scrollTop = 0));
+    await expect(numbers.first()).toBeInViewport();
     content = "";
     await page.getByRole("button", { name: "重新读取", exact: true }).click();
     await expect(page.getByText("空文件", { exact: true })).toBeVisible();

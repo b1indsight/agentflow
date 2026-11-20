@@ -2100,9 +2100,12 @@ pre code {
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  padding: 20px 0;
+  padding: 0;
   background: var(--paper);
   border: 0;
+}
+.numbered-code {
+  padding: 20px 0;
 }
 .numbered-code code {
   display: grid;
@@ -2128,10 +2131,6 @@ pre code {
   min-width: 0;
   min-height: 1.6em;
   padding: 0 16px;
-}
-.file-viewer .text-window-controls {
-  padding: 8px 16px;
-  border-top: 1px solid var(--line);
 }
 .file-image {
   display: block;
