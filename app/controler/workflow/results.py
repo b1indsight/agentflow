@@ -451,6 +451,7 @@ class ResultApplication:
         if plan.batch_id is not None and plan.batch_state is not None:
             consumed = plan.consumed
             batch_state, open_points = plan.batch_state, list(plan.open_points)
+            addressed_by = None
             if plan.revision is not None:
                 records = result_store_tx.list_effects(plan.job_id)
                 blocked = {(f.item_id, f.version) for r in records
@@ -470,8 +471,9 @@ class ResultApplication:
                 assert plan.delivery is not None and plan.delivery.head_sha is not None
                 head = (frozen_revision(job).expected_head_sha if plan.revision_purpose == "answer"
                         else plan.revision.commit_sha)
-                reviews_tx.record_addressed(plan.batch_id, consumed, head, job.id)
-            reviews_tx.complete(plan.batch_id, batch_state, consumed, list(dict.fromkeys(open_points)))
+                addressed_by = (head, job.id)
+            reviews_tx.complete(plan.batch_id, batch_state, consumed, list(dict.fromkeys(open_points)),
+                                addressed_by=addressed_by)
 
     @staticmethod
     def _commit_initial_delivery(

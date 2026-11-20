@@ -1,18 +1,17 @@
 """Permanent collected versions and per-Flow committed reading snapshots."""
 
-import base64
 import hashlib
 import json
 from datetime import datetime
 from difflib import unified_diff
 
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.contracts.console import ActivityItem, ActivityPage, ConsoleFailure, ContentPage
 from app.domain.flow_policy import ORIGIN_KINDS, FlowFact
 from app.github.console import Observation
 from app.persistence.console import ConsoleStore
+from app.persistence.cursor import Cursor
 from app.persistence.records import Row
 from app.persistence.repository import Repository
 
@@ -40,8 +39,7 @@ _ROUND_FACTS = frozenset({"archive", "merge", "archive_correction", "round_resum
 _NON_LEDGER_SQL = "('state','baseline','inference_exhausted')"
 
 
-class ActivityCursor(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+class ActivityCursor(Cursor):
     flow: int
     snapshot: int
     time: datetime
@@ -49,16 +47,6 @@ class ActivityCursor(BaseModel):
     parent: str | None
     versions: str | None = None
     revision: int = 0
-
-    def encode(self) -> str:
-        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode()
-
-    @classmethod
-    def decode(cls, token: str) -> "ActivityCursor":
-        try:
-            return cls.model_validate_json(base64.b64decode(token, altchars=b"-_", validate=True))
-        except (ValueError, ValidationError) as error:
-            raise ConsoleFailure("cursor_invalid") from error
 
 
 # Decode coding-result summaries and hide GitHub transport receipts at the same boundary.

@@ -6,8 +6,6 @@ import json
 import re
 import shlex
 
-from pydantic import BaseModel, ConfigDict, ValidationError
-
 from app.contracts.console import (
     ConsoleFailure,
     FlowDetail,
@@ -19,6 +17,7 @@ from app.contracts.console import (
     RepositoryPage,
     SourceStatus,
 )
+from app.persistence.cursor import Cursor
 from app.persistence.records import Row
 from app.persistence.repository import Repository
 
@@ -26,26 +25,19 @@ PHASES: tuple[Phase, ...] = ("queued", "running", "review", "blocked", "archived
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
-class PageCursor(BaseModel):
+class PageCursor(Cursor):
     """Scope and upper-ID watermark bind keyset continuation to one query."""
 
-    model_config = ConfigDict(extra="forbid", strict=True)
     scope: str
     after: int
     ceiling: int
 
-    def encode(self) -> str:
-        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode()
-
     @classmethod
-    def decode(cls, value: str, scope: str) -> "PageCursor":
-        try:
-            result = cls.model_validate_json(base64.b64decode(value, altchars=b"-_", validate=True))
-            if result.scope != scope or not 0 <= result.after <= result.ceiling:
-                raise ValueError("foreign cursor")
-            return result
-        except (ValueError, ValidationError) as error:
-            raise ConsoleFailure("cursor_invalid") from error
+    def for_scope(cls, token: str, scope: str) -> "PageCursor":
+        result = cls.decode(token)
+        if result.scope != scope or not 0 <= result.after <= result.ceiling:
+            raise ConsoleFailure("cursor_invalid")
+        return result
 
 
 def _scope(*values: object) -> str:
@@ -226,7 +218,7 @@ class ConsoleStore(Repository):
             ).fetchone()
             assert ceiling is not None
             position = (
-                PageCursor.decode(cursor, scope)
+                PageCursor.for_scope(cursor, scope)
                 if cursor
                 else PageCursor(scope=scope, after=ceiling["n"], ceiling=ceiling["n"])
             )
@@ -351,7 +343,7 @@ class ConsoleStore(Repository):
             ).fetchone()
             assert high is not None
             position = (
-                PageCursor.decode(cursor, scope)
+                PageCursor.for_scope(cursor, scope)
                 if cursor
                 else PageCursor(scope=scope, after=high["n"], ceiling=high["n"])
             )
