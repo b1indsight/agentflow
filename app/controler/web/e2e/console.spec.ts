@@ -6687,7 +6687,8 @@ test("worker file requests cancel on tab changes and cannot overwrite a later fi
   const started = page.waitForRequest(`**/api/files/${ids[0]}`);
   await page.getByRole("link", { name: "文件0", exact: true }).click();
   const request = await started;
-  await expect(page.getByRole("status")).toContainText("正在读取文件");
+  const viewer = page.getByRole("region", { name: "文件查看器" });
+  await expect(viewer.getByRole("status")).toContainText("正在读取文件");
   await page.getByRole("tab", { name: "会话", exact: true }).click();
   await expect.poll(() => request.failure()?.errorText).toBeTruthy();
   await page.getByRole("link", { name: "文件1", exact: true }).click();
