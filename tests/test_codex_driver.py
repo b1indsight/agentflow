@@ -40,6 +40,11 @@ async def test_adapter_returns_raw_output_without_interpreting_business_schema(m
 
     async def spawn(*args, **kwargs):
         assert kwargs["cwd"] == tmp_path
+        assert args[:3] == ("codex", "exec", "task")
+        assert args[args.index("-C") + 1] == str(tmp_path)
+        assert args[args.index("-s") + 1] == "danger-full-access"
+        assert "workspace-write" not in args
+        assert 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}' in args
         assert kwargs["env"]["EXAMPLE_MCP_TOKEN"] == "custom-mcp-token"
         assert args[args.index("--output-schema") + 1] == str(schema)
         if model is None:
@@ -57,16 +62,6 @@ async def test_adapter_returns_raw_output_without_interpreting_business_schema(m
     run = await CodexAgent(trusted_host=True).start("task", tmp_path, output_schema=schema, model=model, effort=effort)
     assert (run.session_id, run.last_message, run.exit_code) == ("session-1", raw, 0)
     assert run.backend == "codex" and run.model == model
-
-
-def test_trusted_host_start_uses_full_access_in_the_flow_repo() -> None:
-    args = _start_args("do the task", Path("/worker/repos/flow-1"), trusted_host=True)
-
-    assert args[:3] == ["codex", "exec", "do the task"]
-    assert ["-s", "danger-full-access"] == args[args.index("-s") : args.index("-s") + 2]
-    assert "workspace-write" not in args
-    assert "/worker/repos/flow-1" in args
-    assert 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}' in args
 
 
 def test_full_access_requires_explicit_trusted_host_mode() -> None:

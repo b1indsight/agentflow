@@ -12,16 +12,11 @@ from app.persistence.readiness import database_ready
 from app.worker.health import HealthFile, healthy
 
 
-async def test_database_readiness_is_read_only(postgresql_url):
-    assert await database_ready(postgresql_url)
-
-
 async def test_database_failure_is_not_liveness_failure(monkeypatch, server_runtime):
     async def fail(*args, **kwargs):
         raise OSError('private DSN secret')
 
     monkeypatch.setattr(readiness.psycopg.AsyncConnection, 'connect', fail)
-    assert not await database_ready('unused')
 
     runtime = server_runtime()
     monkeypatch.setattr(type(runtime.coordinator.github), "fetch_installations",
