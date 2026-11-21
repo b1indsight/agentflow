@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, RefreshCw } from "lucide-react";
 import { ApiError } from "./api";
 import { Button } from "./components/ui/button";
 import { readFile } from "./files";
-import { TextWindow } from "./windowing";
+import { CODE_LINES, textEnd, WindowList } from "./windowing";
 
 type Preview =
   | { kind: "text"; text: string }
@@ -75,6 +75,68 @@ function failureMessage(error: Error) {
     return `${messages[error.message] ?? "文件读取失败，请重试。"}（${error.message}）`;
   }
   return "文件读取失败，请检查网络或重新登录后重试。";
+}
+
+/** Reveal source in bounded steps; virtualize groups of physical lines so a wrapped line keeps one gutter. */
+function FileSource({ text }: { text: string }) {
+  const [end, setEnd] = useState(() => textEnd(text, 0, true));
+  const sentinel = useRef<HTMLDivElement>(null);
+  const starts = useMemo(() => {
+    const offsets = [0];
+    let lines = 0;
+    for (let i = 0; i < text.length - 1; i++)
+      if (text[i] === "\n" && ++lines % CODE_LINES === 0) offsets.push(i + 1);
+    return offsets;
+  }, [text]);
+  useEffect(() => {
+    const node = sentinel.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) setEnd(textEnd(text, end, true));
+      },
+      { root: node.closest("[data-scroll-root]"), rootMargin: "0px 0px 160px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [text, end]);
+  const next = starts.findIndex((start) => start > 0 && start >= end);
+  return (
+    <div className="numbered-code" tabIndex={0} aria-label="文件源码">
+      <WindowList
+        count={next < 0 ? starts.length : next}
+        itemKey={(i) => starts[i]}
+        label="文件源码行组"
+        estimate={CODE_LINES * 23}
+      >
+        {(i) => {
+          const part = text.slice(
+            starts[i],
+            Math.min(end, starts[i + 1] ?? end),
+          );
+          return (
+            <pre>
+              <code>
+                {(part.match(/[^\n]*\n|[^\n]+$/g) ?? [""]).map((line, j) => (
+                  <span className="code-line" key={j}>
+                    <span
+                      className="code-line-number"
+                      aria-hidden="true"
+                      data-line-number={i * CODE_LINES + j + 1}
+                    />
+                    <span className="code-line-text">{line}</span>
+                  </span>
+                ))}
+              </code>
+            </pre>
+          );
+        }}
+      </WindowList>
+      {end < text.length && (
+        <div className="body-sentinel" ref={sentinel} aria-hidden="true" />
+      )}
+    </div>
+  );
 }
 
 /** Only the active document is read; switching or retrying aborts and fences previous reads/decodes. */
@@ -167,13 +229,7 @@ export function FileViewer({
           (state.preview.kind === "text" ? (
             <>
               {state.size === 0 && <p>空文件</p>}
-              <TextWindow
-                text={state.preview.text}
-                stateKey={`file-${linkId}-${attempt}`}
-                code
-                lineNumbers
-                label="文件源码"
-              />
+              <FileSource text={state.preview.text} />
             </>
           ) : state.preview.kind === "image" ? (
             <img
