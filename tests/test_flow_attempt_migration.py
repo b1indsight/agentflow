@@ -71,7 +71,7 @@ def legacy(postgresql_url):
                     (11,7,'initial','failed',2,'2026-01-03','2026-01-03');
             INSERT INTO jobs(kind,state,inference,created_at,updated_at)
               VALUES ('inference','failed','{}',now(),now());
-            UPDATE jobs SET result_payload='{"old":"receipt"}',result_digest='original',
+            UPDATE jobs SET started_at=created_at,result_payload='{"old":"receipt"}',result_digest='original',
               result_received_at=now(),result_applied_at=now() WHERE id=10;
             INSERT INTO result_applications VALUES(10,'original','{"old":"plan"}',now());
             INSERT INTO console_sync(flow_id,source,pending,dirty,claim_token,claim_until,status,limitations,reason)

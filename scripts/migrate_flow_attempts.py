@@ -86,8 +86,7 @@ def _unsafe(c: Connection[Row]) -> list[str]:
                OR result_applied_at IS NOT NULL) AND (result_payload IS NULL OR result_digest IS NULL
                OR result_received_at IS NULL OR result_applied_at IS NULL))
           OR (kind<>'inference' AND (started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL
-              OR (kind='archive' AND payload->'archive' IS NOT NULL)) AND (result_received_at IS NULL
-              OR (started_at IS NOT NULL AND result_payload->>'source' IS DISTINCT FROM 'worker'))
+              OR (kind='archive' AND payload->'archive' IS NOT NULL)) AND result_received_at IS NULL
               AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.job_id=j.id
                   AND s.flow_id=j.flow_id AND s.assignment_token=j.assignment_token AND s.state='confirmed'))
         UNION ALL SELECT 'result application',j.id::text FROM result_applications r JOIN jobs j ON j.id=r.job_id
