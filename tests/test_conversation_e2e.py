@@ -4,7 +4,9 @@ import json
 import httpx
 import pytest
 
+from app.contracts.protocol import PROTOCOL_VERSION
 from app.controler.api import create_app
+from app.controler.workflow.service import ControlService
 from app.persistence.records import required
 from app.worker.execution.amp_agent import AmpCodingAgent, AmpProcessResult
 from tests.access import AccessIssuer
@@ -24,7 +26,6 @@ async def test_http_history_queues_behind_callbacks_but_not_execution(
     store, remote_flow, tmp_path, phase, monkeypatch, backend,
 ) -> None:
     flow, runtime, _github, worker, agent = remote_flow
-    job, = store.jobs.list_jobs(flow.id)
     started, release = asyncio.Event(), asyncio.Event()
     blocked_phase = "worker" if phase == "slow_export" else phase
 
@@ -52,19 +53,29 @@ async def test_http_history_queues_behind_callbacks_but_not_execution(
     other_session = ("T-" if backend == "amp" else "") + OTHER_SESSION
     # Real persisted metadata keeps the history cursor stable while execution moves
     # through preparation, tool dispatch and terminal application.
-    attempt = store.flows.create_attempt(flow.id)
+    attempt = store.flows.get_current_attempt(flow)
+    assert attempt is not None
     attempt.codex_session_id = session
     store.flows.update_attempt(attempt)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
-    continuation = store.flows.create_attempt(flow.id)
+    await worker.workspaces.provision(flow.repo)
+    slots = worker.workspaces.inventory()
+    store.workers.worker_connected("worker-1", PROTOCOL_VERSION, "prior", workspace=slots[0].workspace,
+                                   repo_workspace_limit=2, coding_agent=backend)
+    for slot in slots:
+        assert store.workers.report_workspace("worker-1", "prior", slot)
+    assert store.assignments.assign_job("worker-1", "prior", "prior")
+    control = ControlService(database=store.database)
+    control.cancel(flow)
+    flow = control.resume(flow, expected_attempt_id=attempt.id)
+    job, = (job for job in store.jobs.list_jobs(flow.id) if job.attempt_id == flow.current_attempt_id)
+    continuation = required(store.flows.get_current_attempt(flow))
     continuation.codex_session_id, continuation.session_generation = other_session, 1
     store.flows.update_attempt(continuation)
     finish = agent.finish
 
     async def finish_session(context):
         result = await finish(context)
-        result.session_id = session
+        result.session_id = other_session
         return result
 
     monkeypatch.setattr(agent, "finish", finish_session)
@@ -131,7 +142,7 @@ async def test_http_history_queues_behind_callbacks_but_not_execution(
             assert third.json()["sessions"][0]["reached_end"]
             assert (await http.get(f"/api/flows/{flow.id + 1}/conversation")).status_code == 404
             assert not broker._inflight
-            assert worker.executions[flow.id].state.load().terminal.result.session_id == session
+            assert worker.executions[flow.id].state.load().terminal.result.session_id == other_session
     finally:
         release.set()
         await issuer.auth.close()

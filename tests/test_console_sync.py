@@ -22,7 +22,7 @@ from app.contracts.conversation import (
 )
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workers.conversation import ConversationService
-from app.controler.workflow.service import ControlService
+from app.controler.workflow.service import ControlService, FlowReadOnly
 from app.domain.models import DeliveryState, JobKind
 from app.github import GitHubApp
 from app.persistence.activity import ActivityStore
@@ -36,6 +36,35 @@ from tests.workspace_fixtures import register_worker
 def only_worker(database):
     with database.connection() as connection:
         connection.execute("UPDATE console_sync SET pending=(source='worker')")
+
+
+async def test_history_only_reconnect_preserves_publication_and_cannot_read_worker(store):
+    # Released bindings remain historical facts; reconnect must not wake their old source scans.
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    register_worker(store, "w", repo=flow.repo, epoch="old")
+    enqueue_job(store, flow.id, JobKind.INITIAL)
+    assert store.assignments.assign_job("w", "token", "old")
+    ControlService(database=store.database).cancel(flow)
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
+    only_worker(store.database)
+    sync = ConsoleSyncStore(store.database)
+    claim = sync.claim()
+    assert claim is not None and claim.source == "worker"
+    archive = ActivityStore(store.database)
+    before = archive.history(flow.id, flow.required_attempt_id)
+    with store.connection() as c:
+        c.execute("UPDATE flows SET history_only=true,is_issue_owner=false WHERE id=%s", (flow.id,))
+        c.execute("UPDATE console_sync SET pending=false,dirty=false")
+    register_worker(store, "w", repo=flow.repo, epoch="again")
+    assert sync.claim() is None
+    assert not sync.finish(claim, [], cursor="late", more=False, limitations=[])
+    broker = AsyncMock()
+    with pytest.raises(FlowReadOnly):
+        await ConversationService(broker, database=store.database).read(flow.id, None, 10)
+    broker.query.assert_not_awaited()
+    with store.connection() as c:
+        assert not c.execute("SELECT 1 FROM console_sync WHERE pending OR dirty").fetchone()
+    assert archive.history(flow.id, flow.required_attempt_id) == before
 
 
 async def test_direct_task_registers_only_real_remote_sources_and_still_reads_worker(store):
@@ -53,12 +82,12 @@ async def test_direct_task_registers_only_real_remote_sources_and_still_reads_wo
     await sync.sync(worker)
     conversations.read.assert_awaited_once_with(flow.id, None, 50)
     assert sync.store.claim() is None
-    assert ActivityStore(store.database).history(flow.id, 1)
+    assert ActivityStore(store.database).history(flow.id, flow.required_attempt_id)
     with store.connection() as connection:
         names = {row["source"] for row in connection.execute("SELECT source FROM console_sync").fetchall()}
     assert names == {"github", "worker"}
 
-    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, flow.initial_branch)
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
     store.deliveries.update_delivery(delivery)
     remote = sync.store.claim()
@@ -76,7 +105,8 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(
     store, resume_during_read, monkeypatch
 ):
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    attempt = store.flows.create_attempt(flow.id)
+    attempt = store.flows.get_current_attempt(flow)
+    assert attempt is not None
     only_worker(store._db)
     conversations = Mock(spec=ConversationService)
     item = ConversationItem(
@@ -107,21 +137,21 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(
     )
     sync = ConsoleSynchronizer(Mock(spec=GitHubApp), conversations, database=store._db)
     claim = sync.store.claim()
-    assert claim and claim.source == "worker" and claim.round_no == 1
+    assert claim and claim.source == "worker" and claim.attempt_id == attempt.id
     if resume_during_read:
         # A late page belongs to its Attempt, even when its timestamp is in the new round.
         control = ControlService(database=store.database)
         control.cancel(flow)
-        flow = control.resume(flow, expected_round_no=1)
-        assert flow.current_round_no == 2
+        flow = control.resume(flow, expected_attempt_id=flow.required_attempt_id)
+        assert flow.current_attempt_id != attempt.id
     await sync.sync(claim)
     conversations.read.assert_awaited_once_with(flow.id, None, 50)
     archive = ActivityStore(store._db)
     first = archive.page(flow.id)
     message = next(i for i in first.items if i.source == "worker" and i.kind == "message")
     assert message.key == f"worker:{attempt.id}:0:record-1"
-    assert message.round_no == message.model_dump()["round_no"] == attempt.round_no == 1
-    assert archive.versions(flow.id, message.key).items[0].round_no == 1
+    assert message.attempt_id == message.model_dump()["attempt_id"] == attempt.id
+    assert archive.versions(flow.id, message.key).items[0].attempt_id == attempt.id
     assert message.body == "worker display body\\u0000"
     assert message.metadata["unsupported_characters_escaped"] is True
     summary = next(i for i in first.items if i.kind == "tool_call")
@@ -136,7 +166,7 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(
         monkeypatch.setattr(store.database, "_clock", lambda: due)
     again = sync.store.claim()
     assert again and again.cursor == "eof-checkpoint"
-    assert again.round_no == flow.current_round_no
+    assert again.attempt_id == flow.current_attempt_id
     await sync.sync(again)
     assert archive.page(flow.id).snapshot == first.snapshot
     [answer] = [i for i in first.items if i.key == f"worker:{attempt.id}:0:record-3"]
@@ -227,7 +257,7 @@ def test_worker_freshness_and_current_error_are_separate_from_session_coverage(
     only_worker(store._db)
     sync = ConsoleSyncStore(store._db)
     first_session = SessionHistory(
-        attempt_id=1,
+        attempt_id=flow.required_attempt_id,
         session_id="12345678-1234-1234-1234-123456789abc",
         session_generation=0,
         status="available",
@@ -251,7 +281,7 @@ def test_worker_freshness_and_current_error_are_separate_from_session_coverage(
         limitations=[],
         sessions=[
             SessionHistory(
-                attempt_id=2,
+                attempt_id=flow.required_attempt_id,
                 session_id="12345678-1234-1234-1234-123456789def",
                 session_generation=0,
                 status="unsupported",
@@ -305,23 +335,33 @@ async def test_worker_availability_recovers_without_a_permanent_coverage_gap(
     assert after.limitations == [] and after.last_success_at is not None
 
 
-@pytest.mark.parametrize("status", ["not_found", "unsupported"])
+@pytest.mark.parametrize("status", ["not_found", "unsupported", "worker_unavailable"])
 async def test_missing_session_recovers_only_after_that_session_is_reread(
-    store: Store, status: Literal["not_found", "unsupported"]
+    store: Store, status: Literal["not_found", "unsupported", "worker_unavailable"]
 ) -> None:
     # A clean later session must not hide an earlier missing one, including after restart.
     flow = store.flows.create_flow("owner/repo", 7, 42)
+    register_worker(store, "old", repo=flow.repo, epoch="first")
+    enqueue_job(store, flow.id, JobKind.INITIAL)
+    assert store.assignments.assign_job("old", "first-job", "first")
+    control = ControlService(database=store.database)
+    control.cancel(flow)
+    reopened = control.resume(flow, expected_attempt_id=flow.required_attempt_id)
+    register_worker(store, "new", repo=flow.repo, epoch="second")
+    assert store.assignments.assign_job("new", "second-job", "second")
     only_worker(store._db)
+    with store.connection() as connection:
+        connection.execute("UPDATE console_sync SET dirty=FALSE")
     first = SessionHistory(
-        attempt_id=1,
+        attempt_id=flow.required_attempt_id,
         session_id="12345678-1234-1234-1234-123456789abc",
         session_generation=0,
         status=status,
         starts_at_beginning=True,
-        reached_end=True,
+        reached_end=status != "worker_unavailable",
     )
     second = SessionHistory(
-        attempt_id=2,
+        attempt_id=reopened.required_attempt_id,
         session_id="12345678-1234-1234-1234-123456789def",
         session_generation=0,
         status="available",
@@ -337,7 +377,7 @@ async def test_missing_session_recovers_only_after_that_session_is_reread(
             ConversationPage(flow_id=flow.id, sessions=[second], next_cursor="eof"),
             ConversationPage(
                 flow_id=flow.id,
-                sessions=[first.model_copy(update={"status": "available"})],
+                sessions=[first.model_copy(update={"status": "available", "reached_end": True})],
                 has_more=True,
                 next_cursor="second",
             ),
@@ -348,8 +388,15 @@ async def test_missing_session_recovers_only_after_that_session_is_reread(
     for index, cursor in enumerate([None, "second", None, "second"]):
         if index == 2:
             sync = ConsoleSynchronizer(Mock(), conversations, database=store._db)
-            ConsoleStore(store._db).request_sync(flow.id)
-            only_worker(store._db)
+            if status == "worker_unavailable":
+                # Only the old owner's reconnect wakes the finished scan; no manual refresh.
+                assert sync.store.claim() is None
+                register_worker(store, "old", repo=flow.repo, epoch="back")
+                with store.connection() as connection:
+                    connection.execute("UPDATE console_sync SET pending=FALSE WHERE source='github'")
+            else:
+                ConsoleStore(store._db).request_sync(flow.id)
+                only_worker(store._db)
         with store.connection() as connection:
             connection.execute("UPDATE console_sync SET next_at=now()")
         claim = sync.store.claim()
@@ -375,7 +422,7 @@ async def test_session_gap_survives_clean_pages_until_complete_clean_rescan(stor
     flow = store.flows.create_flow("owner/repo", 7, 42)
     console = ConsoleStore(store._db)
     session = SessionHistory(
-        attempt_id=1,
+        attempt_id=flow.required_attempt_id,
         session_id="12345678-1234-1234-1234-123456789abc",
         session_generation=0,
         status="unsupported",
@@ -469,7 +516,7 @@ async def test_legacy_availability_limitations_force_a_fresh_scan_and_clear(
             next_cursor="new-eof",
             sessions=[
                 SessionHistory(
-                    attempt_id=1,
+                    attempt_id=flow.required_attempt_id,
                     session_id="12345678-1234-1234-1234-123456789abc",
                     session_generation=0,
                     status="available",

@@ -15,9 +15,8 @@ from tests.workspace_fixtures import register_worker, report_settled
 @pytest.mark.parametrize("race", [None, "started", "result", "stop", "epoch", "lease", "binding"])
 def test_assignment_rejection_preserves_competing_evidence(store, race):
     flow = store.flows.create_flow("owner/repo", 1, 1)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
+    attempt = store.flows.get_current_attempt(flow)
+    assert attempt is not None
     register_worker(store, "worker", repo=flow.repo, epoch="epoch")
     job = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.assignments.assign_job("worker", "token", "epoch")

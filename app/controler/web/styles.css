@@ -1778,48 +1778,16 @@ pre code {
   margin: 0;
   color: var(--muted);
 }
-.round-actions,
-.round-buttons,
-.round-reasons {
+.round-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   margin-top: 16px;
 }
-.round-actions > p,
-.round-form {
+.round-actions > p {
   flex-basis: 100%;
   min-width: 0;
-}
-.round-form fieldset {
-  min-width: 0;
-  padding: 16px;
-  border: 1px solid var(--line);
-  border-radius: 0;
-}
-.round-form legend {
-  padding: 0 6px;
-  font-size: var(--text-control);
-  font-weight: 600;
-}
-.round-reasons {
-  margin-bottom: 16px;
-}
-.round-form label {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--text-control);
-}
-.round-form label[for="archive-summary"] {
-  margin-bottom: 8px;
-}
-.round-form .round-choice {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
-  box-shadow: none;
 }
 .round-summary {
   white-space: pre-wrap;

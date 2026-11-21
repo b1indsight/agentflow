@@ -18,7 +18,9 @@ export const archiveReasonLabels: Record<ArchiveReason, string> = {
 export function flowLabel({
   phase,
   archive_reason,
-}: Pick<FlowSummary, "phase" | "archive_reason">): string {
+  history_only,
+}: Pick<FlowSummary, "phase" | "archive_reason" | "history_only">): string {
+  if (history_only) return "历史记录 · 只读";
   const label = phases.find(([value]) => value === phase)![1];
   return phase === "archived" && archive_reason
     ? `${label} · ${archiveReasonLabels[archive_reason]}`

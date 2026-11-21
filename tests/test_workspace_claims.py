@@ -6,7 +6,6 @@ from itertools import product
 from threading import Barrier
 from uuid import NAMESPACE_URL, uuid5
 
-import psycopg
 import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Failed
@@ -61,9 +60,6 @@ def provision(store: Store, worker: str, index: int = 0, repo: str = "owner/repo
 
 def queued(store: Store, issue: int = 1, repo: str = "owner/repo") -> Job:
     flow = store.flows.create_flow(repo, issue, None)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
     return enqueue_job(store, flow.id, JobKind.INITIAL)
 
 
@@ -361,29 +357,6 @@ def test_inference_is_one_default_lane_with_local_preference(store: Store) -> No
     assert store.assignments.assign_job("a", "extra", "epoch", slot="infer") is None
 
 
-def test_legacy_worker_schema_requires_explicit_physical_identity_migration(postgresql_url: str) -> None:
-    with psycopg.connect(postgresql_url) as conn:
-        conn.execute("CREATE TABLE workers(worker_id TEXT PRIMARY KEY)")
-    store = Store(postgresql_url)
-    try:
-        with pytest.raises(ValueError, match="explicit workspace migration required"):
-            store.init_db()
-    finally:
-        store.close()
-
-
-def test_obsolete_workspace_state_schema_is_explicitly_rejected(postgresql_url: str) -> None:
-    with psycopg.connect(postgresql_url) as conn:
-        conn.execute("CREATE TABLE workers(worker_id TEXT, workspace TEXT, workspace_state TEXT,"
-                     " PRIMARY KEY(worker_id,workspace))")
-    store = Store(postgresql_url)
-    try:
-        with pytest.raises(ValueError, match="obsolete workspace state schema"):
-            store.init_db()
-    finally:
-        store.close()
-
-
 def test_claim_eligibility_matches_the_domain_dispatch_rules(store: Store) -> None:
     # The claim query repeats Flow.accepts and FlowDelivery.supersedes in SQL so that one
     # statement filters the whole queue. A rule changed on only one side would dispatch
@@ -407,7 +380,7 @@ def test_claim_eligibility_matches_the_domain_dispatch_rules(store: Store) -> No
         slot = provision(store, "a", 0, repo)
         flow = store.flows.create_flow(repo, 1, None)
         job = enqueue_job(store, flow.id, kind)
-        delivery = store.deliveries.get_or_create_delivery(flow.id, "branch")
+        delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "branch")
         delivery.state = delivery_state
         store.deliveries.update_delivery(delivery)
         with store.flows.locked(flow.id) as context:
@@ -416,7 +389,7 @@ def test_claim_eligibility_matches_the_domain_dispatch_rules(store: Store) -> No
             for event in events:
                 fresh = flows.transition(fresh, event)
             if archive:
-                flows.archive_round(fresh, delivery)
+                flows.archive_attempt(fresh, delivery)
         with store.connection() as connection:
             # Bind every Flow so that affinity, not the initial-only rule, admits each kind.
             connection.execute(

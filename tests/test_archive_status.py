@@ -39,8 +39,8 @@ def test_direct_archive_notifies_only_real_pr_with_no_fake_issue_identity():
     # The same completion receipt must remain useful without an Issue target or fake Issue line.
     flow = Flow(id=1, repo="owner/repo", issue_number=None,
                 task_content="Direct", installation_id=42,
-                state=FlowState.FINALIZING)
-    delivery = FlowDelivery(flow_id=flow.id, branch="flow/1", pr_number=17,
+                state=FlowState.FINALIZING, current_attempt_id=9)
+    delivery = FlowDelivery(flow_id=flow.id, attempt_id=9, branch="flow/1", pr_number=17,
                             merge_commit_sha="a" * 40, merged_at=datetime(2026, 9, 8, tzinfo=UTC))
     effects = archive_effects(flow, delivery, done_label="flow:done", in_review_label="flow:in-review")
     assert [effect.number for effect in effects] == [17, 17, 17]
@@ -50,7 +50,7 @@ def test_direct_archive_notifies_only_real_pr_with_no_fake_issue_identity():
     comment = next(effect for effect in effects if isinstance(effect, CommentEffect))
     assert "关联 Issue" not in comment.body and "None" not in comment.body
     assert "关联 PR：owner/repo#17" in comment.body and "a" * 40 in comment.body
-    assert "本轮已归档" in comment.body and "工作区处置已确认" not in comment.body
+    assert "本次执行已归档" in comment.body and "工作区处置已确认" not in comment.body
 
 
 class ArchiveGitHub(RecordingGitHub):
@@ -186,7 +186,7 @@ async def test_merge_notice_survives_permission_failure_without_worker(
     assert store.results.get_plan(job.id) == plan
     assert len(github.notifications) == 2
     assert len(github.writes) == 6
-    assert all("本轮已归档" in body and "工作区处置已确认" not in body
+    assert all("本次执行已归档" in body and "工作区处置已确认" not in body
                for _, body in github.notifications)
     assert store.flows.get_flow(archived.id) == archived
 
@@ -209,7 +209,7 @@ async def test_merge_notice_restart_after_resume_only_observes_old_write(
         patch.setattr(ResultStore, "finish", interrupted)
         with pytest.raises(RuntimeError, match="receipt interrupted"):
             await subject.results.apply(job.id)
-    resumed = ControlService(database=store.database).resume(merge_flow, expected_round_no=1)
+    resumed = ControlService(database=store.database).resume(merge_flow, expected_attempt_id=merge_flow.current_attempt_id)
     before = list(github.writes)
     github.targets[merge_flow.issue_number] = {"Flow:In-Review", "user-label"}
     store.results.recover_claims()
@@ -218,6 +218,18 @@ async def test_merge_notice_restart_after_resume_only_observes_old_write(
     assert github.targets[merge_flow.issue_number] == {"Flow:In-Review", "user-label"}
     assert len(github.notifications) == 1
     assert store.flows.get_flow(merge_flow.id) == resumed
+
+
+async def test_unprepared_merge_notice_after_reopen_keeps_original_attempt(store, merge_flow, archive_resources):
+    # A control receipt may first be consumed after B starts; the persisted plan still belongs to A.
+    await route_merge(store, merge_flow)
+    job = store.jobs.list_jobs(merge_flow.id)[-1]
+    resumed = ControlService(database=store.database).resume(merge_flow, expected_attempt_id=job.attempt_id)
+    github = ArchiveGitHub()
+    assert await coordinator(store, github).results.apply(job.id) is JobState.DONE
+    assert store.results.get_plan(job.id).attempt_id == job.attempt_id != resumed.current_attempt_id
+    assert store.flows.get_flow(resumed.id) == resumed
+    assert github.writes == []
 
 
 async def test_old_merge_notice_cannot_change_new_issue_owner_labels(
@@ -234,19 +246,19 @@ async def test_old_merge_notice_cannot_change_new_issue_owner_labels(
     assert store.flows.get_flow(newer.id) == newer
 
 
-@pytest.mark.parametrize("changed", [{"pr_number": 99}, {"round_no": 2}])
+@pytest.mark.parametrize("changed", [{"pr_number": 99}, {"attempt_id": 99}])
 async def test_notice_cannot_replace_immutable_archive_facts(
     store, merge_flow, changed, archive_resources,
 ):
     await route_merge(store, merge_flow)
     job = store.jobs.list_jobs(merge_flow.id)[-1]
     notice = MergeArchiveNotice.model_validate(job.result_payload["terminal"]).model_copy(update=changed)
-    forged = ResultInbox(version=2, source="control", terminal=notice)
+    forged = ResultInbox(version=3, source="control", terminal=notice)
     with store.connection() as connection:
         connection.execute("UPDATE jobs SET result_payload=%s,result_digest=%s WHERE id=%s",
                            (Jsonb(forged.model_dump(mode="json")), merge_notice_digest(notice), job.id))
     github = ArchiveGitHub()
-    with pytest.raises(ValueError, match="archived round"):
+    with pytest.raises(ValueError, match="archived attempt"):
         await coordinator(store, github).results.apply(job.id)
     assert not github.writes and not github.notifications
     assert store.jobs.get_job(job.id).result_applied_at is None
@@ -264,7 +276,7 @@ async def test_archive_publishes_stable_status_and_replay_does_not_backfill(stor
         assert f"Flow {flow.id}" in body
         assert f"#{flow.issue_number}" in body and "#17" in body
         assert "a" * 40 in body and "2026-09-08T08:00:00" in body
-        assert "本轮已归档" in body and "工作区处置已确认" not in body
+        assert "本次执行已归档" in body and "工作区处置已确认" not in body
         assert "worker-a:" not in body and "archive-token" not in body
     plan = store.results.get_plan(job.id)
     assert plan.archive_notice == result and plan.archive is None

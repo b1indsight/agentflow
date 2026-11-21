@@ -5,27 +5,11 @@ from pydantic import SecretStr
 from app.controler.config import ServerSettings
 from app.controler.events.router import EventRouter
 from app.controler.workflow.service import ControlService
-from app.domain.models import ArchiveReason, DeliveryState, Flow, FlowState, JobKind
+from app.domain.models import ArchiveReason, DeliveryState, FlowState
+from app.persistence.activity import ActivityStore
+from app.persistence.console_sync import ConsoleSyncStore
 from app.persistence.store import Store
 from tests.workspace_fixtures import register_worker
-
-
-class RecordingService(ControlService):
-    def __init__(self, store: Store) -> None:
-        super().__init__(database=store.database)
-
-    def create_flow(
-        self, repo: str, issue_number: int | None, installation_id: int | None,
-        *, task_content: str | None = None,
-    ) -> Flow:
-        flow = self.flows.create_flow(repo, issue_number, installation_id, task_content=task_content)
-        with self.flows.locked(flow.id) as context:
-            assert context.flow is not None
-            self.jobs.using(context.database).enqueue_job(context.flow, JobKind.INITIAL)
-        return flow
-
-    def notify_jobs(self) -> None:
-        pass
 
 
 @pytest.fixture
@@ -38,7 +22,7 @@ def router(store: Store, monkeypatch) -> EventRouter:
         settle_seconds=75.0,
         submit_grace_seconds=15.0,
     )
-    service = RecordingService(store)
+    service = ControlService(database=store.database)
     return EventRouter(
         service,
         settings,
@@ -118,16 +102,47 @@ async def test_unlabel_and_stop_comment_cancel_active_flow(
     assert stopped.archive_reason is ArchiveReason.ABANDONED
 
 
+def test_late_pr_events_cannot_reach_history_or_replacement(router, store):
+    # PR conversation commands arrive as issue_comment. A missed PR lookup must
+    # not be retried against an active Issue, even if its number would match.
+    old = store.flows.create_flow("owner/repo", 7, 42)
+    delivery = store.deliveries.get_or_create_delivery(old.required_attempt_id, old.initial_branch)
+    delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
+    store.deliveries.update_delivery(delivery)
+    ControlService(database=store.database).cancel(old)
+    with store.connection() as c:
+        c.execute("UPDATE flows SET history_only=true,is_issue_owner=false WHERE id=%s", (old.id,))
+    current = store.flows.create_flow(old.repo, 7, 42)
+    unrelated = store.flows.create_flow(old.repo, 17, 42)
+    with store.connection() as c:
+        c.execute("UPDATE console_sync SET pending=false,dirty=false")
+    sync = ConsoleSyncStore(store.database)
+    archived = ActivityStore(store.database)
+    before = archived.page(old.id)
+    pr = {"number": 17, "merged": True, "merged_at": old.created_at.isoformat(), "merge_commit_sha": "a" * 40}
+    merge = {"repository": {"full_name": old.repo}, "action": "closed", "pull_request": pr}
+    comment = {"repository": merge["repository"], "action": "created", "sender": {"login": "alice"},
+               "issue": {"number": 17, "pull_request": {}},
+               "comment": {"id": 99, "body": "/flow stop", "user": {"login": "alice"},
+                           "created_at": current.created_at.isoformat()}}
+    for kind, payload in (("pull_request", merge), ("issue_comment", comment)):
+        router.dispatch(kind, f"late-{kind}", payload)
+        sync.observe_webhook(kind, payload)
+    assert store.flows.get_flow(current.id) == current
+    assert store.flows.get_flow(unrelated.id) == unrelated
+    assert archived.page(old.id) == before
+    assert sync.claim() is None
+    router.dispatch("issue_comment", "current-stop", {**comment, "issue": {"number": 7}})
+    assert store.flows.get_flow(current.id).state is FlowState.ARCHIVED
+
+
 @pytest.mark.parametrize("author", ["reviewer", "Flowtool-bot[bot]"])
 @pytest.mark.asyncio
 async def test_review_comment_is_stored_for_current_attempt(
     router: EventRouter, store: Store, monkeypatch, author: str,
 ) -> None:
     flow = store.flows.create_flow("owner/repo", 7, installation_id=42)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, f"flow/{flow.id}")
     delivery.pr_number = 17
     delivery.state = DeliveryState.OPEN
     store.deliveries.update_delivery(delivery)

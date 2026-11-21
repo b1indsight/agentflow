@@ -97,15 +97,15 @@ class CreateFlowRequest(FlowTarget):
 
 
 class ArchiveRequest(ConsoleModel):
-    """Request round completion, never a direct state override."""
+    """Request Attempt completion, never a direct state override."""
 
     reason: ArchiveReason
     summary: str = Field(max_length=10000)
-    expected_round_no: int = Field(strict=True, gt=0)
+    expected_attempt_id: int = Field(strict=True, gt=0)
 
 
 class ResumeRequest(ConsoleModel):
-    expected_round_no: int = Field(strict=True, gt=0)
+    expected_attempt_id: int = Field(strict=True, gt=0)
 
 
 class RetryRequest(ConsoleModel):
@@ -133,7 +133,9 @@ class FlowSummary(ConsoleModel):
     pr_number: int | None
     pr_url: str | None
     lifecycle: FlowState
-    current_round_no: int
+    history_only: bool
+    current_attempt_id: int
+    attempt_started_at: datetime
     archive_reason: ArchiveReason | None
     archive_summary: str | None
     phase: Phase
@@ -179,6 +181,7 @@ class RepositoryPage(ConsoleModel):
 class JobSummary(ConsoleModel):
     id: int
     flow_id: int
+    attempt_id: int
     attempt: int
     kind: str
     state: str
@@ -226,7 +229,7 @@ class ActivityItem(ConsoleModel):
     version: int
     source: str
     kind: str
-    round_no: int | None = Field(strict=True, gt=0)
+    attempt_id: int | None = Field(strict=True, gt=0)
     occurred_at: datetime
     updated_at: datetime
     observed_at: datetime

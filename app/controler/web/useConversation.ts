@@ -62,7 +62,7 @@ export function activityIdentity(entry: ActivityItem): ActivityIdentity {
   return {
     key: entry.key,
     version: entry.version,
-    round_no: entry.round_no,
+    attempt_id: entry.attempt_id,
     source: entry.source,
     kind: entry.kind,
     author: entry.author,
@@ -286,8 +286,26 @@ export async function readConversationProvenance(
       }
       item = fetchedItems[position.indexes.indexOf(index)];
     }
-    const { key, version, source, author, occurred_at, url, metadata } = item;
-    items.push({ key, version, source, author, occurred_at, url, metadata });
+    const {
+      key,
+      version,
+      attempt_id,
+      source,
+      author,
+      occurred_at,
+      url,
+      metadata,
+    } = item;
+    items.push({
+      key,
+      version,
+      attempt_id,
+      source,
+      author,
+      occurred_at,
+      url,
+      metadata,
+    });
   }
   return {
     items,
@@ -303,7 +321,7 @@ export async function readConversationProvenance(
  */
 export function useConversation(
   flowId: number,
-  refresh: number,
+  refresh: number | null,
   lastRefresh: React.RefObject<number>,
 ) {
   const [state, setState] = useState(() => cache.get(flowId) ?? empty());
@@ -413,7 +431,7 @@ export function useConversation(
     // The detail owns this watermark: a send on another tab must refresh even a cached snapshot.
     // Don't consume it when a tab switch or StrictMode aborts the in-flight read.
     let mounted = true;
-    if (lastRefresh.current !== refresh) {
+    if (refresh !== null && lastRefresh.current !== refresh) {
       void read(null, true).then(() => {
         if (mounted) lastRefresh.current = refresh;
       });
@@ -431,7 +449,8 @@ export function useConversation(
     readProvenance,
     retry: () => {
       const { error, busy } = current.current;
-      if (error && !busy) void read(error.cursor, error.refresh);
+      if (error && !busy)
+        void read(error.cursor, refresh !== null && error.refresh);
     },
   };
 }

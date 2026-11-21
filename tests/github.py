@@ -77,7 +77,7 @@ class RecordingRepository(Repository):
 
     async def refetch(self) -> Repository:
         record_call(self, "fetch_repository")
-        return Repository(self.installation, self.full_name, default_branch="trunk")
+        return Repository(self.installation, self.full_name, default_branch="trunk", archived=False)
 
     async def create_push_capability(self) -> PushCapability:
         record_call(self, "create_push_capability")

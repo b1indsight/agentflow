@@ -399,10 +399,7 @@ def test_distinct_receipt_waits_for_older_repository_transaction(store: Store) -
 ])
 def test_all_business_routes_rollback_with_receipt(store, monkeypatch, event, action):
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "flow/7")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
     delivery.head_sha = "b" * 40
     store.deliveries.update_delivery(delivery)

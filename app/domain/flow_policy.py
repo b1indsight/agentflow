@@ -27,8 +27,8 @@ class FlowEvent(StrEnum):
     FINALIZATION_REQUESTED = "finalization_requested"
     CLEANUP_APPLIED = "cleanup_applied"
     RETRY_REQUESTED = "retry_requested"
-    ROUND_ARCHIVED = "round_archived"
-    ROUND_RESUMED = "round_resumed"
+    ATTEMPT_ARCHIVED = "attempt_archived"
+    ATTEMPT_STARTED = "attempt_started"
 
 
 def decide_flow_state(
@@ -75,19 +75,19 @@ def decide_flow_state(
         case FlowEvent.RETRY_REQUESTED:
             if state is FlowState.BLOCKED:
                 return FlowState.FINALIZING if archive_reason is not None else FlowState.QUEUED
-        case FlowEvent.ROUND_ARCHIVED:
+        case FlowEvent.ATTEMPT_ARCHIVED:
             if state is FlowState.FINALIZING and archive_reason is not None:
                 return FlowState.ARCHIVED
-        case FlowEvent.ROUND_RESUMED:
+        case FlowEvent.ATTEMPT_STARTED:
             if state is FlowState.ARCHIVED:
                 return FlowState.QUEUED
     raise ValueError(f"illegal Flow event {event} in {state}")
 
 
-# Columns rebuilt from the ledger. current_attempt_id and title_job_id are pointers.
+# The selected Attempt is reconstructed from the creation/start facts in version order.
 LEDGER_COLUMNS = (
     "repo", "issue_number", "task_content", "installation_id", "title", "state",
-    "current_round_no", "archive_reason", "archive_summary", "archived_at",
+    "current_attempt_id", "archive_reason", "archive_summary", "archived_at",
     "created_at", "updated_at",
 )
 ORIGIN_KINDS = frozenset({"created", "snapshot"})
@@ -99,7 +99,7 @@ class FlowFact(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     kind: str
-    round_no: int
+    attempt_id: int
     occurred_at: datetime
     metadata: dict[str, str | int | bool | None]
 
@@ -111,7 +111,7 @@ def task_digest(task_content: str | None) -> str | None:
 
 def fact_kind(event: FlowEvent) -> str:
     """The ledger kind recording an event; the archive evidence row records archival."""
-    return "archive" if event is FlowEvent.ROUND_ARCHIVED else event.value
+    return "archive" if event is FlowEvent.ATTEMPT_ARCHIVED else event.value
 
 
 def replay_flow(flow_id: int, facts: Sequence[FlowFact], *, task_content: str | None) -> Flow:
@@ -130,13 +130,20 @@ def replay_flow(flow_id: int, facts: Sequence[FlowFact], *, task_content: str | 
         raise ValueError(f"Flow {flow_id} task content does not match its ledger digest")
     # A snapshot carries every ledger column; creation carries only the inputs.
     columns: dict[str, object] = (
-        {**origin.metadata, "state": FlowState.QUEUED, "current_round_no": origin.round_no,
+        {**origin.metadata, "state": FlowState.QUEUED, "current_attempt_id": origin.attempt_id,
          "created_at": origin.occurred_at, "updated_at": origin.occurred_at}
         if origin.kind == "created" else dict(origin.metadata)
     )
     columns.pop("task_digest")
     flow = Flow.model_validate({**columns, "id": flow_id, "task_content": task_content})
+    if flow.current_attempt_id != origin.attempt_id:
+        raise ValueError("snapshot ownership differs from its Attempt")
+    selected = {origin.attempt_id}
     for fact in facts[starts[-1] + 1:]:
+        if fact.kind == FlowEvent.ATTEMPT_STARTED:
+            if fact.attempt_id in selected:
+                raise ValueError("start fact reuses an earlier Attempt")
+            selected.add(fact.attempt_id)
         flow = _apply(flow, fact)
     return flow
 
@@ -146,17 +153,18 @@ def _apply(flow: Flow, fact: FlowFact) -> Flow:
         case "merge":
             return flow
         case "titled":
+            if fact.attempt_id != flow.current_attempt_id:
+                raise ValueError("title belongs to a superseded Attempt")
             return flow.model_copy(update={"title": fact.metadata["title"]})
         case "archive_correction":
-            # Mirrors observe_archived_merge: only the still-current archived round changes.
-            if fact.round_no == flow.current_round_no and flow.state is FlowState.ARCHIVED:
+            # Mirrors observe_archived_merge: only the still-current archived Attempt changes.
+            if fact.attempt_id == flow.current_attempt_id and flow.state is FlowState.ARCHIVED:
                 return flow.model_copy(update={"archive_reason": ArchiveReason.SUCCEEDED})
             return flow
-    event = FlowEvent.ROUND_ARCHIVED if fact.kind == "archive" else FlowEvent(fact.kind)
-    resumed = event is FlowEvent.ROUND_RESUMED
-    expected_round = flow.current_round_no + 1 if resumed else flow.current_round_no
-    if fact.round_no != expected_round:
-        raise ValueError(f"{fact.kind} fact belongs to round {fact.round_no}, not {expected_round}")
+    event = FlowEvent.ATTEMPT_ARCHIVED if fact.kind == "archive" else FlowEvent(fact.kind)
+    resumed = event is FlowEvent.ATTEMPT_STARTED
+    if not resumed and fact.attempt_id != flow.current_attempt_id:
+        raise ValueError(f"{fact.kind} fact has unexpected Attempt {fact.attempt_id}")
     reason_value = fact.metadata.get("archive_reason")
     reason = ArchiveReason(reason_value) if isinstance(reason_value, str) else None
     state = decide_flow_state(
@@ -166,12 +174,12 @@ def _apply(flow: Flow, fact: FlowFact) -> Flow:
         raise ValueError(f"{fact.kind} fact is not effective from {flow.state}")
     if resumed:
         return flow.model_copy(update={
-            "state": state, "current_round_no": fact.round_no, "archive_reason": None,
+            "state": state, "current_attempt_id": fact.attempt_id, "archive_reason": None,
             "archive_summary": None, "archived_at": None, "updated_at": fact.occurred_at,
         })
     return flow.model_copy(update={
         "state": state, "archive_reason": reason,
         "archive_summary": fact.metadata.get("archive_summary"),
-        "archived_at": fact.occurred_at if event is FlowEvent.ROUND_ARCHIVED else flow.archived_at,
+        "archived_at": fact.occurred_at if event is FlowEvent.ATTEMPT_ARCHIVED else flow.archived_at,
         "updated_at": fact.occurred_at,
     })

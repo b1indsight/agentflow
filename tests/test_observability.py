@@ -265,12 +265,12 @@ def test_reconcile_metrics_match_scheduler_eligibility(store, postgresql_url):
         (5, FlowState.QUEUED, DeliveryState.NONE, None),
     ]:
         flow = store.flows.create_flow('fixture/repo', number, 1)
-        delivery = store.deliveries.get_or_create_delivery(flow.id, f'flow/{number}')
+        delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, f'flow/{number}')
         delivery.state, delivery.pr_number = delivery_state, pr
         store.deliveries.update_delivery(delivery)
         if state is FlowState.ARCHIVED:
             ControlService(database=store.database).cancel(flow)
-            assert ActivityStore(store.database).archived(flow.id, 1) is not None
+            assert ActivityStore(store.database).archived(flow.id, flow.required_attempt_id) is not None
         elif state is not FlowState.QUEUED:
             with store.flows.locked(flow.id) as context:
                 flow = context.flow

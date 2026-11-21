@@ -113,6 +113,7 @@ class FeedbackReconciler:
                     or not flow.accepts(JobKind.REVISION)
                     or flow.current_attempt_id is None
                     or delivery is None
+                    or delivery.attempt_id != check.attempt_id
                     or delivery.state is not DeliveryState.OPEN
                     or delivery.pr_number is None
                 ):
@@ -156,11 +157,11 @@ class FeedbackReconciler:
                 reviews_tx = self.reviews.using(tx)
                 fresh = tx.lock_workflow(flow.id)
                 current = deliveries_tx.get_delivery(flow.id)
+                if fresh is None or fresh.current_attempt_id != check.attempt_id:
+                    return  # Resume also replaced the cursor: never advance or delay the new scan.
                 if (
-                    fresh is None
-                    or current is None
+                    current is None
                     or not fresh.accepts(JobKind.REVISION)
-                    or fresh.current_attempt_id != flow.current_attempt_id
                     or fresh.installation_id != flow.installation_id
                     or current != delivery
                 ):
@@ -192,11 +193,16 @@ class FeedbackReconciler:
             delay = retry_delay(check.failures + 1, self.database.now(), error)
             if error.kind not in {GitHubErrorKind.TRANSIENT, GitHubErrorKind.RATE_LIMITED}:
                 delay = max(1800, delay)
-            self.reconcile_store.feedback_failed(check, delay, error.kind.value)
+            diagnostic = error.kind.value
         except Exception as error:  # noqa: BLE001 -- persist only the error class, never SDK credentials
-            self.reconcile_store.feedback_failed(
-                check, retry_delay(check.failures + 1, self.database.now()), type(error).__name__,
-            )
+            delay = retry_delay(check.failures + 1, self.database.now())
+            diagnostic = type(error).__name__
+        else:
+            return
+        with self.database.transaction() as tx:
+            fresh = tx.lock_workflow(check.flow_id)
+            if fresh is not None and fresh.current_attempt_id == check.attempt_id:
+                self.reconcile_store.using(tx).feedback_failed(check, delay, diagnostic)
 
     async def _scan_threads(
         self, pr: PullRequest, cursor: str | None,

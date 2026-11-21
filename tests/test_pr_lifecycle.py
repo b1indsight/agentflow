@@ -1,4 +1,4 @@
-"""Closing a PR ends its round without discarding outstanding execution evidence."""
+"""Closing a PR ends its attempt without discarding outstanding execution evidence."""
 
 from datetime import timedelta
 from types import SimpleNamespace
@@ -272,7 +272,7 @@ async def test_closed_pr_http_observation_replaces_awaiting_review_in_console(st
     assert not store.jobs.list_jobs(flow.id)
 
 
-async def test_reopen_does_not_refreeze_feedback_from_an_abandoned_round(
+async def test_reopening_closed_pr_leaves_cancelled_feedback_inactive(
     store, lifecycle_flow, lifecycle_resources
 ):
     flow, clock = lifecycle_flow
@@ -338,7 +338,7 @@ async def test_reopen_never_reactivates_blocked_or_archived_flow(
     flow, _ = lifecycle_flow
     if state is FlowState.ARCHIVED:
         await check(store, flow, GitHub(flow))
-        assert ActivityStore(store.database).archived(flow.id, 1) is not None
+        assert ActivityStore(store.database).archived(flow.id, flow.current_attempt_id) is not None
     else:
         flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
         delivery = store.deliveries.get_delivery(flow.id)
@@ -352,7 +352,7 @@ async def test_reopen_never_reactivates_blocked_or_archived_flow(
 
 
 @pytest.mark.parametrize("action", ["closed", "reopened", "synchronize"])
-async def test_close_webhook_ends_round_while_other_lifecycle_events_are_hints(
+async def test_close_webhook_archives_flow_while_other_lifecycle_events_are_hints(
     store, lifecycle_flow, action
 ):
     flow, _ = lifecycle_flow
@@ -382,6 +382,35 @@ async def test_close_webhook_ends_round_while_other_lifecycle_events_are_hints(
     )
 
 
+def test_late_pr_merge_records_only_its_original_attempt(store, lifecycle_flow):
+    # A's PR was merged before abandonment, but GitHub delivered that event after B opened PR 29.
+    flow, clock = lifecycle_flow
+    service = ControlService(database=store.database)
+    service.cancel(flow)
+    resumed = service.resume(flow, expected_attempt_id=flow.required_attempt_id)
+    current = store.deliveries.get_attempt_delivery(resumed.required_attempt_id)
+    assert current is not None and current.pr_number is None
+    current.pr_number, current.state = 29, DeliveryState.OPEN
+    store.deliveries.update_delivery(current)
+    payload = {
+        "action": "closed", "repository": {"full_name": flow.repo},
+        "installation": {"id": flow.installation_id},
+        "pull_request": {"number": 17, "merged": True, "merged_at": (clock.now - timedelta(seconds=3)).isoformat(),
+                         "merge_commit_sha": "a" * 40},
+    }
+    router = EventRouter(service, SimpleNamespace(), bot_login="flowtool[bot]", database=store.database)
+    jobs = store.jobs.list_jobs(flow.id)
+    for receipt in ("merge", "redelivered"):
+        router.dispatch("pull_request", receipt, payload)
+    original = store.deliveries.get_attempt_delivery(flow.required_attempt_id)
+    assert original.state is DeliveryState.MERGED and original.pr_number == 17
+    facts = [item.kind for item in ActivityStore(store.database).history(flow.id, flow.required_attempt_id)]
+    assert facts.count("merge") == facts.count("archive_correction") == 1
+    assert store.flows.get_flow(flow.id) == resumed
+    assert store.deliveries.get_delivery(flow.id) == current
+    assert store.jobs.list_jobs(flow.id) == jobs
+
+
 async def test_close_during_capability_preparation_never_dispatches(store, pending_revision, monkeypatch, server_runtime):
     flow, job, _, github, _subject = pending_revision
     original = Repository.create_push_capability
@@ -404,7 +433,7 @@ async def test_close_during_capability_preparation_never_dispatches(store, pendi
     assert store.flows.get_flow_execution(flow.id).released_at is None
 
 
-async def test_inflight_revision_is_acknowledged_without_reopening_abandoned_round(
+async def test_inflight_revision_is_acknowledged_without_reopening_closed_delivery(
     store, pending_revision, monkeypatch
 ):
     flow, job, task, github, subject = pending_revision
@@ -475,10 +504,8 @@ async def test_initial_close_before_final_commit_keeps_identity_without_authoriz
     ).create_flow("owner/repo", 8, 42)
     register_worker(store, "worker", repo=flow.repo, epoch="epoch")
     job = store.assignments.assign_job("worker", "token", "epoch")
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+    attempt = store.flows.get_current_attempt(flow)
+    delivery = store.deliveries.get_or_create_delivery(attempt.id, f"flow/{flow.id}")
     delivery.state, delivery.head_sha, delivery.base_branch = DeliveryState.OPENING, "abc123", "trunk"
     delivery.title, delivery.body = "Title", "Body\n\nCloses #8"
     store.deliveries.update_delivery(delivery)

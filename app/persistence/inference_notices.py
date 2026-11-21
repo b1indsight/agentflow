@@ -49,10 +49,10 @@ class InferenceNoticeStore(Repository):
             return False
         with self._db.transaction() as tx, tx.connection() as connection:
             # A delayed result still belongs to its frozen Job/Attempt, even after
-            # the batch's current inference job or the Flow's round has changed.
+            # the batch's current inference job or the Flow's Attempt has changed.
             job = connection.execute(
-                "SELECT j.round_no FROM jobs j JOIN review_batches b ON b.id=%s AND b.flow_id=j.flow_id"
-                " JOIN attempts a ON a.id=b.attempt_id AND a.flow_id=b.flow_id AND a.round_no=j.round_no"
+                "SELECT j.attempt_id FROM jobs j JOIN review_batches b ON b.id=%s AND b.flow_id=j.flow_id"
+                " AND b.attempt_id=j.attempt_id"
                 " WHERE j.flow_id=%s AND j.kind='inference'"
                 " AND j.inference->'task'->>'request_id'=%s"
                 " AND (j.inference->>'batch_id')::bigint=b.id",
@@ -63,7 +63,7 @@ class InferenceNoticeStore(Repository):
             # This validated internal notice is not an external conversation observation.
             return ActivityStore(tx)._append(flow_id, Observation(
                 key=f"inference-exhausted:{batch_id}", source="flow", kind="inference_exhausted",
-                round_no=job["round_no"],
+                attempt_id=job["attempt_id"],
                 author="controller", occurred_at=summary.finished_at, updated_at=summary.finished_at,
                 title="推理尝试未成功", metadata={
                     "batch_id": batch_id, "logical_call_id": summary.logical_call_id,
@@ -105,9 +105,10 @@ class InferenceNoticeStore(Repository):
                 " FROM console_activity WHERE flow_id=%s AND version<=%s"
                 " AND source='flow' AND kind='inference_exhausted' ORDER BY key,version DESC)"
                 " SELECT current.*,b.state AS batch_state,b.decision IS NOT NULL AS has_decision,"
-                " coalesce(f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
-                " AND f.delivery_state='open' AND f.current_attempt_id=b.attempt_id,FALSE) AS live"
+                " coalesce(NOT f.history_only AND f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
+                " AND a.delivery_state='open' AND a.id=b.attempt_id,FALSE) AS live"
                 " FROM current JOIN flows f ON f.id=current.flow_id"
+                " JOIN attempts a ON a.id=f.current_attempt_id"
                 " LEFT JOIN review_batches b ON b.id=(current.metadata->>'batch_id')::bigint"
                 " AND b.flow_id=current.flow_id WHERE TRUE"
                 + after

@@ -416,7 +416,7 @@ def merged_business(store, flow_id):
     flow = store.flows.get_flow(flow_id)
     delivery = store.deliveries.get_delivery(flow.id)
     if delivery is None:
-        delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+        delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, flow.initial_branch)
     delivery.state, delivery.pr_number = DeliveryState.MERGED, 17
     delivery.merged_at, delivery.merge_commit_sha = store.now(), "a" * 40
     store.deliveries.update_delivery(delivery)
@@ -425,7 +425,7 @@ def merged_business(store, flow_id):
         flow.archive_reason = ArchiveReason.SUCCEEDED
         flows = store.flows.using(context.database)
         flows.transition(flow, FlowEvent.FINALIZATION_REQUESTED)
-        flows.archive_round(flow, delivery)
+        flows.archive_attempt(flow, delivery)
     return flow
 
 
@@ -503,7 +503,7 @@ def test_archived_stop_settlement_reuses_only_exact_cleaned_generation(store, mo
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
 
 
-@pytest.mark.parametrize("mismatch", [None, "version", "source", "assigned", "kind"])
+@pytest.mark.parametrize("mismatch", [None, "version", "retired", "source", "assigned", "kind"])
 def test_only_local_merge_notice_is_independent_of_resource_settlement(store, mismatch):
     # Notification delivery may remain uncertain while the original stop finishes;
     # a lookalike remote result must keep its ordinary resource preconditions.
@@ -517,13 +517,15 @@ def test_only_local_merge_notice_is_independent_of_resource_settlement(store, mi
         tx.stops.request(job.flow_id)
     flow = merged_business(store, job.flow_id)
     notice = enqueue_job(store, flow.id, JobKind.ARCHIVE)
-    payload = {"version": 2, "source": "control", "terminal": {
-        "type": "merge_archive", "job_id": notice.id, "flow_id": flow.id, "round_no": 1,
+    payload = {"version": 3, "source": "control", "terminal": {
+        "type": "merge_archive", "job_id": notice.id, "flow_id": flow.id, "attempt_id": notice.attempt_id,
         "repo": flow.repo, "pr_number": 17, "merged_at": store.now().isoformat(),
         "merge_commit_sha": "a" * 40,
     }}
     if mismatch in {"version", "source"}:
-        payload[mismatch] = "2" if mismatch == "version" else "worker"
+        payload[mismatch] = "3" if mismatch == "version" else "worker"
+    elif mismatch == "retired":
+        payload["version"] = 2
     with store.connection() as conn:
         conn.execute(
             "UPDATE jobs SET state='running',result_payload=%s,result_digest='test',result_received_at=%s,"

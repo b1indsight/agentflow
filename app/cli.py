@@ -6,6 +6,7 @@ serve：起 webhook 常驻进程；flows/show/cancel/retry：运维 flow。
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -100,6 +101,7 @@ def project_retry(repo: str) -> None:
 @contextmanager
 def _store() -> Iterator[Store]:
     from app.controler.config import ServerSettings
+    from app.controler.workflow.service import FlowReadOnly
     from app.persistence.store import Store
 
     settings = ServerSettings()  # type: ignore[call-arg]
@@ -107,6 +109,9 @@ def _store() -> Iterator[Store]:
     store.init_db()
     try:
         yield store
+    except FlowReadOnly as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from None
     finally:
         store.close()
 
@@ -139,7 +144,8 @@ def flows(active: bool = typer.Option(False, help="只看未终结的")) -> None
             pr = f"PR#{delivery.pr_number}" if delivery and delivery.pr_number else "-"
             cycles = att.revision_cycles if att else 0
             target = f"{f.repo}#{f.issue_number}" if f.issue_number is not None else f.repo
-            typer.echo(f"[{f.id}] {target} {f.state:<10} {pr} cycles={cycles}")
+            mode = " [历史只读]" if f.history_only else ""
+            typer.echo(f"[{f.id}] {target} {f.state:<10} {pr} cycles={cycles}{mode}")
 
 
 @flow_app.command("create")
@@ -259,9 +265,11 @@ def flow_show(flow_id: int) -> None:
             raise typer.Exit(1)
         typer.echo(
             f"flow {f.id}\n  repo={f.repo} issue={f'#{f.issue_number}' if f.issue_number is not None else '-'} state={f.state}"
-            f" round={f.current_round_no} outcome={f.archive_reason or '-'}"
+            f" outcome={f.archive_reason or '-'}"
             f" archived_at={f.archived_at or '-'}"
         )
+        if f.history_only:
+            typer.echo("  历史记录 · 只读")
         if f.task_content is not None:
             typer.echo(f"  task:\n{f.task_content}")
         execution = store.flows.get_flow_execution(f.id)
@@ -295,11 +303,11 @@ def flow_show(flow_id: int) -> None:
         for att in store.flows.list_attempts(f.id):
             cur = " (current)" if att.id == f.current_attempt_id else ""
             typer.echo(
-                f"  attempt {att.id}{cur}: session={att.codex_session_id}"
+                f"  session={att.codex_session_id or '-'}{cur}: started={att.created_at}"
                 f" cycles={att.revision_cycles}"
             )
         jobs = store.jobs.list_jobs(f.id)
-        if delivery is not None and delivery.state is DeliveryState.MERGED:
+        if not f.history_only and delivery is not None and delivery.state is DeliveryState.MERGED:
             typer.echo(
                 f"  archive: {archive_progress(f, jobs, result_store=store.results, flows=store.flows)}"
             )
@@ -362,9 +370,8 @@ def flow_finish(
     flow_id: int,
     reason: ArchiveReason,
     summary: str = typer.Option(""),
-    expected_round: int = typer.Option(..., min=1),
 ) -> None:
-    """结束指定轮次；无 PR 的成功调查必须提供结论。"""
+    """结束 Flow；无 PR 的成功调查必须提供结论。"""
     from app.controler.workflow.service import ControlService
 
     with _store() as store:
@@ -373,17 +380,17 @@ def flow_finish(
             raise typer.Exit(1)
         try:
             ControlService(database=store.database).finish(
-                flow, reason=reason, summary=summary, expected_round_no=expected_round
+                flow, reason=reason, summary=summary, expected_attempt_id=flow.required_attempt_id
             )
         except ValueError as error:
-            typer.echo(str(error), err=True)
+            typer.echo(f"{error}; refresh with flow show {flow_id}", err=True)
             raise typer.Exit(1) from None
-    typer.echo(f"finalization requested for flow {flow_id} round {expected_round}")
+    typer.echo(f"finalization requested for flow {flow_id}")
 
 
 @flow_app.command("resume")
-def flow_resume(flow_id: int, expected_round: int = typer.Option(..., min=1)) -> None:
-    """显式恢复已归档 Flow，开启新轮次和新交付。"""
+def flow_resume(flow_id: int) -> None:
+    """在已归档的 Flow 上重新开工。"""
     from app.controler.workflow.service import ControlService
 
     with _store() as store:
@@ -391,13 +398,13 @@ def flow_resume(flow_id: int, expected_round: int = typer.Option(..., min=1)) ->
         if flow is None:
             raise typer.Exit(1)
         try:
-            resumed = ControlService(database=store.database).resume(
-                flow, expected_round_no=expected_round
+            ControlService(database=store.database).resume(
+                flow, expected_attempt_id=flow.required_attempt_id
             )
         except ValueError as error:
-            typer.echo(str(error), err=True)
+            typer.echo(f"{error}; refresh with flow show {flow_id}", err=True)
             raise typer.Exit(1) from None
-    typer.echo(f"flow {flow_id} round {resumed.current_round_no}: queued")
+    typer.echo(f"flow {flow_id}: queued")
 
 
 @flow_app.command("verify")
@@ -406,33 +413,45 @@ def flow_verify(flow_id: Annotated[int | None, typer.Argument()] = None) -> None
     with _store() as store:
         ids = [flow_id] if flow_id is not None else [f.id for f in store.flows.list_flows()]
         failed = False
+        matched = 0
         for identity in sorted(ids):
             try:
                 differences = store.flows.verify(identity)
             except ValueError as error:
-                typer.echo(f"flow {identity}: {error}", err=True)
+                message = "执行记录归属不一致" if "attempt" in str(error).lower() else str(error)
+                typer.echo(f"flow {identity}: {message}", err=True)
                 failed = True
                 continue
+            if differences is None:
+                typer.echo(f"flow {identity}: 历史只读，跳过重放")
+                continue
             for column, (replayed, stored) in differences.items():
+                if column == "current_attempt_id":
+                    typer.echo(f"flow {identity}: 当前执行与账本不一致", err=True)
+                    continue
                 typer.echo(f"flow {identity} {column}: ledger={replayed!r} stored={stored!r}",
                            err=True)
             failed = failed or bool(differences)
+            matched += not differences
     if failed:
         raise typer.Exit(1)
-    typer.echo(f"{len(ids)} flow(s) match their ledger")
+    typer.echo(f"{matched} flow(s) match their ledger")
 
 
 @flow_app.command("history")
-def flow_history(flow_id: int, round_no: int = typer.Option(..., "--round", min=1)) -> None:
-    """按轮次显示 Flow 事实账本、状态快照与通知的原始活动记录。"""
+def flow_history(flow_id: int) -> None:
+    """按记录顺序显示 Flow 历史，包括归档和重新开工前后的记录。"""
     from app.persistence.activity import ActivityStore
 
     with _store() as store:
-        flow = store.flows.get_flow(flow_id)
-        if flow is None or round_no > flow.current_round_no:
+        if store.flows.get_flow(flow_id) is None:
             raise typer.Exit(1)
-        for item in ActivityStore(store.database).history(flow_id, round_no):
-            typer.echo(item.model_dump_json())
+        for item in ActivityStore(store.database).history(flow_id):
+            row = item.model_dump(mode="json", include={"version", "occurred_at", "title"})
+            row.update({key: item.metadata[key] for key in (
+                "state", "archive_reason", "archive_summary", "job_id", "pr_number"
+            ) if item.metadata.get(key) is not None})
+            typer.echo(json.dumps(row, ensure_ascii=False))
 
 
 if __name__ == "__main__":

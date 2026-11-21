@@ -1,8 +1,28 @@
 # 当前版本部署与重启
 
-当前格式为 wire protocol v27、worker journal v5、执行 ResultInbox v1、Control 合并通知 inbox v2、workspace manifest v3。serve 和 worker 拒绝不匹配的在线协议；在维护窗口停止新分配，等待在途准备、推理、执行和已发远端操作收敛，再备份并协调更新两端。设置页的模型目录查询不需要更换原生 CLI 或转换 journal。
+当前格式为 wire protocol v28、worker journal v5、执行 ResultInbox v1、Control 合并通知 inbox v3、workspace manifest v3。serve 和 worker 拒绝不匹配的在线协议；在维护窗口停止新分配，等待在途准备、推理、执行和已发远端操作收敛，再备份并协调更新两端。设置页的模型目录查询不需要更换原生 CLI 或转换 journal。
 首次部署选择新数据库/schema 与新 worker root，serve/worker 固定到同一 commit/镜像 digest；
-schema 初始化只创建当前结构。合并归档调整不增加 DDL；前置的[多工作区并发版本](../plan/worker-workspace-concurrency.md)仍须独立核验 workers 结构及物理位置迁移。
+服务只在空 schema 创建 v3；已有库启动时只读核对 v3 标记、所需表和视图、关键列及 Worker 主键。不在启动时改表、刷新历史卡片或补写账本。检查失败时先停写，在备份副本上按下节预检；不要手工补版本标记。前置的[多工作区并发版本](../plan/worker-workspace-concurrency.md)仍须独立核验 workers 结构及物理位置迁移。
+
+## 将旧 Flow 保留为只读历史（数据库 schema v3）
+
+**只迁移全部 Flow 均已归档的旧库。** 预检和 `--apply` 都检查这个条件。发现未归档记录时报告 Flow ID 和状态并停止，不跳过记录，也不替用户归档。迁移保留原链接、归档结论和任务正文，释放 Issue 所有权。旧详情只供查阅；切换后创建的 Flow 可正常运行，归档后仍可重新开工。
+
+只支持从已有六态账本、合表和多工作区的未标记轮号库迁移。空库直接初始化为 v3。旧库不能通过启动服务来升级；未知或混合结构需人工核对。先在旧版本核对账本、按[冷备与恢复](backup-restore.md)恢复独立 PostgreSQL 副本。以下从**新版本源码根目录**运行，service 名指向副本，不要让副本连接生产 Worker 或 GitHub：
+
+```sh
+uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_copy' > preflight.json
+uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_copy' --apply > applied.json
+uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_copy' --apply
+```
+
+第一条只读。检查 `status`（待迁移库应为 `legacy`）和全部 `conflicts`。预检拒绝未完成的 Job（含独立推理）、未应用的收件、未释放的绑定/Worker 占位、未确认停止、未结清的工具调用或副作用、未处理 webhook、未定的 Projects 远端新增、仍在处理的评审批次。不要删队列、伪造停止回执或覆写结果让检查通过。回到旧版本按报出的身份结清；无法证明真实进程已退出或远端写入已对账时，停止升级。
+
+`--apply` 在独占锁内重做检查，同一事务内完成身份回填、历史标记、队列退役和版本提交。按同一 Flow 内的旧轮号关联已有 Attempt，保留其 ID、时间戳和会话。归档卡片、作业或活动引用的轮号缺少 Attempt 时，只用 Flow 创建时间（首轮）或唯一的重开记录补建；归属冲突或缺少所需时间则停止。迁移不重放旧状态机。历史收件、计划和 effects 原样保留，不再派发或重试。
+
+在恢复入口前，二次执行应返回 `status=current, applied=false`。对比备份：Flow ID、选择的 Attempt、归档结论、活动版本/key/父引用/元数据、作业收件和 digest 应对应；无归属的共享活动仍无归属。核实 `SELECT count(*) FROM flows WHERE NOT history_only OR is_issue_owner` 为零，旧 Console 同步不再 pending、无 claim，旧 Projects/对账不再排队，来源限制、覆盖缺口和已采集正文仍可查看。**不要用重新采集旧内容验证切换**。在隔离副本上打开原链接，确认归档记录可读且不可重新开工。
+
+正式切换需另行授权。停止**全部**入口、控制端、Worker、定时写入方；记录/排空在途任务、外部操作和未确认停止，保存并验证数据库及原 Worker root/HOME 备份可恢复，再在停写库执行上述核对。API、Console、CLI、Worker 同步发布。恢复写入前若失败，事务会回滚；若已提交可恢复停写备份并运行旧版本。恢复写入后**不可**直接降级或覆盖库：先停写、保存增量与外部事实，再前向修复或对账恢复。
 
 ## 升级前核对数据库与工作区
 
@@ -12,7 +32,7 @@ schema 初始化只创建当前结构。合并归档调整不增加 DDL；前置
 
 ## 合并归档与资源回收分离
 
-Control 核验 PR 合并后先提交业务归档，原 Worker 的停止、精确回执与 GitHub 通知独立收尾。新合并不再派发 Worker ARCHIVE；仅新的 Control 通知写 inbox v2。Worker 执行仍写 v1，wire20、journal v5 和 manifest v3 不因这项调整再次升级。
+对可运行的 Flow，Control 核验 PR 合并后先提交业务归档，原 Worker 的停止、精确回执与 GitHub 通知独立收尾。新合并不再派发 Worker ARCHIVE；当前 Control 合并通知写 inbox v3，Worker 执行写 v1。只读历史不参加这套恢复流程。
 
 在维护窗口暂停入口和新分配，备份数据库及原 worker root/HOME，盘点冻结任务、dispatch authorization、终态回执、effect ledger、停止请求和各位置 generation。当前环境已由用户确认不存在遗留 Worker ARCHIVE 任务，本次不新增该类任务的恢复或交接逻辑；既有历史格式读取、原回执与 digest 保持不变。若盘点发现不符合此前提的任务，停止升级并单独核验。
 

@@ -302,14 +302,13 @@ async def pending_naming(store):
     ({"title": "Title", "branch_slug": "feat/Remove-login"}, False, None),
     ({"title": "Title", "branch_slug": "feat/remove--login"}, False, None),
     ({"title": "Title", "branch_slug": "feat/remove-login\n"}, False, None),
-    ({"title": "Title", "branch_slug": "feat/remove-login-round"}, False, None),
-    ({"title": "Title", "branch_slug": "feat/remove-login-round-2"}, False, None),
+    ({"title": "Title", "branch_slug": "feat/remove-login-attempt"}, False, None),
+    ({"title": "Title", "branch_slug": "feat/remove-login-attempt-2"}, False, None),
     ({"title": "Title"}, False, None),
     ({"title": "Title", "branch_slug": "fix/cursor", "extra": True}, False, None),
     ("[]", False, None),
     ('{"title":"One","title":"Two","branch_slug":"fix/cursor"}', False, None),
     (InferenceFailure(code="configuration"), False, None),
-    ({"title": "不应使用的标题", "branch_slug": "fix/cursor"}, True, None),
     ({"title": "不应使用的标题", "branch_slug": "fix/cursor"}, "stop", None),
 ])
 async def test_title_is_inferred_once_and_replayed_atomically(store, pending_naming, monkeypatch, reply, cancelled, expected):
@@ -342,9 +341,6 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, pending_nam
     assert store.assignments.record_assignment_result(assigned.id, "worker-a", "title-token", "epoch", response) == "pending"
     if cancelled == "stop":
         ControlService(database=store.database).cancel(flow)
-    elif cancelled:
-        flow.current_attempt_id = store.flows.create_attempt(flow.id).id
-        store.flows.set_current_attempt(flow)
     recovered = coordinator(store, subject.github)
     if expected is not None:
         # Fail the title write after settlement: both facts must roll back together.
@@ -365,9 +361,6 @@ async def test_title_is_inferred_once_and_replayed_atomically(store, pending_nam
         assert store.flows.get_flow(flow.id).title is None
     await recovered.results.apply(assigned.id)
     await coordinator(store, subject.github).results.apply(assigned.id)
-    assert store.flows.get_flow(flow.id).title == expected
-    if cancelled != "stop":
-        store.flows.set_current_attempt(flow)
     assert store.flows.get_flow(flow.id).title == expected
     if expected is not None:
         preparing.cancel()

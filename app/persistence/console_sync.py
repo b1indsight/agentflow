@@ -4,12 +4,14 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from uuid import uuid4
 
+from psycopg import Connection
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
 from app.contracts.conversation import SessionHistory
 from app.github.console import Observation, webhook_observations
 from app.persistence.activity import ActivityStore
+from app.persistence.records import Row
 from app.persistence.repository import Repository
 
 _WORKER_AVAILABILITY = ("no_worker", "no_session", "not_found", "unsupported")
@@ -19,7 +21,7 @@ class SyncClaim(BaseModel):
     """Pre-I/O ownership fence; worker records still resolve their own historical Attempts."""
 
     flow_id: int
-    round_no: int = Field(strict=True, gt=0)
+    attempt_id: int = Field(strict=True, gt=0)
     source: str
     cursor: str | None
     claim_token: str
@@ -34,7 +36,7 @@ class SyncClaim(BaseModel):
 class ConsoleSyncStore(Repository):
     """A source page and its checkpoint commit together; a crashed claim can be reclaimed."""
 
-    def reset_round(self, flow_id: int) -> None:
+    def reset_attempt(self, flow_id: int) -> None:
         """Retire old remote claims, preserving append-only activity and worker coverage."""
         with self._db.connection() as connection:
             # Match finish(): publication before source bookkeeping.
@@ -51,9 +53,10 @@ class ConsoleSyncStore(Repository):
             row = connection.execute(
                 "SELECT s.flow_id,s.source,CASE WHEN s.source='worker' AND s.limitations ?| %s"
                 " THEN NULL ELSE s.cursor END AS cursor,s.failures,f.repo,f.issue_number,"
-                "f.current_round_no AS round_no,f.delivery_pr_number AS pr_number,f.installation_id,f.created_at"
+                "a.id AS attempt_id,a.delivery_pr_number AS pr_number,f.installation_id,f.created_at"
                 " FROM console_sync s JOIN flows f ON f.id=s.flow_id"
-                " WHERE s.pending AND s.next_at<=%s"
+                " JOIN attempts a ON a.id=f.current_attempt_id"
+                " WHERE NOT f.history_only AND s.pending AND s.next_at<=%s"
                 " AND (s.source='worker' OR NOT EXISTS (SELECT 1 FROM console_installation_backoff b"
                 " WHERE b.installation_id=f.installation_id AND b.until_at>%s))"
                 " AND (s.claim_until IS NULL OR s.claim_until<%s) ORDER BY s.next_at,s.flow_id,s.source"
@@ -70,6 +73,28 @@ class ConsoleSyncStore(Repository):
             )
         return SyncClaim(**row, claim_token=token)
 
+    def remote_read_allowed(self, claim: SyncClaim) -> bool:
+        """A queued page can lose its claim or PR while waiting for an I/O slot."""
+        with self._db.connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM console_sync s JOIN flows f ON f.id=s.flow_id"
+                " JOIN attempts a ON a.id=f.current_attempt_id"
+                " WHERE s.flow_id=%s AND s.source=%s AND s.claim_token=%s AND s.pending"
+                " AND NOT f.history_only AND a.id=%s AND a.delivery_pr_number IS NOT DISTINCT FROM %s",
+                (claim.flow_id, claim.source, claim.claim_token, claim.attempt_id, claim.pr_number),
+            ).fetchone() is not None
+
+    @staticmethod
+    def _owns_publication(connection: Connection[Row], claim: SyncClaim) -> bool:
+        """Lock publication before source rows; worker pages span historical Attempts."""
+        row = connection.execute(
+            "SELECT facts FROM console_flows WHERE flow_id=%s FOR UPDATE", (claim.flow_id,)
+        ).fetchone()
+        return row is not None and not row["facts"]["history_only"] and (claim.source == "worker" or (
+            row["facts"]["current_attempt_id"] == claim.attempt_id
+            and row["facts"]["pr_number"] == claim.pr_number
+        ))
+
     def finish(
         self,
         claim: SyncClaim,
@@ -84,54 +109,39 @@ class ConsoleSyncStore(Repository):
     ) -> bool:
         """Publish a claimed page atomically, rejecting retired remote ownership before any writes."""
         with self._db.transaction() as tx, tx.connection() as connection:
-            # Always lock publication before source bookkeeping (also used by fact triggers).
-            publication = connection.execute(
-                "SELECT facts FROM console_flows WHERE flow_id=%s FOR UPDATE", (claim.flow_id,)
-            ).fetchone()
+            if not self._owns_publication(connection, claim):
+                return False
             source = connection.execute(
                 "SELECT dirty,limitations FROM console_sync WHERE flow_id=%s AND source=%s"
                 " AND claim_token=%s FOR UPDATE",
                 (claim.flow_id, claim.source, claim.claim_token),
             ).fetchone()
-            if source is None or publication is None:
+            if source is None:
                 return False
-            # The publication fence sees committed resume/PR changes without taking a
-            # Flow lock after it. Worker history intentionally spans retired rounds.
-            if claim.source != "worker" and (
-                publication["facts"]["current_round_no"] != claim.round_no
-                or publication["facts"]["pr_number"] != claim.pr_number
-            ):
-                return False
-            rounds: dict[int, int] = {}
-            if claim.source == "worker" and items:
-                attempt_ids: list[int] = []
+            if claim.source == "worker" and (items or sessions):
+                attempt_ids = {session.attempt_id for session in sessions}
                 for item in items:
-                    identity = item.metadata.get("attempt_id")
-                    if type(identity) is not int or identity <= 0:
+                    if item.attempt_id is None:
                         raise ValueError("missing worker Attempt identity")
-                    attempt_ids.append(identity)
-                rounds = {
-                    row["id"]: row["round_no"]
+                    attempt_ids.add(item.attempt_id)
+                owned = {
+                    row["id"]
                     for row in connection.execute(
-                        "SELECT id,round_no FROM attempts WHERE flow_id=%s AND id=ANY(%s)",
-                        (claim.flow_id, attempt_ids),
+                        "SELECT id FROM attempts WHERE flow_id=%s AND id=ANY(%s)",
+                        (claim.flow_id, list(attempt_ids)),
                     ).fetchall()
                 }
-                if any(identity not in rounds for identity in attempt_ids):
+                if attempt_ids != owned:
                     raise ValueError("worker Attempt does not belong to Flow")
-            round_no: int | None
             for item in items:
-                if claim.source == "worker":
-                    attempt_id = item.metadata["attempt_id"]
-                    assert isinstance(attempt_id, int)
-                    round_no = rounds[attempt_id]
-                else:
+                if claim.source != "worker":
                     # Issue content and SHA/comment-ID child sources can be shared.
-                    # Only sources explicitly bound to this PR prove round ownership.
-                    round_no = claim.round_no if claim.pr_number is not None and (
+                    # Only sources explicitly bound to this PR prove Attempt ownership.
+                    attempt_id = claim.attempt_id if claim.pr_number is not None and (
                         claim.source.startswith(("pr.", "inline.reactions:", "review.reactions:"))
                     ) and item.kind not in {"commit", "check", "status"} else None
-                ActivityStore(tx).append(claim.flow_id, item.model_copy(update={"round_no": round_no}))
+                    item = item.model_copy(update={"attempt_id": attempt_id})
+                ActivityStore(tx).append(claim.flow_id, item)
             # These child rows are current per-session coverage, never queued work.
             # Only a complete clean scan from that session's beginning repairs a gap.
             for session in sessions:
@@ -225,6 +235,8 @@ class ConsoleSyncStore(Repository):
         self, claim: SyncClaim, code: str, *, delay: float | None, reset_cursor: bool = False
     ) -> None:
         with self._db.transaction() as tx, tx.connection() as connection:
+            if not self._owns_publication(connection, claim):
+                return
             if (
                 connection.execute(
                     "SELECT 1 FROM console_sync WHERE flow_id=%s AND source=%s AND claim_token=%s FOR UPDATE",
@@ -279,26 +291,32 @@ class ConsoleSyncStore(Repository):
         observations = webhook_observations(event_type, payload)
         with self._db.transaction() as tx, tx.connection() as connection:
             flows = connection.execute(
-                "SELECT f.id,f.current_round_no,f.delivery_pr_number AS pr_number FROM flows f"
-                " WHERE lower(f.repo)=lower(%s) AND (f.issue_number=%s"
-                " OR f.delivery_pr_number=ANY(%s) OR (%s::text IS NOT NULL AND f.delivery_head_sha=%s)) ORDER BY f.id",
-                (repo, issue_number, sorted(pull_numbers), sha, sha),
+                "SELECT f.id,a.id AS attempt_id,a.delivery_pr_number AS pr_number FROM flows f"
+                " JOIN attempts a ON a.flow_id=f.id"
+                " WHERE NOT f.history_only AND lower(f.repo)=lower(%s)"
+                " AND ((f.issue_number=%s AND a.id=f.current_attempt_id)"
+                " OR a.delivery_pr_number=ANY(%s) OR a.delivery_head_sha=%s) ORDER BY f.id",
+                (repo, issue_number, sorted(pull_numbers), None if pull_numbers else sha),
             ).fetchall()
-            owners: dict[int, set[int | None]] = {
-                flow["id"]: {flow["current_round_no"] if flow["pr_number"] in pull_numbers else None}
-                for flow in flows
-            }
+            owners: dict[int, set[int | None]] = {}
+            matching_attempts: dict[int, set[int]] = {}
+            for flow in flows:
+                matching_attempts.setdefault(flow["id"], set()).add(flow["attempt_id"])
+                owners.setdefault(flow["id"], set()).add(
+                    flow["attempt_id"] if flow["pr_number"] in pull_numbers else None
+                )
             archive = ActivityStore(tx)
-            for pr_number in sorted(pull_numbers):
-                owner = archive.archived_pr(repo, pr_number)
-                if owner is not None:
-                    flow_id, archived_round_no = owner
-                    owners.setdefault(flow_id, set()).add(archived_round_no)
-            for flow_id, rounds in sorted(owners.items()):
-                # A SHA alone, or a check shared by multiple rounds, proves no one round.
-                round_no = next(iter(rounds)) if len(rounds) == 1 else None
+            for flow_id, attempts in sorted(owners.items()):
+                # A SHA alone, or a check shared by multiple Attempts, proves no one owner.
+                attempt_id = next(iter(attempts)) if len(attempts) == 1 else None
                 for item in observations:
                     archive.append(flow_id, item.model_copy(update={
-                        "round_no": None if item.kind in {"commit", "check", "status"} else round_no,
+                        "attempt_id": None if item.kind in {"commit", "check", "status"} else attempt_id,
                     }))
-                connection.execute("SELECT console_enqueue(%s)", (flow_id,))
+                # A retired PR can append history, not schedule reads against its replacement.
+                publication = connection.execute(
+                    "SELECT (facts->>'current_attempt_id')::bigint AS owner FROM console_flows"
+                    " WHERE flow_id=%s FOR UPDATE", (flow_id,),
+                ).fetchone()
+                if publication and publication["owner"] in matching_attempts.get(flow_id, set()):
+                    connection.execute("SELECT console_enqueue(%s)", (flow_id,))

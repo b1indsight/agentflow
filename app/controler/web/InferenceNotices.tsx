@@ -23,7 +23,7 @@ const stopLabels: Record<InferenceNotice["stop_reason"], string> = {
   max_attempts: "已达尝试上限",
   deadline: "总预算耗尽",
   non_retryable: "不可直接重试",
-  unavailable: "无可用推理 Worker，停止本轮尝试",
+  unavailable: "无可用推理 Worker，本次推理已停止",
 };
 
 /** Mount only in the jobs tab; the parent keys by Flow and refresh to reset the snapshot. */
@@ -86,7 +86,7 @@ export function InferenceNotices({ id }: { id: number }) {
         推理通知
       </h2>
       <p className="panel-note">
-        记录未成功的推理轮次，不代表整个 Flow
+        记录未成功的推理请求，不代表整个 Flow
         失败。尝试次数包含已授权派发但结果未知的任务。
       </p>
       <WindowList
@@ -103,7 +103,7 @@ export function InferenceNotices({ id }: { id: number }) {
               data-historical={notice.historical}
             >
               <div className="inference-notice-top">
-                <h3>本轮推理未成功</h3>
+                <h3>本次推理未成功</h3>
                 {notice.historical && <span className="badge">历史通知</span>}
               </div>
               <time dateTime={notice.occurred_at}>

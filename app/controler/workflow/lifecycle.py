@@ -89,6 +89,7 @@ def adopt_created_pull_request(
         flow = context.flow
         current = deliveries_tx.get_delivery(expected.flow_id)
         if (flow is None or current is None or flow.current_attempt_id != attempt_id
+                or expected.attempt_id != attempt_id
                 or current.version != expected.version or current.head_sha != expected.head_sha
                 or current.pr_number not in {None, remote.number}):
             raise ResultPending("INITIAL delivery changed during PR verification")
@@ -161,8 +162,9 @@ def close_delivery(
     stops: StopStore,
     assignments: AssignmentStore,
 ) -> None:
-    """An unmerged close ends this round; a later reopen grants no new work."""
-    if flow.state is FlowState.ARCHIVED or delivery.state is DeliveryState.MERGED:
+    """An unmerged close ends the current attempt; a later reopen grants no new work."""
+    if (delivery.attempt_id != flow.current_attempt_id or flow.state is FlowState.ARCHIVED
+            or delivery.state is DeliveryState.MERGED):
         return
     pause_delivery(delivery, deliveries=deliveries, assignments=assignments)
     if flow.archive_reason is None:
@@ -192,6 +194,8 @@ async def prove_reopen(
         return None, "PR source identity requires manual reconciliation"
     proof = ReopenProof(delivery.head_sha)
     if job is not None:
+        if job.attempt_id != delivery.attempt_id:
+            return None, "coding job belongs to another attempt"
         if job.result_payload is None or job.result_applied_at is None:
             return None, "old executor or result is not settled"
         if job.result_digest is None:
@@ -246,6 +250,8 @@ def record_reopen(
     flows: FlowStore,
 ) -> None:
     """Record verified baseline facts only; reopen never resumes business work."""
+    if flow.current_attempt_id != delivery.attempt_id:
+        raise ValueError("cannot reopen a historical delivery")
     delivery.state, delivery.head_sha = DeliveryState.OPEN, proof.head_sha
     delivery.version += 1
     deliveries.update_delivery(delivery)
@@ -278,9 +284,6 @@ def record_merge(
             or (delivery.merge_commit_sha is not None
                 and delivery.merge_commit_sha != merge.merge_commit_sha)):
         raise ValueError("merge event conflicts with recorded merge facts")
-    if flow.state is FlowState.ARCHIVED:
-        flows.observe_archived_merge(flow.id, flow.current_round_no, merge, origin=origin)
-        return False
     first_merge = delivery.state is not DeliveryState.MERGED
     if first_merge or delivery.merged_at is None or delivery.merge_commit_sha is None:
         delivery.state = DeliveryState.MERGED
@@ -288,12 +291,15 @@ def record_merge(
         delivery.merge_commit_sha = merge.merge_commit_sha
         delivery.version += 1
         deliveries.update_delivery(delivery)
+    if delivery.attempt_id != flow.current_attempt_id or flow.state is FlowState.ARCHIVED:
+        flows.observe_archived_merge(flow.id, delivery.attempt_id, merge, origin=origin)
+        return False
     flow.archive_reason = ArchiveReason.SUCCEEDED
     flows.transition(flow, FlowEvent.FINALIZATION_REQUESTED)
     stops.request(flow.id)
     assignments.retire_queued_work(flow.id, reason="PR merged; queued work retired")
     jobs.record_merge_notice(flow, delivery)
-    flows.archive_round(flow, delivery)
+    flows.archive_attempt(flow, delivery)
     # This can release a never-dispatched preparation immediately. Real execution
     # remains pinned by the unchanged stop/result/ACK preconditions.
     flows.release_flow_execution(flow.id)

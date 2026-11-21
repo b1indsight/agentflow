@@ -78,7 +78,7 @@ class StopStore(Repository):
             return False
         with self._db.transaction() as tx:
             flow = tx.lock_workflow(job.required_flow_id)
-            if flow is None or not flow.accepts(job.kind) or flow.current_round_no != job.round_no:
+            if flow is None or not flow.accepts(job.kind) or flow.current_attempt_id != job.attempt_id:
                 return False
             delivery = DeliveryStore(tx).get_delivery(flow.id)
             if delivery is not None and (delivery.state is DeliveryState.CLOSED or delivery.supersedes(job.kind)):
@@ -105,6 +105,7 @@ class StopStore(Repository):
         with self._db.connection() as conn:
             return conn.cursor(row_factory=class_row(StopIntent)).execute(
                 "SELECT * FROM execution_stops WHERE worker_id=%s AND state!='confirmed'"
+                " AND EXISTS (SELECT 1 FROM flows WHERE id=execution_stops.flow_id AND NOT history_only)"
                 " ORDER BY requested_at,request_id", (worker_id,),
             ).fetchall()
 

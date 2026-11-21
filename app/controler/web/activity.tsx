@@ -64,7 +64,7 @@ function MarkdownImage({ src, alt, title }: ComponentProps<"img">) {
 }
 
 export const OpenWorkerFile = createContext<
-  ((file: WorkerFile) => void) | null
+  ((file: WorkerFile) => void) | "history-only" | null
 >(null);
 
 function MarkdownLink({
@@ -136,6 +136,7 @@ export function ActivityMarkdown({
   url: string | null;
   onFileOpen?: (file: WorkerFile) => void;
 }) {
+  const historyOnly = useContext(OpenWorkerFile) === "history-only";
   const id = useId();
   const body = useRef<HTMLDivElement>(null);
   const footnoteLabel = `${id}-footnote-label`;
@@ -234,6 +235,13 @@ export function ActivityMarkdown({
             const destination = /^[a-z][a-z\d+.-]*:/i.test(safe)
               ? new URL(safe)
               : new URL(safe, sourceUrl ?? undefined);
+            // A bare absolute attachment link would still read a live Worker in another tab.
+            if (
+              historyOnly &&
+              destination.origin === location.origin &&
+              destination.pathname.startsWith("/api/files/")
+            )
+              return undefined;
             if (key === "src" && !/^https?:$/.test(destination.protocol))
               return undefined;
             return defaultUrlTransform(destination.href) || undefined;
@@ -336,7 +344,9 @@ function BodyPage({
             text={part}
             url={entry.url}
             onFileOpen={
-              entry.source === "worker" ? (openFile ?? undefined) : undefined
+              entry.source === "worker" && typeof openFile === "function"
+                ? openFile
+                : undefined
             }
           />
         ),
@@ -658,6 +668,7 @@ export function sameActivityGroup(
     !left.deleted &&
     !right.deleted &&
     left.prior === right.prior &&
+    left.attempt_id === right.attempt_id &&
     left.parent_key === right.parent_key &&
     (operations ||
       [left, right].every(
@@ -916,6 +927,15 @@ export function ActivitySummary({
   );
 }
 
+function displayMetadata(value: unknown) {
+  return JSON.stringify(
+    value,
+    (key, item) =>
+      key === "attempt_id" || key === "current_attempt_id" ? undefined : item,
+    2,
+  );
+}
+
 /** Retain only the selected metadata page, separately from persisted panel/text reading state. */
 function ProvenancePage({
   source,
@@ -966,7 +986,7 @@ function ProvenancePage({
         <>
           <TextWindow
             code
-            text={JSON.stringify(page.items, null, 2)}
+            text={displayMetadata(page.items)}
             stateKey={`${stateKey}-${page.offset}-text`}
           />
           {page.total > ACTIVITY_PROVENANCE_ROWS && (
@@ -1074,7 +1094,10 @@ export function ActivityView({
     : 0;
   const metadata =
     (!continuation || compact) &&
-    (Object.keys(entry.metadata).length > 0 || provenanceCount > 1);
+    (Object.keys(entry.metadata).some(
+      (key) => key !== "attempt_id" && key !== "current_attempt_id",
+    ) ||
+      provenanceCount > 1);
   const provenanceLabel =
     "来源信息与查询定位" +
     (provenanceCount > 1 ? ` · ${provenanceCount} 条记录` : "");
@@ -1216,7 +1239,7 @@ export function ActivityView({
                 ) : (
                   <TextWindow
                     code
-                    text={JSON.stringify(entry.metadata, null, 2)}
+                    text={displayMetadata(entry.metadata)}
                     stateKey={`${entry.key}-${entry.version}-metadata-text`}
                   />
                 )}

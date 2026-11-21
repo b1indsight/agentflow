@@ -72,7 +72,7 @@ class ProjectStore(Repository):
                 " SELECT lower(repo),issue_number,%s,id,%s,'todo',%s FROM ("
                 " SELECT f.* FROM flows f"
                 " JOIN project_destinations d"
-                " ON d.repo=%s AND d.project_id=%s WHERE f.is_issue_owner AND lower(f.repo)=d.repo"
+                " ON d.repo=%s AND d.project_id=%s WHERE f.is_issue_owner AND NOT f.history_only AND lower(f.repo)=d.repo"
                 " AND (f.state<>'archived' OR f.updated_at>=d.enabled_at)"
                 " AND NOT EXISTS (SELECT 1 FROM project_projections p WHERE p.repo=d.repo"
                 " AND p.project_id=d.project_id AND p.issue_number=f.issue_number)"
@@ -101,13 +101,15 @@ class ProjectStore(Repository):
             return []
         with self._db.connection() as connection:
             return connection.cursor(row_factory=class_row(Projection)).execute(
-                "SELECT * FROM project_projections WHERE NOT blocked AND next_at<=%s"
+                "SELECT * FROM project_projections p WHERE NOT blocked AND next_at<=%s"
+                " AND EXISTS (SELECT 1 FROM flows f WHERE f.is_issue_owner AND NOT f.history_only"
+                " AND lower(f.repo)=p.repo AND f.issue_number=p.issue_number)"
                 " AND (repo,project_id) IN (SELECT * FROM unnest(%s::text[],%s::text[]))"
                 " ORDER BY next_at,id LIMIT %s",
                 (self._db.now(), list(configs), [c.project_id for c in configs.values()], limit),
             ).fetchall()
 
-    def refresh(self, identity: int, config: ProjectConfig) -> Projection:
+    def refresh(self, identity: int, config: ProjectConfig) -> Projection | None:
         with self._db.transaction() as tx, tx.connection() as connection:
             row = connection.cursor(row_factory=class_row(Projection)).execute(
                 "SELECT * FROM project_projections WHERE id=%s FOR UPDATE", (identity,),
@@ -120,10 +122,11 @@ class ProjectStore(Repository):
                 " WHEN c.phase='queued' THEN 'todo' WHEN c.phase='running' THEN 'in_progress'"
                 " WHEN c.phase='review' THEN 'in_review' ELSE c.phase END AS status"
                 " FROM flows f JOIN console_facts c ON c.id=f.id"
-                " WHERE f.is_issue_owner AND lower(f.repo)=%s AND f.issue_number=%s",
+                " WHERE f.is_issue_owner AND NOT f.history_only AND lower(f.repo)=%s AND f.issue_number=%s",
                 (row.repo, row.issue_number),
             ).fetchone()
-            assert fact is not None
+            if fact is None:
+                return None  # Keep the stored projection until a writable Issue owner exists.
             key = config_key(config)
             changed = (row.flow_id, row.desired_status, row.config_key) != (fact["id"], fact["status"], key)
             if changed:

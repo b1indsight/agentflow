@@ -51,7 +51,7 @@ def test_direct_task_title_overrides_remote_cache_and_body_is_only_loaded_in_det
 @pytest.mark.ledger_unverified
 def test_display_title_and_search_share_fallback_precedence(store, generated, cached, pr, expected):
     flow = store.flows.create_flow("octo/repo", 7, 1)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, flow.initial_branch)
     delivery.title = pr
     store.deliveries.update_delivery(delivery)
     with store.connection() as connection:
@@ -147,9 +147,9 @@ def test_effect_markers_are_hidden_from_preview_content_and_diffs(store):
 
     # Opening another round must not rewrite prior reading versions or expose receipt markers.
     service = ControlService(database=store.database)
-    service.finish(flow, reason=ArchiveReason.SUCCEEDED, summary="调查完成", expected_round_no=1)
-    service.resume(store.flows.get_flow(flow.id), expected_round_no=1)
-    assert store.flows.get_flow(flow.id).current_round_no == 2
+    service.finish(flow, reason=ArchiveReason.SUCCEEDED, summary="调查完成", expected_attempt_id=flow.required_attempt_id)
+    service.resume(store.flows.get_flow(flow.id), expected_attempt_id=flow.required_attempt_id)
+    assert store.flows.get_flow(flow.id).current_attempt_id != flow.current_attempt_id
     assert archive.content(flow.id, changed.key, changed.version, 0, compare=True) == diff
     assert archive.page(flow.id, since=deleted_snapshot).changes == {}
 

@@ -19,7 +19,7 @@ UNCONFIRMED_EFFECT_SQL = (
     " AND (e.state<>'skipped' OR e.payload->>'kind' IS DISTINCT FROM 'label')"
 )
 
-# Only an unassigned v2 Control notice owns no executor or directory. Keep
+# Only an unassigned Control notice owns no executor or directory. Keep
 # unknown/corrupt inboxes resource-blocking; terminal.type alone grants nothing.
 # Shared settlement queries use jobs AS j.
 RESOURCE_JOB_SQL = (
@@ -27,7 +27,7 @@ RESOURCE_JOB_SQL = (
     " AND j.assignment_token IS NULL AND j.workspace IS NULL AND j.generation IS NULL"
     " AND j.started_at IS NULL AND j.dispatch_authorized_at IS NULL"
     " AND jsonb_typeof(j.result_payload->'version')='number'"
-    " AND j.result_payload->>'version'='2' AND j.result_payload->>'source'='control'"
+    " AND j.result_payload->>'version'='3' AND j.result_payload->>'source'='control'"
     " AND j.result_payload->'terminal'->>'type'='merge_archive',FALSE)"
 )
 
@@ -36,12 +36,25 @@ class ResultStore(Repository):
     """Share the database context's connection, including its explicit transaction when preparing."""
 
     def get_plan(self, job_id: int) -> ResultPlan | None:
+        """Read executable intent only; frozen historical JSON stays untouched and unparsed."""
         with self._db.connection() as connection:
             row = connection.execute(
-                "SELECT plan FROM result_applications WHERE job_id=%s",
+                "SELECT r.plan,r.digest,j.flow_id,j.attempt_id,j.result_digest"
+                " FROM result_applications r JOIN jobs j ON j.id=r.job_id JOIN flows f ON f.id=j.flow_id"
+                " WHERE r.job_id=%s AND NOT f.history_only",
                 (job_id,),
             ).fetchone()
-            return ResultPlan.model_validate(row["plan"]) if row else None
+            if row is None:
+                return None
+            data = row["plan"]
+            if (data.get("job_id") != job_id or data.get("flow_id") != row["flow_id"]
+                    or data.get("digest") != row["digest"] or row["digest"] != row["result_digest"]):
+                raise ValueError("result plan owner or digest conflicts with inbox")
+            plan = ResultPlan.model_validate(data)
+            if plan.attempt_id != row["attempt_id"] or (plan.delivery is not None and
+                    (plan.delivery.flow_id, plan.delivery.attempt_id) != (plan.flow_id, plan.attempt_id)):
+                raise ValueError("result plan belongs to another Attempt")
+            return plan
 
     def defer_verification(self, job: Job, error: GitHubError) -> None:
         """Retain a server deadline only while this accepted result still needs verification."""

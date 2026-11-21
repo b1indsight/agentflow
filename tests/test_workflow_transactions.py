@@ -55,6 +55,7 @@ def test_locked_flow_reads_state_and_attempt_committed_while_waiting(store, monk
     # A recovery operation can wait behind a result/attempt update. Its eligibility
     # checks must use the committed facts, never a snapshot read before that wait.
     flow = store.flows.create_flow("owner/repo", 710, 42)
+    ControlService(database=store.database).cancel(flow)
     waiting = Event()
     lock_workflow = Database.lock_workflow
 
@@ -64,7 +65,7 @@ def test_locked_flow_reads_state_and_attempt_committed_while_waiting(store, monk
 
     def read_current():
         with store.flows.locked(flow.id) as context:
-            return context.flow, context.matches(round_no=1, attempt_id=None)
+            return context.flow, context.matches(attempt_id=flow.required_attempt_id)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         with store.flows.locked(flow.id) as context:
@@ -72,11 +73,9 @@ def test_locked_flow_reads_state_and_attempt_committed_while_waiting(store, monk
             reader = pool.submit(read_current)
             assert waiting.wait(5) and not reader.done()
             fresh, tx = context.flow, context.database
-            fresh.current_attempt_id = store.flows.using(tx).create_attempt(flow.id).id
-            store.flows.using(tx).set_current_attempt(fresh)
-            store.flows.using(tx).transition(fresh, FlowEvent.RESULT_FAILED)
+            fresh = ControlService(database=tx).resume(fresh, expected_attempt_id=flow.required_attempt_id)
         current, matches = reader.result(timeout=5)
-    assert current.state is FlowState.BLOCKED
+    assert current.state is FlowState.QUEUED
     assert current.current_attempt_id == fresh.current_attempt_id
     assert not matches
 
@@ -111,8 +110,8 @@ def test_direct_tasks_keep_independent_inputs_through_retry_and_resume(store: St
     service.cancel(fresh)
     archived = store.flows.get_flow(first.id)
     assert archived is not None and archived.state is FlowState.ARCHIVED
-    resumed = service.resume(archived, expected_round_no=1)
-    assert resumed.current_round_no == 2 and resumed.task_content == content
+    resumed = service.resume(archived, expected_attempt_id=archived.required_attempt_id)
+    assert resumed.current_attempt_id != archived.current_attempt_id and resumed.task_content == content
     first, second = store.flows.get_flow(first.id), store.flows.get_flow(second.id)
     assert first is not None and first.task_content == content
     assert second is not None and second.task_content is not None
@@ -200,7 +199,7 @@ def test_retry_rolls_back_with_real_database(store: Store, monkeypatch, command)
     service = ControlService(database=store.database)
     if command == "resume":
         enqueue_job(store, flow.id, JobKind.INITIAL)
-        delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+        delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, flow.initial_branch)
         delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
         store.deliveries.update_delivery(delivery)
         store.reconcile.feedback_seed(10)
@@ -233,7 +232,7 @@ def test_retry_rolls_back_with_real_database(store: Store, monkeypatch, command)
     monkeypatch.setattr(JobStore, "enqueue_job", fail_enqueue)
     with pytest.raises(RuntimeError, match="enqueue interrupted"):
         if command == "resume":
-            service.resume(flow, expected_round_no=1)
+            service.resume(flow, expected_attempt_id=flow.required_attempt_id)
         else:
             service.retry(flow)
     assert snapshot() == before
@@ -262,7 +261,7 @@ def test_trigger_and_operator_resume_share_issue_reservation(store: Store, postg
             try:
                 ControlService(
                     database=operator.database,
-                ).resume(flow, expected_round_no=flow.current_round_no)
+                ).resume(flow, expected_attempt_id=flow.required_attempt_id)
             except ValueError as error:
                 assert "already active" in str(error)
                 return False
@@ -282,12 +281,11 @@ def bound_review_flow(store: Store):
     """Bind a review-ready fixture without inventing evidence of remote execution."""
     register_worker(store, "worker-a", repo="owner/repo", epoch="epoch-a")
     flow = store.flows.create_flow("owner/repo", 703, 42)
-    attempt = store.flows.create_attempt(flow.id)
+    attempt = store.flows.get_current_attempt(flow)
+    assert attempt is not None
     attempt.codex_session_id = "session"
     store.flows.update_attempt(attempt)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, f"flow/{flow.id}")
     delivery.state, delivery.base_branch, delivery.pr_number = DeliveryState.OPEN, "trunk", 17
     delivery.head_sha = "abc123"
     store.deliveries.update_delivery(delivery)

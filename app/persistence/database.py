@@ -16,6 +16,95 @@ from app.domain.models import Flow, Job, utcnow
 from app.persistence.records import Row
 from app.persistence.schema import SCHEMAS
 
+FLOW_TABLES = frozenset(
+    [
+        "runtime_settings",
+        "flows",
+        "attempts",
+        "jobs",
+        "workers",
+        "worker_file_links",
+        "flow_executions",
+        "flow_tool_calls",
+        "events",
+        "execution_stops",
+        "result_applications",
+        "result_effects",
+        "review_versions",
+        "review_buffers",
+        "review_batches",
+        "reconcile_checks",
+        "project_destinations",
+        "project_projections",
+        "console_flows",
+        "console_activity",
+        "console_sync",
+        "console_installation_backoff",
+    ]
+)
+
+
+def schema_relations(connection: Connection[Row]) -> dict[str, str]:
+    return {
+        row["relname"]: row["relkind"]
+        for row in connection.execute(
+            "SELECT relname,relkind FROM pg_class WHERE relnamespace=current_schema()::regnamespace"
+        )
+    }
+
+
+def require_worker_key(connection: Connection[Row]) -> None:
+    primary = connection.execute(
+        "SELECT array_agg(a.attname::text ORDER BY k.ordinality) AS columns"
+        " FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k(attnum,ordinality)"
+        " JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum"
+        " WHERE c.conrelid='workers'::regclass AND c.contype='p'"
+    ).fetchone()
+    if primary is None or primary["columns"] != ["worker_id", "workspace"]:
+        raise ValueError(
+            "expected workers primary key (worker_id, workspace); reconcile worker identities offline"
+        )
+
+
+def require_current_schema(connection: Connection[Row], relations: dict[str, str]) -> None:
+    """Check the cutover marker and required relations without installing or repairing anything."""
+    tables = {name for name, kind in relations.items() if kind in ("r", "p")}
+    if (
+        FLOW_TABLES | {"flowtool_schema_version"} <= tables
+        and relations.get("console_facts") == "v"
+    ):
+        columns = {
+            (r["relname"], r["attname"])
+            for r in connection.execute(
+                "SELECT c.relname,a.attname FROM pg_class c JOIN pg_attribute a ON c.oid=a.attrelid"
+                " WHERE c.relnamespace=current_schema()::regnamespace AND a.attnum>0 AND NOT a.attisdropped"
+                " AND c.relkind IN ('r','p')"
+            )
+        }
+        if {
+            ("flowtool_schema_version", "version"),
+            ("flows", "history_only"),
+            ("flows", "is_issue_owner"),
+            ("attempts", "delivery_branch"),
+            ("jobs", "attempt_id"),
+            ("console_activity", "attempt_id"),
+        } <= columns and connection.execute(
+            "SELECT version FROM flowtool_schema_version"
+        ).fetchall() == [{"version": 3}]:
+            require_worker_key(connection)
+            return
+    raise ValueError(
+        "expected Flow schema v3; inspect the database offline with scripts.migrate_flow_attempts"
+    )
+
+
+def mark_flow_schema_current(connection: Connection[Row]) -> None:
+    """Publish the history boundary only when schema and data commit together."""
+    connection.execute("""
+        CREATE TABLE flowtool_schema_version(version integer PRIMARY KEY CHECK(version=3));
+        INSERT INTO flowtool_schema_version VALUES(3);
+    """)
+
 
 class _WorkflowOwnershipChanged(Exception):
     """Retry discovery after rolling back just the locks taken by lock_workflow."""
@@ -151,48 +240,15 @@ class Database:
         ).fetchall()
 
     def init_db(self) -> None:
-        """Initialize the complete schema in its foreign-key dependency order."""
+        """Bootstrap an empty schema; existing installations must already be current."""
         with self.connection() as connection:
-            workers = connection.execute("SELECT to_regclass('workers') AS name").fetchone()
-            if workers is not None and workers["name"]:
-                primary = connection.execute(
-                    "SELECT array_agg(a.attname::text ORDER BY k.ordinality) AS columns"
-                    " FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey)"
-                    " WITH ORDINALITY k(attnum,ordinality)"
-                    " JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum"
-                    " WHERE c.conrelid='workers'::regclass AND c.contype='p'"
-                ).fetchone()
-                if primary is None or primary["columns"] != ["worker_id", "workspace"]:
-                    raise ValueError(
-                        "legacy worker schema: explicit workspace migration required; stop consumers"
-                        " and reconcile real worker-root workspace identities before upgrading"
-                    )
-                obsolete = connection.execute(
-                    "SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()"
-                    " AND table_name='workers' AND column_name IN ('workspace_state','retired_generation')"
-                ).fetchone()
-                if obsolete is not None:
-                    raise ValueError(
-                        "obsolete workspace state schema: this unreleased schema requires explicit"
-                        " reconciliation before upgrading; automatic migration is not supported"
-                    )
-            existing = connection.execute("SELECT to_regclass('flows') AS name").fetchone()
-            if existing is not None and existing["name"]:
-                columns = connection.execute(
-                    "SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()"
-                    " AND table_name='flows' AND column_name='current_round_no'"
-                ).fetchone()
-                if columns is None:
-                    raise ValueError(
-                        "legacy Flow schema: use the pre-185 offline migration checkout (see README)"
-                    )
-            if connection.execute(
-                "SELECT 1 WHERE to_regclass('issue_flow_owners') IS NOT NULL"
-                " OR to_regclass('flow_deliveries') IS NOT NULL OR to_regclass('webhook_inbox') IS NOT NULL"
-            ).fetchone():
-                raise ValueError("pre-185 schema: stop writers and migrate the three legacy tables offline")
+            relations = schema_relations(connection)
+            if relations:
+                require_current_schema(connection, relations)
+                return
             for schema in SCHEMAS:
                 connection.execute(schema)
+            mark_flow_schema_current(connection)
 
     def now(self) -> datetime:
         return self._clock()

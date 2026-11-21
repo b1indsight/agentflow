@@ -13,7 +13,7 @@
 | 查询已追踪 PR | `FLOWTOOL_RECONCILE_INTERVAL_SECONDS` 默认 300；`FLOWTOOL_RECONCILE_BATCH_SIZE` 默认 64；`FLOWTOOL_RECONCILE_CONCURRENCY` 默认 4。补查不会补建漏失的 Issue 触发。 |
 | 已接收结果等待确认 | `FLOWTOOL_RESULT_RECOVERY_CONCURRENCY` 默认 4（1–64），`FLOWTOOL_RESULT_RECOVERY_BATCH_SIZE` 默认 64（1–1000）。结果恢复与租约回收分别进行。 |
 
-修复明确的失败后可运行 `flowtool flow retry <id>`。若修订已推送、只是通知被明确拒绝，只重试失败的通知，不重新编码；发送结果不明时先查远端回执，不盲目重发。已归档的 Flow 不通过 retry 开始新一轮。显式恢复用 `flowtool flow resume <id> --expected-round N`；无 PR 的调查可用 `flowtool flow finish <id> succeeded --summary '调查结论' --expected-round N`。用 `flowtool flow history <id> --round N` 核对轮次。
+修复明确的失败后可运行 `flowtool flow retry <id>`。若修订已推送、只是通知被明确拒绝，只重试失败的通知，不重新编码；发送结果不明时先查远端回执，不盲目重发。已归档的 Flow 用 `flowtool flow resume <id>` 重新开工；无 PR 的调查可用 `flowtool flow finish <id> succeeded --summary '调查结论'` 结束。用 `flowtool flow history <id>` 查看同一 Flow 归档和重新开工前后的记录。
 
 ## Linux systemd（手动更新）
 

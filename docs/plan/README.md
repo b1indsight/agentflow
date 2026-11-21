@@ -5,6 +5,8 @@
 
 ## 当前计划
 
+- [`flow-attempt-lifecycle.md`](flow-attempt-lifecycle.md) — [PR #190](https://github.com/b1indsight/agentflow/pull/190)，已实现，未部署：保留 Flow ID，用 Attempt 表示每次开工；修订和重试留在同一 Attempt，归档证据、PR 和执行结果按 Attempt 归属。
+
 - [`flow-event-table-merge.md`](flow-event-table-merge.md) — [PR #185](https://github.com/b1indsight/agentflow/pull/185)，已实现，未部署：Issue 归属与当前交付并入 `flows`，Webhook 收件与业务去重并入 `events`。
 
 - [`reconcile-table-merge.md`](reconcile-table-merge.md) — 已实现，本地全量回归通过，未部署：`flow_reconcile` 与 `feedback_reconcile` 合并为 `reconcile_checks`，PR 检查为 `source='pull_request'` 的一行并保留 `hint_version`；启动时迁移现有行，对账行为与指标不变。

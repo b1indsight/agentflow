@@ -67,7 +67,7 @@ class MergeArchiveNotice(ProtocolModel):
     type: Literal["merge_archive"] = "merge_archive"
     job_id: int = Field(gt=0)
     flow_id: int = Field(gt=0)
-    round_no: int = Field(gt=0)
+    attempt_id: int = Field(gt=0)
     repo: str = Field(min_length=1)
     pr_number: int = Field(gt=0)
     merged_at: AwareDatetime
@@ -84,15 +84,15 @@ def merge_notice_digest(notice: MergeArchiveNotice) -> str:
 class ResultInbox(ProtocolModel):
     """One stored business outcome and its origin, with no delivery metadata."""
 
-    version: Annotated[Literal[1, 2], BeforeValidator(_INTEGER.validate_python)] = 1
+    version: Annotated[Literal[1, 3], BeforeValidator(_INTEGER.validate_python)] = 1
     source: Literal["worker", "control"]
     terminal: Annotated[Succeeded | Failed | MergeArchiveNotice, Field(discriminator="type")]
 
     @model_validator(mode="after")
     def _control_outcome(self) -> Self:
         if isinstance(self.terminal, MergeArchiveNotice):
-            if self.version != 2 or self.source != "control":
-                raise ValueError("merge notice requires the v2 Control inbox")
+            if self.source != "control" or self.version != 3:
+                raise ValueError("merge notices require a v3 Control inbox")
             return self
         if self.version != 1:
             raise ValueError("execution outcomes require the v1 inbox")
@@ -108,7 +108,7 @@ def decode_result_inbox(
     assignment_token: str | None,
     result_digest: str,
 ) -> ResultInbox:
-    """Read v1/v2 or a known v14/v15 inbox against the owning database row.
+    """Read a versioned inbox or a known v14/v15 terminal against the owning job.
 
     No input mutation, default-version inference or writeback occurs. An unassigned control
     failure alone can use the historical token='control' sentinel. Actual application and

@@ -36,7 +36,7 @@ def store(postgresql_url):
 def archived(store):
     service = ControlService(database=store.database)
     flow = service.create_flow("owner/repo", 7, 42)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, flow.initial_branch)
     delivery.pr_number, delivery.state = MERGE.number, DeliveryState.OPEN
     store.deliveries.update_delivery(delivery)
     service.cancel(flow)
@@ -65,9 +65,8 @@ def authority(store, flow_id):
 def test_delayed_merge_automatically_corrects_without_resuming(store, archived, monkeypatch):
     # GitHub merged before local archive, but its delivery arrives after abandonment.
     activity = ActivityStore(store.database)
-    original = activity.archived(archived.id, 1)
+    original = activity.archived(archived.id, archived.required_attempt_id)
     before = authority(store, archived.id)
-    delivery = store.deliveries.get_delivery(archived.id)
     service = ControlService(database=store.database)
     router = EventRouter(service, SimpleNamespace(), bot_login="flowtool[bot]", database=store.database)
     router.dispatch("pull_request", "delayed", merge_payload(archived))
@@ -75,11 +74,12 @@ def test_delayed_merge_automatically_corrects_without_resuming(store, archived, 
     current = store.flows.get_flow(archived.id)
     assert current == archived.model_copy(update={"archive_reason": ArchiveReason.SUCCEEDED})
     assert authority(store, archived.id) == before
-    assert store.deliveries.get_delivery(archived.id) == delivery
-    assert activity.archived(archived.id, 1) == original
+    delivery = store.deliveries.get_attempt_delivery(archived.required_attempt_id)
+    assert delivery.state is DeliveryState.MERGED and delivery.merge_commit_sha == MERGE.merge_commit_sha
+    assert activity.archived(archived.id, archived.required_attempt_id) == original
     assert original.metadata["archive_reason"] == "abandoned"
     assert original.occurred_at == archived.archived_at
-    events = activity.history(archived.id, 1)
+    events = activity.history(archived.id, archived.required_attempt_id)
     merges = [e for e in events if e.kind == "merge"]
     assert len(merges) == 1
     assert merges[0].metadata["merge_commit_sha"] == MERGE.merge_commit_sha
@@ -91,19 +91,22 @@ def test_delayed_merge_automatically_corrects_without_resuming(store, archived, 
     monkeypatch.setattr(store.database, "_clock", lambda: NOW + timedelta(days=1))
     router.dispatch("pull_request", "delayed", merge_payload(archived))
     router.dispatch("pull_request", "duplicate-fact", merge_payload(archived))
-    assert not store.flows.observe_archived_merge(archived.id, 1, MERGE, origin="reconciliation")
-    assert activity.history(archived.id, 1) == events
+    assert not store.flows.observe_archived_merge(archived.id, archived.required_attempt_id, MERGE, origin="reconciliation")
+    assert activity.history(archived.id, archived.required_attempt_id) == events
     assert authority(store, archived.id) == before
     assert store.deliveries.get_delivery(archived.id) == delivery
 
 
-def test_delayed_old_round_merge_does_not_change_resumed_flow(store, archived):
+def test_delayed_old_attempt_merge_does_not_change_resumed_flow(store, archived):
     # A delayed webhook still names the previous PR after a new delivery starts.
     service = ControlService(database=store.database)
     activity = ActivityStore(store.database)
-    original = activity.archived(archived.id, 1)
+    original = activity.archived(archived.id, archived.required_attempt_id)
     assert original is not None and original.metadata["archive_reason"] == "abandoned"
-    resumed = service.resume(archived, expected_round_no=1)
+    resumed = service.resume(archived, expected_attempt_id=archived.required_attempt_id)
+    current_delivery = store.deliveries.get_delivery(resumed.id)
+    current_delivery.pr_number, current_delivery.state = 29, DeliveryState.OPEN
+    store.deliveries.update_delivery(current_delivery)
     before = authority(store, archived.id)
     router = EventRouter(service, SimpleNamespace(), bot_login="flowtool[bot]", database=store.database)
     payload = merge_payload(resumed)
@@ -115,17 +118,17 @@ def test_delayed_old_round_merge_does_not_change_resumed_flow(store, archived):
     router.dispatch("pull_request", "late-merge", payload)
     assert store.flows.get_flow(resumed.id) == resumed
     assert authority(store, resumed.id) == before
-    assert activity.archived(resumed.id, 1) == original
-    assert activity.archived_pr(resumed.repo, MERGE.number) == (resumed.id, 1)
-    history = activity.history(resumed.id, 1)
+    assert activity.archived(resumed.id, archived.required_attempt_id) == original
+    history = activity.history(resumed.id, archived.required_attempt_id)
     merges = [item for item in history if item.kind == "merge"]
     assert len(merges) == 1
     assert merges[0].metadata["merge_commit_sha"] == MERGE.merge_commit_sha
     assert len([item for item in history if item.kind == "archive_correction"]) == 1
-    assert activity.archived(resumed.id, 2) is None
-    assert not any(e.kind == "archive_correction" for e in activity.history(resumed.id, 2))
+    assert activity.archived(resumed.id, resumed.required_attempt_id) is None
+    assert not any(e.kind == "archive_correction" for e in activity.history(resumed.id, resumed.required_attempt_id))
     assert [job.kind for job in store.jobs.list_jobs(resumed.id)] == [JobKind.INITIAL, JobKind.INITIAL]
-    assert store.deliveries.get_delivery(resumed.id).pr_number is None
+    assert store.deliveries.get_attempt_delivery(archived.required_attempt_id).state is DeliveryState.MERGED
+    assert store.deliveries.get_delivery(resumed.id) == current_delivery
 
 
 @pytest.mark.parametrize("seconds_before", [2, 1.000001, 1, 0.999999, 0, -1])
@@ -145,23 +148,23 @@ def test_conflicting_merge_is_rejected_without_changing_history(store, archived)
     service = ControlService(database=store.database)
     service.on_merged(archived, "first", merge_payload(archived))
     activity = ActivityStore(store.database)
-    before = activity.history(archived.id, 1)
+    before = activity.history(archived.id, archived.required_attempt_id)
     conflict = MERGE.model_copy(update={"merge_commit_sha": "b" * 40})
     with pytest.raises(ValueError, match="conflict"):
         service.on_merged(archived, "conflict", merge_payload(archived, conflict))
-    assert activity.history(archived.id, 1) == before
+    assert activity.history(archived.id, archived.required_attempt_id) == before
 
 
 def test_correction_activity_failure_rolls_back_merge_and_outcome(store, archived, monkeypatch):
     original_append = ActivityStore.append_flow
 
-    def fail_correction(self, flow_id, round_no, kind, **kwargs):
+    def fail_correction(self, flow_id, attempt_id, kind, **kwargs):
         if kind == "archive_correction":
             raise RuntimeError("audit unavailable")
-        return original_append(self, flow_id, round_no, kind, **kwargs)
+        return original_append(self, flow_id, attempt_id, kind, **kwargs)
 
     activity = ActivityStore(store.database)
-    before = activity.history(archived.id, 1)
+    before = activity.history(archived.id, archived.required_attempt_id)
     with monkeypatch.context() as patch:
         patch.setattr(ActivityStore, "append_flow", fail_correction)
         with pytest.raises(RuntimeError, match="audit unavailable"):
@@ -169,7 +172,7 @@ def test_correction_activity_failure_rolls_back_merge_and_outcome(store, archive
                 archived, "retryable", merge_payload(archived)
             )
     assert store.flows.get_flow(archived.id) == archived
-    assert activity.history(archived.id, 1) == before
+    assert activity.history(archived.id, archived.required_attempt_id) == before
     ControlService(database=store.database).on_merged(
         archived, "retryable", merge_payload(archived)
     )
@@ -183,9 +186,9 @@ def test_archive_requires_activity_in_the_same_transaction(store):
         fresh.archive_reason = ArchiveReason.ABANDONED
         flows = store.flows.using(context.database)
         flows.transition(fresh, FlowEvent.FINALIZATION_REQUESTED)
-        flows.transition(fresh, FlowEvent.ROUND_ARCHIVED)
+        flows.transition(fresh, FlowEvent.ATTEMPT_ARCHIVED)
     assert store.flows.get_flow(flow.id).state is FlowState.QUEUED
-    assert ActivityStore(store.database).archived(flow.id, 1) is None
+    assert ActivityStore(store.database).archived(flow.id, flow.required_attempt_id) is None
 
 
 def test_archive_activity_failure_rolls_back_release_and_cancellation(store, monkeypatch):
@@ -197,10 +200,10 @@ def test_archive_activity_failure_rolls_back_release_and_cancellation(store, mon
     original_flow = store.flows.get_flow(flow.id)
     original_append = ActivityStore.append_flow
 
-    def fail_archive(self, flow_id, round_no, kind, **kwargs):
+    def fail_archive(self, flow_id, attempt_id, kind, **kwargs):
         if kind == "archive":
             raise RuntimeError("history unavailable")
-        return original_append(self, flow_id, round_no, kind, **kwargs)
+        return original_append(self, flow_id, attempt_id, kind, **kwargs)
 
     with monkeypatch.context() as patch:
         patch.setattr(ActivityStore, "append_flow", fail_archive)
@@ -208,7 +211,7 @@ def test_archive_activity_failure_rolls_back_release_and_cancellation(store, mon
             service.cancel(flow)
     assert authority(store, flow.id) == before
     assert store.flows.get_flow(flow.id) == original_flow
-    assert ActivityStore(store.database).archived(flow.id, 1) is None
+    assert ActivityStore(store.database).archived(flow.id, flow.required_attempt_id) is None
     service.cancel(flow)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.flows.get_flow_execution(flow.id).released_at is not None
@@ -220,7 +223,7 @@ def test_resume_and_automatic_correction_share_the_workflow_fence(store, archive
         ControlService(database=database).on_merged(archived, "concurrent", merge_payload(archived))
 
     def resume(database):
-        ControlService(database=database).resume(archived, expected_round_no=1)
+        ControlService(database=database).resume(archived, expected_attempt_id=archived.required_attempt_id)
 
     before, after = (correct, resume) if first == "correction" else (resume, correct)
     with store.transaction() as tx:
@@ -231,13 +234,13 @@ def test_resume_and_automatic_correction_share_the_workflow_fence(store, archive
             after(other.database)
     after(store.database)
     current = store.flows.get_flow(archived.id)
-    assert current.state is FlowState.QUEUED and current.current_round_no == 2
+    assert current.state is FlowState.QUEUED and current.current_attempt_id != archived.current_attempt_id
     assert current.archive_reason is None and current.archived_at is None
     assert (
         len(
             [
                 item
-                for item in ActivityStore(store.database).history(archived.id, 1)
+                for item in ActivityStore(store.database).history(archived.id, archived.required_attempt_id)
                 if item.kind == "archive_correction"
             ]
         )
@@ -249,7 +252,7 @@ def test_saved_merge_evidence_can_be_corrected_despite_unrelated_comments(store,
     activity = ActivityStore(store.database)
     activity.append_flow(
         archived.id,
-        1,
+        archived.required_attempt_id,
         "merge",
         occurred_at=MERGE.merged_at,
         metadata={
@@ -276,14 +279,28 @@ def test_saved_merge_evidence_can_be_corrected_despite_unrelated_comments(store,
         archived, "already-observed", merge_payload(archived)
     )
     assert store.flows.get_flow(archived.id).archive_reason is ArchiveReason.SUCCEEDED
-    events = activity.history(archived.id, 1)
+    events = activity.history(archived.id, archived.required_attempt_id)
     assert len([e for e in events if e.kind == "merge"]) == 1
     assert len([e for e in events if e.kind == "archive_correction"]) == 1
 
 
+def test_history_only_rejects_new_activity_without_advancing_snapshot(store, archived):
+    # A stale collector or direct ledger call must not change the preserved conversation.
+    with store.connection() as connection:
+        connection.execute("UPDATE flows SET history_only=TRUE WHERE id=%s", (archived.id,))
+    activity = ActivityStore(store.database)
+    snapshot = activity.page(archived.id).snapshot
+    observation = Observation(key="late", source="issue.comments", kind="comment", author="user",
+                              occurred_at=NOW, updated_at=NOW, body="Late comment")
+    assert not activity.append(archived.id, observation)
+    with pytest.raises(ValueError, match="flow_read_only"):
+        activity.append_flow(archived.id, archived.required_attempt_id, "merge", occurred_at=NOW, metadata={})
+    assert activity.page(archived.id).snapshot == snapshot
+
+
 def test_workflow_evidence_cannot_be_overwritten_or_forged_by_observation(store, archived):
     activity = ActivityStore(store.database)
-    original = activity.archived(archived.id, 1)
+    original = activity.archived(archived.id, archived.required_attempt_id)
     with pytest.raises(ValueError, match="internal activity writer"):
         activity.append(archived.id, original)
     with pytest.raises(CheckViolation, match="immutable"), store.connection() as connection:
@@ -295,4 +312,4 @@ def test_workflow_evidence_cannot_be_overwritten_or_forged_by_observation(store,
             "UPDATE console_activity SET metadata='{}' WHERE flow_id=%s AND kind='created'",
             (archived.id,),
         )
-    assert activity.archived(archived.id, 1) == original
+    assert activity.archived(archived.id, archived.required_attempt_id) == original
