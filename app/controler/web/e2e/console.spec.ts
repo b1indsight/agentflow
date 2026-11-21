@@ -10,35 +10,32 @@ import type {
 } from "../types";
 
 const now = "2026-10-17T12:00:00Z";
-const flow: FlowSummary & Pick<FlowDetail, "task_content" | "installation_id"> =
-  {
-    id: 42,
-    history_only: false,
-    continued_from_flow_id: null,
-    installation_id: 71,
-    repo: "owner/agentflow",
-    issue_number: 85,
-    issue_url: "https://example.test/issues/85",
-    task_content: null,
-    title: "真实 DTO Flow",
-    pr_number: 87,
-    pr_url: "https://example.test/pulls/87",
-    lifecycle: "running",
-    phase: "running",
-    action: "正在验证",
-    worker_id: "worker-1",
-    worker_historical: false,
-    revision_cycles: 1,
-    branch: "flow/85",
-    created_at: now,
-    updated_at: now,
-    current_attempt_id: 73,
-    attempt_started_at: now,
-    archive_reason: null,
-    archive_summary: null,
-    archived_at: null,
-    state_version: 2,
-  };
+const flow: FlowSummary & Pick<FlowDetail, "task_content"> = {
+  id: 42,
+  history_only: false,
+  repo: "owner/agentflow",
+  issue_number: 85,
+  issue_url: "https://example.test/issues/85",
+  task_content: null,
+  title: "真实 DTO Flow",
+  pr_number: 87,
+  pr_url: "https://example.test/pulls/87",
+  lifecycle: "running",
+  phase: "running",
+  action: "正在验证",
+  worker_id: "worker-1",
+  worker_historical: false,
+  revision_cycles: 1,
+  branch: "flow/85",
+  created_at: now,
+  updated_at: now,
+  current_attempt_id: 73,
+  attempt_started_at: now,
+  archive_reason: null,
+  archive_summary: null,
+  archived_at: null,
+  state_version: 2,
+};
 const blockedFlow: FlowDetail = {
   ...flow,
   lifecycle: "blocked",
@@ -5589,7 +5586,7 @@ test("detail Inbox preserves partial results and distinguishes failed reads from
 });
 
 for (const width of [1440, 390]) {
-  test(`history-only Flow reads saved records and continues into the returned Flow at ${width}px`, async ({
+  test(`history-only Flow shows saved records without write actions at ${width}px`, async ({
     page,
     baseURL,
   }) => {
@@ -5597,7 +5594,6 @@ for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
     const issue = width === 390 ? 85 : null;
     const original = "为发布检查补充失败用例。";
-    const edited = "补充发布检查，并验证升级前后的结果。";
     const source: FlowDetail = {
       ...archivedFlow,
       history_only: true,
@@ -5608,13 +5604,7 @@ for (const width of [1440, 390]) {
       title: "发布检查与升级验证",
       task_content: issue ? null : original,
     };
-    const successor: FlowDetail = {
-      ...blockedFlow,
-      id: 97,
-      continued_from_flow_id: source.id,
-      title: "继续验证发布流程",
-    };
-    await mockFlows(page, () => [source, successor]);
+    await mockFlows(page, () => [source]);
     const badRequests: string[] = [];
     page.on("request", (req) => {
       const url = new URL(req.url());
@@ -5647,14 +5637,6 @@ for (const width of [1440, 390]) {
         ),
       }),
     );
-    const posts: unknown[] = [];
-    await page.route(/\/api\/flows$/, (route) => {
-      posts.push(route.request().postDataJSON());
-      return route.fulfill({
-        status: posts.length === 1 ? 201 : 200,
-        json: successor,
-      });
-    });
     await page.goto("/console/#flow/42/conversation");
     await expect(
       page.getByText("已保存升级检查结果。", { exact: false }).first(),
@@ -5676,39 +5658,6 @@ for (const width of [1440, 390]) {
     await page.screenshot({
       path: `../../../.amp/in/artifacts/history-only-${width}.png`,
     });
-    for (let visit = 0; visit < 2; visit++) {
-      await page.getByRole("button", { name: "创建新 Flow 继续" }).click();
-      const dialog = page.getByRole("dialog", { name: "创建新 Flow 继续" });
-      if (issue === null) {
-        await expect(dialog.getByLabel("任务内容")).toHaveValue(original);
-        await dialog.getByLabel("任务内容").fill(edited);
-      } else {
-        await expect(dialog).toContainText("Issue #85");
-        await expect(dialog.getByRole("textbox")).toHaveCount(0);
-      }
-      if (visit === 0)
-        await page.screenshot({
-          path: `../../../.amp/in/artifacts/history-continue-${width}.png`,
-        });
-      await dialog.getByRole("button", { name: "开启 Flow" }).click();
-      await expect(page).toHaveURL(/#flow\/97\/overview$/);
-      await expect(
-        page.getByRole("button", { name: "重试", exact: true }),
-      ).toBeVisible();
-      await page.getByRole("link", { name: "来源 Flow #42" }).click();
-    }
-    const expected = {
-      repo: source.repo,
-      installation_id: 71,
-      continued_from_flow_id: 42,
-      ...(issue ? { issue_number: issue } : { task_content: edited }),
-    };
-    expect(posts).toEqual([expected, expected]);
-    source.installation_id = null;
-    await page.reload();
-    await expect(
-      page.getByText("缺少仓库授权信息", { exact: false }),
-    ).toBeVisible();
     await expect(
       page.getByRole("button", { name: "创建新 Flow 继续" }),
     ).toHaveCount(0);

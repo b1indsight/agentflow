@@ -84,7 +84,6 @@ def require_current_schema(connection: Connection[Row], relations: dict[str, str
         if {
             ("flowtool_schema_version", "version"),
             ("flows", "history_only"),
-            ("flows", "continued_from_flow_id"),
             ("flows", "is_issue_owner"),
             ("attempts", "delivery_branch"),
             ("jobs", "attempt_id"),

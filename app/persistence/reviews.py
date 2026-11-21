@@ -105,12 +105,12 @@ class ReviewStore(Repository):
             return True
 
     def issue_comment_cutoff(self, flow: Flow) -> datetime | None:
-        """Exclude shared Issue history before a continuation or reopened Attempt starts."""
+        """Only a reopened Attempt excludes Issue history, including its ambiguous start second."""
         with self._db.connection() as connection:
             row = connection.execute(
-                "SELECT a.created_at FROM attempts a WHERE a.id=%s AND (%s OR EXISTS"
-                " (SELECT 1 FROM attempts other WHERE other.flow_id=a.flow_id AND other.id<>a.id))",
-                (flow.current_attempt_id, flow.continued_from_flow_id is not None),
+                "SELECT a.created_at FROM attempts a WHERE a.id=%s AND EXISTS"
+                " (SELECT 1 FROM attempts other WHERE other.flow_id=a.flow_id AND other.id<>a.id)",
+                (flow.current_attempt_id,),
             ).fetchone()
         return row["created_at"].replace(microsecond=0) + timedelta(seconds=1) if row else None
 

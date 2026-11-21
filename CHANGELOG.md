@@ -10,7 +10,7 @@
 
 - 数据库启动只在空 schema 建表；已有 v3 库只读校验，旧库必须离线迁移。重启不再自动合表或补写历史快照。
 
-- 切换前的 Flow 保留原链接和最后状态，只能查看历史。要继续工作，可从旧详情创建新 Flow；同一 Issue 已有活动 Flow 时打开该 Flow。升级须先结清在途工作，再按[离线升级说明](docs/operations/upgrade.md)操作。
+- 切换前已归档的 Flow 保留原链接，只能查看历史；切换后新建的 Flow 归档后仍可重新开工。升级须先结清在途工作，再按[离线升级说明](docs/operations/upgrade.md)操作。
 
 - Flow 保留原 ID，每次显式开工建立一个 Attempt；Job、编码会话、交付和归档历史按 Attempt 归属。归档/重开的客户端需传 `expected_attempt_id`。已有数据库须按[升级说明](docs/operations/upgrade.md)停写、备份并迁移，不支持新旧控制端混跑。
 

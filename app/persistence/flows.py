@@ -59,7 +59,7 @@ class FlowStore(Repository):
 
     def create_flow(
         self, repo: str, issue_number: int | None, installation_id: int | None,
-        *, task_content: str | None = None, continued_from_flow_id: int | None = None,
+        *, task_content: str | None = None,
     ) -> Flow:
         if (issue_number is None) == (task_content is None):
             raise ValueError("provide exactly one of issue_number and task_content")
@@ -72,9 +72,9 @@ class FlowStore(Repository):
             tx.serialize_issue(repo, issue_number)
             row = cursor.execute(
                 "INSERT INTO flows(repo, issue_number, installation_id, task_content, state,"
-                " created_at, updated_at, continued_from_flow_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                " created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                 (repo, issue_number, installation_id, task_content,
-                 decide_flow_state(None, FlowEvent.CREATED, archive_reason=None), now, now, continued_from_flow_id),
+                 decide_flow_state(None, FlowEvent.CREATED, archive_reason=None), now, now),
             ).fetchone()
             flow = required(row)
             attempt = FlowStore(tx).create_current_attempt(flow)
@@ -105,12 +105,6 @@ class FlowStore(Repository):
                 "SELECT * FROM flows WHERE repo=%s AND issue_number=%s AND state<>'archived'"
                 " ORDER BY id DESC LIMIT 1",
                 (repo, issue_number),
-            ).fetchone()
-
-    def continuation(self, source_id: int) -> Flow | None:
-        with self._db.connection() as connection, connection.cursor(row_factory=class_row(Flow)) as cursor:
-            return cursor.execute(
-                "SELECT * FROM flows WHERE continued_from_flow_id=%s", (source_id,)
             ).fetchone()
 
     def get_flow_by_pr(self, repo: str, pr_number: int) -> Flow | None:

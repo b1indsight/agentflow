@@ -33,7 +33,7 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  OR j.verify_last_error IS NOT NULL THEN 'execution_error' ELSE NULL END AS error_code,
  a.id AS attempt_id,a.codex_session_id,a.session_generation,a.last_revision_summary,
  f.current_attempt_id,a.created_at AS attempt_started_at,f.archive_reason,
- f.archive_summary,f.archived_at,f.title AS task_title,f.history_only,f.continued_from_flow_id
+ f.archive_summary,f.archived_at,f.title AS task_title,f.history_only
 FROM flows f
 LEFT JOIN flow_executions x ON x.flow_id=f.id
 LEFT JOIN attempts a ON a.id=f.current_attempt_id
@@ -137,7 +137,6 @@ BEGIN
    IF previous_facts->>'history_only'='true' THEN RETURN; END IF;
    -- Older cards may lack an Attempt or its start time, filled by the offline migration.
    next_facts := next_facts || previous_facts || jsonb_build_object('history_only',TRUE,
-     'continued_from_flow_id',next_facts->'continued_from_flow_id',
      'current_attempt_id',next_facts->'current_attempt_id','attempt_started_at',next_facts->'attempt_started_at');
    UPDATE console_flows SET facts=next_facts,state_version=state_version+1
     WHERE flow_id=identity AND facts IS DISTINCT FROM next_facts;

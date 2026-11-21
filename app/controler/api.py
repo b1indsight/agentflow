@@ -36,7 +36,7 @@ from app.controler.config import ServerSettings
 from app.controler.console.api import router as console_router
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.transport import serve_worker
-from app.controler.workflow.service import ContinuationRejected, FlowReadOnly
+from app.controler.workflow.service import FlowReadOnly
 from app.persistence.webhooks import DeliveryConflict
 
 
@@ -87,7 +87,6 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
         return JSONResponse({"detail": error.code}, status_code=error.status,
                             headers={"Cache-Control": "no-store"})
 
-    @application.exception_handler(ContinuationRejected)
     @application.exception_handler(FlowReadOnly)
     async def history_conflict(request: Request, error: Exception) -> Response:
         return JSONResponse({"detail": str(error)}, status_code=409, headers={"Cache-Control": "no-store"})

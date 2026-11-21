@@ -5,7 +5,7 @@ import base64
 from functools import partial
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Query, Request, Response
+from fastapi import APIRouter, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.catalog import CatalogGroup
@@ -183,7 +183,7 @@ async def update_settings(request: Request, body: UpdateSettingsRequest) -> Codi
 
 
 @router.post("/flows", response_model=FlowDetail, status_code=201)
-async def create_flow(request: Request, body: CreateFlowRequest, response: Response) -> FlowDetail:
+async def create_flow(request: Request, body: CreateFlowRequest) -> FlowDetail:
     """Validate current GitHub access before atomically persisting input and INITIAL."""
     _require_same_origin_json(request)
     runtime: ServerRuntime = request.app.state.runtime
@@ -206,14 +206,11 @@ async def create_flow(request: Request, body: CreateFlowRequest, response: Respo
             database=runtime.database,
             jobs_available=notify_jobs,
         ).create_flow(repository.full_name, body.issue_number, body.installation_id,
-                      task_content=body.task_content, continued_from_flow_id=body.continued_from_flow_id)
+                      task_content=body.task_content)
         if flow is None:
             raise ConsoleFailure("flow_conflict")
         return ConsoleStore(runtime.database).detail(flow.id)
 
-    if body.continued_from_flow_id is not None:
-        # Continuation may return a Flow that was already opened from another tab.
-        response.status_code = 200
     return await runtime.console.db(command)
 
 

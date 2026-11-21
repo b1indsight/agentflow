@@ -55,8 +55,6 @@ npm run preview -- --port 8767
 ## 页面与读取语义
 
 迁移后标记为 `history_only: true` 的 Flow 保留原详情地址，显示「历史记录 · 只读」。概览、会话和执行记录只读已保存的数据，不重新同步、不打开 Worker 附件，也不提供归档、重试、重新开工或 Agent 输入。
-「创建新 Flow 继续」沿用来源详情的仓库与 installation；缺少 installation 时不提供创建操作。Issue 任务沿用同一 Issue，直接任务预填原始任务正文，可在提交前编辑。
-确认后用 `POST /api/flows` 提交 `continued_from_flow_id` 和原仓库授权，按任务类型只传 `issue_number` 或 `task_content`。首次创建和再次继续都打开服务端返回的 Flow ID，新详情可通过「来源 Flow」返回只读记录。
 
 普通 Flow 详情各页签底部的 `AgentTaskInput` 与「新建 Flow」共用 `FlowTaskInput` 文本组件，保留粘贴换行及输入光标。
 继续工作支持 Enter 换行、Ctrl / ⌘ + Enter 发送，中文输入法确认不发送；空白不可提交，最多 16000 字。

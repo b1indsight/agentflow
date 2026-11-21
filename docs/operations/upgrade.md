@@ -6,7 +6,7 @@
 
 ## 将旧 Flow 保留为只读历史（数据库 schema v3）
 
-**只迁移全部 Flow 均已归档的旧库。** 预检和 `--apply` 都检查这个条件。发现未归档记录时报告 Flow ID 和状态并停止，不跳过记录，也不替用户归档。迁移保留原链接、归档结论和任务正文，释放 Issue 所有权。需要继续处理时，从旧详情创建新 Flow；切换后创建的 Flow 可正常运行和重新开工。
+**只迁移全部 Flow 均已归档的旧库。** 预检和 `--apply` 都检查这个条件。发现未归档记录时报告 Flow ID 和状态并停止，不跳过记录，也不替用户归档。迁移保留原链接、归档结论和任务正文，释放 Issue 所有权。旧详情只供查阅；切换后创建的 Flow 可正常运行，归档后仍可重新开工。
 
 支持已有六态账本、合表和多工作区的未标记轮号库，以及有标记的 v2 Attempt 库。空库直接初始化为 v3。旧库不能通过启动服务来升级；未知或混合结构需人工核对。先在旧版本核对账本、按[冷备与恢复](backup-restore.md)恢复独立 PostgreSQL 副本。以下从**新版本源码根目录**运行，service 名指向副本，不要让副本连接生产 Worker 或 GitHub：
 
@@ -20,7 +20,7 @@ uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_
 
 `--apply` 在独占锁内重做检查，同一事务内完成身份回填、历史标记、队列退役和版本提交。原轮号与已存在 Attempt 必须有唯一对应；未曾准备执行的轮次，只按可证实的创建/重开边界补齐身份。保留原有 Attempt 的 ID、时间戳及会话；不猜测被覆盖的分支或 head。只在事务内使用临时轮号映射；v2 的旧映射表在同一事务内移除。历史收件、计划和 effects 作为原始证据保留，不解码旧计划、不改写 JSON、不重新签名，也不再派发或重试。
 
-在恢复入口前，二次执行应返回 `status=current, applied=false`。对比备份：Flow ID、选择的 Attempt、归档结论、活动版本/key/父引用/元数据、作业收件和 digest 应对应；无归属的共享活动仍无归属。核实 `SELECT count(*) FROM flows WHERE NOT history_only OR is_issue_owner` 为零，旧 Console 同步不再 pending、无 claim，旧 Projects/对账不再排队，来源限制、覆盖缺口和已采集正文仍可查看。**不要用重新采集旧内容验证切换**。在隔离副本上通过旧链接查看归档记录，验证继续工作时打开新 Flow，原链接仍指向旧记录。
+在恢复入口前，二次执行应返回 `status=current, applied=false`。对比备份：Flow ID、选择的 Attempt、归档结论、活动版本/key/父引用/元数据、作业收件和 digest 应对应；无归属的共享活动仍无归属。核实 `SELECT count(*) FROM flows WHERE NOT history_only OR is_issue_owner` 为零，旧 Console 同步不再 pending、无 claim，旧 Projects/对账不再排队，来源限制、覆盖缺口和已采集正文仍可查看。**不要用重新采集旧内容验证切换**。在隔离副本上打开原链接，确认归档记录可读且不可重新开工。
 
 正式切换需另行授权。停止**全部**入口、控制端、Worker、定时写入方；记录/排空在途任务、外部操作和未确认停止，保存并验证数据库及原 Worker root/HOME 备份可恢复，再在停写库执行上述核对。API、Console、CLI、Worker 同步发布。恢复写入前若失败，事务会回滚；若已提交可恢复停写备份并运行旧版本。恢复写入后**不可**直接降级或覆盖库：先停写、保存增量与外部事实，再前向修复或对账恢复。
 

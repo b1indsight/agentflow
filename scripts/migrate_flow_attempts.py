@@ -53,7 +53,7 @@ def flow_schema_version(connection: Connection[Row]) -> str:
         ("jobs", "attempt_id"),
         ("console_activity", "attempt_id"),
     }
-    boundary = {("flows", "history_only"), ("flows", "continued_from_flow_id")}
+    boundary = {("flows", "history_only")}
     if ("flows", "is_issue_owner") not in columns:
         raise ValueError("incomplete Flow schema: offline investigation required")
     obsolete = {
@@ -400,7 +400,6 @@ def _freeze(c: Connection[Row], status: str, rounds: list[Row]) -> None:
     else:
         c.execute("DROP TABLE flow_attempt_legacy_map,flowtool_schema_version")
     c.execute("""ALTER TABLE flows ADD history_only boolean NOT NULL DEFAULT false,
-        ADD continued_from_flow_id bigint REFERENCES flows(id),
         ADD CONSTRAINT flows_history_archived CHECK (NOT history_only OR state='archived')""")
     c.execute("UPDATE flows SET history_only=true,is_issue_owner=false")
     # A public link names a worker file, not a Flow. Retire old capabilities as one registry.

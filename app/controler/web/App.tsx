@@ -46,7 +46,6 @@ import {
 } from "./activity";
 import { ConversationSources, SourceList } from "./ConversationSources";
 import { CreateFlow } from "./CreateFlow";
-import { ContinueFlow } from "./ContinueFlow";
 import { FileViewer } from "./FileViewer";
 import { AgentTaskInput } from "./AgentTaskInput";
 import type { WorkerFile } from "./files";
@@ -798,11 +797,6 @@ function DetailPanel({
             </div>
             <div className="links">
               <span>{flow.repo}</span>
-              {flow.continued_from_flow_id != null && (
-                <a href={`#flow/${flow.continued_from_flow_id}/overview`}>
-                  来源 Flow #{flow.continued_from_flow_id}
-                </a>
-              )}
               {flow.issue_number !== null && flow.issue_url && (
                 <a href={flow.issue_url} target="_blank" rel="noreferrer">
                   Issue #{flow.issue_number} ↗
@@ -815,15 +809,6 @@ function DetailPanel({
                 <a href={flow.pr_url} target="_blank" rel="noreferrer">
                   PR #{flow.pr_number} ↗
                 </a>
-              )}
-              {flow.history_only && (
-                <ContinueFlow
-                  source={flow}
-                  onCreated={(next) => {
-                    onChanged();
-                    location.hash = `flow/${next}/overview`;
-                  }}
-                />
               )}
             </div>
             <TabsList aria-label="Flow 详情">

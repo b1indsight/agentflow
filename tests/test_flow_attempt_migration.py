@@ -27,7 +27,7 @@ def legacy(postgresql_url):
         c.execute("""
             DROP VIEW console_facts;
             DROP TABLE flowtool_schema_version;
-            ALTER TABLE flows DROP history_only,DROP continued_from_flow_id;
+            ALTER TABLE flows DROP history_only;
             DROP TRIGGER preserve_job_owner ON jobs;
             DROP TRIGGER require_selected_attempt ON flows;
             ALTER TABLE flows ADD current_round_no integer NOT NULL DEFAULT 1;
@@ -300,7 +300,7 @@ def test_v2_direct_task_cutover(postgresql_url):
         ControlService(database=db).cancel(a)
         with db.connection() as c:
             c.execute("""DROP VIEW console_facts;
-                ALTER TABLE flows DROP history_only,DROP continued_from_flow_id;
+                ALTER TABLE flows DROP history_only;
                 CREATE VIEW console_facts AS SELECT id,repo FROM flows;
                 CREATE TABLE flow_attempt_legacy_map(flow_id bigint,round_no integer,attempt_id bigint UNIQUE,
                     PRIMARY KEY(flow_id,round_no),FOREIGN KEY(flow_id,attempt_id) REFERENCES attempts(flow_id,id));
@@ -309,11 +309,11 @@ def test_v2_direct_task_cutover(postgresql_url):
                 INSERT INTO flowtool_schema_version VALUES(2);
                 INSERT INTO flow_attempt_legacy_map SELECT id,1,current_attempt_id FROM flows""")
             # Do not mistake a partial/manual v3 upgrade for an unmarked historical cohort.
-            c.execute("ALTER TABLE flows ADD continued_from_flow_id bigint")
+            c.execute("ALTER TABLE flows ADD history_only boolean")
         with pytest.raises(ValueError, match="partial"):
             migrate(postgresql_url, apply=True)
         with db.connection() as c:
-            c.execute("ALTER TABLE flows DROP continued_from_flow_id")
+            c.execute("ALTER TABLE flows DROP history_only")
         with pytest.raises(ValueError, match="offline"):
             db.init_db()
         assert migrate(postgresql_url)["status"] == "v2"
@@ -324,6 +324,14 @@ def test_v2_direct_task_cutover(postgresql_url):
             archived.task_content == a.task_content
             and archived.current_attempt_id == a.current_attempt_id
         )
+        # The cutover freezes a cohort, not the archived state of every future Flow.
+        service = ControlService(database=db)
+        new = service.create_flow(a.repo, None, None, task_content="new task")
+        assert new and new.id != archived.id
+        service.cancel(new)
         assert not migrate(postgresql_url, apply=True)["applied"]
+        reopened = service.resume(new, expected_attempt_id=new.required_attempt_id)
+        assert reopened.id == new.id and reopened.required_attempt_id != new.required_attempt_id
+        assert FlowStore(db).get_flow(a.id) == archived
     finally:
         db.close()

@@ -112,7 +112,6 @@ def _summary(row: Row) -> FlowSummary:
         pr_url=f"https://github.com/{repo}/pull/{pr}" if pr else None,
         lifecycle=facts["lifecycle"],
         history_only=facts["history_only"],
-        continued_from_flow_id=facts["continued_from_flow_id"],
         current_attempt_id=facts["current_attempt_id"],
         attempt_started_at=facts["attempt_started_at"],
         archive_reason=facts["archive_reason"],
@@ -134,7 +133,7 @@ def _explanation(row: Row) -> tuple[str, str]:
     """Explain persisted blockers, without exposing errors or promising retry eligibility."""
     facts = row["facts"]
     if facts["history_only"]:
-        return "历史记录 · 只读", "仅展示已留存的记录；如需继续，请创建新 Flow。"
+        return "历史记录 · 只读", "仅展示升级前已保存的记录。"
     if facts["lifecycle"] == "archived":
         outcome = "成功" if facts["archive_reason"] == "succeeded" else "废弃"
         return f"本次执行已归档 · {outcome}", "如需继续，请重新开工；不会重开历史 PR"
@@ -260,7 +259,7 @@ class ConsoleStore(Repository):
             row = connection.execute(
                 "SELECT c.flow_id,c.facts-'delivery_body'-'delivery_title' AS facts,"
                 "coalesce(c.facts->>'task_title',c.title,c.facts->>'delivery_title') AS title,"
-                "c.state_version,f.task_content,f.installation_id,diagnostic.*"
+                "c.state_version,f.task_content,diagnostic.*"
                 " FROM console_flows c JOIN flows f ON f.id=c.flow_id LEFT JOIN LATERAL ("
                 " SELECT j.id AS diagnostic_job_id,j.kind AS diagnostic_kind,"
                 " j.state AS diagnostic_state,j.started_at IS NOT NULL AS execution_started,"
@@ -284,7 +283,6 @@ class ConsoleStore(Repository):
         return FlowDetail(
             **flow.model_dump(),
             task_content=row["task_content"],
-            installation_id=row["installation_id"],
             reason=reason,
             next_condition=condition,
             sources=self.sources(flow_id),

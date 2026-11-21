@@ -122,7 +122,6 @@ class Flow(BaseModel):
     title: str | None = None
     title_job_id: int | None = None
     history_only: bool = False
-    continued_from_flow_id: int | None = None
     state: FlowState
     installation_id: int | None = None
     current_attempt_id: int | None = None

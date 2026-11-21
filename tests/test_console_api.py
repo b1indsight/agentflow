@@ -170,8 +170,7 @@ def test_manual_creation_without_issue_is_atomic_visible_and_owner_only(console_
     assert console_runtime.gateway.wake_all.called
 
 
-def test_history_link_stays_readable_after_concurrent_continuation(console_runtime, store, recording_resources):
-    console_runtime.github = RecordingGitHub()
+def test_history_link_stays_readable_and_rejects_writes(console_runtime, store):
     source = store.flows.create_flow("owner/repo", None, 42, task_content="旧任务")
     ControlService(database=store.database).cancel(source)
     with store.connection() as c:
@@ -187,33 +186,7 @@ def test_history_link_stays_readable_after_concurrent_continuation(console_runti
                              ("agent-tasks", {"request_id": str(uuid4()), "instruction": "迟到的请求"})):
             response = client.post(f"{path}/{action}", headers=headers, json=body)
             assert (response.status_code, response.json()) == (409, {"detail": "flow_read_only"})
-        payload = {"repo": source.repo, "installation_id": 42, "task_content": "修订后的任务",
-                   "continued_from_flow_id": source.id}
-        with ThreadPoolExecutor(2) as pool:
-            responses = list(pool.map(lambda _: client.post("/api/flows", headers=headers, json=payload), range(2)))
-        assert [r.status_code for r in responses] == [200, 200]
-        new = responses[0].json()
-        assert new["id"] == responses[1].json()["id"] != source.id
-        assert new["continued_from_flow_id"] == source.id and not new["history_only"]
-        assert new["current_attempt_id"] != source.required_attempt_id and new["task_content"] == payload["task_content"]
-        assert [j.kind for j in store.jobs.list_jobs(new["id"])] == [JobKind.INITIAL]
-        assert [f["id"] for f in client.get("/api/flows?q=is:active", headers=headers).json()["items"]] == [new["id"]]
-        for mismatch in ({"installation_id": 43}, {"repo": "other/repo"}, {"continued_from_flow_id": new["id"]},
-                         {"task_content": "另一个标签页修改了正文"}):
-            assert client.post("/api/flows", headers=headers, json=payload | mismatch).status_code == 409
         assert client.get(path, headers=headers).json() == before
-
-
-def test_continue_issue_opens_existing_live_flow_without_queuing_work(store):
-    service = ControlService(database=store.database)
-    source = store.flows.create_flow("owner/repo", 91, 42)
-    service.cancel(source)
-    with store.connection() as c:
-        c.execute("UPDATE flows SET history_only=true,is_issue_owner=false WHERE id=%s", (source.id,))
-    active = service.create_flow(source.repo, 91, 42)
-    jobs = store.jobs.list_jobs(active.id)
-    opened = service.create_flow(source.repo, 91, 42, continued_from_flow_id=source.id)
-    assert opened.id == active.id and store.jobs.list_jobs(active.id) == jobs
 
 
 @pytest.mark.parametrize("changes", [

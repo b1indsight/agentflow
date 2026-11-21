@@ -157,17 +157,11 @@ export const getRepos = (cursor: string | null, signal?: AbortSignal) =>
   api<RepositoryPage>("/api/repos", { cursor, limit: 100 }, signal);
 export const getFlowTargets = (cursor: string | null, signal: AbortSignal) =>
   api<FlowTargetPage>("/api/flow-targets", { cursor }, signal);
-export const createFlow = async (
-  input: FlowTarget &
-    (
-      | { task_content: string; continued_from_flow_id?: number }
-      | { issue_number: number; continued_from_flow_id: number }
-    ),
-) => {
+export const createFlow = async (target: FlowTarget, task: string) => {
   const flow = await api<FlowDetail>("/api/flows", {}, undefined, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...target, task_content: task }),
   });
   // An incomplete success response cannot identify the committed Flow for verification/navigation.
   if (!Number.isSafeInteger(flow.id) || flow.id <= 0)

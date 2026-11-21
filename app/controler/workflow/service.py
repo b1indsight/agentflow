@@ -73,10 +73,6 @@ class FlowReadOnly(Exception):
         super().__init__("flow_read_only")
 
 
-class ContinuationRejected(ValueError):
-    """The requested input does not match the historical source or its successor."""
-
-
 class ControlService:
     def __init__(
         self,
@@ -108,31 +104,17 @@ class ControlService:
 
     def create_flow(
         self, repo: str, issue_number: int | None, installation_id: int | None,
-        *, task_content: str | None = None, continued_from_flow_id: int | None = None,
+        *, task_content: str | None = None,
     ) -> Flow | None:
         """Atomically queue a task; only Issue identities deduplicate active Flows."""
         with self.database.transaction() as tx:
             flows_tx = self.flows.using(tx)
             jobs_tx = self.jobs.using(tx)
             tx.serialize_issue(repo, issue_number)
-            if continued_from_flow_id is not None:
-                # Serialize even direct-task continuations, which have no Issue lock.
-                source = tx.lock_workflow(continued_from_flow_id)
-                if (source is None or not source.history_only or source.repo != repo
-                        or source.issue_number != issue_number or source.installation_id != installation_id):
-                    raise ContinuationRejected("continuation_source_invalid")
-            active = flows_tx.get_active_flow(repo, issue_number)
-            if active is not None:
+            if flows_tx.get_active_flow(repo, issue_number):
                 logger.info("flow already active for {}#{}", repo, issue_number)
-                return active if continued_from_flow_id is not None else None
-            if continued_from_flow_id is not None:
-                previous = flows_tx.continuation(continued_from_flow_id)
-                if previous is not None:
-                    if previous.task_content != task_content:
-                        raise ContinuationRejected("continuation_input_conflict")
-                    return previous
-            flow = flows_tx.create_flow(repo, issue_number, installation_id, task_content=task_content,
-                                        continued_from_flow_id=continued_from_flow_id)
+                return None
+            flow = flows_tx.create_flow(repo, issue_number, installation_id, task_content=task_content)
             jobs_tx.enqueue_job(
                 flow, JobKind.INITIAL,
                 payload={"issue_number": issue_number} if issue_number is not None else {},

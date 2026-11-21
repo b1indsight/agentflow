@@ -89,10 +89,7 @@ export function CreateFlow({
     setPending(true);
     setFailure(null);
     try {
-      const flow = await createFlow({
-        ...selected,
-        task_content: content.task,
-      });
+      const flow = await createFlow(selected, content.task);
       setBody("");
       setSelected(null);
       dialog.current?.close();

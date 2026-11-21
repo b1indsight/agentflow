@@ -100,7 +100,7 @@ def project_retry(repo: str) -> None:
 @contextmanager
 def _store() -> Iterator[Store]:
     from app.controler.config import ServerSettings
-    from app.controler.workflow.service import ContinuationRejected, FlowReadOnly
+    from app.controler.workflow.service import FlowReadOnly
     from app.persistence.store import Store
 
     settings = ServerSettings()  # type: ignore[call-arg]
@@ -108,7 +108,7 @@ def _store() -> Iterator[Store]:
     store.init_db()
     try:
         yield store
-    except (FlowReadOnly, ContinuationRejected) as error:
+    except FlowReadOnly as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(1) from None
     finally:
@@ -154,7 +154,6 @@ def flow_create(
     issue_number: int | None = typer.Option(None, min=1),
     content: str | None = typer.Option(None),
     content_file: Annotated[Path | None, typer.Option(help="UTF-8 任务内容文件，- 表示 stdin")] = None,
-    continued_from: Annotated[int | None, typer.Option(min=1, help="继续工作的历史 Flow ID")] = None,
 ) -> None:
     """从 Issue 或直接任务内容创建 Flow；不要求 webhook。"""
     from app.contracts.console import CreateFlowRequest
@@ -173,7 +172,6 @@ def flow_create(
         request = CreateFlowRequest(
             repo=repo, installation_id=installation_id, issue_number=issue_number,
             task_content=content,
-            continued_from_flow_id=continued_from,
         )
     except (OSError, UnicodeError) as error:
         raise typer.BadParameter("cannot read UTF-8 task content") from error
@@ -198,13 +196,12 @@ def flow_create(
     with _store() as store:
         flow = ControlService(database=store.database).create_flow(
             repository.full_name, request.issue_number, request.installation_id,
-            task_content=request.task_content, continued_from_flow_id=request.continued_from_flow_id,
+            task_content=request.task_content,
         )
         if flow is None:
             typer.echo("an active Flow already exists for this Issue", err=True)
             raise typer.Exit(1)
-        typer.echo(f"flow {flow.id} {flow.state} for {flow.repo}" if continued_from is not None
-                   else f"flow {flow.id} created (queued) for {flow.repo}")
+        typer.echo(f"flow {flow.id} created (queued) for {flow.repo}")
 
 
 @app.command("worker-drain")
@@ -271,9 +268,7 @@ def flow_show(flow_id: int) -> None:
             f" archived_at={f.archived_at or '-'}"
         )
         if f.history_only:
-            typer.echo("  历史记录 · 只读；继续工作请创建新 Flow")
-        if f.continued_from_flow_id is not None:
-            typer.echo(f"  continued from flow {f.continued_from_flow_id}")
+            typer.echo("  历史记录 · 只读")
         if f.task_content is not None:
             typer.echo(f"  task:\n{f.task_content}")
         execution = store.flows.get_flow_execution(f.id)
