@@ -13,6 +13,7 @@ from app.domain.models import ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
 from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
+from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.reconciliation import ReconcileStore
 from app.persistence.reviews import ReviewStore
@@ -100,8 +101,18 @@ class EventRouter:
             return
         body = item.get("body") or ""
         if conversation and action == "created" and body.strip() == "/flow stop":
-            if self.webhook_store.record_event(delivery_id, event_type, flow.id, payload):
-                self.service.cancel(flow)
+            if not self.webhook_store.record_event(delivery_id, event_type, flow.id, payload):
+                return
+            # A shared Issue command needs the same creation boundary as ordinary feedback.
+            cutoff = self.reviews.issue_comment_cutoff(flow) if number == flow.issue_number else None
+            if cutoff is not None:
+                timestamp = item.get("created_at")
+                if not isinstance(timestamp, str):
+                    return
+                created = datetime.fromisoformat(timestamp)
+                if created.tzinfo is None or created < cutoff:
+                    return
+            self.service.cancel(flow)
             return
         sender = (payload.get("sender") or {}).get("login", "")
         authorized = sender in self.settings.allowlist and sender == author.get("login")
@@ -147,13 +158,17 @@ class EventRouter:
         if payload.get("action") not in {"closed", "reopened", "synchronize"}:
             return
         repo = payload["repository"]["full_name"]
-        flow = self.flows.get_flow_by_pr(repo, pull_request["number"])
-        if flow is None and pull_request.get("merged") is True:
+        delivery = DeliveryStore(self.database).delivery_by_pr(repo, pull_request["number"])
+        flow = self.flows.get_flow(delivery.flow_id) if delivery is not None else None
+        if delivery is None and pull_request.get("merged") is True:
+            # Pre-migration archives can prove the PR identity without a branch or a full delivery.
             historical = ActivityStore(self.database).archived_pr(repo, pull_request["number"])
             if historical is not None:
                 flow = self.flows.get_flow(historical[0])
         if flow and payload.get("action") == "closed" and pull_request.get("merged") is True:
             self.service.on_merged(flow, delivery_id, payload)
+        elif flow and delivery and flow.current_attempt_id != delivery.attempt_id:
+            self.webhook_store.record_event(delivery_id, "pull_request", flow.id, payload)
         elif flow and payload.get("action") == "closed":
             self.service.on_closed(flow, delivery_id, payload)
         elif flow:
@@ -161,5 +176,7 @@ class EventRouter:
                 reconcile_store_tx = self.reconcile_store.using(tx)
                 webhook_store_tx = self.webhook_store.using(tx)
                 fresh = tx.lock_workflow(flow.id)
-                if fresh is not None and webhook_store_tx.record_event(delivery_id, "pull_request", flow.id, payload):
+                if (webhook_store_tx.record_event(delivery_id, "pull_request", flow.id, payload)
+                        and fresh is not None and delivery is not None
+                        and fresh.current_attempt_id == delivery.attempt_id):
                     reconcile_store_tx.hint(flow.id)

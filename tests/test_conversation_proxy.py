@@ -334,9 +334,8 @@ async def test_service_resolves_existing_database_metadata_and_released_binding(
         database=store.database,
     )
     assert (await service.read(flow.id, None, 100)).unavailable_reason == "no_worker"
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
+    attempt = store.flows.get_current_attempt(flow)
+    assert attempt is not None
     register_worker(store, "worker-1", repo=flow.repo, epoch="epoch")
     enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.assignments.assign_job("worker-1", "assignment", "epoch") is not None

@@ -21,7 +21,7 @@ async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypa
     flow = store.flows.get_flow(job.flow_id)
     await route_merge(store, flow)
     archived = store.flows.get_flow(flow.id)
-    activity = ActivityStore(store.database).archived(flow.id, 1)
+    activity = ActivityStore(store.database).archived(flow.id, flow.required_attempt_id)
     stop = store.stops.pending("worker-a")
     receipt = ExecutionStopped(**stop.fence().model_dump(), execution_nonce="original-executor")
     original = FlowStore.release_flow_execution
@@ -44,7 +44,7 @@ async def test_archive_release_rolls_back_and_replays_atomically(store, monkeypa
     assert store.stops.confirm("worker-a", receipt, "epoch-a")
     assert store.stops.confirm("worker-a", receipt, "epoch-a")
     assert store.flows.get_flow(flow.id) == archived
-    assert ActivityStore(store.database).archived(flow.id, 1) == activity
+    assert ActivityStore(store.database).archived(flow.id, flow.required_attempt_id) == activity
     assert store.flows.get_flow_execution(flow.id).released_at is not None
     assert flow.id not in [item.id for item in store.flows.list_flows(active_only=True)]
     assert store.assignments.assign_job("worker-a", "next", "epoch-a").flow_id == other.id
@@ -81,7 +81,7 @@ async def test_merge_after_abandonment_cannot_adopt_a_released_binding(
     with pytest.raises(ValueError, match="archived"):
         service.retry(flow)
     activity = ActivityStore(store.database)
-    archived = activity.archived(flow.id, 1)
+    archived = activity.archived(flow.id, flow.required_attempt_id)
     assert archived is not None and archived.metadata["archive_reason"] == "abandoned"
     payload = merge_payload(flow)
     payload["pull_request"]["merged_at"] = (
@@ -90,8 +90,8 @@ async def test_merge_after_abandonment_cannot_adopt_a_released_binding(
     await route_merge(store, flow, payload=payload)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert store.flows.get_flow(flow.id).archive_reason is ArchiveReason.SUCCEEDED
-    assert activity.archived(flow.id, 1) == archived
-    history = activity.history(flow.id, 1)
+    assert activity.archived(flow.id, flow.required_attempt_id) == archived
+    history = activity.history(flow.id, flow.required_attempt_id)
     merges = [item for item in history if item.kind == "merge"]
     assert len(merges) == 1
     assert merges[0].metadata["merge_commit_sha"] == "a" * 40

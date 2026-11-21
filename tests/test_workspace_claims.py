@@ -61,9 +61,6 @@ def provision(store: Store, worker: str, index: int = 0, repo: str = "owner/repo
 
 def queued(store: Store, issue: int = 1, repo: str = "owner/repo") -> Job:
     flow = store.flows.create_flow(repo, issue, None)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
     return enqueue_job(store, flow.id, JobKind.INITIAL)
 
 
@@ -407,7 +404,7 @@ def test_claim_eligibility_matches_the_domain_dispatch_rules(store: Store) -> No
         slot = provision(store, "a", 0, repo)
         flow = store.flows.create_flow(repo, 1, None)
         job = enqueue_job(store, flow.id, kind)
-        delivery = store.deliveries.get_or_create_delivery(flow.id, "branch")
+        delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "branch")
         delivery.state = delivery_state
         store.deliveries.update_delivery(delivery)
         with store.flows.locked(flow.id) as context:
@@ -416,7 +413,7 @@ def test_claim_eligibility_matches_the_domain_dispatch_rules(store: Store) -> No
             for event in events:
                 fresh = flows.transition(fresh, event)
             if archive:
-                flows.archive_round(fresh, delivery)
+                flows.archive_attempt(fresh, delivery)
         with store.connection() as connection:
             # Bind every Flow so that affinity, not the initial-only rule, admits each kind.
             connection.execute(

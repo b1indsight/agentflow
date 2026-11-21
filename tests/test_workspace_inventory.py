@@ -416,7 +416,7 @@ def merged_business(store, flow_id):
     flow = store.flows.get_flow(flow_id)
     delivery = store.deliveries.get_delivery(flow.id)
     if delivery is None:
-        delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+        delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, flow.initial_branch)
     delivery.state, delivery.pr_number = DeliveryState.MERGED, 17
     delivery.merged_at, delivery.merge_commit_sha = store.now(), "a" * 40
     store.deliveries.update_delivery(delivery)
@@ -425,7 +425,7 @@ def merged_business(store, flow_id):
         flow.archive_reason = ArchiveReason.SUCCEEDED
         flows = store.flows.using(context.database)
         flows.transition(flow, FlowEvent.FINALIZATION_REQUESTED)
-        flows.archive_round(flow, delivery)
+        flows.archive_attempt(flow, delivery)
     return flow
 
 

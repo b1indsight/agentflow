@@ -357,9 +357,8 @@ async def test_gateway_and_worker_cancel_over_duplex_protocol(
         async with asyncio.timeout(10):
             for issue_number in (1, 2):
                 flow = store.flows.create_flow("owner/repo", issue_number, 1)
-                attempt = store.flows.create_attempt(flow.id)
-                flow.current_attempt_id = attempt.id
-                store.flows.set_current_attempt(flow)
+                attempt = store.flows.get_current_attempt(flow)
+                assert attempt is not None
                 session = ExecutionState(root, flow.id)
                 enqueue_job(store, flow.id, JobKind.INITIAL)
                 started.clear()
@@ -556,9 +555,8 @@ async def test_stop_without_ack_reuses_workspace_and_reconnect_ack_preserves_new
     flows, jobs = [], []
     for issue in (1, 2):
         flow = store.flows.create_flow("owner/repo", issue, 1)
-        attempt = store.flows.create_attempt(flow.id)
-        flow.current_attempt_id = attempt.id
-        store.flows.set_current_attempt(flow)
+        attempt = store.flows.get_current_attempt(flow)
+        assert attempt is not None
         flows.append(flow)
         jobs.append(enqueue_job(store, flow.id, JobKind.INITIAL))
     started, successor_dispatched = asyncio.Event(), asyncio.Event()

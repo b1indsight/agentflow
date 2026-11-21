@@ -17,6 +17,82 @@ from app.persistence.records import Row
 from app.persistence.schema import SCHEMAS
 
 
+def flow_schema_version(connection: Connection[Row]) -> str:
+    """Only unmarked databases need structural identification; never auto-upgrade them."""
+    tables = connection.execute(
+        "SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace"
+        " AND relkind IN ('r','p')"
+    ).fetchall()
+    names = {row["relname"] for row in tables}
+    if names & {"issue_flow_owners", "flow_deliveries", "webhook_inbox"}:
+        raise ValueError("pre-185 schema: stop writers and migrate the three legacy tables offline")
+    if not names:
+        return "empty"
+    columns = {
+        (row["table_name"], row["column_name"])
+        for row in connection.execute(
+            "SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema()"
+        )
+    }
+    if "workers" in names:
+        primary = connection.execute(
+            "SELECT array_agg(a.attname::text ORDER BY k.ordinality) AS columns"
+            " FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k(attnum,ordinality)"
+            " JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum"
+            " WHERE c.conrelid='workers'::regclass AND c.contype='p'"
+        ).fetchone()
+        if primary is None or primary["columns"] != ["worker_id", "workspace"]:
+            raise ValueError(
+                "legacy worker schema: explicit workspace migration required; stop consumers"
+                " and reconcile real worker-root workspace identities before upgrading"
+            )
+        if columns & {("workers", "workspace_state"), ("workers", "retired_generation")}:
+            raise ValueError(
+                "obsolete workspace state schema: this unreleased schema requires explicit"
+                " reconciliation before upgrading; automatic migration is not supported"
+            )
+    legacy = {
+        ("flows", "current_round_no"),
+        ("flows", "delivery_branch"),
+        ("attempts", "round_no"),
+        ("jobs", "round_no"),
+        ("console_activity", "round_no"),
+    }
+    new = {
+        ("attempts", "delivery_branch"),
+        ("jobs", "attempt_id"),
+        ("console_activity", "attempt_id"),
+    }
+    if "flowtool_schema_version" in names:
+        versions = connection.execute("SELECT version FROM flowtool_schema_version").fetchall()
+        if versions != [{"version": 2}]:
+            raise ValueError(f"unsupported Flow schema version: {versions}")
+        if new <= columns and not (legacy & columns) and "flow_attempt_legacy_map" in names:
+            return "current"
+    elif (
+        legacy <= columns
+        and not (new & columns)
+        and "flow_attempt_legacy_map" not in names
+        and {"workers", "result_applications", "flow_tool_calls", "review_batches", "events"}
+        <= names
+        and ("flows", "is_issue_owner") in columns
+    ):
+        return "legacy"
+    raise ValueError("unrecognized or partial Flow schema: offline investigation required")
+
+
+def mark_flow_schema_current(connection: Connection[Row]) -> None:
+    """Publish the cutover in the same commit as the complete schema and legacy mapping."""
+    connection.execute("""
+        CREATE TABLE flow_attempt_legacy_map (
+          flow_id bigint NOT NULL, round_no integer NOT NULL CHECK(round_no>0),
+          attempt_id bigint NOT NULL UNIQUE, PRIMARY KEY(flow_id,round_no),
+          FOREIGN KEY(flow_id,attempt_id) REFERENCES attempts(flow_id,id));
+        CREATE TABLE flowtool_schema_version(version integer PRIMARY KEY CHECK(version=2));
+        INSERT INTO flowtool_schema_version VALUES(2);
+    """)
+
+
 class _WorkflowOwnershipChanged(Exception):
     """Retry discovery after rolling back just the locks taken by lock_workflow."""
 
@@ -153,46 +229,13 @@ class Database:
     def init_db(self) -> None:
         """Initialize the complete schema in its foreign-key dependency order."""
         with self.connection() as connection:
-            workers = connection.execute("SELECT to_regclass('workers') AS name").fetchone()
-            if workers is not None and workers["name"]:
-                primary = connection.execute(
-                    "SELECT array_agg(a.attname::text ORDER BY k.ordinality) AS columns"
-                    " FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey)"
-                    " WITH ORDINALITY k(attnum,ordinality)"
-                    " JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum"
-                    " WHERE c.conrelid='workers'::regclass AND c.contype='p'"
-                ).fetchone()
-                if primary is None or primary["columns"] != ["worker_id", "workspace"]:
-                    raise ValueError(
-                        "legacy worker schema: explicit workspace migration required; stop consumers"
-                        " and reconcile real worker-root workspace identities before upgrading"
-                    )
-                obsolete = connection.execute(
-                    "SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()"
-                    " AND table_name='workers' AND column_name IN ('workspace_state','retired_generation')"
-                ).fetchone()
-                if obsolete is not None:
-                    raise ValueError(
-                        "obsolete workspace state schema: this unreleased schema requires explicit"
-                        " reconciliation before upgrading; automatic migration is not supported"
-                    )
-            existing = connection.execute("SELECT to_regclass('flows') AS name").fetchone()
-            if existing is not None and existing["name"]:
-                columns = connection.execute(
-                    "SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()"
-                    " AND table_name='flows' AND column_name='current_round_no'"
-                ).fetchone()
-                if columns is None:
-                    raise ValueError(
-                        "legacy Flow schema: use the pre-185 offline migration checkout (see README)"
-                    )
-            if connection.execute(
-                "SELECT 1 WHERE to_regclass('issue_flow_owners') IS NOT NULL"
-                " OR to_regclass('flow_deliveries') IS NOT NULL OR to_regclass('webhook_inbox') IS NOT NULL"
-            ).fetchone():
-                raise ValueError("pre-185 schema: stop writers and migrate the three legacy tables offline")
+            version = flow_schema_version(connection)
+            if version == 'legacy':
+                raise ValueError('legacy Flow schema: stop writers and run scripts.migrate_flow_attempts offline')
             for schema in SCHEMAS:
                 connection.execute(schema)
+            if version == 'empty':
+                mark_flow_schema_current(connection)
 
     def now(self) -> datetime:
         return self._clock()

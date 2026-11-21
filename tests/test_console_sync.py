@@ -53,12 +53,12 @@ async def test_direct_task_registers_only_real_remote_sources_and_still_reads_wo
     await sync.sync(worker)
     conversations.read.assert_awaited_once_with(flow.id, None, 50)
     assert sync.store.claim() is None
-    assert ActivityStore(store.database).history(flow.id, 1)
+    assert ActivityStore(store.database).history(flow.id, flow.required_attempt_id)
     with store.connection() as connection:
         names = {row["source"] for row in connection.execute("SELECT source FROM console_sync").fetchall()}
     assert names == {"github", "worker"}
 
-    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, flow.initial_branch)
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
     store.deliveries.update_delivery(delivery)
     remote = sync.store.claim()
@@ -76,7 +76,8 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(
     store, resume_during_read, monkeypatch
 ):
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    attempt = store.flows.create_attempt(flow.id)
+    attempt = store.flows.get_current_attempt(flow)
+    assert attempt is not None
     only_worker(store._db)
     conversations = Mock(spec=ConversationService)
     item = ConversationItem(
@@ -107,21 +108,21 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(
     )
     sync = ConsoleSynchronizer(Mock(spec=GitHubApp), conversations, database=store._db)
     claim = sync.store.claim()
-    assert claim and claim.source == "worker" and claim.round_no == 1
+    assert claim and claim.source == "worker" and claim.attempt_id == attempt.id
     if resume_during_read:
         # A late page belongs to its Attempt, even when its timestamp is in the new round.
         control = ControlService(database=store.database)
         control.cancel(flow)
-        flow = control.resume(flow, expected_round_no=1)
-        assert flow.current_round_no == 2
+        flow = control.resume(flow, expected_attempt_id=flow.required_attempt_id)
+        assert flow.current_attempt_id != attempt.id
     await sync.sync(claim)
     conversations.read.assert_awaited_once_with(flow.id, None, 50)
     archive = ActivityStore(store._db)
     first = archive.page(flow.id)
     message = next(i for i in first.items if i.source == "worker" and i.kind == "message")
     assert message.key == f"worker:{attempt.id}:0:record-1"
-    assert message.round_no == message.model_dump()["round_no"] == attempt.round_no == 1
-    assert archive.versions(flow.id, message.key).items[0].round_no == 1
+    assert message.attempt_id == message.model_dump()["attempt_id"] == attempt.id
+    assert archive.versions(flow.id, message.key).items[0].attempt_id == attempt.id
     assert message.body == "worker display body\\u0000"
     assert message.metadata["unsupported_characters_escaped"] is True
     summary = next(i for i in first.items if i.kind == "tool_call")
@@ -136,7 +137,7 @@ async def test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh(
         monkeypatch.setattr(store.database, "_clock", lambda: due)
     again = sync.store.claim()
     assert again and again.cursor == "eof-checkpoint"
-    assert again.round_no == flow.current_round_no
+    assert again.attempt_id == flow.current_attempt_id
     await sync.sync(again)
     assert archive.page(flow.id).snapshot == first.snapshot
     [answer] = [i for i in first.items if i.key == f"worker:{attempt.id}:0:record-3"]
@@ -227,7 +228,7 @@ def test_worker_freshness_and_current_error_are_separate_from_session_coverage(
     only_worker(store._db)
     sync = ConsoleSyncStore(store._db)
     first_session = SessionHistory(
-        attempt_id=1,
+        attempt_id=flow.required_attempt_id,
         session_id="12345678-1234-1234-1234-123456789abc",
         session_generation=0,
         status="available",
@@ -251,7 +252,7 @@ def test_worker_freshness_and_current_error_are_separate_from_session_coverage(
         limitations=[],
         sessions=[
             SessionHistory(
-                attempt_id=2,
+                attempt_id=flow.required_attempt_id,
                 session_id="12345678-1234-1234-1234-123456789def",
                 session_generation=0,
                 status="unsupported",
@@ -313,7 +314,7 @@ async def test_missing_session_recovers_only_after_that_session_is_reread(
     flow = store.flows.create_flow("owner/repo", 7, 42)
     only_worker(store._db)
     first = SessionHistory(
-        attempt_id=1,
+        attempt_id=flow.required_attempt_id,
         session_id="12345678-1234-1234-1234-123456789abc",
         session_generation=0,
         status=status,
@@ -321,7 +322,7 @@ async def test_missing_session_recovers_only_after_that_session_is_reread(
         reached_end=True,
     )
     second = SessionHistory(
-        attempt_id=2,
+        attempt_id=flow.required_attempt_id,
         session_id="12345678-1234-1234-1234-123456789def",
         session_generation=0,
         status="available",
@@ -375,7 +376,7 @@ async def test_session_gap_survives_clean_pages_until_complete_clean_rescan(stor
     flow = store.flows.create_flow("owner/repo", 7, 42)
     console = ConsoleStore(store._db)
     session = SessionHistory(
-        attempt_id=1,
+        attempt_id=flow.required_attempt_id,
         session_id="12345678-1234-1234-1234-123456789abc",
         session_generation=0,
         status="unsupported",
@@ -469,7 +470,7 @@ async def test_legacy_availability_limitations_force_a_fresh_scan_and_clear(
             next_cursor="new-eof",
             sessions=[
                 SessionHistory(
-                    attempt_id=1,
+                    attempt_id=flow.required_attempt_id,
                     session_id="12345678-1234-1234-1234-123456789abc",
                     session_generation=0,
                     status="available",

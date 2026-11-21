@@ -10,7 +10,6 @@ from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import CommentEffect, ResultPending, ResultPlan, RunUpdate
 from app.controler.review.resolution import plan_resolution
 from app.controler.workflow.plans import (
-    delivered_pr_number,
     failed_plan,
     installation_id,
     review_effects,
@@ -21,7 +20,6 @@ from app.controler.workflow.preparation import (
     PreparationReads,
     preparation_retired,
     required_delivery,
-    required_pr_number,
 )
 from app.domain.models import (
     TERMINAL_STATES,
@@ -56,18 +54,26 @@ async def prepare_revision(
     reviews: ReviewStore, settings: ServerSettings, fail: FailJob,
 ) -> RevisionTask | JobState:
     """Read current PR facts outside locks, then freeze only a still-current assignment."""
+    if job.attempt_id != attempt.id or flow.current_attempt_id != attempt.id:
+        return JobState.DONE
     batch = reviews.for_job(job)
     if batch.attempt_id != attempt.id or batch.state not in {
         BatchState.READY, BatchState.PROCESSING,
     }:
         raise ValueError("review batch is no longer current")
 
+    delivery = required_delivery(flow, deliveries=deliveries)
+    if delivery.attempt_id != job.attempt_id:
+        return JobState.DONE
+    number = delivery.pr_number
+    if number is None:
+        raise ValueError(f"flow {flow.id} has no pull request")
     threads = None
     if batch.threads is None and any(f.kind is ReviewItemKind.INLINE for f in batch.feedback):
         assert flow.installation_id is not None
         repository = github.installation(flow.installation_id).repository(flow.repo)
         # Bind persisted identity; the thread query does not need current PR facts.
-        pr = PullRequest(repository, required_pr_number(flow, deliveries=deliveries))
+        pr = PullRequest(repository, number)
         try:
             threads = await reads.read(job, pr.list_review_threads)
         except GitHubError as exc:
@@ -75,7 +81,6 @@ async def prepare_revision(
 
     assert flow.installation_id is not None
     repository = github.installation(flow.installation_id).repository(flow.repo)
-    delivery = required_delivery(flow, deliveries=deliveries)
     payload = job.payload or {}
     purpose = payload.get("purpose", "revise")
     retry_status = payload.get("retry_status") if purpose == "revise" else None
@@ -87,9 +92,7 @@ async def prepare_revision(
         await fail(job, "修订任务缺少有效 worker binding。")
         return JobState.FAILED
     try:
-        remote = await reads.read(job, lambda: repository.fetch_pull_request(
-            required_pr_number(flow, deliveries=deliveries),
-        ))
+        remote = await reads.read(job, lambda: repository.fetch_pull_request(number))
         mismatch = (delivery.state is not DeliveryState.OPEN or not delivery.head_sha
             or remote.repo != flow.repo or remote.number != delivery.pr_number
             or remote.state != "open" or remote.merged
@@ -184,9 +187,10 @@ async def verify_revision_result(
             or job.result_payload is None or result_store.get_plan(job.id) is not None):
         return None
     flow = flows.get_flow(job.required_flow_id)
-    if flow is None or flow.state in TERMINAL_STATES:
+    if (flow is None or flow.state in TERMINAL_STATES or job.attempt_id is None
+            or flow.current_attempt_id != job.attempt_id):
         return None
-    delivery = deliveries.get_delivery(flow.id)
+    delivery = deliveries.get_attempt_delivery(job.attempt_id)
     if flow.retires(job, delivery):
         return None
     if job.result_digest is None:
@@ -204,8 +208,8 @@ async def verify_revision_result(
     mismatch = revision_mismatch(task, result)
     if mismatch:
         return mismatch
-    delivery = deliveries.get_delivery(flow.id)
-    if delivery is None or delivery.head_sha != (task.previous_head_sha or task.expected_head_sha):
+    if (delivery is None or task.attempt_id != job.attempt_id
+            or delivery.head_sha != (task.previous_head_sha or task.expected_head_sha)):
         return "revision baseline no longer matches delivery"
     if job.verify_next_at is not None and job.verify_next_at > database.now():
         raise ResultPending(job.verify_last_error or "revision verification backoff")
@@ -257,12 +261,13 @@ def revision_plan(
             f"{result.failure_detail or '执行结果不确定'}。反馈保留，需核对工作区和远端。",
         )
     task = frozen_revision(job)
-    delivery = deliveries.get_delivery(flow.id)
+    delivery = deliveries.get_attempt_delivery(attempt.id)
     execution = flows.get_flow_execution(flow.id)
     mismatch = revision_error or revision_mismatch(task, result)
     if mismatch:
         return failed_plan(base, mismatch)
-    if (delivery is None or delivery.head_sha != (task.previous_head_sha or task.expected_head_sha)
+    if (delivery is None or flow.current_attempt_id != attempt.id or task.attempt_id != job.attempt_id
+            or task.attempt_id != attempt.id or delivery.head_sha != (task.previous_head_sha or task.expected_head_sha)
             or delivery.state is not DeliveryState.OPEN
             or delivery.pr_number != task.pr_number or delivery.branch != task.branch
             or attempt.codex_session_id != task.session_id
@@ -271,7 +276,7 @@ def revision_plan(
             or execution.repo_identity != task.repo_identity):
         return failed_plan(base, "revision assignment is no longer current")
     assert result.output is not None
-    number = delivered_pr_number(flow, deliveries=deliveries)
+    number = task.pr_number
     members = {(f.item_id, f.version): f for f in batch.feedback}
     reported: list[AddressedComment | DeferredComment] = [
         *result.output.addressed, *result.output.deferred,

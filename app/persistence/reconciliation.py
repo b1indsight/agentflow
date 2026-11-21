@@ -13,10 +13,10 @@ from app.github import FeedbackSource
 ReconcileSource = FeedbackSource | Literal["threads"]
 # PR status checks share reconcile_checks with the feedback sources under this source name.
 PR_SOURCE = "pull_request"
-PR_RECONCILE_ELIGIBLE = "f.delivery_pr_number IS NOT NULL AND f.delivery_state<>'merged'"
+PR_RECONCILE_ELIGIBLE = "a.delivery_pr_number IS NOT NULL AND a.delivery_state<>'merged'"
 _FEEDBACK_RECONCILE_ELIGIBLE = (
     "f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
-    " AND f.delivery_state='open' AND f.delivery_pr_number IS NOT NULL"
+    " AND a.delivery_state='open' AND a.delivery_pr_number IS NOT NULL"
     " AND (s.source<>'issue_comments' OR f.issue_number IS NOT NULL)"
 )
 
@@ -27,6 +27,7 @@ class ReconcileState(BaseModel):
     """A PR status check: the reconcile_checks row whose source is PR_SOURCE."""
 
     flow_id: int
+    attempt_id: int
     next_at: datetime
     last_success_at: datetime | None = None
     failures: int = 0
@@ -47,13 +48,13 @@ class ReconcileStore(Repository):
         """Recover persisted current merges that the ordinary PR poller intentionally excludes."""
         with self._db.connection() as connection:
             return [row["id"] for row in connection.execute(
-                "SELECT f.id FROM flows f"
-                " WHERE f.state<>'archived' AND f.delivery_state='merged' AND f.delivery_pr_number IS NOT NULL"
-                " AND f.delivery_merged_at IS NOT NULL AND length(f.delivery_merge_commit_sha)>0"
+                "SELECT f.id FROM flows f JOIN attempts a ON a.id=f.current_attempt_id"
+                " WHERE f.state<>'archived' AND a.delivery_state='merged' AND a.delivery_pr_number IS NOT NULL"
+                " AND a.delivery_merged_at IS NOT NULL AND length(a.delivery_merge_commit_sha)>0"
                 " ORDER BY f.id LIMIT %s", (limit,),
             ).fetchall()]
 
-    def reset_round(self, flow_id: int) -> None:
+    def reset_attempt(self, flow_id: int) -> None:
         """A new delivery starts fresh PR/feedback observations in the resume transaction."""
         with self._db.connection() as connection:
             connection.execute("DELETE FROM reconcile_checks WHERE flow_id=%s", (flow_id,))
@@ -62,7 +63,7 @@ class ReconcileStore(Repository):
         with self._db.connection() as connection:
             connection.execute(
                 "INSERT INTO reconcile_checks(flow_id,source,next_at)"
-                " SELECT f.id,s.source,%s FROM flows f"
+                " SELECT f.id,s.source,%s FROM flows f JOIN attempts a ON a.id=f.current_attempt_id"
                 " CROSS JOIN (VALUES ('issue_comments'),('pr_comments'),('reviews'),('threads')) s(source)"
                 f" WHERE {_FEEDBACK_RECONCILE_ELIGIBLE}"
                 " AND NOT EXISTS (SELECT 1 FROM reconcile_checks r"
@@ -76,7 +77,8 @@ class ReconcileStore(Repository):
             return (
                 connection.cursor(row_factory=class_row(FeedbackCheck))
                 .execute(
-                    "SELECT s.* FROM reconcile_checks s JOIN flows f ON f.id=s.flow_id"
+                    "SELECT s.*,a.id AS attempt_id FROM reconcile_checks s JOIN flows f ON f.id=s.flow_id"
+                    " JOIN attempts a ON a.id=f.current_attempt_id"
                     " WHERE s.next_at<=%s AND s.source<>%s"
                     f" AND {_FEEDBACK_RECONCILE_ELIGIBLE}"
                     " ORDER BY s.next_at,s.flow_id,s.source LIMIT %s",
@@ -88,7 +90,8 @@ class ReconcileStore(Repository):
     def feedback_get(self, flow_id: int, source: ReconcileSource) -> FeedbackCheck | None:
         with self._db.connection() as connection:
             return connection.cursor(row_factory=class_row(FeedbackCheck)).execute(
-                "SELECT * FROM reconcile_checks WHERE flow_id=%s AND source=%s",
+                "SELECT s.*,f.current_attempt_id AS attempt_id FROM reconcile_checks s JOIN flows f ON f.id=s.flow_id"
+                " WHERE s.flow_id=%s AND s.source=%s",
                 (flow_id, source),
             ).fetchone()
 
@@ -133,7 +136,7 @@ class ReconcileStore(Repository):
         with self._db.connection() as connection:
             connection.execute(
                 "INSERT INTO reconcile_checks(flow_id,source,next_at)"
-                " SELECT f.id,%s,%s FROM flows f"
+                " SELECT f.id,%s,%s FROM flows f JOIN attempts a ON a.id=f.current_attempt_id"
                 f" WHERE {PR_RECONCILE_ELIGIBLE}"
                 " AND NOT EXISTS (SELECT 1 FROM reconcile_checks r WHERE r.flow_id=f.id AND r.source=%s)"
                 " ORDER BY f.id LIMIT %s ON CONFLICT DO NOTHING",
@@ -143,7 +146,8 @@ class ReconcileStore(Repository):
     def due(self, limit: int) -> list[ReconcileState]:
         with self._db.connection() as connection:
             return connection.cursor(row_factory=class_row(ReconcileState)).execute(
-                "SELECT r.* FROM reconcile_checks r JOIN flows f ON f.id=r.flow_id"
+                "SELECT r.*,a.id AS attempt_id FROM reconcile_checks r JOIN flows f ON f.id=r.flow_id"
+                " JOIN attempts a ON a.id=f.current_attempt_id"
                 " WHERE r.source=%s AND r.next_at<=%s"
                 f" AND {PR_RECONCILE_ELIGIBLE}"
                 " ORDER BY r.next_at,r.flow_id LIMIT %s", (PR_SOURCE, self._db.now(), limit),
@@ -152,7 +156,8 @@ class ReconcileStore(Repository):
     def get(self, flow_id: int) -> ReconcileState | None:
         with self._db.connection() as connection:
             return connection.cursor(row_factory=class_row(ReconcileState)).execute(
-                "SELECT * FROM reconcile_checks WHERE flow_id=%s AND source=%s",
+                "SELECT r.*,f.current_attempt_id AS attempt_id FROM reconcile_checks r JOIN flows f ON f.id=r.flow_id"
+                " WHERE r.flow_id=%s AND r.source=%s",
                 (flow_id, PR_SOURCE),
             ).fetchone()
 

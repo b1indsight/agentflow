@@ -22,8 +22,8 @@ from app.domain.review_models import FeedbackUpdate
     ("cleanup_applied", "succeeded", ("!", "!", "!", "finalizing", "finalizing", "!")),
     ("retry_requested", None, ("!", "!", "!", "queued", "!", "!")),
     ("retry_requested", "abandoned", ("!", "!", "!", "finalizing", "!", "!")),
-    ("round_archived", "succeeded", ("!", "!", "!", "!", "archived", "!")),
-    ("round_resumed", "abandoned", ("!", "!", "!", "!", "!", "queued")),
+    ("attempt_archived", "succeeded", ("!", "!", "!", "!", "archived", "!")),
+    ("attempt_started", "abandoned", ("!", "!", "!", "!", "!", "queued")),
     ("job_enqueued", "abandoned", (None,) * 6),
     ("job_claimed", "succeeded", (None,) * 6),
     ("assignment_requeued", "abandoned", (None,) * 6),
@@ -31,7 +31,7 @@ from app.domain.review_models import FeedbackUpdate
     ("delivery_baseline_rejected", "abandoned", ("!",) * 6),
     ("finalization_requested", None, ("!",) * 6),
     ("cleanup_applied", None, ("!",) * 6),
-    ("round_archived", None, ("!",) * 6),
+    ("attempt_archived", None, ("!",) * 6),
 ])
 def test_flow_events_define_transitions_noops_and_rejections(event, reason, targets):
     # In particular, blocked results can recover while blocked work cannot dispatch;
@@ -70,9 +70,9 @@ def test_flow_transition_preserves_noop_and_same_state_write_semantics(store):
     with store.flows.locked(flow.id) as context:
         fresh = context.flow
         assert fresh is not None
-        assert context.matches(round_no=1, attempt_id=None)
-        assert not context.matches(round_no=2, attempt_id=None)
-        assert not context.matches(round_no=1, attempt_id=17)
+        assert context.matches(attempt_id=flow.required_attempt_id)
+        assert not context.matches(attempt_id=None)
+        assert not context.matches(attempt_id=flow.required_attempt_id + 1)
         flows = store.flows.using(context.database)
         later = flow.updated_at + timedelta(seconds=10)
         flows.transition(fresh, FlowEvent.JOB_CLAIMED, now=later)
@@ -87,11 +87,6 @@ def test_flow_transition_preserves_noop_and_same_state_write_semantics(store):
     with pytest.raises(ValueError, match="no longer current"), store.flows.locked(flow.id) as context:
         store.flows.using(context.database).transition(flow, FlowEvent.JOB_CLAIMED)
     assert store.flows.get_flow(flow.id) == blocked
-    # A pointer write may carry an older snapshot, but must never overwrite its business state.
-    flow.current_attempt_id = store.flows.create_attempt(flow.id).id
-    store.flows.set_current_attempt(flow)
-    assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED
-    assert store.flows.get_flow(flow.id).current_attempt_id == flow.current_attempt_id
 
 
 def test_illegal_flow_transition_rolls_back_its_transaction(store):
@@ -104,30 +99,17 @@ def test_illegal_flow_transition_rolls_back_its_transaction(store):
         fresh = context.flow
         assert fresh is not None
         flows = store.flows.using(context.database)
-        fresh.current_attempt_id = flows.create_attempt(fresh.id).id
-        flows.set_current_attempt(fresh)
-        flows.transition(fresh, FlowEvent.ROUND_RESUMED)
+        flows.transition(fresh, FlowEvent.JOB_CLAIMED)
+        flows.transition(fresh, FlowEvent.ATTEMPT_STARTED)
     assert store.flows.get_flow(flow.id) == flow
 
 
-@pytest.mark.parametrize("branch,round_no,expected_branch", [
-    ("feat/remove-login", 1, "feat/remove-login-round-2"),
-    ("feat/remove-login-round-3", 3, "feat/remove-login-round-4"),
-    ("flow/77", 1, "flow/77-round-2"),
-    ("flow/custom-task", 1, "flow/custom-task-round-2"),
-    ("flow/custom-task-round-3", 3, "flow/custom-task-round-4"),
-    ("flow/not-this-round-3", 2, "flow/not-this-round-3-round-3"),
-])
-def test_resume_does_not_replay_prior_round_feedback_or_cursors(store, branch, round_no, expected_branch):
+def test_resume_does_not_replay_prior_feedback_or_cursors(store):
     service = ControlService(database=store.database)
     flow = service.create_flow("owner/repo", 7, 42)
-    for previous_round in range(1, round_no):
-        service.cancel(flow)
-        flow = service.resume(flow, expected_round_no=previous_round)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, branch)
+    # Attempt identities are globally allocated, not contiguous execution numbers.
+    store.flows.create_flow("owner/other", 7, 42)
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "feat/remove-login")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
     store.deliveries.update_delivery(delivery)
     store.reviews.ingest(
@@ -152,10 +134,9 @@ def test_resume_does_not_replay_prior_round_feedback_or_cursors(store, branch, r
     assert store.reviews.pending(flow.id)
     assert store.reconcile.feedback_get(flow.id, "reviews") is not None
     service.cancel(flow)
-    resumed = service.resume(flow, expected_round_no=round_no)
-    assert store.deliveries.get_delivery(flow.id).branch == expected_branch
-    resumed.current_attempt_id = store.flows.create_attempt(flow.id).id
-    store.flows.set_current_attempt(resumed)
+    resumed = service.resume(flow, expected_attempt_id=flow.required_attempt_id)
+    assert store.deliveries.get_delivery(flow.id).branch == f"feat/remove-login-attempt-{resumed.current_attempt_id}"
+    assert store.deliveries.get_attempt_delivery(flow.required_attempt_id) == delivery
     assert store.reviews.pending(flow.id) == []
     assert store.reviews.claim_due() == []
     assert store.reconcile.feedback_get(flow.id, "reviews") is None
@@ -174,17 +155,17 @@ async def test_resume_before_first_delivery_still_requires_worker_naming(store, 
     service = ControlService(database=store.database)
     flow = service.create_flow("owner/repo", 8, 42)
     service.cancel(flow)
-    resumed = service.resume(flow, expected_round_no=1)
-    assert resumed.current_round_no == 2 and store.deliveries.get_delivery(flow.id) is None
+    resumed = service.resume(flow, expected_attempt_id=flow.required_attempt_id)
+    assert resumed.current_attempt_id != flow.current_attempt_id and store.deliveries.get_delivery(flow.id) is None
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     coding = store.assignments.assign_job("worker-a", "token", "epoch")
     github = RecordingGitHub()
     github.refs = {}
     task = await prepare_initial(coordinator(store, github), coding)
-    assert isinstance(task, InitialTask) and task.branch == "feat/implement-task-round-2"
+    assert isinstance(task, InitialTask) and task.branch == f"feat/implement-task-attempt-{resumed.current_attempt_id}"
 
 
-async def test_failed_initial_round_stops_workspace_before_resume(
+async def test_failed_initial_attempt_stops_workspace_before_resume(
     store,
     tmp_path,
     recording_resources,
@@ -281,7 +262,7 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     service.cancel(store.flows.get_flow(flow.id))
     assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
     with pytest.raises(ValueError, match="archived"):
-        service.resume(flow, expected_round_no=1)
+        service.resume(flow, expected_attempt_id=flow.required_attempt_id)
     stop = store.stops.pending("worker-a")
     owner = WorkerExecution(worker_id="worker-a", executor=executor, state=state)
     receipt = await owner.stop(stop.fence())
@@ -297,11 +278,11 @@ async def test_failed_initial_round_stops_workspace_before_resume(
     for item in pool.inventory():
         assert store.workers.report_workspace("worker-a", "epoch", item)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-    service.resume(flow, expected_round_no=1)
+    resumed = service.resume(flow, expected_attempt_id=flow.required_attempt_id)
     next_job = store.assignments.assign_job("worker-a", "second", "epoch")
     next_task = await subject.prepare(next_job)
     assert isinstance(next_task, InitialTask)
-    assert next_task.branch == f"{task.branch}-round-2"
+    assert next_task.branch == f"{task.branch}-attempt-{resumed.current_attempt_id}"
     assert store.flows.get_flow(flow.id).title_job_id == store.jobs.list_jobs(flow.id)[1].id
     assert store.deliveries.get_delivery(flow.id).branch == next_task.branch
     state.record_received(
@@ -345,6 +326,11 @@ def test_legacy_flow_replays_from_a_startup_snapshot_and_verify_reports_bypasses
             "created_at,updated_at) VALUES ('owner/legacy',3,'finalizing','abandoned','closed',"
             "now()-interval '1 day',now()) RETURNING id"
         ).fetchone()["id"]
+        attempt = connection.execute(
+            "INSERT INTO attempts(flow_id,created_at,updated_at) SELECT id,created_at,updated_at"
+            " FROM flows WHERE id=%s RETURNING id", (legacy,),
+        ).fetchone()["id"]
+        connection.execute("UPDATE flows SET current_attempt_id=%s WHERE id=%s", (attempt, legacy))
     with pytest.raises(ValueError, match="no origin"):
         store.flows.verify(legacy)
     store.init_db()

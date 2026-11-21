@@ -77,7 +77,7 @@ def _coding_failure(job: Job, now: datetime) -> Observation:
             body = "Worker 返回退出码 0，但控制端处理任务结果失败。"
     return Observation(
         key=f"workflow_result:{job.id}", source="workflow_result", kind="failure",
-        round_no=job.round_no, author=author, occurred_at=now, updated_at=now,
+        attempt_id=job.attempt_id, author=author, occurred_at=now, updated_at=now,
         title=f"任务 #{job.id} 失败", body=body, metadata={"job_id": job.id, "kind": job.kind.value},
     )
 
@@ -167,7 +167,7 @@ class ResultApplication:
                     and inference.validation == "flow_naming"):
                 flow = self.flows.using(tx).get_flow(job.flow_id)
                 if (flow is not None and flow.title_job_id == job.id
-                        and flow.current_round_no == job.round_no
+                        and flow.current_attempt_id == job.attempt_id
                         and flow.current_attempt_id == inference.source_attempt_id):
                     assert isinstance(title, str)
                     self.flows.using(tx).set_title(flow.id, job.id, title.strip())
@@ -294,9 +294,9 @@ class ResultApplication:
                 raise ResultPending("result has not reached its atomic completion boundary")
             if state is JobState.FAILED and current.kind in {JobKind.INITIAL, JobKind.REVISION}:
                 ActivityStore(tx).append(flow.id, _coding_failure(current, tx.now()))
-            if current.round_no == flow.current_round_no:
+            if current.attempt_id == flow.current_attempt_id:
                 # Even a failed INITIAL retains its checkout. Explicit finalization
-                # must confirm stop/reclamation before releasing this round's binding.
+                # must confirm stop/reclamation before releasing the binding.
                 self.flows.using(tx).try_archive(flow.id)
             flow = self.flows.using(tx).get_flow(flow.id) or flow
         if not retired:
@@ -319,12 +319,13 @@ class ResultApplication:
             assignment_token=job.assignment_token,
             result_digest=job.result_digest,
         ).terminal
-        attempt = flows_tx.get_current_attempt(flow)
+        assert job.attempt_id is not None  # Non-inference jobs always belong to an Attempt.
+        attempt = flows_tx.get_attempt(job.attempt_id)
         base = ResultPlan(
             job_id=job.id,
             flow_id=flow.id,
             digest=job.result_digest,
-            attempt_id=flow.current_attempt_id,
+            attempt_id=job.attempt_id,
             state=JobState.DONE,
         )
         if isinstance(message, MergeArchiveNotice):
@@ -332,12 +333,12 @@ class ResultApplication:
                 base, flow, job, message, activity=ActivityStore(tx),
                 done_label=self.settings.done_label, in_review_label=self.settings.in_review_label,
             )
-        if flow.state in TERMINAL_STATES or job.round_no != flow.current_round_no:
+        if flow.state in TERMINAL_STATES or job.attempt_id != flow.current_attempt_id:
             return self._retired_plan(job, base.attempt_id)
         # Bind failed results to their review batch too, before handling the terminal kind.
         batch = reviews_tx.for_job(job) if job.kind in {JobKind.REVISION} else None
         if batch is not None:
-            base = base.model_copy(update={"attempt_id": batch.attempt_id, "batch_id": batch.id})
+            base = base.model_copy(update={"batch_id": batch.id})
         delivery = deliveries_tx.get_delivery(flow.id)
         if flow.retires(job, delivery):
             return self._retired_plan(job, base.attempt_id)
@@ -452,7 +453,7 @@ class ResultApplication:
         state = FlowState.BLOCKED if failure else plan.flow_state
         if state is FlowState.ARCHIVED:
             # Archive and ownership release happen after this result's completion
-            # marker, in the same transaction, through the settled-round guard.
+            # marker, in the same transaction, once the Attempt's resources settle.
             flows_tx.transition(flow, FlowEvent.CLEANUP_APPLIED)
         elif state is FlowState.BLOCKED:
             flows_tx.transition(flow, FlowEvent.RESULT_FAILED)

@@ -53,13 +53,17 @@ def previous_terminal(version: int = 15) -> dict[str, JsonValue]:
     }
 
 
-def test_merge_notice_is_local_evidence_not_a_worker_result() -> None:
+@pytest.mark.parametrize("version", [2, 3])
+def test_merge_notice_is_local_evidence_not_a_worker_result(version: Literal[2, 3]) -> None:
     notice = MergeArchiveNotice(
-        job_id=5, flow_id=3, round_no=2, repo="owner/repo", pr_number=17,
+        job_id=5, flow_id=3, round_no=2 if version == 2 else None,
+        attempt_id=19 if version == 3 else None, repo="owner/repo", pr_number=17,
         merged_at=datetime(2026, 11, 6, 8, tzinfo=UTC), merge_commit_sha="a" * 40,
     )
-    inbox = ResultInbox(version=2, source="control", terminal=notice)
+    inbox = ResultInbox(version=version, source="control", terminal=notice)
     saved = inbox.model_dump(mode="json")
+    assert ("attempt_id" in saved["terminal"]) == (version == 3)
+    assert ("round_no" in saved["terminal"]) == (version == 2)
     before = deepcopy(saved)
     digest = merge_notice_digest(notice)
     assert decode_result_inbox(saved, job_id=5, assignment_token=None,

@@ -42,10 +42,9 @@ class LockedFlow:
     database: Database
     flow: Flow | None
 
-    def matches(self, *, round_no: int, attempt_id: int | None) -> bool:
+    def matches(self, *, attempt_id: int | None) -> bool:
         """Compare exact ownership; a None attempt is not a wildcard."""
-        return (self.flow is not None and self.flow.current_round_no == round_no
-                and self.flow.current_attempt_id == attempt_id)
+        return self.flow is not None and attempt_id is not None and self.flow.current_attempt_id == attempt_id
 
 
 class FlowStore(Repository):
@@ -77,8 +76,9 @@ class FlowStore(Repository):
                  decide_flow_state(None, FlowEvent.CREATED, archive_reason=None), now, now),
             ).fetchone()
             flow = required(row)
+            attempt = FlowStore(tx).create_current_attempt(flow)
             ActivityStore(tx).append_flow(
-                flow.id, flow.current_round_no, fact_kind(FlowEvent.CREATED), occurred_at=now,
+                flow.id, attempt.id, fact_kind(FlowEvent.CREATED), occurred_at=now,
                 metadata={"repo": repo, "issue_number": issue_number,
                           "installation_id": installation_id,
                           "task_digest": task_digest(task_content)},
@@ -112,7 +112,8 @@ class FlowStore(Repository):
             connection.cursor(row_factory=class_row(Flow)) as cursor,
         ):
             return cursor.execute(
-                "SELECT * FROM flows WHERE repo=%s AND delivery_pr_number=%s ORDER BY id DESC LIMIT 1",
+                "SELECT f.* FROM flows f JOIN attempts a ON a.id=f.current_attempt_id"
+                " WHERE f.repo=%s AND a.delivery_pr_number=%s ORDER BY f.id DESC LIMIT 1",
                 (repo, pr_number),
             ).fetchone()
 
@@ -135,34 +136,34 @@ class FlowStore(Repository):
             return flow
         now = now if now is not None else self._db.now()
         with self._db.connection() as connection:
-            if event is FlowEvent.ROUND_RESUMED:
+            if event is FlowEvent.ATTEMPT_STARTED:
                 row = connection.cursor(row_factory=class_row(Flow)).execute(
-                    "UPDATE flows SET state=%s,current_round_no=current_round_no+1,"
-                    " current_attempt_id=NULL,archive_reason=NULL,archive_summary=NULL,"
+                    "UPDATE flows SET state=%s,current_attempt_id=NULL,archive_reason=NULL,archive_summary=NULL,"
                     " archived_at=NULL,updated_at=%s"
-                    " WHERE id=%s AND state=%s AND current_round_no=%s RETURNING *",
-                    (state, now, flow.id, flow.state, flow.current_round_no),
+                    " WHERE id=%s AND state=%s AND current_attempt_id=%s RETURNING *",
+                    (state, now, flow.id, flow.state, flow.current_attempt_id),
                 ).fetchone()
                 if row is None:
-                    raise ValueError("archived Flow round is no longer current")
+                    raise ValueError("archived Attempt is no longer current")
+                self.create_current_attempt(row)
                 self._record(row, event)
                 return row
             if (
                 state is FlowState.ARCHIVED
-                and ActivityStore(self._db).archived(flow.id, flow.current_round_no) is None
+                and ActivityStore(self._db).archived(flow.id, flow.required_attempt_id) is None
             ):
                 raise ValueError("archive requires settled activity evidence")
             changed = connection.execute(
                 "UPDATE flows SET state=%s,archive_reason=%s,archive_summary=%s,"
-                " archived_at=%s,updated_at=%s WHERE id=%s AND current_round_no=%s AND state=%s",
+                " archived_at=%s,updated_at=%s WHERE id=%s AND current_attempt_id=%s AND state=%s",
                 (state, flow.archive_reason, flow.archive_summary, flow.archived_at,
-                 now, flow.id, flow.current_round_no, flow.state),
+                 now, flow.id, flow.current_attempt_id, flow.state),
             )
             if changed.rowcount != 1:
-                raise ValueError("Flow state or round is no longer current")
+                raise ValueError("Flow state or Attempt is no longer current")
             flow.state, flow.updated_at = state, now
-            # archive_round already appended the archive evidence that records archival.
-            if event is not FlowEvent.ROUND_ARCHIVED:
+            # archive_attempt already appended the archive evidence that records archival.
+            if event is not FlowEvent.ATTEMPT_ARCHIVED:
                 self._record(flow, event)
             if state in {FlowState.FINALIZING, FlowState.ARCHIVED}:
                 ReviewStore(self._db).cancel(flow.id)
@@ -171,23 +172,13 @@ class FlowStore(Repository):
     def _record(self, flow: Flow, event: FlowEvent) -> None:
         """Append the ledger fact for a transition just written to ``flow``."""
         ActivityStore(self._db).append_flow(
-            flow.id, flow.current_round_no, fact_kind(event), occurred_at=flow.updated_at,
+            flow.id, flow.required_attempt_id, fact_kind(event), occurred_at=flow.updated_at,
             metadata={
                 "state": flow.state.value,
                 "archive_reason": flow.archive_reason.value if flow.archive_reason else None,
                 "archive_summary": flow.archive_summary,
             },
         )
-
-    def set_current_attempt(self, flow: Flow) -> None:
-        """Point the current round at its Attempt; a pointer, not a ledger fact."""
-        with self._db.connection() as connection:
-            changed = connection.execute(
-                "UPDATE flows SET current_attempt_id=%s WHERE id=%s AND current_round_no=%s",
-                (flow.current_attempt_id, flow.id, flow.current_round_no),
-            )
-            if changed.rowcount != 1:
-                raise ValueError("Flow round is no longer current")
 
     def set_title_job(self, flow_id: int, job_id: int) -> None:
         """Point the Flow at the naming inference whose result may set its title."""
@@ -199,12 +190,14 @@ class FlowStore(Repository):
         with self._db.connection() as connection:
             row = connection.execute(
                 "UPDATE flows SET title=%s WHERE id=%s AND title_job_id=%s"
-                " RETURNING current_round_no",
+                " AND EXISTS (SELECT 1 FROM jobs WHERE jobs.id=flows.title_job_id"
+                " AND jobs.attempt_id=flows.current_attempt_id)"
+                " RETURNING current_attempt_id",
                 (title, flow_id, job_id),
             ).fetchone()
         if row is not None:
             ActivityStore(self._db).append_flow(
-                flow_id, row["current_round_no"], "titled", occurred_at=self._db.now(),
+                flow_id, row["current_attempt_id"], "titled", occurred_at=self._db.now(),
                 metadata={"title": title, "job_id": job_id},
             )
 
@@ -241,25 +234,20 @@ class FlowStore(Repository):
         ):
             return cursor.execute(query).fetchall()
 
-    def create_attempt(self, flow_id: int) -> Attempt:
-        now = self._db.now()
+    def create_current_attempt(self, flow: Flow) -> Attempt:
+        """Select the first Attempt for a new or reopening Flow in its transaction."""
+        if self._db._bound_connection is None or flow.current_attempt_id is not None:
+            raise ValueError("Attempt selection requires a new or reopening Flow in its transaction")
         with (
             self._db.connection() as connection,
             connection.cursor(row_factory=class_row(Attempt)) as cursor,
         ):
-            row = cursor.execute(
-                "INSERT INTO attempts(flow_id,round_no,revision_cycles,created_at,updated_at)"
-                " SELECT id,current_round_no,0,%s,%s FROM flows WHERE id=%s RETURNING *",
-                (now, now, flow_id),
-            ).fetchone()
-        return required(row)
-
-    def create_current_attempt(self, flow: Flow) -> Attempt:
-        """Create and select an Attempt atomically, rolling back if the round changed."""
-        with self._db.transaction() as tx:
-            flows = self.using(tx)
-            attempt = flows.create_attempt(flow.id)
-            flows.set_current_attempt(flow.model_copy(update={"current_attempt_id": attempt.id}))
+            attempt = required(cursor.execute(
+                "INSERT INTO attempts(flow_id,created_at,updated_at)"
+                " SELECT id,updated_at,updated_at FROM flows"
+                " WHERE id=%s AND current_attempt_id IS NULL RETURNING *", (flow.id,),
+            ).fetchone())
+            connection.execute("UPDATE flows SET current_attempt_id=%s WHERE id=%s", (attempt.id, flow.id))
         flow.current_attempt_id = attempt.id
         return attempt
 
@@ -270,8 +258,9 @@ class FlowStore(Repository):
         ):
             return cursor.execute("SELECT * FROM attempts WHERE id=%s", (attempt_id,)).fetchone()
 
-    def get_current_attempt(self, flow: Flow) -> Attempt | None:
-        return self.get_attempt(flow.current_attempt_id) if flow.current_attempt_id else None
+    def get_current_attempt(self, flow: Flow) -> Attempt:
+        """Load the Attempt selected by this Flow snapshot, not a later replacement."""
+        return required(self.get_attempt(flow.required_attempt_id))
 
     def list_attempts(self, flow_id: int) -> list[Attempt]:
         with (
@@ -279,8 +268,17 @@ class FlowStore(Repository):
             connection.cursor(row_factory=class_row(Attempt)) as cursor,
         ):
             return cursor.execute(
-                "SELECT * FROM attempts WHERE flow_id=%s ORDER BY id", (flow_id,)
+                "SELECT * FROM attempts WHERE flow_id=%s ORDER BY created_at,id", (flow_id,)
             ).fetchall()
+
+    def session_worker(self, attempt_id: int) -> str | None:
+        """Read the coding assignment that owned this Attempt, even after the Flow rebinds."""
+        with self._db.connection() as connection:
+            row = connection.execute(
+                "SELECT assigned_worker_id FROM jobs WHERE attempt_id=%s AND kind IN ('initial','revision')"
+                " AND assigned_worker_id IS NOT NULL ORDER BY id DESC LIMIT 1", (attempt_id,),
+            ).fetchone()
+        return row["assigned_worker_id"] if row else None
 
     def update_attempt(self, attempt: Attempt) -> None:
         attempt.updated_at = self._db.now()
@@ -362,7 +360,7 @@ class FlowStore(Repository):
                 " AND s.binding_at=flow_executions.bound_at AND s.state!='confirmed')"
                 " AND NOT EXISTS (SELECT 1 FROM jobs j JOIN flows f ON f.id=j.flow_id"
                 " WHERE j.flow_id=flow_executions.flow_id"
-                f" AND j.round_no=f.current_round_no AND j.kind<>'inference' AND {RESOURCE_JOB_SQL}"
+                f" AND j.attempt_id=f.current_attempt_id AND j.kind<>'inference' AND {RESOURCE_JOB_SQL}"
                 " AND (j.state='running'"
                 " OR (j.result_received_at IS NOT NULL AND j.result_applied_at IS NULL)"
                 " OR ((j.started_at IS NOT NULL OR j.dispatch_authorized_at IS NOT NULL"
@@ -371,7 +369,7 @@ class FlowStore(Repository):
                 " WHERE s.job_id=j.id AND s.assignment_token=j.assignment_token AND s.state='confirmed'))))"
                 " AND NOT EXISTS (SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
                 " JOIN flows f ON f.id=j.flow_id WHERE j.flow_id=flow_executions.flow_id"
-                f" AND j.round_no=f.current_round_no AND {RESOURCE_JOB_SQL} AND {UNCONFIRMED_EFFECT_SQL})",
+                f" AND j.attempt_id=f.current_attempt_id AND {RESOURCE_JOB_SQL} AND {UNCONFIRMED_EFFECT_SQL})",
                 (now, flow_id),
             )
             if result.rowcount == 1:
@@ -386,7 +384,7 @@ class FlowStore(Repository):
         return result.rowcount == 1
 
     def try_archive(self, flow_id: int) -> bool:
-        """Finish a requested round or settle an already-archived round's resources.
+        """Finish a requested Attempt or settle its already-archived resources.
 
         Merged business archival is independent of the original Worker's cleanup.
         Its stop/result callbacks still release that binding through the controller's
@@ -405,7 +403,7 @@ class FlowStore(Repository):
             delivery = DeliveryStore(tx).get_delivery(flow_id)
             if (
                 connection.execute(
-                    "SELECT 1 FROM jobs WHERE flow_id=%s AND round_no=%s AND"
+                    "SELECT 1 FROM jobs WHERE flow_id=%s AND attempt_id=%s AND"
                     " (state IN ('queued','running') OR (result_received_at IS NOT NULL AND result_applied_at IS NULL)"
                     " OR (kind<>'inference' AND (started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL"
                     " OR (kind='archive' AND payload->'archive' IS NOT NULL))"
@@ -413,10 +411,10 @@ class FlowStore(Repository):
                     " WHERE s.job_id=jobs.id AND s.assignment_token=jobs.assignment_token AND s.state='confirmed')))"
                     " UNION ALL SELECT 1 FROM execution_stops WHERE flow_id=%s AND state<>'confirmed'"
                     " UNION ALL SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
-                    " WHERE j.flow_id=%s AND j.round_no=%s AND ((e.state NOT IN ('succeeded','skipped')"
+                    " WHERE j.flow_id=%s AND j.attempt_id=%s AND ((e.state NOT IN ('succeeded','skipped')"
                     " AND NOT (e.state='failed' AND e.dispatched_at IS NULL))"
                     f" OR ({UNCONFIRMED_EFFECT_SQL})) LIMIT 1",
-                    (flow_id, flow.current_round_no, flow_id, flow_id, flow.current_round_no),
+                    (flow_id, flow.current_attempt_id, flow_id, flow_id, flow.current_attempt_id),
                 ).fetchone()
                 is not None
             ):
@@ -427,10 +425,10 @@ class FlowStore(Repository):
                 if (
                     connection.execute(
                         "SELECT 1 FROM jobs j JOIN result_applications r ON r.job_id=j.id"
-                        " WHERE j.flow_id=%s AND j.round_no=%s AND j.kind='archive' AND j.state='done'"
+                        " WHERE j.flow_id=%s AND j.attempt_id=%s AND j.kind='archive' AND j.state='done'"
                         " AND j.result_applied_at IS NOT NULL"
                         " AND r.plan->'archive'->>'cleanup' IN ('removed','released','already_absent')",
-                        (flow_id, flow.current_round_no),
+                        (flow_id, flow.current_attempt_id),
                     ).fetchone()
                     is None
                 ):
@@ -448,10 +446,10 @@ class FlowStore(Repository):
                 and not flows.release_flow_execution(flow_id)
             ):
                 return False
-            flows.archive_round(flow, delivery)
+            flows.archive_attempt(flow, delivery)
             return True
 
-    def archive_round(self, flow: Flow, delivery: FlowDelivery | None) -> None:
+    def archive_attempt(self, flow: Flow, delivery: FlowDelivery | None) -> None:
         """Commit an already-proved business conclusion under the caller's workflow lock.
 
         The immutable activity and terminal projection share the transaction. The
@@ -461,9 +459,11 @@ class FlowStore(Repository):
             raise RuntimeError("archive requires a workflow transaction")
         if flow.archive_reason is None:
             raise ValueError("archive requires a business conclusion")
+        if delivery is not None and delivery.attempt_id != flow.required_attempt_id:
+            raise ValueError("cannot archive with another Attempt's delivery")
         flow.archived_at = self._db.now()
         ActivityStore(self._db).append_flow(
-            flow.id, flow.current_round_no, "archive", occurred_at=flow.archived_at,
+            flow.id, flow.required_attempt_id, "archive", occurred_at=flow.archived_at,
             metadata={
                 "repo": flow.repo,
                 "pr_number": delivery.pr_number if delivery else None,
@@ -474,10 +474,10 @@ class FlowStore(Repository):
                 "merge_commit_sha": delivery.merge_commit_sha if delivery else None,
             },
         )
-        self.transition(flow, FlowEvent.ROUND_ARCHIVED, now=flow.archived_at)
+        self.transition(flow, FlowEvent.ATTEMPT_ARCHIVED, now=flow.archived_at)
 
     def observe_archived_merge(
-        self, flow_id: int, round_no: int, merge: PullRequestMerge, *, origin: str
+        self, flow_id: int, attempt_id: int, merge: PullRequestMerge, *, origin: str
     ) -> bool:
         """Correct a proven pre-archive merge without authorizing work, even after resume.
 
@@ -488,15 +488,15 @@ class FlowStore(Repository):
         with self._db.transaction() as tx, tx.connection() as connection:
             flow = tx.lock_workflow(flow_id)
             activity = ActivityStore(tx)
-            archive = activity.archived(flow_id, round_no)
-            if flow is None or archive is None or round_no > flow.current_round_no:
+            archive = activity.archived(flow_id, attempt_id)
+            if flow is None or archive is None:
                 raise ValueError("archived activity does not exist")
             if (
                 archive.metadata.get("repo") != flow.repo
                 or archive.metadata.get("pr_number") != merge.number
             ):
                 raise ValueError("merge does not belong to archived PR")
-            previous = activity.flow_event(flow_id, round_no, "merge")
+            previous = activity.flow_event(flow_id, attempt_id, "merge")
             for record in (archive, previous):
                 if record is None:
                     continue
@@ -520,16 +520,16 @@ class FlowStore(Repository):
             added = False
             if previous is None:
                 added = activity.append_flow(
-                    flow_id, round_no, "merge", occurred_at=merge.merged_at, metadata=metadata
+                    flow_id, attempt_id, "merge", occurred_at=merge.merged_at, metadata=metadata
                 )
             if (
                 archive.metadata.get("archive_reason") == ArchiveReason.ABANDONED.value
                 and merge.merged_at + timedelta(seconds=1) < archive.occurred_at
-                and activity.flow_event(flow_id, round_no, "archive_correction") is None
+                and activity.flow_event(flow_id, attempt_id, "archive_correction") is None
             ):
                 activity.append_flow(
                     flow_id,
-                    round_no,
+                    attempt_id,
                     "archive_correction",
                     occurred_at=tx.now(),
                     metadata={
@@ -539,7 +539,7 @@ class FlowStore(Repository):
                         "archived_at": archive.occurred_at.isoformat(),
                     },
                 )
-                if flow.current_round_no == round_no and flow.state is FlowState.ARCHIVED:
+                if flow.current_attempt_id == attempt_id and flow.state is FlowState.ARCHIVED:
                     # Do not advance updated_at, mutate owner, or re-enter merge cleanup.
                     connection.execute(
                         "UPDATE flows SET archive_reason='succeeded' WHERE id=%s", (flow_id,)

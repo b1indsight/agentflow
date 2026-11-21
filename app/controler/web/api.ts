@@ -1,7 +1,6 @@
 import { jsonCacheBytes, SessionCache } from "./sessionCache";
 import type {
   ActivityPage,
-  ArchiveReason,
   CodingModelSettings,
   ContentPage,
   FlowDetail,
@@ -191,24 +190,21 @@ export function createFailure(error: unknown): {
 }
 export const getFlow = (id: number, signal?: AbortSignal) =>
   api<FlowDetail>(`/api/flows/${id}`, {}, signal);
-export const archiveFlow = (
-  id: number,
-  request: {
-    reason: ArchiveReason;
-    summary: string;
-    expected_round_no: number;
-  },
-) =>
+export const archiveFlow = (id: number, expectedAttemptId: number) =>
   api<FlowDetail>(`/api/flows/${id}/archive`, {}, undefined, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
+    body: JSON.stringify({
+      reason: "abandoned",
+      summary: "",
+      expected_attempt_id: expectedAttemptId,
+    }),
   });
-export const resumeFlow = (id: number, expectedRoundNo: number) =>
+export const resumeFlow = (id: number, expectedAttemptId: number) =>
   api<FlowDetail>(`/api/flows/${id}/resume`, {}, undefined, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ expected_round_no: expectedRoundNo }),
+    body: JSON.stringify({ expected_attempt_id: expectedAttemptId }),
   });
 export const retryFlow = (id: number) =>
   api<FlowDetail>(`/api/flows/${id}/retry`, {}, undefined, {
@@ -263,7 +259,7 @@ const retryRefusals: Record<string, string> = {
   retry_delivery_closed: "PR 已关闭或暂停，请先重新打开并完成对账。",
   retry_result_pending: "结果仍待对账，请完成对账后再重试。",
   retry_flow_conflict: "同一 Issue 已有其他活跃 Flow，请先处理该 Flow。",
-  retry_archived: "本轮已归档，请使用恢复推进开启新轮次。",
+  retry_archived: "本次执行已归档，如需继续，请重新开工。",
   retry_delivery_merged: "PR 已合并，不能重跑编码或评审任务。",
   retry_archive_inactive: "PR 已合并，只能重试活跃 Flow 的归档。",
   retry_archive_binding_missing: "原执行绑定已失效，暂时无法重试归档。",
@@ -278,15 +274,15 @@ export function roundFailureMessage(
   action: "archive" | "resume",
   error: unknown,
 ): string {
-  const label = action === "archive" ? "结束本轮" : "恢复推进";
+  const label = action === "archive" ? "归档" : "重新开工";
   if (error instanceof ApiError) {
     if (error.status === 401) return "登录已失效，请重新登录后再操作。";
     if (error.status === 403) return "没有操作权限，或请求未通过同源校验。";
     if (error.status === 404) return "Flow 不存在，请刷新确认。";
     if (error.status === 409)
-      return `未受理${label}：轮次、状态或安全条件不满足，请刷新核对后再操作（${error.message}）。`;
+      return `未受理${label}：执行身份、状态或安全条件不满足，请刷新核对后再操作（${error.message}）。`;
     if (error.status === 400 || error.status === 422)
-      return `未受理${label}：请检查填写内容（${error.message}）。`;
+      return `未受理${label}：请刷新核对当前执行（${error.message}）。`;
   }
   return `无法确认${label}是否已提交，请先刷新核对状态，不要直接重复提交。`;
 }

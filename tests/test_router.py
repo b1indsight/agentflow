@@ -124,10 +124,7 @@ async def test_review_comment_is_stored_for_current_attempt(
     router: EventRouter, store: Store, monkeypatch, author: str,
 ) -> None:
     flow = store.flows.create_flow("owner/repo", 7, installation_id=42)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, f"flow/{flow.id}")
     delivery.pr_number = 17
     delivery.state = DeliveryState.OPEN
     store.deliveries.update_delivery(delivery)

@@ -31,14 +31,14 @@ FlowTool 把 GitHub Issue 或一段任务描述交给 Codex 或 Amp。Worker 编
 - **从控制台开始：** 用 owner 身份打开部署地址的 `/console/`，点「新建 Flow」，选择已授权的仓库并输入任务（最多 32 KiB UTF-8）。无需先建 Issue。若提交后连接中断，先刷新看板核对，以免重复创建。
 - **从 GitHub 开始：** 配好 [Webhook](docs/architecture/github-app.md) 后，由 allowlist 中的用户给目标仓库的 Issue 添加 `flow` 标签（名称可配置）。
 
-没有空闲 Worker 时任务会排队。打开 Flow 详情可以看执行记录、时间线和 PR；在 PR 上审核、留言或请求修改。无 PR 的调查也可填写结论并结束本轮。需要重新推进已归档的 Flow 时，显式恢复新一轮；重开 Issue 或 PR 不会自动启动编码。
+没有空闲 Worker 时任务会排队。打开 Flow 详情可以看执行记录、时间线和 PR；在 PR 上审核、留言或请求修改。无 PR 的调查也可填写结论并结束执行。需要继续已归档的 Flow 时，显式重新开工，系统会在原 Flow 下创建新的 Attempt。修订、重试和切换编码会话沿用当前 Attempt；重开 Issue 或 PR 不会自动启动编码。
 
 在能访问数据库的服务端，也可用 CLI 查看进度（将 `42` 换成实际 Flow ID）：
 
 ```bash
 uv run flowtool flows --active
 uv run flowtool flow show 42
-uv run flowtool flow history 42 --round 1
+uv run flowtool flow history 42 --attempt 71  # 使用 show 显示的 Attempt ID
 ```
 
 ## 文档

@@ -1,4 +1,4 @@
-"""Queue owner messages on their existing, round-scoped conversation records."""
+"""Queue owner messages on their existing, attempt-scoped conversation records."""
 
 from psycopg.types.json import Jsonb
 
@@ -30,7 +30,7 @@ class AgentInputStore(Repository):
         key = f"agent_task:{request_id}"
         now = self._db.now()
         ActivityStore(self._db).append(flow.id, Observation(
-            key=key, source="agent_task", kind="message", round_no=flow.current_round_no,
+            key=key, source="agent_task", kind="message", attempt_id=flow.current_attempt_id,
             author="user", body=instruction, occurred_at=now, updated_at=now,
             metadata={"attempt_id": flow.current_attempt_id},
         ))
@@ -43,7 +43,7 @@ class AgentInputStore(Repository):
         with self._db.connection() as conn:
             return [row["flow_id"] for row in conn.execute(
                 "SELECT DISTINCT a.flow_id FROM console_activity a JOIN flows f ON f.id=a.flow_id"
-                " AND f.current_round_no=a.round_no WHERE a.awaiting_agent AND f.archive_reason IS NULL"
+                " AND f.current_attempt_id=a.attempt_id WHERE a.awaiting_agent AND f.archive_reason IS NULL"
                 " AND f.state IN ('review','blocked') ORDER BY a.flow_id",
             )]
 
@@ -51,8 +51,8 @@ class AgentInputStore(Repository):
         with self._db.connection() as conn:
             rows = conn.execute(
                 "WITH taken AS (UPDATE console_activity SET awaiting_agent=FALSE"
-                " WHERE flow_id=%s AND round_no=%s AND awaiting_agent RETURNING version,body)"
-                " SELECT body FROM taken ORDER BY version", (flow.id, flow.current_round_no),
+                " WHERE flow_id=%s AND attempt_id=%s AND awaiting_agent RETURNING version,body)"
+                " SELECT body FROM taken ORDER BY version", (flow.id, flow.current_attempt_id),
             )
             return [row["body"] for row in rows]
 
@@ -63,7 +63,7 @@ class AgentInputStore(Repository):
             assert current is not None
             notes = (current.payload or {}).get("owner_messages", [])
             if (current.state is JobState.RUNNING and current.assignment_token == job.assignment_token
-                    and current.round_no == flow.current_round_no and current.started_at is None
+                    and current.attempt_id == flow.current_attempt_id and current.started_at is None
                     and current.dispatch_authorized_at is None and (pending := self.take(flow))):
                 notes = [*notes, *pending]
                 conn.execute("UPDATE jobs SET payload=COALESCE(payload,'{}') || %s WHERE id=%s",

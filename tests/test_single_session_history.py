@@ -5,10 +5,13 @@ from types import SimpleNamespace
 import pytest
 
 from app.contracts.conversation import ConversationFailure, HistoryQuery
+from app.contracts.protocol import ExecutionStopped
 from app.controler.workers.conversation import ConversationService
+from app.controler.workflow.service import ControlService
 from app.persistence.records import required
 from app.worker.execution import codex
 from tests.test_conversation_history import SESSION, codex_agent, message, rollout
+from tests.workspace_fixtures import register_worker
 
 OTHER = "019eac3b-a60c-7a93-a442-3718f660fc8d"
 
@@ -39,7 +42,16 @@ async def test_control_owns_session_order_attribution_and_tail(store, completed_
     second_path.write_text(json.dumps({"type": "session_meta", "payload": {"id": OTHER}}) + "\n"
                            + json.dumps(message("assistant", "two")) + "\n")
     flow, *_ = completed_open_initial
-    attempts = [required(store.flows.get_current_attempt(flow)), store.flows.create_attempt(flow.id)]
+    service = ControlService(database=store.database)
+    service.cancel(flow)
+    stop = required(store.stops.pending("worker-a"))
+    assert store.stops.confirm("worker-a", ExecutionStopped(
+        **stop.fence().model_dump(), execution_nonce="first-execution",
+    ), "epoch")
+    reopened = service.resume(flow, expected_attempt_id=flow.required_attempt_id)
+    register_worker(store, "worker-b", repo=flow.repo, epoch="next")
+    assert store.assignments.assign_job("worker-b", "new-assignment", "next")
+    attempts = [store.flows.get_current_attempt(f) for f in (flow, reopened)]
     for attempt, session, generation in zip(attempts, (SESSION, OTHER), (0, 1), strict=True):
         attempt.codex_session_id, attempt.session_generation = session, generation
         store.flows.update_attempt(attempt)
@@ -47,7 +59,7 @@ async def test_control_owns_session_order_attribution_and_tail(store, completed_
     reader = codex_agent(tmp_path, monkeypatch)
 
     async def query(worker_id, request):
-        assert worker_id == "worker-a"
+        assert worker_id == ("worker-a" if request.session_id == SESSION else "worker-b")
         calls.append(request)
         return reader.read_history(request)
 

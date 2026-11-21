@@ -200,6 +200,7 @@ class ConsoleSynchronizer:
             )
         return Observation(
             key=f"worker:{item.attempt_id}:{item.session_generation}:{item.id}",
+            attempt_id=item.attempt_id,
             source="worker",
             kind=item.kind,
             occurred_at=occurred,

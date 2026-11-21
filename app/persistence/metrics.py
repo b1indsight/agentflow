@@ -10,7 +10,7 @@ from app.persistence.reconciliation import PR_RECONCILE_ELIGIBLE, PR_SOURCE
 # One statement gives a consistent snapshot and one total SQL execution budget.
 SNAPSHOT_SQL = f"""
 WITH due_reconcile AS (
- SELECT r.next_at FROM reconcile_checks r JOIN flows f ON f.id=r.flow_id
+ SELECT r.next_at FROM reconcile_checks r JOIN flows f ON f.id=r.flow_id JOIN attempts a ON a.id=f.current_attempt_id
  WHERE r.source='{PR_SOURCE}' AND r.next_at<=now() AND {PR_RECONCILE_ELIGIBLE}
 ), ages AS (
  SELECT 'inbox' AS queue, min(received_at) AS oldest FROM events WHERE state != 'done'

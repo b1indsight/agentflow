@@ -156,7 +156,7 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
         flow = required(store.flows.get_flow(stopped_job.required_flow_id))
         # Completed naming is retained when a running coding task is stopped.
         control.finish(flow, reason=ArchiveReason.ABANDONED, summary="",
-                       expected_round_no=flow.current_round_no)
+                       expected_attempt_id=flow.required_attempt_id)
         title_job = required(store.jobs.get_job(required(store.flows.get_flow(flow.id)).title_job_id))
         assert title_job.state is JobState.DONE
         peers.wake_all()

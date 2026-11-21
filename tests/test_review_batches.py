@@ -36,11 +36,8 @@ from tests.test_coordinator import coordinator
 
 def open_flow(store, issue_number=7, pr_number=17):
     flow = store.flows.create_flow("owner/repo", issue_number, 42)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
     flow = apply_flow_event(store, flow, FlowEvent.DELIVERY_APPLIED)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, f"flow/{flow.id}")
     delivery.pr_number, delivery.state = pr_number, DeliveryState.OPEN
     store.deliveries.update_delivery(delivery)
     return flow
@@ -556,11 +553,11 @@ def test_retry_after_successful_replacement_does_not_select_historical_failure(
     service.cancel(flow)
     with pytest.raises(ValueError, match="archived"):
         service.retry(flow)
-    resumed = service.resume(flow, expected_round_no=flow.current_round_no)
+    resumed = service.resume(flow, expected_attempt_id=flow.required_attempt_id)
     assert store.jobs.get_job(original.id).state is JobState.FAILED
     assert store.jobs.list_jobs(flow.id)[-1].kind is JobKind.INITIAL
     assert resumed.state is FlowState.QUEUED
-    assert resumed.current_round_no == flow.current_round_no + 1
+    assert resumed.current_attempt_id != flow.current_attempt_id
 
 
 async def test_answer_carries_waiting_questions_into_worker_task(store, review_flow, recording_resources):

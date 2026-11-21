@@ -124,7 +124,6 @@ class Flow(BaseModel):
     state: FlowState
     installation_id: int | None = None
     current_attempt_id: int | None = None
-    current_round_no: int = 1
     archive_reason: ArchiveReason | None = None
     archive_summary: str | None = None
     archived_at: datetime | None = None
@@ -138,10 +137,16 @@ class Flow(BaseModel):
         return self
 
     @property
+    def required_attempt_id(self) -> int:
+        """The pointer is empty only inside the transaction selecting an Attempt."""
+        if self.current_attempt_id is None:
+            raise ValueError("Flow has no selected Attempt")
+        return self.current_attempt_id
+
+    @property
     def initial_branch(self) -> str:
         """Legacy default; prepared deliveries own their actual worker-generated branch."""
-        suffix = f"-round-{self.current_round_no}" if self.current_round_no > 1 else ""
-        return f"flow/{self.id}{suffix}"
+        return f"flow/{self.id}"
 
     def accepts(self, kind: JobKind) -> bool:
         """Finalization never authorizes more coding, even if its PR is reopened."""
@@ -152,18 +157,17 @@ class Flow(BaseModel):
     def retires(self, job: Job, delivery: FlowDelivery | None) -> bool:
         """Check superseded intent; callers retain stage, attempt and dispatch fences."""
         return (
-            job.round_no != self.current_round_no
+            job.attempt_id != self.required_attempt_id
             or (self.archive_reason is not None and job.kind is not JobKind.ARCHIVE)
             or (delivery is not None and delivery.supersedes(job.kind))
         )
 
 
 class Attempt(BaseModel):
-    """One execution/recovery/retry fact within a stable Flow binding."""
+    """One start of a Flow; recovery and retry keep this identity."""
 
     id: int
     flow_id: int
-    round_no: int = 1
     codex_session_id: str | None = None
     session_generation: int = 0
     last_revision_summary: str = ""
@@ -186,9 +190,10 @@ class FlowExecution(BaseModel):
 
 
 class FlowDelivery(BaseModel):
-    """Flow-owned branch and pull-request delivery state."""
+    """The branch and pull request belonging to a specific Attempt."""
 
     flow_id: int
+    attempt_id: int
     branch: str
     base_branch: str | None = None
     state: DeliveryState = DeliveryState.NONE
@@ -225,7 +230,7 @@ class FlowToolCall(BaseModel):
 class Job(BaseModel):
     id: int
     flow_id: int | None
-    round_no: int = 1
+    attempt_id: int | None = Field(frozen=True)
     kind: JobKind
     state: JobState
     inference: InferenceJob | None = None
@@ -259,6 +264,8 @@ class Job(BaseModel):
 
     @model_validator(mode="after")
     def _kind_fields(self) -> Job:
+        if (self.flow_id is None) != (self.attempt_id is None):
+            raise ValueError("Flow and Attempt provenance must be present together")
         if self.kind is JobKind.INFERENCE:
             if self.inference is None:
                 raise ValueError("inference jobs require a frozen inference call")

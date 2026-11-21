@@ -658,6 +658,7 @@ export function sameActivityGroup(
     !left.deleted &&
     !right.deleted &&
     left.prior === right.prior &&
+    left.attempt_id === right.attempt_id &&
     left.parent_key === right.parent_key &&
     (operations ||
       [left, right].every(
@@ -916,6 +917,15 @@ export function ActivitySummary({
   );
 }
 
+function displayMetadata(value: unknown) {
+  return JSON.stringify(
+    value,
+    (key, item) =>
+      key === "attempt_id" || key === "current_attempt_id" ? undefined : item,
+    2,
+  );
+}
+
 /** Retain only the selected metadata page, separately from persisted panel/text reading state. */
 function ProvenancePage({
   source,
@@ -966,7 +976,7 @@ function ProvenancePage({
         <>
           <TextWindow
             code
-            text={JSON.stringify(page.items, null, 2)}
+            text={displayMetadata(page.items)}
             stateKey={`${stateKey}-${page.offset}-text`}
           />
           {page.total > ACTIVITY_PROVENANCE_ROWS && (
@@ -1074,7 +1084,10 @@ export function ActivityView({
     : 0;
   const metadata =
     (!continuation || compact) &&
-    (Object.keys(entry.metadata).length > 0 || provenanceCount > 1);
+    (Object.keys(entry.metadata).some(
+      (key) => key !== "attempt_id" && key !== "current_attempt_id",
+    ) ||
+      provenanceCount > 1);
   const provenanceLabel =
     "来源信息与查询定位" +
     (provenanceCount > 1 ? ` · ${provenanceCount} 条记录` : "");
@@ -1216,7 +1229,7 @@ export function ActivityView({
                 ) : (
                   <TextWindow
                     code
-                    text={JSON.stringify(entry.metadata, null, 2)}
+                    text={displayMetadata(entry.metadata)}
                     stateKey={`${entry.key}-${entry.version}-metadata-text`}
                   />
                 )}

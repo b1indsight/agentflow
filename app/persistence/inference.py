@@ -34,11 +34,11 @@ class InferenceStore(Repository):
         self, task: InferenceTask, *, flow_id: int | None = None,
         batch_id: int | None = None, validation: Literal["text", "review", "flow_naming"] = "text",
     ) -> Job:
-        """Freeze a logical call once; a batch's consumed recoverable failure starts a new round.
+        """Freeze a logical call once; a batch's consumed recoverable failure allows another call.
 
         Polling/restarts never replenish the existing job's attempts or deadline. The
         batch link is independent of its revision job, and is serialized with workflow
-        currentness and the batch row before any new round is created. Review jobs are
+        currentness and the batch row before any new call is created. Review jobs are
         reusable only for their frozen context. A generic request ID may only replay the
         same frozen input, validation contract and attribution.
         """
@@ -47,6 +47,9 @@ class InferenceStore(Repository):
         now = self._db.now()
         with self._db.transaction() as tx, tx.connection() as connection:
             flow = tx.lock_workflow(flow_id) if flow_id is not None else None
+            if flow_id is not None and flow is None:
+                raise ValueError("inference source Flow does not exist")
+            attempt_id = flow.required_attempt_id if flow else None
             previous = None
             batch = None
             if batch_id is not None:
@@ -82,7 +85,8 @@ class InferenceStore(Repository):
                     (task.request_id,),
                 ).fetchone()
                 if existing is not None:
-                    if existing.flow_id != flow_id or existing.inference is None or existing.inference.batch_id is not None:
+                    if (existing.flow_id != flow_id or existing.attempt_id != attempt_id
+                            or existing.inference is None or existing.inference.batch_id is not None):
                         raise ValueError("logical inference request belongs to another caller")
                     if existing.inference.task != task or existing.inference.validation != validation:
                         raise ValueError("logical inference request does not match its frozen call")
@@ -93,17 +97,17 @@ class InferenceStore(Repository):
             inference = InferenceJob(
                 task=frozen, deadline_at=now + timedelta(seconds=frozen.timeout_seconds),
                 validation=validation, batch_id=batch_id,
-                source_attempt_id=flow.current_attempt_id if flow else None,
+                source_attempt_id=attempt_id,
                 context_digest=batch.context.digest if batch and batch.context else None,
             )
             job = (
                 connection.cursor(row_factory=class_row(Job))
                 .execute(
-                    "INSERT INTO jobs(flow_id,round_no,kind,state,inference,created_at,updated_at)"
+                    "INSERT INTO jobs(flow_id,attempt_id,kind,state,inference,created_at,updated_at)"
                     " VALUES (%s,%s,'inference','queued',%s,%s,%s) RETURNING *",
                     (
                         flow_id,
-                        flow.current_round_no if flow else 1,
+                        attempt_id,
                         Jsonb(inference.model_dump(mode="json")),
                         now,
                         now,
@@ -248,7 +252,7 @@ class InferenceStore(Repository):
             InferenceNoticeStore(self._db).append(job.flow_id, call.batch_id, call.summary)
         if job.flow_id is not None:
             flow = FlowStore(self._db).get_flow(job.flow_id)
-            if flow is not None and job.round_no == flow.current_round_no:
+            if flow is not None and job.attempt_id == flow.current_attempt_id:
                 FlowStore(self._db).try_archive(job.flow_id)
 
     def recover_inference(self, worker_id: str | None = None) -> None:

@@ -36,7 +36,7 @@ function record(
     version: 1,
     source: "worker",
     kind: "tool_call",
-    round_no: 1,
+    attempt_id: 1,
     author: "assistant",
     occurred_at: "2026-10-27T00:00:00Z",
     updated_at: "2026-10-27T00:00:00Z",
@@ -354,6 +354,7 @@ test("identity classifiers retain cross-source operations and worker ownership a
     buildConversationRows([activityIdentity(check)], new Set())[0].kind,
     "body",
   );
+  assert.equal(sameActivityGroup(check, { ...event, attempt_id: 108 }), false);
   assert.equal(sameActivityGroup(check, { ...event, body_length: 1 }), false);
   assert.equal(sameActivityGroup(check, { ...event, author: "other" }), false);
   assert.equal(sameActivityGroup(check, { ...event, source: "worker" }), false);
@@ -642,7 +643,7 @@ test("GitHub and Agent content cannot inject HTML or unsafe destinations", () =>
           {
             key: payload,
             version: 1,
-            round_no: null,
+            attempt_id: null,
             author: payload,
             occurred_at: "2026-10-17T00:00:00Z",
             updated_at: "2026-10-17T00:00:00Z",
@@ -699,7 +700,7 @@ test("Markdown destinations use the message source, never the console origin", (
   const entry: ActivityItem = {
     key: "source-links",
     version: 1,
-    round_no: 1,
+    attempt_id: 1,
     author: "owner",
     occurred_at: "2026-10-20T00:00:00Z",
     updated_at: "2026-10-20T00:00:00Z",
@@ -813,7 +814,7 @@ test("CI checks show workflow, job and status beside the app without hiding summ
   const check: ActivityItem = {
     key: "check-1",
     version: 1,
-    round_no: null,
+    attempt_id: null,
     source: "commit.check_runs:head",
     kind: "check",
     author: "GitHub Actions",

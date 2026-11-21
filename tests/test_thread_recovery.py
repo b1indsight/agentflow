@@ -110,17 +110,16 @@ def thread_resources(revision_resources, monkeypatch):
 async def thread_revision(store, request, thread_resources):
     mode = getattr(request, "param", "one")
     flow = store.flows.create_flow("owner/repo", 8, 42)
-    attempt = store.flows.create_attempt(flow.id)
+    attempt = store.flows.get_current_attempt(flow)
+    assert attempt is not None
     attempt.codex_session_id = "old-session"
     store.flows.update_attempt(attempt)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     initial = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.assignments.assign_job("worker-a", "initial", "epoch") is not None
     assert store.assignments.finish_assignment(initial.id, "worker-a", "initial", JobState.DONE, "epoch")
     report_settled(store, initial.id, epoch="epoch")
-    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "flow/1")
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
     delivery.head_sha, delivery.base_branch = "baseline", "main"
     store.deliveries.update_delivery(delivery)

@@ -17,6 +17,7 @@ from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
+from app.persistence.jobs import JobStore
 
 
 class FlowToolRejected(RuntimeError):
@@ -89,16 +90,17 @@ class FlowToolService:
                 "Flow tool assignment fence expired",
             )
         flow = self.flows.get_flow(arguments.flow_id)
-        attempt = self.flows.get_attempt(arguments.attempt_id)
+        job = JobStore(self.database).get_job(arguments.job_id)
         execution = self.flows.get_flow_execution(arguments.flow_id)
-        delivery = self.deliveries.get_delivery(arguments.flow_id)
+        delivery = self.deliveries.get_attempt_delivery(arguments.attempt_id)
         if flow is None or not flow.accepts(JobKind.INITIAL):
             raise FlowToolRejected(FlowToolErrorKind.CONFLICT, "Flow is not active")
         if (
-            attempt is None
-            or attempt.flow_id != flow.id
-            or flow.current_attempt_id != attempt.id
-            or attempt.round_no != flow.current_round_no
+            job is None
+            or job.kind is not JobKind.INITIAL
+            or job.flow_id != flow.id
+            or job.attempt_id != arguments.attempt_id
+            or flow.current_attempt_id != arguments.attempt_id
         ):
             raise FlowToolRejected(
                 FlowToolErrorKind.STALE_ASSIGNMENT,
@@ -155,7 +157,7 @@ class FlowToolService:
             call, _ = self.deliveries.reserve_tool_call(
                 call_id=arguments.call_id,
                 flow_id=flow.id,
-                attempt_id=attempt.id,
+                attempt_id=arguments.attempt_id,
                 job_id=arguments.job_id,
                 name=request.method,
                 arguments=arguments.arguments,

@@ -123,7 +123,7 @@ class ConversationService:
         if execution is None:
             return None, []
         attempts: dict[str, Attempt] = {}
-        for attempt in sorted(self.flows.list_attempts(flow_id), key=lambda a: a.id):
+        for attempt in self.flows.list_attempts(flow_id):
             if attempt.codex_session_id:
                 try:
                     HistoryQuery(session_id=attempt.codex_session_id)
@@ -176,7 +176,10 @@ class ConversationService:
             )
         except ValidationError as exc:
             raise ConversationFailure("cursor_invalid") from exc
-        page = await self.broker.query(worker_id, query)
+        owner = await asyncio.to_thread(self.flows.session_worker, attempt.id)
+        if owner is None:
+            raise ConversationFailure("worker_unavailable")
+        page = await self.broker.query(owner, query)
         # Only control attaches trusted Flow/Attempt attribution to worker records.
         attribution = {
             "attempt_id": attempt.id,

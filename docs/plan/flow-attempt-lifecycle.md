@@ -1,6 +1,6 @@
 # 用 Attempt 表示 Flow 的一次开工
 
-**状态：** 计划草案，待审批；未实施。基线：[main #189](https://github.com/b1indsight/agentflow/commit/007a86ab380bf850edd18983a1a7de8565211a5b)。[需求讨论](https://ampcode.com/threads/T-01a1fd4b-ae11-73c8-a250-42fd27c0b216)。
+**状态：** 已实现，未部署。[PR #190](https://github.com/b1indsight/agentflow/pull/190) · 基线：[main #189](https://github.com/b1indsight/agentflow/commit/007a86ab380bf850edd18983a1a7de8565211a5b) · [需求讨论](https://ampcode.com/threads/T-01a1fd4b-ae11-73c8-a250-42fd27c0b216)。
 
 ## 1. 初始计划
 
@@ -56,3 +56,36 @@
 方案本身无前置产品问题。存量歧义数量、需要保留的历史解码版本，以及在途操作能否排空，是上线前必须由预检和演练回答的问题。生产迁移、部署、并行 Attempt 和补造缺失的历史交付均不在本次计划交付范围内。
 
 ## 2. PR 变更时间线
+
+### 2026-11-21：一次开工只有一个执行身份
+
+创建和重开都在同一事务内选中 Attempt、追加起点并入队。Job 归属由组合外键和不可变约束保护；`jobs.attempt` 仍是派发次数。交付保存在 Attempt 上。当前交付保留 `get_delivery(flow_id)` 便捷读法，历史由 `get_attempt_delivery(attempt_id)` 读取；创建和更新始终指定 Attempt。会话历史按开工时间排序，通过原 Attempt 的编码 Job 查当时的 worker。工作区仍由 Flow 持有。
+
+迟到的 PR 17 合并能改正 A；若 B 已有 PR 29，B 的任务、交付、归档投影都不变。恢复分页成功与失败都必须复核原 Attempt，旧表单返回冲突。见[历史合并测试](../../tests/test_flow_archive_activity.py)、[分页测试](../../tests/test_reconcile_threads.py)和[跨 worker 历史测试](../../tests/test_single_session_history.py)。
+
+### 2026-11-21：两个身份校验的对照实验
+
+在临时源码副本中使用相同的 PostgreSQL 测试数据和命令，分别比较以下路径：
+
+| 测试（`uv run pytest -q tests/<模块>::<用例>`） | 简化实现的结果 | 保留的约束 |
+|---|---|---|
+| `test_archive_status.py::test_unprepared_merge_notice_after_reopen_keeps_original_attempt` | `ResultPlan.attempt_id` 从当前 Flow 取值时，A 的通知被持久化为 B（2 ≠ 1）；不需要真的写坏远端即可发现错归属。 | 从原 Job 冻结身份，旧通知不向新执行发写操作。 |
+| `test_store.py::test_stale_reopen_after_second_archive_cannot_start_a_third_attempt` | 只移除 `resume` 锁内的预期身份比较，A 的已归档事实仍存在，B 结束后 A 的旧请求成功。 | 即使当前也已归档，仍必须校验收到的 `expected_attempt_id`。 |
+
+原实现通过两项测试。两处校验分别保护持久归属和命令授权，不能互相替代。
+
+### 2026-11-21：停写切换和恢复演练
+
+用基线控制端在本机独立 PostgreSQL 创建 Issue Flow、创建旧 Attempt、取消后重开，另建尚未派发的直接任务。对该库运行 `pg_dump -Fc`、`pg_restore` 到另一空库后，以新脚本依次预检、`--apply`、再次 `--apply`。预检无冲突，首次切换成功，第二次报告 `current, applied=false`；两个 Flow 重放均无差异，三个 Job 分别保留对应的执行归属。[迁移用例](../../tests/test_flow_attempt_migration.py)另覆盖回执、歧义及事务回滚。未读取共享库；正式部署必须重新预检并验证备份，参见[升级说明](../operations/upgrade.md)。
+
+旧活动摘要包含轮号，重复采集时需用原始输入及迁移映射比对，否则同一条历史评论会多出一个版本。旧冻结计划的交付快照则缺少 `attempt_id`：迁移预检和恢复读取共用同一解码方法，按原 Job 补入内存副本。已验证实际读取返回 A 的交付，虽然 Flow 已指向 B；数据库中的原 JSON 和回执摘要保持不变。
+
+最终源码快照通过 PostgreSQL 全量 pytest；Git 后端不适用的 `.jj` 元数据用例按测试设计跳过。Ruff、mypy、前端单测、Playwright、生产构建和含 Console 静态资源的 wheel 均通过。桌面和手机检查了结束表单、收尾、归档详情及重新开工；浏览器使用测试 API 响应，未对真实 GitHub 或生产环境执行写入。
+
+### 控制台不展示内部执行编号
+
+用户通过开工时间、分支和结论区分执行。结束表单、任务信息、执行记录和来源信息不展示 Attempt ID。页面仍记住打开表单时的执行身份，控制端据此拒绝迟到的请求。
+
+### 控制台归档改为单击操作
+
+「归档」直接请求停止当前执行，不再选择结果、填写结论或二次确认。控制台使用现有 `abandoned` 请求并留空摘要，不代用户声明任务成功；合并证据仍由控制端判定。请求使用点击时页面上的执行身份，保留过期请求和重复提交保护。

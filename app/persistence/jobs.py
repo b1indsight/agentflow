@@ -47,6 +47,7 @@ class JobStore(Repository):
                 connection.cursor(row_factory=class_row(Job))
                 .execute(
                     "SELECT * FROM jobs WHERE flow_id=%s AND kind IN ('initial','revision')"
+                    " AND attempt_id=(SELECT current_attempt_id FROM flows WHERE id=jobs.flow_id)"
                     " AND (state='running' OR started_at IS NOT NULL OR result_received_at IS NOT NULL)"
                     " AND NOT (started_at IS NULL AND COALESCE("
                     " (jsonb_typeof(result_payload->'version')='number'"
@@ -65,7 +66,8 @@ class JobStore(Repository):
         """A timeout cannot prove that an executor exited or a dispatched effect settled."""
         with self._db.connection() as connection:
             return connection.execute(
-                "SELECT 1 FROM jobs WHERE flow_id=%s AND kind<>'inference' AND (state='running'"
+                "SELECT 1 FROM jobs WHERE flow_id=%s AND kind<>'inference'"
+                " AND attempt_id=(SELECT current_attempt_id FROM flows WHERE id=jobs.flow_id) AND (state='running'"
                 " OR (result_received_at IS NOT NULL AND result_applied_at IS NULL)"
                 " OR (started_at IS NOT NULL AND result_received_at IS NULL)) LIMIT 1", (flow_id,),
             ).fetchone() is not None
@@ -75,6 +77,7 @@ class JobStore(Repository):
             return (
                 connection.execute(
                     "SELECT 1 FROM jobs j WHERE flow_id=%s AND kind<>'inference' AND result_received_at IS NOT NULL"
+                    " AND attempt_id=(SELECT current_attempt_id FROM flows WHERE id=j.flow_id)"
                     " AND result_applied_at IS NULL"
                     f" AND {RESOURCE_JOB_SQL} LIMIT 1",
                     (flow_id,),
@@ -87,6 +90,7 @@ class JobStore(Repository):
         with self._db.connection() as connection:
             return connection.execute(
                 "SELECT 1 FROM jobs j WHERE flow_id=%s AND id<>%s AND kind<>'inference'"
+                " AND attempt_id=(SELECT current_attempt_id FROM flows WHERE id=j.flow_id)"
                 f" AND {RESOURCE_JOB_SQL}"
                 " AND (state=%s OR (result_received_at IS NOT NULL"
                 " AND result_applied_at IS NULL) OR EXISTS (SELECT 1 FROM workers w"
@@ -120,41 +124,46 @@ class JobStore(Repository):
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             row = cursor.execute(
-                "INSERT INTO jobs(flow_id,round_no,kind,state,attempt,payload,created_at,"
-                " updated_at,source_job_id,source_key) VALUES (%s,(SELECT current_round_no FROM flows WHERE id=%s),%s,%s,%s,%s,%s,%s,%s,%s)"
+                "INSERT INTO jobs(flow_id,attempt_id,kind,state,attempt,payload,created_at,"
+                " updated_at,source_job_id,source_key) SELECT id,current_attempt_id,%s,%s,0,%s,%s,%s,%s,%s"
+                " FROM flows WHERE id=%s AND current_attempt_id=%s AND (%s::bigint IS NULL OR EXISTS"
+                " (SELECT 1 FROM jobs src WHERE src.id=%s AND src.attempt_id=flows.current_attempt_id))"
                 " ON CONFLICT(source_job_id,source_key) WHERE source_job_id IS NOT NULL"
                 " DO UPDATE SET source_key=excluded.source_key"
-                " WHERE jobs.flow_id=excluded.flow_id AND jobs.kind=excluded.kind"
+                " WHERE jobs.attempt_id=excluded.attempt_id AND jobs.kind=excluded.kind"
                 " AND jobs.payload IS NOT DISTINCT FROM excluded.payload RETURNING *",
                 (
-                    flow.id,
-                    flow.id,
                     kind,
                     JobState.QUEUED,
-                    0,
                     Jsonb(payload) if payload else None,
                     now,
                     now,
                     source_job_id,
                     source_key,
+                    flow.id,
+                    flow.required_attempt_id,
+                    source_job_id,
+                    source_job_id,
                 ),
             ).fetchone()
+            if row is None:
+                raise ValueError("job does not belong to the current Attempt or conflicts with its source")
             if kind is not JobKind.ARCHIVE:
                 FlowStore(self._db).transition(flow, FlowEvent.JOB_ENQUEUED, now=now)
-        return required(row)
+        return row
 
     def record_merge_notice(self, flow: Flow, delivery: FlowDelivery) -> Job:
         """Persist local notification intent in the merge transaction, never the dispatch queue."""
-        if (delivery.flow_id != flow.id or delivery.pr_number is None
+        if (delivery.attempt_id != flow.required_attempt_id or delivery.flow_id != flow.id or delivery.pr_number is None
                 or delivery.merged_at is None or delivery.merge_commit_sha is None):
             raise ValueError("merge notice requires the current delivery's complete merge facts")
         job = self.enqueue_job(flow, JobKind.ARCHIVE)
         notice = MergeArchiveNotice(
-            job_id=job.id, flow_id=flow.id, round_no=flow.current_round_no, repo=flow.repo,
+            job_id=job.id, flow_id=flow.id, attempt_id=flow.required_attempt_id, repo=flow.repo,
             pr_number=delivery.pr_number, merged_at=delivery.merged_at,
             merge_commit_sha=delivery.merge_commit_sha,
         )
-        inbox = ResultInbox(version=2, source="control", terminal=notice)
+        inbox = ResultInbox(version=3, source="control", terminal=notice)
         with self._db.connection() as connection:
             connection.execute(
                 "UPDATE jobs SET state='running',result_payload=%s,result_digest=%s,"
@@ -214,7 +223,8 @@ class JobStore(Repository):
             connection.cursor(row_factory=class_row(Job)) as cursor,
         ):
             return cursor.execute(
-                "SELECT * FROM (SELECT * FROM jobs WHERE flow_id=%s AND kind<>'inference' ORDER BY id DESC LIMIT 1)"
+                "SELECT * FROM (SELECT * FROM jobs WHERE flow_id=%s AND kind<>'inference'"
+                " AND attempt_id=(SELECT current_attempt_id FROM flows WHERE id=jobs.flow_id) ORDER BY id DESC LIMIT 1)"
                 " latest WHERE state=%s",
                 (flow_id, JobState.FAILED),
             ).fetchone()
@@ -285,7 +295,10 @@ class JobStore(Repository):
                     connection.execute(
                         "UPDATE flow_executions SET recovery_deadline=CASE WHEN EXISTS"
                         " (SELECT 1 FROM workers WHERE repository IS NULL AND worker_id=%s AND status=%s) THEN NULL ELSE %s END"
-                        " WHERE flow_id=(SELECT flow_id FROM jobs WHERE id=%s) AND released_at IS NULL",
+                        " WHERE flow_id=(SELECT f.id FROM jobs j JOIN flows f ON f.current_attempt_id=j.attempt_id"
+                        " WHERE j.id=%s AND j.generation=flow_executions.generation"
+                        " AND j.workspace=flow_executions.workspace AND j.assigned_worker_id=flow_executions.worker_id)"
+                        " AND released_at IS NULL",
                         (
                             completed["assigned_worker_id"],
                             WorkerStatus.ONLINE,

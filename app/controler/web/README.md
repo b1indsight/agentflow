@@ -1,7 +1,7 @@
 # Web 控制台
 
 当前由 `flowtool serve` 在 `/console/` 提供，使用真实同源 `/api/`，**没有生产示例数据或 mock 回退**。
-提供顶栏「新建 Flow」、详情底部「继续工作」、Flow「结束本轮」、已归档 Flow「恢复推进」及受阻 Flow 的安全重试。
+提供顶栏「新建 Flow」、详情底部「继续工作」、Flow「归档」、已归档 Flow「重新开工」及受阻 Flow 的安全重试。
 页面、静态资源和 API 均要求 Cloudflare Access 的单 owner 身份；数据库、GitHub 与 Worker
 读取由 control 负责。真实 Access 登录/MFA、GitHub App 全来源回填和目标部署仍待验收。
 架构与持久化边界见[控制台功能记录](../../../docs/plan/web-console-kanban.md)。
@@ -59,7 +59,7 @@ npm run preview -- --port 8767
 切换页签保留草稿，切换 Flow 清空。提交中禁止重复发送；响应不确定时重试沿用 UUID。
 `POST /api/flows/{id}/agent-tasks` 接收 `instruction`、`request_id`，要求 owner 同源 JSON，向未归档的 Flow 追加消息，无需等待 PR。
 成功后自动刷新本 Flow 的会话。回执仅表示消息已记录，不表示任务已排队、已开始或 Agent 已读取；执行情况以会话和执行记录为准。
-收尾期间（包括收尾受阻）仅记录留言，不启动新任务。已归档的 Flow 禁止发送，需先显式恢复推进。
+收尾期间（包括收尾受阻）仅记录留言，不启动新任务。已归档的 Flow 禁止发送，需先显式重新开工。
 任务契约不接收 `author`；会话记录使用固定 `user` 角色展示输入，不保存 owner 邮箱。
 Worker 会话中的编码结果展示摘要和按原序排列的待澄清问题。编码任务失败另有结果记录：注明是 Worker 报告还是控制端处理失败，不冒充 Agent 发言。仅显示允许公开的失败阶段和诊断，不复制任意异常文本。
 
@@ -131,27 +131,24 @@ Enter 提交；聚焦或输入字段显示统一建议，方向键 / 点击选�
 中文组合输入不提交；Escape 关闭建议，清空恢复全部结果，浏览器前进/后退恢复已提交查询。
 无效、重复或未知条件提示错误，保留上一有效结果；不实现 GitHub 全套搜索语法。
 
-未归档且不在收尾中的 Flow 可在「概览 → 当前动作」点击「结束本轮」，在内联表单选择
-成功（`succeeded`）或废弃（`abandoned`），并填写非空结论。UI 统一要求结论，
-包括无 PR 的成功结束；不会使用浏览器确认框或输入框。
-`POST /api/flows/{id}/archive` 提交同源 JSON
-`{reason, summary, expected_round_no}`，轮次取自当前详情。
-表单打开后若刷新发现轮次变化，必须关闭并重新核对，不能把旧表单提交到新轮次。
-受理只表示发起结束本轮，不承诺立即归档；停止确认、结果对账及收尾未完成前不会归档。
+未归档且不在收尾中的 Flow 可在「概览 → 当前动作」点击「归档」直接请求收尾，无需填写结论或再次确认。
+`POST /api/flows/{id}/archive` 提交 `reason: "abandoned"` 和空摘要，表示停止本次执行，不声明任务成功。后端已有 PR 合并证据时仍按成功处理。
+请求携带点击时详情的 `current_attempt_id` 作为 `expected_attempt_id`，旧页面不能归档重新开工后的执行。
+受理只表示开始收尾，不承诺立即归档；停止确认、结果对账及收尾未完成前不会归档。
 收尾中仍显示「进行中」，详情注明 `finalizing`，不提供重复结束或重试入口。
-`archive_reason`、`archive_summary` 展示本轮结束目标/归档结果和结论；
-`archived_at` 是真实业务归档时间，不再存在 cancelled-only 展示归档。
+`archive_reason`、`archive_summary` 展示结束目标/归档结果和结论；
+`attempt_started_at` 是当前执行的开工时间；`archived_at` 是真实业务归档时间，不再存在 cancelled-only 展示归档。
 
-已归档 Flow 只提供显式「恢复推进」，通过 `POST /api/flows/{id}/resume`
-提交 `{expected_round_no}`。页面明确提示：同一 Flow 开启新轮次、从待处理开始，后续使用新 PR，
-保留历史；不复用 `/retry` 恢复归档轮次，也不提前移动卡片。
+已归档 Flow 只提供显式「重新开工」，通过 `POST /api/flows/{id}/resume`
+提交 `{expected_attempt_id}`。页面明确提示：同一 Flow 开始新的执行、从待处理开始，后续使用新 PR，
+保留历史；不复用 `/retry` 恢复已归档的执行，也不提前移动卡片。
 
 只有 `blocked` Flow 可在「概览 → 当前动作」点击「重试」。
 `POST /api/flows/{id}/retry` 同样只接受 owner 的同源空 JSON，复用 `ControlService.retry`；
 仍需满足停止确认、结果对账、PR 状态、活跃 Flow 冲突及原 Worker 归档绑定等检查。
 没有可重试工作或安全检查未通过时返回 409，并在页面解释原因；不存在返回 404。
 提交期间三个操作互斥，受理后按返回详情刷新分组，不提前移动卡片，也不承诺任务已运行。
-结束/恢复的 409 会显示未受理及后端错误码，保留当前详情和表单，不显示成功通知。
+归档/重新开工的 409 会显示未受理及后端错误码，保留当前详情，不显示成功通知。
 网络异常可能发生在提交之后，页面会提示先刷新核对，不自动重发；切换 Flow 不受旧响应覆盖。
 清理受阻仍属于「受阻」，不会因 PR 合并显示为已归档。Job 的 `done` 状态与 Flow 阶段独立，保持不变。
 
@@ -339,16 +336,17 @@ CI=1 PLAYWRIGHT_PORT=5186 npm run test:e2e -- --workers=1 --grep 'worker file|st
 任务输入回归覆盖原样字符串（包括 CRLF 粘贴及后续编辑）、空标题编号回退、刷新后服务端标题、
 取消/重复提交/结果未知保护；截图为 `.amp/in/artifacts/task-text-{form,detail-pending,detail-generated}-{1440,390}.png`。
 Issue/PR 关联但标题为 null 时的 `Flow #ID` 标题和独立身份徽标截图为 `task-text-fallback-{cards,pr,issue}-{1440,390}.png`。
-六态预览及本轮操作回归可单独复现（同时生成桌面/手机截图）：
+六态预览及执行操作回归可单独复现（同时生成桌面/手机截图）：
 
 ```sh
-npm run test:e2e -- --workers=2 --grep 'six-state preview|round archive|round commands|round form'
+npm run test:e2e -- --workers=2 --grep 'six-state preview|one-click archive|round commands'
 ```
 
 预览在 `e2e/console.spec.ts` 使用带类型的六态 DTO，覆盖五列默认看板、finalizing 详情、
-成功/废弃归档、结束表单、恢复新轮次及 409/网络异常；没有接入生产数据。
-截图保存到仓库根目录 `.amp/in/artifacts/flow-{default,finalizing,archived}-{1440,390}.png`，
-结束表单截图为 `flow-end-round-{1440,390}.png`。在本地运行前应确保 `/.amp/in/` 已加入
+成功/废弃归档、单击归档、重新开工及 409/网络异常；没有接入生产数据。
+截图保存在仓库根目录 `.amp/in/artifacts/`：看板为 `flow-default-{1440,390}.png`，
+归档按钮为 `flow-one-click-archive-{1440,390}.png`，执行详情为 `flow-execution-{finalizing,archived-actions,archived-facts,restarted}-{1440,390}.png`。
+归档操作与执行信息各截一张，以便在手机上核对重新开工入口、开工时间、分支和结论。在本地运行前应确保 `/.amp/in/` 已加入
 仓库本地 exclude；截图不进入提交。
 浏览器回归覆盖 DTO 展示与 API 故障、快照分页与缓存回读、会话分组与阅读恢复、窗口上限与键盘焦点，
 以及 Markdown/编辑 diff、归档和桌面/手机交互；具体读取和渲染规则见前文。

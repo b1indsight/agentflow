@@ -6,7 +6,7 @@
 签名正确的 Webhook
   → FastAPI 持久化 webhook inbox 并返回 202
   → 后台消费者 → Event Router 去重 / 授权 / 写 PostgreSQL
-  → flow + queued job
+  → 同一事务创建 Flow、首个 Attempt 和 queued initial Job
   → worker 按仓库需求补充并登记 workspace，serve 领取具体 (worker_id, workspace)
   → FlowExecution 独占该位置与 generation，prepare 读取真实 Issue/default branch
   → Started / Heartbeat；INITIAL 获得临发 scoped push capability
@@ -44,8 +44,8 @@
 
 - **PR / 反馈对账**：独立循环读取已追踪 PR 的 merge/close/reopen，以及 Issue/PR 普通评论、
   review 正文和行内线程；持久化分页进度和退避。未合并关闭进入废弃收尾，重开不自动恢复；对账不补建漏失的新 Flow trigger，不追溯执行旧评论命令。
-- **跨轮反馈**：恢复后，以本轮首个 INITIAL 的持久创建时间为界；同秒、更早或缺少创建时间的原 Issue 评论不进入新批次，编辑旧评论也不会改变归属。新 PR 上的评论和 Review 无此时间限制。普通反馈每次每来源至多 50 条，线程每次至多 20 条评论；不以分页片段判定线程可以 resolve。
-- **取消**：事务内记录结束本轮和停止意图，阻止新派发；worker 取消
+- **重新开工后的反馈**：以当前 Attempt 的开工时间为界；同秒、更早或缺少创建时间的原 Issue 评论不进入新批次，编辑旧评论也不会改变归属。新 PR 上的评论和 Review 无此时间限制。普通反馈每次每来源至多 50 条，线程每次至多 20 条评论；不以分页片段判定线程可以 resolve。
+- **取消**：事务内记录结束当前 Attempt 和停止意图，阻止新派发；worker 取消
   执行并回收持有的进程组，journal 保存停止凭据。control 确认凭据且已发送 effects 收敛后
   才释放绑定；未知旧进程继续阻塞。取消不回滚已发生的远端操作，合并事实仍进入原归档路径。
 - **Drain**：持久标记 worker 不接新 Flow；已绑定 Flow 的修订/归档仍继续，不隐式取消业务。
@@ -86,8 +86,8 @@
 | 结果失败或核验未通过 | `result_failed` | `blocked` |
 | PR 来源分支被改动 | `delivery_baseline_rejected` | `blocked` |
 | 显式 retry | `retry_requested` | `queued`，已有归档结论时 `finalizing` |
-| 取消、结束本轮、`/flow stop`、未合并关闭 PR | `finalization_requested`，收尾完成后 `archive` | `archived` |
-| 显式恢复新轮次 | `round_resumed` | `queued` |
+| 取消、结束本次执行、`/flow stop`、未合并关闭 PR | `finalization_requested`，收尾完成后 `archive` | `archived` |
+| 显式恢复新 Attempt | `attempt_started` | `queued` |
 | 归档后发现此前已合并 | `merge`，必要时 `archive_correction` | 不变 |
 
 Job、交付和反馈批次自身的变化不写 Flow 事实；事件名说明 Flow 为什么变化，细节仍在对应的表里。
