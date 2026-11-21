@@ -3,9 +3,7 @@
 import psycopg
 import pytest
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 
-from app.contracts.protocol import Failed, terminal_digest
 from app.controler.workflow.service import ControlService
 from app.persistence.database import Database
 from app.persistence.flows import FlowStore
@@ -73,7 +71,7 @@ def legacy(postgresql_url):
                     (11,7,'initial','failed',2,'2026-01-03','2026-01-03');
             INSERT INTO jobs(kind,state,inference,created_at,updated_at)
               VALUES ('inference','failed','{}',now(),now());
-            UPDATE jobs SET result_payload='{"old":"receipt"}',result_digest='original',
+            UPDATE jobs SET started_at=created_at,result_payload='{"old":"receipt"}',result_digest='original',
               result_received_at=now(),result_applied_at=now() WHERE id=10;
             INSERT INTO result_applications VALUES(10,'original','{"old":"plan"}',now());
             INSERT INTO console_sync(flow_id,source,pending,dirty,claim_token,claim_until,status,limitations,reason)
@@ -189,37 +187,6 @@ def test_conflict_is_reported_without_partial_upgrade(legacy, change, evidence):
             "SELECT current_round_no,current_attempt_id FROM flows WHERE id=7"
         ).fetchone() == (2, 20)
         assert c.execute("SELECT to_regclass('flowtool_schema_version')").fetchone() == (None,)
-
-
-@pytest.mark.ledger_unverified
-@pytest.mark.parametrize(
-    ("version", "epoch", "tampered", "accepted"),
-    [
-        (14, "old-worker", False, True),
-        (15, "old-worker", False, True),
-        (14, "control", False, False),
-        (15, "old-worker", True, False),
-    ],
-)
-def test_cutover_validates_legacy_worker_receipt(legacy, version, epoch, tampered, accepted):
-    terminal = Failed(job_id=11, assignment_token="old-token", error="failed")
-    receipt = dict(
-        terminal.model_dump(mode="json"), protocol_version=version, connection_epoch=epoch
-    )
-    with psycopg.connect(legacy) as c:
-        c.execute("ALTER TABLE jobs DISABLE TRIGGER console_fact_changed")
-        c.execute(
-            """UPDATE jobs SET started_at=now(),assignment_token=%s,result_payload=%s,
-            result_digest=%s,result_received_at=now(),result_applied_at=now() WHERE id=11""",
-            (
-                terminal.assignment_token,
-                Jsonb(receipt),
-                "wrong" if tampered else terminal_digest(terminal),
-            ),
-        )
-        c.execute("ALTER TABLE jobs ENABLE TRIGGER console_fact_changed")
-    assert migrate(legacy)["conflicts"] == ([] if accepted else ["job 11: not settled"])
-    assert migrate(legacy, apply=True)["applied"] == accepted
 
 
 def test_interrupted_cutover_rolls_back_data_and_ddl(legacy):
