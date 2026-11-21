@@ -154,23 +154,26 @@ class EventRouter:
 
     def _on_pull_request(self, delivery_id: str, payload: dict) -> None:
         pull_request = payload.get("pull_request") or {}
-        if payload.get("action") not in {"closed", "reopened", "synchronize"}:
+        action = payload.get("action")
+        if action not in {"closed", "reopened", "synchronize"}:
             return
         repo = payload["repository"]["full_name"]
         delivery = DeliveryStore(self.database).delivery_by_pr(repo, pull_request["number"])
-        flow = self.flows.get_flow(delivery.flow_id) if delivery is not None else None
-        if flow and payload.get("action") == "closed" and pull_request.get("merged") is True:
-            self.service.on_merged(flow, delivery_id, payload)
-        elif flow and delivery and flow.current_attempt_id != delivery.attempt_id:
-            self.webhook_store.record_event(delivery_id, "pull_request", flow.id, payload)
-        elif flow and payload.get("action") == "closed":
-            self.service.on_closed(flow, delivery_id, payload)
-        elif flow:
-            with self.database.transaction() as tx:
-                reconcile_store_tx = self.reconcile_store.using(tx)
-                webhook_store_tx = self.webhook_store.using(tx)
-                fresh = tx.lock_workflow(flow.id)
-                if (webhook_store_tx.record_event(delivery_id, "pull_request", flow.id, payload)
-                        and fresh is not None and delivery is not None
-                        and fresh.current_attempt_id == delivery.attempt_id):
-                    reconcile_store_tx.hint(flow.id)
+        if delivery is None:
+            return
+        flow_id = delivery.flow_id
+        if action == "closed":
+            flow = self.flows.get_flow(flow_id)
+            if flow is None:
+                return
+            if pull_request.get("merged") is True:
+                self.service.on_merged(flow, delivery_id, payload)
+            elif flow.current_attempt_id == delivery.attempt_id:
+                self.service.on_closed(flow, delivery_id, payload)
+            else:
+                self.webhook_store.record_event(delivery_id, "pull_request", flow_id, payload)
+            return
+        with self.flows.locked(flow_id) as context:
+            if (self.webhook_store.using(context.database).record_event(delivery_id, "pull_request", flow_id, payload)
+                    and context.matches(attempt_id=delivery.attempt_id)):
+                self.reconcile_store.using(context.database).hint(flow_id)
