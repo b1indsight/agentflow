@@ -9,9 +9,88 @@ from psycopg import Connection, sql
 from psycopg.rows import dict_row
 
 from app.domain.flow_policy import LEDGER_COLUMNS, FlowFact, replay_flow
-from app.persistence.database import flow_schema_version, mark_flow_schema_current
+from app.persistence.database import (
+    FLOW_TABLES,
+    mark_flow_schema_current,
+    require_current_schema,
+    require_worker_key,
+    schema_relations,
+)
 from app.persistence.records import Row
 from app.persistence.schema import SCHEMAS
+
+
+def flow_schema_version(connection: Connection[Row]) -> str:
+    """Identify a supported source or target schema; never infer a completed cutover from rows."""
+    relations = schema_relations(connection)
+    names = {name for name, kind in relations.items() if kind in ("r", "p")}
+    if names & {"issue_flow_owners", "flow_deliveries", "webhook_inbox"}:
+        raise ValueError("pre-185 schema: stop writers and migrate the three legacy tables offline")
+    if not relations:
+        return "empty"
+    columns = {
+        (row["table_name"], row["column_name"])
+        for row in connection.execute(
+            "SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema()"
+        )
+    }
+    if "workers" in names:
+        require_worker_key(connection)
+        if columns & {("workers", "workspace_state"), ("workers", "retired_generation")}:
+            raise ValueError(
+                "obsolete workspace state schema: this unreleased schema requires explicit"
+                " reconciliation before upgrading; automatic migration is not supported"
+            )
+    legacy = {
+        ("flows", "current_round_no"),
+        ("flows", "delivery_branch"),
+        ("attempts", "round_no"),
+        ("jobs", "round_no"),
+        ("console_activity", "round_no"),
+    }
+    new = {
+        ("attempts", "delivery_branch"),
+        ("jobs", "attempt_id"),
+        ("console_activity", "attempt_id"),
+    }
+    boundary = {("flows", "history_only"), ("flows", "continued_from_flow_id")}
+    if ("flows", "is_issue_owner") not in columns:
+        raise ValueError("incomplete Flow schema: offline investigation required")
+    obsolete = {
+        "review_items",
+        "review_pending_edits",
+        "review_thread_observations",
+        "feedback_reconcile",
+        "flow_reconcile",
+    }
+    map_columns = {name for table, name in columns if table == "flow_attempt_legacy_map"}
+    if "flowtool_schema_version" in names:
+        versions = connection.execute("SELECT version FROM flowtool_schema_version").fetchall()
+        if versions not in ([{"version": 2}], [{"version": 3}]):
+            raise ValueError(f"unsupported Flow schema version: {versions}")
+        if new <= columns and not (legacy & columns):
+            if (
+                versions == [{"version": 3}]
+                and boundary <= columns
+                and "flow_attempt_legacy_map" not in names
+            ):
+                require_current_schema(connection, relations)
+                return "current"
+            if (
+                versions == [{"version": 2}]
+                and FLOW_TABLES <= names
+                and not (boundary & columns or obsolete & names)
+                and map_columns == {"flow_id", "round_no", "attempt_id"}
+            ):
+                return "v2"
+    elif (
+        FLOW_TABLES <= names
+        and legacy <= columns
+        and not ((new | boundary) & columns)
+        and not ((obsolete | {"flow_attempt_legacy_map"}) & names)
+    ):
+        return "legacy"
+    raise ValueError("unrecognized or partial Flow schema: offline investigation required")
 
 
 def _unsafe(c: Connection[Row]) -> list[str]:
@@ -285,6 +364,8 @@ def _convert_rounds(c: Connection[Row], rounds: list[Row]) -> None:
         UPDATE console_activity s SET attempt_id=a.id FROM attempts a WHERE s.source='worker'
           AND s.round_no IS NULL AND s.flow_id=a.flow_id AND s.metadata->>'attempt_id'=a.id::text;
         ALTER TABLE jobs ADD FOREIGN KEY(flow_id,attempt_id) REFERENCES attempts(flow_id,id) MATCH FULL;
+        ALTER TABLE console_activity ADD CONSTRAINT console_activity_owner
+            FOREIGN KEY(flow_id,attempt_id) REFERENCES attempts(flow_id,id);
         """)
     names = sql.SQL(",").join(sql.Identifier(col["attname"]) for col in columns)
     c.execute(
@@ -318,7 +399,9 @@ def _freeze(c: Connection[Row], status: str, rounds: list[Row]) -> None:
         _convert_rounds(c, rounds)
     else:
         c.execute("DROP TABLE flow_attempt_legacy_map,flowtool_schema_version")
-    c.execute("ALTER TABLE flows ADD history_only boolean NOT NULL DEFAULT false")
+    c.execute("""ALTER TABLE flows ADD history_only boolean NOT NULL DEFAULT false,
+        ADD continued_from_flow_id bigint REFERENCES flows(id),
+        ADD CONSTRAINT flows_history_archived CHECK (NOT history_only OR state='archived')""")
     c.execute("UPDATE flows SET history_only=true,is_issue_owner=false")
     # A public link names a worker file, not a Flow. Retire old capabilities as one registry.
     c.execute("ALTER TABLE worker_file_links RENAME TO historical_worker_file_links")
@@ -327,6 +410,7 @@ def _freeze(c: Connection[Row], status: str, rounds: list[Row]) -> None:
     # Keep coverage, timestamps, gaps, cursors and source content. Stopping a scan does not
     # imply it ever reached EOF. These are work queues, not external-write acknowledgements.
     c.execute("""
+        SELECT console_refresh(id) FROM flows ORDER BY id;
         UPDATE console_sync SET pending=false,dirty=false,claim_token=NULL,claim_until=NULL,
           status=CASE WHEN status IN ('pending','syncing') THEN 'partial' ELSE status END
           WHERE pending OR dirty OR claim_token IS NOT NULL OR claim_until IS NOT NULL;

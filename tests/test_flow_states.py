@@ -317,9 +317,8 @@ async def test_failed_initial_attempt_stops_workspace_before_resume(
 
 
 @pytest.mark.ledger_unverified
-def test_legacy_flow_replays_from_a_startup_snapshot_and_verify_reports_bypasses(store):
-    # A Flow written before the ledger existed has no creation fact. Startup must give it
-    # exactly one snapshot origin, and a later write that bypasses transition() must show up.
+def test_restart_does_not_invent_a_missing_ledger_origin(store):
+    # A manual row without creation evidence must remain detectable across restarts.
     with store.connection() as connection:
         legacy = connection.execute(
             "INSERT INTO flows(repo,issue_number,state,archive_reason,archive_summary,"
@@ -334,12 +333,5 @@ def test_legacy_flow_replays_from_a_startup_snapshot_and_verify_reports_bypasses
     with pytest.raises(ValueError, match="no origin"):
         store.flows.verify(legacy)
     store.init_db()
-    store.init_db()
-    assert store.flows.verify(legacy) == {}
-    with store.connection() as connection:
-        assert connection.execute(
-            "SELECT count(*) AS n FROM console_activity WHERE flow_id=%s AND kind='snapshot'",
-            (legacy,),
-        ).fetchone()["n"] == 1
-        connection.execute("UPDATE flows SET state='blocked' WHERE id=%s", (legacy,))
-    assert store.flows.verify(legacy) == {"state": (FlowState.FINALIZING, FlowState.BLOCKED)}
+    with pytest.raises(ValueError, match="no origin"):
+        store.flows.verify(legacy)

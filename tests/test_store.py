@@ -32,51 +32,35 @@ def test_startup_leaves_pre185_receipts_for_manual_upgrade(postgresql_url):
     with closing(Store(postgresql_url)) as store:
         with store.connection() as connection:
             connection.execute("CREATE TABLE webhook_inbox AS SELECT 'pending'::text AS state")
-        with pytest.raises(ValueError, match="pre-185 schema"):
+        with pytest.raises(ValueError, match="offline"):
             store.init_db()
         with store.connection() as connection:
             assert connection.execute("SELECT state FROM webhook_inbox").fetchall() == [{"state": "pending"}]
             assert connection.execute("SELECT to_regclass('events') AS name").fetchone() == {"name": None}
 
 
-def test_legacy_reconcile_tables_merge_once_into_reconcile_checks(store):
-    # Deployed databases hold PR checks and feedback scans in two tables; startup must move both
-    # rows, including backoff, wake-up and cursor progress, before dropping the old tables.
-    flow = store.flows.create_flow("owner/repo", 17, 42)
-    later = store.now() + timedelta(minutes=10)
+def test_startup_does_not_repair_an_incomplete_current_schema(store):
     with store.connection() as connection:
-        connection.execute("""
-            DROP TABLE reconcile_checks;
-            CREATE TABLE flow_reconcile (
-              flow_id BIGINT PRIMARY KEY REFERENCES flows(id), next_at TIMESTAMPTZ NOT NULL,
-              last_success_at TIMESTAMPTZ, failures INTEGER NOT NULL DEFAULT 0, last_error TEXT,
-              hint_version BIGINT NOT NULL DEFAULT 0
-            );
-            CREATE TABLE feedback_reconcile (
-              flow_id BIGINT NOT NULL REFERENCES flows(id), source TEXT NOT NULL, cursor TEXT,
-              next_at TIMESTAMPTZ NOT NULL, last_success_at TIMESTAMPTZ,
-              failures INTEGER NOT NULL DEFAULT 0, last_error TEXT,
-              scan_incomplete BOOLEAN NOT NULL DEFAULT FALSE, PRIMARY KEY(flow_id,source)
-            );
-        """)
-        connection.execute(
-            "INSERT INTO flow_reconcile VALUES(%s,%s,NULL,3,'rate_limited',5)", (flow.id, later))
-        connection.execute(
-            "INSERT INTO feedback_reconcile VALUES(%s,'threads','page-2',%s,NULL,1,'boom',TRUE)",
-            (flow.id, later))
-    store.init_db()
-    store.init_db()
+        connection.execute("DROP TABLE reconcile_checks")
+    with pytest.raises(ValueError, match="offline"):
+        store.init_db()
     with store.connection() as connection:
-        remaining = [
-            connection.execute("SELECT to_regclass(%s) AS name", (table,)).fetchone()["name"]
-            for table in ("flow_reconcile", "feedback_reconcile")
-        ]
-    assert remaining == [None, None]
-    pr = store.reconcile.get(flow.id)
-    assert (pr.next_at, pr.failures, pr.last_error, pr.hint_version) == (later, 3, "rate_limited", 5)
-    scan = store.reconcile.feedback_get(flow.id, "threads")
-    assert (scan.cursor, scan.next_at, scan.failures, scan.last_error, scan.scan_incomplete) == (
-        "page-2", later, 1, "boom", True)
+        assert connection.execute("SELECT to_regclass('reconcile_checks') AS name").fetchone() == {"name": None}
+
+
+def test_current_schema_restarts_in_a_read_only_transaction(store):
+    with store.database.transaction() as db:
+        with db.connection() as connection:
+            connection.execute("SET TRANSACTION READ ONLY")
+        db.init_db()
+
+
+def test_unknown_version_rejected_even_when_all_tables_are_current(store):
+    with store.connection() as connection:
+        connection.execute("DROP TABLE flowtool_schema_version; CREATE TABLE flowtool_schema_version(version integer);")
+        connection.execute("INSERT INTO flowtool_schema_version VALUES(4)")
+    with pytest.raises(ValueError, match="offline"):
+        store.init_db()
 
 
 def test_persisted_timestamps_follow_the_injected_clock(postgresql_url):

@@ -6,7 +6,6 @@ from itertools import product
 from threading import Barrier
 from uuid import NAMESPACE_URL, uuid5
 
-import psycopg
 import pytest
 
 from app.contracts.protocol import PROTOCOL_VERSION, ExecutionStopped, Failed
@@ -356,29 +355,6 @@ def test_inference_is_one_default_lane_with_local_preference(store: Store) -> No
     assert remote.workspace == identity("a:default")
     store.inference.enqueue_inference(InferenceTask(messages=[InferenceMessage(role="user", content="three")]))
     assert store.assignments.assign_job("a", "extra", "epoch", slot="infer") is None
-
-
-def test_legacy_worker_schema_requires_explicit_physical_identity_migration(postgresql_url: str) -> None:
-    with psycopg.connect(postgresql_url) as conn:
-        conn.execute("CREATE TABLE workers(worker_id TEXT PRIMARY KEY)")
-    store = Store(postgresql_url)
-    try:
-        with pytest.raises(ValueError, match="explicit workspace migration required"):
-            store.init_db()
-    finally:
-        store.close()
-
-
-def test_obsolete_workspace_state_schema_is_explicitly_rejected(postgresql_url: str) -> None:
-    with psycopg.connect(postgresql_url) as conn:
-        conn.execute("CREATE TABLE workers(worker_id TEXT, workspace TEXT, workspace_state TEXT,"
-                     " PRIMARY KEY(worker_id,workspace))")
-    store = Store(postgresql_url)
-    try:
-        with pytest.raises(ValueError, match="obsolete workspace state schema"):
-            store.init_db()
-    finally:
-        store.close()
 
 
 def test_claim_eligibility_matches_the_domain_dispatch_rules(store: Store) -> None:

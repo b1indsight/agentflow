@@ -16,55 +16,8 @@ from app.domain.models import Flow, Job, utcnow
 from app.persistence.records import Row
 from app.persistence.schema import SCHEMAS
 
-
-def flow_schema_version(connection: Connection[Row]) -> str:
-    """Identify a supported source or target schema; never infer a completed cutover from rows."""
-    tables = connection.execute(
-        "SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace"
-        " AND relkind IN ('r','p')"
-    ).fetchall()
-    names = {row["relname"] for row in tables}
-    if names & {"issue_flow_owners", "flow_deliveries", "webhook_inbox"}:
-        raise ValueError("pre-185 schema: stop writers and migrate the three legacy tables offline")
-    if not names:
-        return "empty"
-    columns = {
-        (row["table_name"], row["column_name"])
-        for row in connection.execute(
-            "SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema()"
-        )
-    }
-    if "workers" in names:
-        primary = connection.execute(
-            "SELECT array_agg(a.attname::text ORDER BY k.ordinality) AS columns"
-            " FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k(attnum,ordinality)"
-            " JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum"
-            " WHERE c.conrelid='workers'::regclass AND c.contype='p'"
-        ).fetchone()
-        if primary is None or primary["columns"] != ["worker_id", "workspace"]:
-            raise ValueError(
-                "legacy worker schema: explicit workspace migration required; stop consumers"
-                " and reconcile real worker-root workspace identities before upgrading"
-            )
-        if columns & {("workers", "workspace_state"), ("workers", "retired_generation")}:
-            raise ValueError(
-                "obsolete workspace state schema: this unreleased schema requires explicit"
-                " reconciliation before upgrading; automatic migration is not supported"
-            )
-    legacy = {
-        ("flows", "current_round_no"),
-        ("flows", "delivery_branch"),
-        ("attempts", "round_no"),
-        ("jobs", "round_no"),
-        ("console_activity", "round_no"),
-    }
-    new = {
-        ("attempts", "delivery_branch"),
-        ("jobs", "attempt_id"),
-        ("console_activity", "attempt_id"),
-    }
-    boundary = {("flows", "history_only"), ("flows", "continued_from_flow_id")}
-    required = {
+FLOW_TABLES = frozenset(
+    [
         "runtime_settings",
         "flows",
         "attempts",
@@ -87,43 +40,63 @@ def flow_schema_version(connection: Connection[Row]) -> str:
         "console_activity",
         "console_sync",
         "console_installation_backoff",
+    ]
+)
+
+
+def schema_relations(connection: Connection[Row]) -> dict[str, str]:
+    return {
+        row["relname"]: row["relkind"]
+        for row in connection.execute(
+            "SELECT relname,relkind FROM pg_class WHERE relnamespace=current_schema()::regnamespace"
+        )
     }
-    if ("flows", "is_issue_owner") not in columns:
-        raise ValueError("incomplete Flow schema: offline investigation required")
-    obsolete = {
-        "review_items",
-        "review_pending_edits",
-        "review_thread_observations",
-        "feedback_reconcile",
-        "flow_reconcile",
-    }
-    map_columns = {name for table, name in columns if table == "flow_attempt_legacy_map"}
-    if "flowtool_schema_version" in names:
-        versions = connection.execute("SELECT version FROM flowtool_schema_version").fetchall()
-        if versions not in ([{"version": 2}], [{"version": 3}]):
-            raise ValueError(f"unsupported Flow schema version: {versions}")
-        if new <= columns and not (legacy & columns):
-            if (
-                versions == [{"version": 3}]
-                and boundary <= columns
-                and "flow_attempt_legacy_map" not in names
-            ):
-                return "current"
-            if (
-                versions == [{"version": 2}]
-                and required <= names
-                and not (boundary & columns or obsolete & names)
-                and map_columns == {"flow_id", "round_no", "attempt_id"}
-            ):
-                return "v2"
-    elif (
-        required <= names
-        and legacy <= columns
-        and not ((new | boundary) & columns)
-        and not ((obsolete | {"flow_attempt_legacy_map"}) & names)
+
+
+def require_worker_key(connection: Connection[Row]) -> None:
+    primary = connection.execute(
+        "SELECT array_agg(a.attname::text ORDER BY k.ordinality) AS columns"
+        " FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k(attnum,ordinality)"
+        " JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum"
+        " WHERE c.conrelid='workers'::regclass AND c.contype='p'"
+    ).fetchone()
+    if primary is None or primary["columns"] != ["worker_id", "workspace"]:
+        raise ValueError(
+            "expected workers primary key (worker_id, workspace); reconcile worker identities offline"
+        )
+
+
+def require_current_schema(connection: Connection[Row], relations: dict[str, str]) -> None:
+    """Check the cutover marker and required relations without installing or repairing anything."""
+    tables = {name for name, kind in relations.items() if kind in ("r", "p")}
+    if (
+        FLOW_TABLES | {"flowtool_schema_version"} <= tables
+        and relations.get("console_facts") == "v"
     ):
-        return "legacy"
-    raise ValueError("unrecognized or partial Flow schema: offline investigation required")
+        columns = {
+            (r["relname"], r["attname"])
+            for r in connection.execute(
+                "SELECT c.relname,a.attname FROM pg_class c JOIN pg_attribute a ON c.oid=a.attrelid"
+                " WHERE c.relnamespace=current_schema()::regnamespace AND a.attnum>0 AND NOT a.attisdropped"
+                " AND c.relkind IN ('r','p')"
+            )
+        }
+        if {
+            ("flowtool_schema_version", "version"),
+            ("flows", "history_only"),
+            ("flows", "continued_from_flow_id"),
+            ("flows", "is_issue_owner"),
+            ("attempts", "delivery_branch"),
+            ("jobs", "attempt_id"),
+            ("console_activity", "attempt_id"),
+        } <= columns and connection.execute(
+            "SELECT version FROM flowtool_schema_version"
+        ).fetchall() == [{"version": 3}]:
+            require_worker_key(connection)
+            return
+    raise ValueError(
+        "expected Flow schema v3; inspect the database offline with scripts.migrate_flow_attempts"
+    )
 
 
 def mark_flow_schema_current(connection: Connection[Row]) -> None:
@@ -268,15 +241,15 @@ class Database:
         ).fetchall()
 
     def init_db(self) -> None:
-        """Initialize the complete schema in its foreign-key dependency order."""
+        """Bootstrap an empty schema; existing installations must already be current."""
         with self.connection() as connection:
-            version = flow_schema_version(connection)
-            if version in {'legacy', 'v2'}:
-                raise ValueError('legacy Flow schema: stop writers and run scripts.migrate_flow_attempts offline')
+            relations = schema_relations(connection)
+            if relations:
+                require_current_schema(connection, relations)
+                return
             for schema in SCHEMAS:
                 connection.execute(schema)
-            if version == 'empty':
-                mark_flow_schema_current(connection)
+            mark_flow_schema_current(connection)
 
     def now(self) -> datetime:
         return self._clock()

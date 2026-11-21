@@ -185,9 +185,7 @@ FlowStore.transition(flow, event)          调用方已持有 lock_workflow
 
 ## 9. 存量数据
 
-schema 初始化的最后一步（`FLOW_LEDGER_BACKFILL`）为每个既没有 `created` 也没有 `snapshot` 的 Flow
-补一条 `snapshot`，内容是当时 `flows` 行的账本列。重复初始化不新增行。它不放在 `CONSOLE_SCHEMA` 里：
-旧版迁移脚本会单独执行 `CONSOLE_SCHEMA`，随后才补写 `archive` 证据；快照必须排在这些证据之后。
+更早的版本曾为存量 Flow 补写 `snapshot` 作为账本起点。当前服务不再根据 `flows` 行生成历史证据；新版 Flow 缺少起点时，重启后 `flow verify` 仍报告错误。旧库的账本由[离线迁移](../operations/upgrade.md)在切换前核对。
 
 - 重放从 `snapshot` 开始；它之前的状态变化不可还原，与现有 `baseline` 行的说明一致。
 - 已有的 `archive`、`merge`、`archive_correction` 事实保持原样，仍用于历史 PR 归属和归档检查。

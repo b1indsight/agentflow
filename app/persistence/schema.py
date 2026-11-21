@@ -1,6 +1,6 @@
 """Complete PostgreSQL schema in dependency order; no historical migrations."""
 
-from app.persistence.console_schema import CONSOLE_SCHEMA, FLOW_LEDGER_BACKFILL
+from app.persistence.console_schema import CONSOLE_SCHEMA
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runtime_settings (
@@ -11,8 +11,6 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
   amp_effort TEXT,
   revision BIGINT NOT NULL DEFAULT 0 CHECK (revision>=0)
 );
-ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS codex_effort TEXT;
-ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS amp_effort TEXT;
 INSERT INTO runtime_settings(id) VALUES (1) ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS flows (
@@ -31,25 +29,14 @@ CREATE TABLE IF NOT EXISTS flows (
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   is_issue_owner BOOLEAN NOT NULL DEFAULT FALSE CHECK (NOT is_issue_owner OR issue_number IS NOT NULL),
+  history_only BOOLEAN NOT NULL DEFAULT FALSE,
+  continued_from_flow_id BIGINT REFERENCES flows(id),
+  CONSTRAINT flows_one_input CHECK ((issue_number IS NULL) = (task_content IS NOT NULL)),
+  CONSTRAINT flows_history_archived CHECK (NOT history_only OR state='archived'),
   CHECK ((state='archived') = (archived_at IS NOT NULL)),
   CHECK (state NOT IN ('finalizing','archived') OR archive_reason IS NOT NULL),
   CHECK (archive_reason IS NULL OR state IN ('blocked','finalizing','archived'))
 );
-ALTER TABLE flows ADD COLUMN IF NOT EXISTS task_content TEXT;
-ALTER TABLE flows ADD COLUMN IF NOT EXISTS title TEXT;
-ALTER TABLE flows ADD COLUMN IF NOT EXISTS title_job_id BIGINT;
-ALTER TABLE flows ADD COLUMN IF NOT EXISTS history_only BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE flows ADD COLUMN IF NOT EXISTS continued_from_flow_id BIGINT REFERENCES flows(id);
-ALTER TABLE flows ALTER COLUMN issue_number DROP NOT NULL;
-DO $$ BEGIN
-  ALTER TABLE flows ADD CONSTRAINT flows_one_input
-    CHECK ((issue_number IS NULL) = (task_content IS NOT NULL));
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-DO $$ BEGIN
-  ALTER TABLE flows ADD CONSTRAINT flows_history_archived CHECK (NOT history_only OR state='archived');
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_flows_active ON flows(repo, issue_number) WHERE state <> 'archived';
 CREATE UNIQUE INDEX IF NOT EXISTS ux_flows_continuation ON flows(continued_from_flow_id)
   WHERE continued_from_flow_id IS NOT NULL;
@@ -133,10 +120,16 @@ CREATE TABLE IF NOT EXISTS jobs (
   source_key TEXT,
   last_error TEXT,
   payload JSONB,
+  inference JSONB,
+  CONSTRAINT ck_jobs_kind_fields CHECK (
+    (kind='inference' AND inference IS NOT NULL)
+    OR (kind<>'inference' AND flow_id IS NOT NULL AND inference IS NULL)),
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_jobs_state ON jobs(state);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_inference_request
+  ON jobs ((inference->'task'->>'request_id')) WHERE kind='inference';
 CREATE OR REPLACE FUNCTION preserve_job_owner() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF (OLD.flow_id,OLD.attempt_id) IS DISTINCT FROM (NEW.flow_id,NEW.attempt_id) THEN
@@ -165,10 +158,14 @@ CREATE TABLE IF NOT EXISTS workers (
   last_assigned_at TIMESTAMPTZ,
   last_error TEXT,
   last_disconnect_reason TEXT,
+  coding_agent TEXT CHECK (coding_agent IN ('codex','amp')),
+  execute BOOLEAN NOT NULL DEFAULT TRUE,
+  inference JSONB,
+  current_inference_job_id BIGINT REFERENCES jobs(id),
+  last_inference_assigned_at TIMESTAMPTZ,
   PRIMARY KEY(worker_id,workspace)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_workers_default ON workers(worker_id) WHERE repository IS NULL;
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS coding_agent TEXT CHECK (coding_agent IN ('codex','amp'));
 
 CREATE TABLE IF NOT EXISTS worker_file_links (
   link_id TEXT PRIMARY KEY,
@@ -293,28 +290,6 @@ CREATE TABLE IF NOT EXISTS review_versions (
   observation_seq BIGINT GENERATED ALWAYS AS IDENTITY,
   PRIMARY KEY(item_id,version)
 );
-DO $$
-BEGIN
-  IF to_regclass('review_items') IS NOT NULL THEN
-    IF EXISTS (SELECT 1 FROM review_items GROUP BY kind,github_id HAVING count(*)>1) THEN
-      RAISE EXCEPTION 'review_items holds one GitHub object in several Flows; reconcile before upgrading';
-    END IF;
-    ALTER TABLE review_versions ADD COLUMN kind TEXT, ADD COLUMN github_id BIGINT,
-      ADD COLUMN observed_at TIMESTAMPTZ;
-    UPDATE review_versions v SET kind=i.kind,github_id=i.github_id,observed_at=i.observed_at
-      FROM review_items i WHERE i.id=v.item_id;
-    ALTER TABLE review_versions ALTER COLUMN kind SET NOT NULL,
-      ALTER COLUMN github_id SET NOT NULL, ALTER COLUMN observed_at SET NOT NULL,
-      ADD CONSTRAINT ck_review_versions_kind CHECK (kind IN ('review_body','inline','conversation')),
-      ADD CONSTRAINT ck_review_versions_github_id CHECK (github_id>0),
-      DROP CONSTRAINT review_versions_item_id_fkey;
-    DROP TABLE IF EXISTS review_pending_edits;
-    DROP TABLE review_items;
-  END IF;
-END $$;
-ALTER TABLE review_versions DROP COLUMN IF EXISTS signal_retired;
-DROP TABLE IF EXISTS review_pending_edits;
-DROP TABLE IF EXISTS review_thread_observations;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_review_observation_seq ON review_versions(observation_seq);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_review_object_version ON review_versions(kind,github_id,version);
 CREATE INDEX IF NOT EXISTS ix_review_versions_attempt ON review_versions(attempt_id);
@@ -322,7 +297,6 @@ CREATE TABLE IF NOT EXISTS review_buffers (
   flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
   due_at TIMESTAMPTZ
 );
-ALTER TABLE review_buffers DROP COLUMN IF EXISTS generation, DROP COLUMN IF EXISTS force_triage;
 CREATE INDEX IF NOT EXISTS ix_review_due ON review_buffers(due_at) WHERE due_at IS NOT NULL;
 CREATE TABLE IF NOT EXISTS review_batches (
   id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
@@ -336,9 +310,9 @@ CREATE TABLE IF NOT EXISTS review_batches (
   created_at TIMESTAMPTZ NOT NULL,
   context JSONB,
   decision JSONB,
-  threads JSONB
+  threads JSONB,
+  inference_job_id BIGINT REFERENCES jobs(id)
 );
-ALTER TABLE review_batches DROP COLUMN IF EXISTS generation;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_review_active_batch ON review_batches(flow_id)
   WHERE state IN ('ready','processing');
 """
@@ -357,23 +331,6 @@ CREATE TABLE IF NOT EXISTS reconcile_checks (
   hint_version BIGINT NOT NULL DEFAULT 0,
   PRIMARY KEY(flow_id,source)
 );
-DO $$
-BEGIN
-  IF to_regclass('feedback_reconcile') IS NOT NULL THEN
-    INSERT INTO reconcile_checks(flow_id,source,cursor,next_at,last_success_at,failures,last_error,
-      scan_incomplete)
-    SELECT flow_id,source,cursor,next_at,last_success_at,failures,last_error,scan_incomplete
-      FROM feedback_reconcile ON CONFLICT DO NOTHING;
-    DROP TABLE feedback_reconcile;
-  END IF;
-  IF to_regclass('flow_reconcile') IS NOT NULL THEN
-    INSERT INTO reconcile_checks(flow_id,source,next_at,last_success_at,failures,last_error,
-      hint_version)
-    SELECT flow_id,'pull_request',next_at,last_success_at,failures,last_error,hint_version
-      FROM flow_reconcile ON CONFLICT DO NOTHING;
-    DROP TABLE flow_reconcile;
-  END IF;
-END $$;
 CREATE INDEX IF NOT EXISTS ix_reconcile_checks_due ON reconcile_checks(next_at,flow_id);
 """
 
@@ -395,27 +352,6 @@ CREATE TABLE IF NOT EXISTS project_projections (
 CREATE INDEX IF NOT EXISTS ix_projects_due ON project_projections(next_at,id) WHERE NOT blocked;
 """
 
-INFERENCE_SCHEMA = """
--- Additive and repeatable for deployed databases; historical result receipts are untouched.
-ALTER TABLE jobs ALTER COLUMN flow_id DROP NOT NULL;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS inference JSONB;
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS execute BOOLEAN NOT NULL DEFAULT TRUE;
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS inference JSONB;
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS current_inference_job_id BIGINT REFERENCES jobs(id);
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS last_inference_assigned_at TIMESTAMPTZ;
-ALTER TABLE review_batches ADD COLUMN IF NOT EXISTS inference_job_id BIGINT REFERENCES jobs(id);
-DO $$
-BEGIN
-  ALTER TABLE jobs ADD CONSTRAINT ck_jobs_kind_fields CHECK (
-    (kind='inference' AND inference IS NOT NULL)
-    OR (kind<>'inference' AND flow_id IS NOT NULL AND inference IS NULL)
-  );
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_inference_request
-  ON jobs ((inference->'task'->>'request_id')) WHERE kind='inference';
-"""
-
 SCHEMAS = (
     SCHEMA,
     STOP_SCHEMA,
@@ -424,6 +360,4 @@ SCHEMAS = (
     RECONCILE_SCHEMA,
     PROJECT_SCHEMA,
     CONSOLE_SCHEMA,
-    INFERENCE_SCHEMA,
-    FLOW_LEDGER_BACKFILL,
 )

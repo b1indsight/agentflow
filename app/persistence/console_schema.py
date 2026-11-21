@@ -58,15 +58,11 @@ CREATE TABLE IF NOT EXISTS console_activity (
  author TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
  url TEXT, parent_key TEXT, deleted BOOLEAN NOT NULL DEFAULT FALSE,
  metadata JSONB NOT NULL DEFAULT '{}', digest TEXT NOT NULL,
+ attempt_id BIGINT,
+ awaiting_agent BOOLEAN NOT NULL DEFAULT FALSE,
+ CONSTRAINT console_activity_owner FOREIGN KEY(flow_id,attempt_id) REFERENCES attempts(flow_id,id),
  PRIMARY KEY(flow_id,version)
 );
-ALTER TABLE console_activity ADD COLUMN IF NOT EXISTS attempt_id BIGINT;
-DO $$ BEGIN
- ALTER TABLE console_activity ADD CONSTRAINT console_activity_owner
- FOREIGN KEY(flow_id,attempt_id) REFERENCES attempts(flow_id,id);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-ALTER TABLE console_activity ADD COLUMN IF NOT EXISTS awaiting_agent BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS ix_console_pending_agent ON console_activity(flow_id,attempt_id,version)
  WHERE awaiting_agent;
 CREATE INDEX IF NOT EXISTS ix_console_activity_attempt ON console_activity(flow_id,attempt_id,version);
@@ -102,9 +98,9 @@ CREATE TABLE IF NOT EXISTS console_sync (
  claim_token TEXT, claim_until TIMESTAMPTZ, next_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  failures INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', reason TEXT,
  last_success_at TIMESTAMPTZ, limitations JSONB NOT NULL DEFAULT '[]',
+ worker_scan_clean BOOLEAN NOT NULL DEFAULT FALSE,
  PRIMARY KEY(flow_id,source)
 );
-ALTER TABLE console_sync ADD COLUMN IF NOT EXISTS worker_scan_clean BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS ix_console_sync_due ON console_sync(next_at,flow_id)
  WHERE pending;
 CREATE TABLE IF NOT EXISTS console_installation_backoff (
@@ -201,38 +197,4 @@ END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE TRIGGER console_worker_changed AFTER INSERT OR UPDATE ON workers
  FOR EACH ROW EXECUTE FUNCTION console_worker_changed();
--- Only missing projections are seeded; ordinary restarts never rescan archived source bodies.
-SELECT console_refresh(id,TRUE) FROM flows
- WHERE NOT EXISTS (SELECT 1 FROM console_flows c WHERE c.flow_id=flows.id);
--- Reclassify existing cards once when a display phase or action rule changes.
-SELECT console_refresh(c.flow_id) FROM console_flows c
- JOIN console_facts f ON f.id=c.flow_id
- WHERE c.facts->>'history_only' IS DISTINCT FROM 'true'
- AND c.facts-'updated_at' IS DISTINCT FROM to_jsonb(f)-'updated_at'
- ORDER BY c.flow_id;
-"""
-
-# Runs after every other schema, including a legacy migration's own evidence writes,
-# so a backfilled snapshot always follows the facts that already describe its row.
-FLOW_LEDGER_BACKFILL = """
--- Flows older than the ledger replay from one snapshot of their ledger-owned columns.
-WITH missing AS (
- SELECT f.* FROM flows f WHERE NOT EXISTS (SELECT 1 FROM console_activity a
-  WHERE a.flow_id=f.id AND a.source='flow' AND a.kind IN ('created','snapshot'))),
-reserved AS (
- UPDATE console_flows c SET activity_version=c.activity_version+1 FROM missing m
- WHERE c.flow_id=m.id RETURNING c.flow_id,c.activity_version),
-facts AS (
- SELECT m.id,m.current_attempt_id,r.activity_version,jsonb_build_object(
-  'repo',m.repo,'issue_number',m.issue_number,'installation_id',m.installation_id,
-  'task_digest',encode(sha256(convert_to(m.task_content,'UTF8')),'hex'),
-  'title',m.title,'state',m.state,'current_attempt_id',m.current_attempt_id,
-  'archive_reason',m.archive_reason,'archive_summary',m.archive_summary,
-  'archived_at',m.archived_at,'created_at',m.created_at,'updated_at',m.updated_at) AS metadata
- FROM missing m JOIN reserved r ON r.flow_id=m.id)
-INSERT INTO console_activity(flow_id,version,attempt_id,key,source,kind,occurred_at,updated_at,
- author,title,body,metadata,digest)
-SELECT id,activity_version,current_attempt_id,'flow:'||id||':snapshot','flow','snapshot',
- clock_timestamp(),clock_timestamp(),'FlowTool','账本起点快照','',
- metadata,encode(sha256(convert_to(metadata::text,'UTF8')),'hex') FROM facts;
 """

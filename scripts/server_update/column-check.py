@@ -78,7 +78,7 @@ def columns(connection: psycopg.Connection) -> dict[Column, tuple[int, int]]:
 
 
 def execute_schemas(connection: psycopg.Connection, statements: list[str]) -> None:
-    """Match Database.init_db: execute the complete schema in one transaction."""
+    """Replay schema declarations in one transaction on the disposable probe database."""
     with connection.transaction():
         for statement in statements:
             connection.execute(statement)
