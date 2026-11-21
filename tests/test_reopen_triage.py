@@ -38,7 +38,7 @@ async def test_reopen_retained_signals_stay_retired_across_batches_and_restart(
         tx.reviews.complete(batch.id, outcome, consumed, [])
     await check(store, flow, GitHub(flow))
     await check(store, flow, GitHub(flow, "open"))
-    archived = ActivityStore(store.database).archived(flow.id, 1)
+    archived = ActivityStore(store.database).archived(flow.id, flow.current_attempt_id)
     assert archived is not None and archived.metadata["archive_reason"] == "abandoned"
     assert settle(store) == []
 
@@ -46,13 +46,13 @@ async def test_reopen_retained_signals_stay_retired_across_batches_and_restart(
     try:
         assert settle(restarted) == []
         assert restarted.jobs.list_jobs(flow.id) == []
-        assert ActivityStore(restarted.database).archived(flow.id, 1) == archived
+        assert ActivityStore(restarted.database).archived(flow.id, flow.current_attempt_id) == archived
     finally:
         restarted.close()
 
 
 @pytest.mark.parametrize("new_kind", ["new_review", "edited_version"])
-async def test_reopen_rejects_duplicate_and_new_authorization_for_archived_round(
+async def test_reopen_rejects_duplicate_and_new_authorization_for_archived_attempt(
     store,
     lifecycle_flow,
     new_kind,
@@ -77,12 +77,12 @@ async def test_reopen_rejects_duplicate_and_new_authorization_for_archived_round
     assert not ingest(store, flow, new, "new-signal")
     clock.now += timedelta(seconds=76)
     assert settle(store) == []
-    # Repeated lifecycle observations still grant no new round or coding authority.
+    # Repeated lifecycle observations still grant no new attempt or coding authority.
     await check(store, flow, GitHub(flow))
     await check(store, flow, GitHub(flow, "open"))
     assert settle(store) == []
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-    assert store.flows.get_flow(flow.id).current_round_no == 1
+    assert store.flows.get_flow(flow.id).current_attempt_id == flow.current_attempt_id
     assert store.jobs.list_jobs(flow.id) == []
 
 

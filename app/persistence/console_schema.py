@@ -7,7 +7,7 @@ service remembering an outbox call. Only explicit display facts enter this archi
 CONSOLE_SCHEMA = """
 CREATE OR REPLACE VIEW console_facts AS
 SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
- GREATEST(f.updated_at,COALESCE(f.delivery_updated_at,f.updated_at),
+ GREATEST(f.updated_at,COALESCE(a.delivery_updated_at,f.updated_at),
           COALESCE(j.updated_at,f.updated_at),COALESCE(a.updated_at,f.updated_at)) AS updated_at,
  CASE WHEN f.state='finalizing' THEN 'running' ELSE f.state END AS phase,
  CASE WHEN f.state='archived' THEN 'archived'
@@ -18,27 +18,27 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  WHEN j.state='running' AND j.recovery_deadline IS NOT NULL THEN 'recovering'
  WHEN j.state IN ('queued','running') THEN j.kind || ':' || j.state
  WHEN j.state='failed' THEN 'execution_failed'
- WHEN f.delivery_state='merged' THEN 'awaiting_archive'
- WHEN f.delivery_state='open' THEN 'awaiting_review'
+ WHEN a.delivery_state='merged' THEN 'awaiting_archive'
+ WHEN a.delivery_state='open' THEN 'awaiting_review'
  ELSE 'unknown' END AS action,
  COALESCE(x.worker_id,j.assigned_worker_id) AS worker_id,
  (f.state='archived' OR x.released_at IS NOT NULL)
  AS worker_historical,
  COALESCE(a.revision_cycles,0) AS revision_cycles,
- f.delivery_pr_number AS pr_number,f.delivery_branch AS branch,f.delivery_state,f.delivery_head_sha AS head_sha,
- f.delivery_title,f.delivery_body,j.id AS job_id,
+ a.delivery_pr_number AS pr_number,a.delivery_branch AS branch,a.delivery_state,a.delivery_head_sha AS head_sha,
+ a.delivery_title,a.delivery_body,j.id AS job_id,
  j.state AS job_state,j.kind AS job_kind,j.attempt AS job_attempt,
  j.started_at,j.result_applied_at,
  CASE WHEN j.last_error IS NOT NULL OR j.prepare_last_error IS NOT NULL
  OR j.verify_last_error IS NOT NULL THEN 'execution_error' ELSE NULL END AS error_code,
  a.id AS attempt_id,a.codex_session_id,a.session_generation,a.last_revision_summary,
- f.current_round_no,f.archive_reason,
+ f.current_attempt_id,a.created_at AS attempt_started_at,f.archive_reason,
  f.archive_summary,f.archived_at,f.title AS task_title
 FROM flows f
 LEFT JOIN flow_executions x ON x.flow_id=f.id
 LEFT JOIN attempts a ON a.id=f.current_attempt_id
 LEFT JOIN LATERAL (SELECT candidate.*
- FROM jobs candidate WHERE flow_id=f.id AND round_no=f.current_round_no
+ FROM jobs candidate WHERE flow_id=f.id AND attempt_id=f.current_attempt_id
  AND kind<>'inference' ORDER BY id DESC LIMIT 1) j ON TRUE;
 
 CREATE TABLE IF NOT EXISTS console_flows (
@@ -60,20 +60,25 @@ CREATE TABLE IF NOT EXISTS console_activity (
  metadata JSONB NOT NULL DEFAULT '{}', digest TEXT NOT NULL,
  PRIMARY KEY(flow_id,version)
 );
-ALTER TABLE console_activity ADD COLUMN IF NOT EXISTS round_no INTEGER CHECK(round_no>0);
+ALTER TABLE console_activity ADD COLUMN IF NOT EXISTS attempt_id BIGINT;
+DO $$ BEGIN
+ ALTER TABLE console_activity ADD CONSTRAINT console_activity_owner
+ FOREIGN KEY(flow_id,attempt_id) REFERENCES attempts(flow_id,id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 ALTER TABLE console_activity ADD COLUMN IF NOT EXISTS awaiting_agent BOOLEAN NOT NULL DEFAULT FALSE;
-CREATE INDEX IF NOT EXISTS ix_console_pending_agent ON console_activity(flow_id,round_no,version)
+CREATE INDEX IF NOT EXISTS ix_console_pending_agent ON console_activity(flow_id,attempt_id,version)
  WHERE awaiting_agent;
-CREATE INDEX IF NOT EXISTS ix_console_activity_round ON console_activity(flow_id,round_no,version);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_console_flow_evidence ON console_activity(flow_id,round_no,kind)
+CREATE INDEX IF NOT EXISTS ix_console_activity_attempt ON console_activity(flow_id,attempt_id,version);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_console_flow_evidence ON console_activity(flow_id,attempt_id,kind)
  WHERE source='flow' AND kind IN ('archive','merge','archive_correction');
 CREATE UNIQUE INDEX IF NOT EXISTS ux_console_archived_pr ON console_activity
  (lower(metadata->>'repo'),((metadata->>'pr_number')::integer))
  WHERE source='flow' AND kind='archive' AND metadata->>'pr_number' IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_console_flow_origin ON console_activity(flow_id)
  WHERE source='flow' AND kind IN ('created','snapshot');
-CREATE UNIQUE INDEX IF NOT EXISTS ux_console_flow_round_start ON console_activity(flow_id,round_no)
- WHERE source='flow' AND kind='round_resumed';
+CREATE UNIQUE INDEX IF NOT EXISTS ux_console_flow_attempt_start ON console_activity(flow_id,attempt_id)
+ WHERE source='flow' AND kind='attempt_started';
 CREATE OR REPLACE FUNCTION console_preserve_evidence() RETURNS TRIGGER AS $$
 BEGIN
  -- Every Flow row except display snapshots and notices is ledger evidence (activity.py).
@@ -130,14 +135,14 @@ BEGIN
  SELECT facts INTO previous_facts
  FROM console_flows WHERE flow_id=identity FOR UPDATE;
  SELECT to_jsonb(f) INTO next_facts FROM console_facts f WHERE id=identity;
- IF next_facts IS NULL THEN RETURN; END IF;
+ IF next_facts->>'current_attempt_id' IS NULL THEN RETURN; END IF;
  IF previous_facts-'updated_at'=next_facts-'updated_at' THEN RETURN; END IF;
  UPDATE console_flows SET facts=next_facts,state_version=state_version+1,
  activity_version=activity_version+1 WHERE flow_id=identity
  RETURNING activity_version,state_version INTO next_version,state_revision;
- INSERT INTO console_activity(flow_id,version,round_no,key,source,kind,occurred_at,updated_at,
+ INSERT INTO console_activity(flow_id,version,attempt_id,key,source,kind,occurred_at,updated_at,
  author,title,body,metadata,digest) VALUES(identity,next_version,
- (next_facts->>'current_round_no')::integer,
+ (next_facts->>'current_attempt_id')::bigint,
  'flow:'||identity||':'||state_revision,'flow',CASE WHEN baseline THEN 'baseline' ELSE 'state' END,
  clock_timestamp(),clock_timestamp(),'FlowTool',
  CASE WHEN baseline THEN '迁移基线：此前业务历史不可还原' ELSE 'Flow 状态变更' END,
@@ -169,7 +174,15 @@ END $$;
 CREATE OR REPLACE FUNCTION console_worker_changed() RETURNS TRIGGER AS $$
 BEGIN
  IF TG_OP='INSERT' OR NEW.connection_epoch IS DISTINCT FROM OLD.connection_epoch THEN
- PERFORM console_enqueue(flow_id) FROM flow_executions WHERE worker_id=NEW.worker_id ORDER BY flow_id;
+ PERFORM console_enqueue(flow_id) FROM (
+   SELECT flow_id FROM flow_executions WHERE worker_id=NEW.worker_id
+   UNION
+   -- Include outstanding historical gaps and in-flight scans racing this reconnect.
+   SELECT j.flow_id FROM jobs j JOIN console_sync s ON s.flow_id=j.flow_id
+   WHERE j.assigned_worker_id=NEW.worker_id AND j.kind IN ('initial','revision')
+   AND ((s.pending AND s.source='worker') OR
+        (s.reason='worker_unavailable' AND s.source LIKE 'worker:'||j.attempt_id||':%'))
+ ) affected ORDER BY flow_id;
  END IF;
  RETURN NEW;
 END;
@@ -197,16 +210,16 @@ reserved AS (
  UPDATE console_flows c SET activity_version=c.activity_version+1 FROM missing m
  WHERE c.flow_id=m.id RETURNING c.flow_id,c.activity_version),
 facts AS (
- SELECT m.id,m.current_round_no,r.activity_version,jsonb_build_object(
+ SELECT m.id,m.current_attempt_id,r.activity_version,jsonb_build_object(
   'repo',m.repo,'issue_number',m.issue_number,'installation_id',m.installation_id,
   'task_digest',encode(sha256(convert_to(m.task_content,'UTF8')),'hex'),
-  'title',m.title,'state',m.state,'current_round_no',m.current_round_no,
+  'title',m.title,'state',m.state,'current_attempt_id',m.current_attempt_id,
   'archive_reason',m.archive_reason,'archive_summary',m.archive_summary,
   'archived_at',m.archived_at,'created_at',m.created_at,'updated_at',m.updated_at) AS metadata
  FROM missing m JOIN reserved r ON r.flow_id=m.id)
-INSERT INTO console_activity(flow_id,version,round_no,key,source,kind,occurred_at,updated_at,
+INSERT INTO console_activity(flow_id,version,attempt_id,key,source,kind,occurred_at,updated_at,
  author,title,body,metadata,digest)
-SELECT id,activity_version,current_round_no,'flow:'||id||':snapshot','flow','snapshot',
+SELECT id,activity_version,current_attempt_id,'flow:'||id||':snapshot','flow','snapshot',
  clock_timestamp(),clock_timestamp(),'FlowTool','账本起点快照','',
  metadata,encode(sha256(convert_to(metadata::text,'UTF8')),'hex') FROM facts;
 """

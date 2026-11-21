@@ -66,12 +66,12 @@ def _pending_feedback(plan: ResultPlan, *, reviews: ReviewStore) -> bool:
 
 
 def _plan_stale(context: LockedFlow, job: Job, plan: ResultPlan) -> bool:
-    """A notice survives terminal state, but never a round or attempt change."""
+    """A notice survives terminal state, but never an attempt change."""
     flow = context.flow
     assert flow is not None
     return (
         (flow.state in TERMINAL_STATES and plan.archive_notice is None)
-        or not context.matches(round_no=job.round_no, attempt_id=plan.attempt_id)
+        or job.attempt_id != plan.attempt_id or not context.matches(attempt_id=plan.attempt_id)
         or (flow.archive_reason is not None
             and plan.archive is None and plan.archive_notice is None)
     )

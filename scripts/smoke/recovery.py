@@ -146,7 +146,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         root_lock.acquire()
         store.init_db()
         flow = store.flows.create_flow('fixture/no-network', 1, 1)
-        attempt = store.flows.create_current_attempt(flow)
+        attempt_id = flow.required_attempt_id
         pool = RepositoryWorkspaces(root, 'fixture-worker')
         default = pool.initialize()
         store.workers.worker_connected(
@@ -162,7 +162,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
         job = store.assignments.assign_job('fixture-worker', 'fixture-token', 'fixture-epoch')
         if job is None or job.workspace is None or job.generation is None:
             raise RuntimeError('fixture assignment failed')
-        if not store.assignments.start_assignment(job.id, attempt.id, 'fixture-worker', 'fixture-token', 'fixture-epoch'):
+        if not store.assignments.start_assignment(job.id, attempt_id, 'fixture-worker', 'fixture-token', 'fixture-epoch'):
             raise RuntimeError('fixture start failed')
         expected_flow = store.flows.get_flow(flow.id)
         if expected_flow is None or expected_flow.state is not FlowState.RUNNING:
@@ -179,7 +179,7 @@ def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
             secret=AssignmentSecret(push=PushSecret(
                 token=SecretStr('fixture-not-a-credential'), repository=flow.repo,
                 expires_at=datetime.now(UTC), bot_login='fixture[bot]', bot_user_id=1)),
-            task=InitialTask(flow_id=flow.id, attempt_id=attempt.id, repo=flow.repo,
+            task=InitialTask(flow_id=flow.id, attempt_id=attempt_id, repo=flow.repo,
                              issue_number=1, task_content='fixture', branch='fixture'),
         ))
         original = journal.record_started()

@@ -107,10 +107,7 @@ def test_observe_reads_without_creating_work_and_does_not_claim_partial_success(
     gh = FakeGitHub()
     gh.issue = 7
     flow = store.flows.create_flow("owner/smoke", 7, 42)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "flow/7")
     delivery.state, delivery.pr_number, delivery.head_sha = DeliveryState.OPEN, 8, "a"*40
     store.deliveries.update_delivery(delivery)
     probe = GitHubProbe()
@@ -165,10 +162,9 @@ async def test_core_pass_requires_three_verified_heads_and_matching_merge(
     gh = FakeGitHub()
     gh.issue = 7
     flow = store.flows.create_flow("owner/smoke", 7, 42)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    attempt = store.flows.get_current_attempt(flow)
+    assert attempt is not None
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "flow/7")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 8
     store.deliveries.update_delivery(delivery)
     register_worker(store, "worker-1", repo=flow.repo)
@@ -199,10 +195,10 @@ async def test_core_pass_requires_three_verified_heads_and_matching_merge(
                     flow,
                     reason=ArchiveReason.SUCCEEDED,
                     summary="Merged",
-                    expected_round_no=flow.current_round_no,
+                    expected_attempt_id=flow.required_attempt_id,
                 )
                 assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
-                assert ActivityStore(store.database).archived(flow.id, 1) is not None
+                assert ActivityStore(store.database).archived(flow.id, flow.required_attempt_id) is not None
                 notice = store.jobs.list_jobs(flow.id)[-1]
                 assert notice.assigned_worker_id is None
                 subject = coordinator(store, RecordingGitHub())

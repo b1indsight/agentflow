@@ -38,13 +38,12 @@ async def test_direct_open_pr_preserves_body_without_closing_a_fake_issue(store,
     flow = ControlService(database=store.database).create_flow(
         "owner/repo", None, 42, task_content="Direct",
     )
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
+    attempt = store.flows.get_current_attempt(flow)
+    assert attempt is not None
     register_worker(store, "worker-a", repo=flow.repo, epoch="epoch")
     job = store.assignments.assign_job("worker-a", "token", "epoch")
     assert store.assignments.start_assignment(job.id, attempt.id, "worker-a", "token", "epoch")
-    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, flow.initial_branch)
     delivery.base_branch = "trunk"
     store.deliveries.update_delivery(delivery)
     body = "\n## Direct result\n\nPreserve trailing whitespace.  \n"
@@ -301,7 +300,7 @@ async def test_tool_ledger_keeps_business_arguments_and_rejects_call_id_reuse_by
     )
     assert call.arguments == invocation.arguments.arguments
     assert call.response == result.delivery_receipt
-    job = enqueue_job(store, flow.id, JobKind.REVISION)
+    job = enqueue_job(store, flow.id, JobKind.INITIAL)
     replacement = store.assignments.assign_job("worker-a", "token-b", "epoch")
     assert replacement is not None and replacement.id == job.id
     # A later execution cannot claim an old call_id, even with identical business arguments.

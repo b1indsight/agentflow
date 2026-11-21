@@ -21,9 +21,8 @@ NOW = datetime(2026, 9, 29, tzinfo=UTC)
 def expiring(store, *, started=False):
     store._db._clock = lambda: NOW
     flow = store.flows.create_flow("owner/recovery", 1, 1)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
+    attempt = store.flows.get_current_attempt(flow)
+    assert attempt is not None
     register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.assignments.assign_job("w", "token", "epoch").id == job.id
@@ -117,7 +116,7 @@ def test_sweep_failure_rolls_back_prior_job_updates(store, monkeypatch):
 
 
 def preparation_retry(error, *, failures=0, first_failed=None, last_error=None):
-    job = Job(id=1, flow_id=1, kind=JobKind.REVISION, state=JobState.RUNNING, prepare_failures=failures,
+    job = Job(id=1, flow_id=1, attempt_id=7, kind=JobKind.REVISION, state=JobState.RUNNING, prepare_failures=failures,
               prepare_first_failed_at=NOW - timedelta(seconds=first_failed) if first_failed is not None else None,
               prepare_last_error=last_error)
     return decide_preparation_retry(job, error, now=NOW, max_failures=3, window_seconds=600)

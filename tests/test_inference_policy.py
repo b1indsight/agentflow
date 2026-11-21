@@ -45,7 +45,7 @@ def call(**changes) -> InferenceJob:
 def job(*, state=JobState.RUNNING, attempt=1, worker="w1", flow_id=None, **changes) -> Job:
     inference = changes.pop("inference", None) or call()
     return Job(
-        id=7, flow_id=flow_id, kind=JobKind.INFERENCE, state=state, attempt=attempt,
+        id=7, flow_id=flow_id, attempt_id=inference.source_attempt_id, kind=JobKind.INFERENCE, state=state, attempt=attempt,
         assigned_worker_id=worker if state is JobState.RUNNING else None, inference=inference,
         created_at=NOW - timedelta(seconds=2), **changes,
     )

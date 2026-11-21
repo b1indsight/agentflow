@@ -259,7 +259,7 @@ def flow_show(flow_id: int) -> None:
             raise typer.Exit(1)
         typer.echo(
             f"flow {f.id}\n  repo={f.repo} issue={f'#{f.issue_number}' if f.issue_number is not None else '-'} state={f.state}"
-            f" round={f.current_round_no} outcome={f.archive_reason or '-'}"
+            f" attempt={f.current_attempt_id} outcome={f.archive_reason or '-'}"
             f" archived_at={f.archived_at or '-'}"
         )
         if f.task_content is not None:
@@ -295,7 +295,7 @@ def flow_show(flow_id: int) -> None:
         for att in store.flows.list_attempts(f.id):
             cur = " (current)" if att.id == f.current_attempt_id else ""
             typer.echo(
-                f"  attempt {att.id}{cur}: session={att.codex_session_id}"
+                f"  attempt {att.id}{cur}: started={att.created_at} session={att.codex_session_id}"
                 f" cycles={att.revision_cycles}"
             )
         jobs = store.jobs.list_jobs(f.id)
@@ -307,7 +307,7 @@ def flow_show(flow_id: int) -> None:
             recovery = _remaining(job.recovery_deadline)
             result = "received" if job.result_received_at is not None else "-"
             typer.echo(
-                f"  job {job.id}: kind={job.kind} state={job.state} "
+                f"  job {job.id}: kind={job.kind} state={job.state} attempt={job.attempt_id} "
                 f"worker={job.assigned_worker_id or '-'} recovery={recovery} result={result}"
             )
             if job.last_error:
@@ -362,9 +362,9 @@ def flow_finish(
     flow_id: int,
     reason: ArchiveReason,
     summary: str = typer.Option(""),
-    expected_round: int = typer.Option(..., min=1),
+    expected_attempt: int = typer.Option(..., min=1),
 ) -> None:
-    """结束指定轮次；无 PR 的成功调查必须提供结论。"""
+    """结束指定 Attempt；无 PR 的成功调查必须提供结论。"""
     from app.controler.workflow.service import ControlService
 
     with _store() as store:
@@ -373,17 +373,17 @@ def flow_finish(
             raise typer.Exit(1)
         try:
             ControlService(database=store.database).finish(
-                flow, reason=reason, summary=summary, expected_round_no=expected_round
+                flow, reason=reason, summary=summary, expected_attempt_id=expected_attempt
             )
         except ValueError as error:
-            typer.echo(str(error), err=True)
+            typer.echo(f"{error}; refresh with flow show {flow_id}", err=True)
             raise typer.Exit(1) from None
-    typer.echo(f"finalization requested for flow {flow_id} round {expected_round}")
+    typer.echo(f"finalization requested for flow {flow_id} attempt {expected_attempt}")
 
 
 @flow_app.command("resume")
-def flow_resume(flow_id: int, expected_round: int = typer.Option(..., min=1)) -> None:
-    """显式恢复已归档 Flow，开启新轮次和新交付。"""
+def flow_resume(flow_id: int, expected_attempt: int = typer.Option(..., min=1)) -> None:
+    """在已归档的 Flow 上重新开工。"""
     from app.controler.workflow.service import ControlService
 
     with _store() as store:
@@ -392,12 +392,12 @@ def flow_resume(flow_id: int, expected_round: int = typer.Option(..., min=1)) ->
             raise typer.Exit(1)
         try:
             resumed = ControlService(database=store.database).resume(
-                flow, expected_round_no=expected_round
+                flow, expected_attempt_id=expected_attempt
             )
         except ValueError as error:
-            typer.echo(str(error), err=True)
+            typer.echo(f"{error}; refresh with flow show {flow_id}", err=True)
             raise typer.Exit(1) from None
-    typer.echo(f"flow {flow_id} round {resumed.current_round_no}: queued")
+    typer.echo(f"flow {flow_id} attempt {resumed.current_attempt_id}: queued")
 
 
 @flow_app.command("verify")
@@ -423,15 +423,15 @@ def flow_verify(flow_id: Annotated[int | None, typer.Argument()] = None) -> None
 
 
 @flow_app.command("history")
-def flow_history(flow_id: int, round_no: int = typer.Option(..., "--round", min=1)) -> None:
-    """按轮次显示 Flow 事实账本、状态快照与通知的原始活动记录。"""
+def flow_history(flow_id: int, attempt_id: int = typer.Option(..., "--attempt", min=1)) -> None:
+    """按 Attempt 显示 Flow 事实账本、状态快照与通知的原始活动记录。"""
     from app.persistence.activity import ActivityStore
 
     with _store() as store:
-        flow = store.flows.get_flow(flow_id)
-        if flow is None or round_no > flow.current_round_no:
+        attempt = store.flows.get_attempt(attempt_id)
+        if attempt is None or attempt.flow_id != flow_id:
             raise typer.Exit(1)
-        for item in ActivityStore(store.database).history(flow_id, round_no):
+        for item in ActivityStore(store.database).history(flow_id, attempt_id):
             typer.echo(item.model_dump_json())
 
 

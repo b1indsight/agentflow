@@ -1,9 +1,12 @@
 """Console contracts exercised through real PostgreSQL publication boundaries."""
 
+import json
 from datetime import timedelta
 
 import pytest
+from typer.testing import CliRunner
 
+from app import cli
 from app.contracts.console import ConsoleFailure
 from app.contracts.protocol import ExecutionStopped
 from app.controler.workflow.service import ControlService
@@ -82,12 +85,12 @@ def test_current_projection_and_history_rollback_with_facts(store):
     console = ConsoleStore(store._db)
     activity = ActivityStore(store.database)
     before = console.detail(flow.id)
-    history_before = activity.history(flow.id, 1)
+    history_before = activity.history(flow.id, flow.required_attempt_id)
     with pytest.raises(RuntimeError), store.transaction() as tx:
         apply_flow_event(tx, flow, FlowEvent.RESULT_FAILED)
         raise RuntimeError("rollback")
     assert console.detail(flow.id) == before
-    assert activity.history(flow.id, 1) == history_before
+    assert activity.history(flow.id, flow.required_attempt_id) == history_before
     flow = apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
     assert console.detail(flow.id).phase == "blocked"
     with store._db.connection() as connection:
@@ -147,7 +150,7 @@ def test_delivery_facts_cannot_override_flow_phase_or_issue_ownership(
             }[state])
     console = ConsoleStore(store._db)
     before = console.detail(flow.id)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "flow/7")
     delivery.pr_number, delivery.state = 17, delivery_state
     store.deliveries.update_delivery(delivery)
     detail = console.detail(flow.id)
@@ -178,12 +181,12 @@ def test_delivery_facts_cannot_override_flow_phase_or_issue_ownership(
 def test_real_archive_filters_and_rebuild_preserve_business_outcome(store, reason):
     flow = store.flows.create_flow("octo/repo", 7, 1)
     service = ControlService(database=store.database)
-    service.finish(flow, reason=reason, summary="本轮调查结论", expected_round_no=1)
+    service.finish(flow, reason=reason, summary="本次执行调查结论", expected_attempt_id=flow.required_attempt_id)
     console = ConsoleStore(store.database)
     detail = console.detail(flow.id)
     assert detail.phase == "archived" and detail.lifecycle is FlowState.ARCHIVED
-    assert detail.current_round_no == 1
-    assert detail.archive_reason is reason and detail.archive_summary == "本轮调查结论"
+    assert detail.current_attempt_id == flow.current_attempt_id
+    assert detail.archive_reason is reason and detail.archive_summary == "本次执行调查结论"
     assert detail.archived_at == store.flows.get_flow(flow.id).archived_at is not None
     assert ("成功" if reason is ArchiveReason.SUCCEEDED else "废弃") in detail.reason
     assert [item.id for item in console.flows(q="is:archived").items] == [flow.id]
@@ -199,7 +202,7 @@ def test_real_archive_filters_and_rebuild_preserve_business_outcome(store, reaso
     for query in ("is:done", "status:done"):
         with pytest.raises(ConsoleFailure, match="search_invalid"):
             console.flows(q=query)
-    service.finish(flow, reason=reason, summary="重复请求不能覆盖结论", expected_round_no=1)
+    service.finish(flow, reason=reason, summary="重复请求不能覆盖结论", expected_attempt_id=flow.required_attempt_id)
     assert console.detail(flow.id) == detail
     console.rebuild(flow.id)
     store.init_db()
@@ -207,10 +210,30 @@ def test_real_archive_filters_and_rebuild_preserve_business_outcome(store, reaso
     assert console.detail(flow.id) == detail
 
 
-def test_resume_starts_new_round_without_overwriting_archive_or_conversation(store):
+def test_cli_attempt_history_checks_ownership_not_numeric_range(store, monkeypatch):
+    # A smaller global ID can belong to another Flow, not a previous execution of this one.
+    foreign = store.flows.create_flow("octo/repo", 8, 1)
+    flow = store.flows.create_flow("octo/repo", 7, 1)
+    monkeypatch.setenv("FLOWTOOL_DATABASE_URL", store.database.database_url)
+    monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker":"test-token"}')
+    runner = CliRunner()
+    old = str(flow.required_attempt_id)
+    assert runner.invoke(cli.app, ["flow", "finish", str(flow.id), "succeeded", "--summary", "调查完成",
+                                   "--expected-attempt", old]).exit_code == 0
+    assert runner.invoke(cli.app, ["flow", "resume", str(flow.id), "--expected-attempt", old]).exit_code == 0
+    history = ["flow", "history", str(flow.id), "--attempt"]
+    result = runner.invoke(cli.app, [*history, old])
+    assert result.exit_code == 0
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    assert all(row["attempt_id"] == flow.required_attempt_id for row in rows)
+    assert any(row["kind"] == "archive" for row in rows)
+    assert runner.invoke(cli.app, [*history, str(foreign.required_attempt_id)]).exit_code == 1
+
+
+def test_resume_starts_new_attempt_without_overwriting_archive_or_conversation(store):
     flow = store.flows.create_flow("octo/repo", 7, 1)
     original_job = enqueue_job(store, flow.id, JobKind.INITIAL)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/7")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "flow/7")
     delivery.pr_number, delivery.state = 17, DeliveryState.CLOSED
     store.deliveries.update_delivery(delivery)
     control = ControlService(database=store.database)
@@ -228,27 +251,27 @@ def test_resume_starts_new_round_without_overwriting_archive_or_conversation(sto
     )
     history.append(flow.id, observation)
     archived = console.detail(flow.id)
-    first_archive = history.archived(flow.id, 1)
+    first_archive = history.archived(flow.id, flow.required_attempt_id)
     assert first_archive is not None
     assert first_archive.metadata["pr_number"] == 17
     assert first_archive.metadata["archive_reason"] == "abandoned"
     assert first_archive.occurred_at == archived.archived_at is not None
     retired_job = store.jobs.get_job(original_job.id)
-    assert retired_job.state is JobState.FAILED and retired_job.round_no == 1
+    assert retired_job.state is JobState.FAILED and retired_job.attempt_id == flow.current_attempt_id
     console.rebuild(flow.id)
     store.init_db()
     assert console.detail(flow.id) == archived
-    resumed = control.resume(store.flows.get_flow(flow.id), expected_round_no=1)
+    resumed = control.resume(store.flows.get_flow(flow.id), expected_attempt_id=flow.required_attempt_id)
     detail = console.detail(flow.id)
-    assert resumed.id == flow.id and detail.current_round_no == 2
+    assert resumed.id == flow.id and detail.current_attempt_id == resumed.current_attempt_id != flow.current_attempt_id
     assert detail.phase == "queued" and detail.lifecycle is FlowState.QUEUED
     assert detail.archived_at is detail.archive_reason is detail.archive_summary is None
-    assert detail.pr_number is None and detail.branch == "flow/7-round-2"
-    assert history.archived(flow.id, 1) == first_archive
+    assert detail.pr_number is None and detail.branch == f"flow/7-attempt-{resumed.current_attempt_id}"
+    assert history.archived(flow.id, flow.required_attempt_id) == first_archive
     jobs = store.jobs.list_jobs(flow.id)
-    assert [(job.round_no, job.state) for job in jobs] == [
-        (1, JobState.FAILED),
-        (2, JobState.QUEUED),
+    assert [(job.attempt_id, job.state) for job in jobs] == [
+        (flow.current_attempt_id, JobState.FAILED),
+        (resumed.current_attempt_id, JobState.QUEUED),
     ]
     assert store.jobs.get_job(original_job.id) == retired_job
     assert {job.id for job in console.jobs(flow.id).items} == {job.id for job in jobs}
@@ -256,8 +279,8 @@ def test_resume_starts_new_round_without_overwriting_archive_or_conversation(sto
     assert history.page(flow.id).items[0].body == observation.body
     control.cancel(resumed)
     assert console.detail(flow.id).phase == "archived"
-    assert history.archived(flow.id, 1) == first_archive
-    second_archive = history.archived(flow.id, 2)
+    assert history.archived(flow.id, flow.required_attempt_id) == first_archive
+    second_archive = history.archived(flow.id, resumed.current_attempt_id)
     assert second_archive is not None and second_archive.metadata["archive_reason"] == "abandoned"
 
 
@@ -273,7 +296,7 @@ def test_finalizing_waits_for_stop_receipt_before_archiving_and_releasing_issue(
     detail = console.detail(flow.id)
     assert detail.lifecycle is FlowState.FINALIZING and detail.phase == "running"
     assert detail.archived_at is None
-    assert ActivityStore(store.database).archived(flow.id, 1) is None
+    assert ActivityStore(store.database).archived(flow.id, flow.required_attempt_id) is None
     assert store.flows.get_active_flow(flow.repo, flow.issue_number).id == flow.id
     assert [item.id for item in console.flows(q="is:active").items] == [flow.id]
     control.cancel(store.flows.get_flow(flow.id))

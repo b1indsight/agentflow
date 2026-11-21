@@ -12,6 +12,7 @@ from pluggy import PluginManager
 from app.contracts.protocol import RevisionTaskResult, Succeeded
 from app.contracts.receipts import decode_result_inbox
 from app.controler.workflow.archive import verify_archive, verify_merge_notice
+from app.controler.workflow.initial import reopened_branch
 from app.controler.workflow.lifecycle import close_delivery, record_merge
 from app.controler.workflow.plans import coding_failure_status
 from app.domain.flow_policy import FlowEvent
@@ -123,13 +124,13 @@ class ControlService:
             flow,
             reason=ArchiveReason.ABANDONED,
             summary="Explicitly abandoned",
-            expected_round_no=flow.current_round_no,
+            expected_attempt_id=flow.required_attempt_id,
         )
 
     def finish(
-        self, flow: Flow, *, reason: ArchiveReason, summary: str, expected_round_no: int
+        self, flow: Flow, *, reason: ArchiveReason, summary: str, expected_attempt_id: int
     ) -> None:
-        """End the selected round; a conclusion without a PR can succeed independently."""
+        """End the selected Attempt; a conclusion without a PR can succeed independently."""
         with self.flows.locked(flow.id) as context:
             tx = context.database
             deliveries_tx = self.deliveries.using(tx)
@@ -137,8 +138,8 @@ class ControlService:
             jobs_tx = self.jobs.using(tx)
             stops_tx = self.stops.using(tx)
             fresh = context.flow
-            if fresh is None or fresh.current_round_no != expected_round_no:
-                raise ValueError("Flow round is no longer current")
+            if fresh is None or fresh.current_attempt_id != expected_attempt_id:
+                raise ValueError("Flow Attempt is no longer current")
             if fresh.state is FlowState.ARCHIVED:
                 return
             delivery = deliveries_tx.get_delivery(fresh.id)
@@ -172,35 +173,34 @@ class ControlService:
             self._jobs_available()
         logger.info("flow {} finalization requested", flow.id)
 
-    def resume(self, flow: Flow, *, expected_round_no: int) -> Flow:
-        """Explicitly open one new round; stale/repeated requests cannot revive old work."""
+    def resume(self, flow: Flow, *, expected_attempt_id: int) -> Flow:
+        """Explicitly start a new Attempt; stale/repeated requests cannot revive old work."""
         with self.database.transaction() as tx:
             tx.serialize_issue(flow.repo, flow.issue_number)
             fresh = tx.lock_workflow(flow.id)
             flows = self.flows.using(tx)
-            if fresh is None or fresh.current_round_no != expected_round_no:
-                raise ValueError("Flow round is no longer current")
+            if fresh is None or fresh.current_attempt_id != expected_attempt_id:
+                raise ValueError("Flow Attempt is no longer current")
             active = flows.get_active_flow(fresh.repo, fresh.issue_number)
             if active is not None and active.id != fresh.id:
                 raise ValueError(f"flow {active.id} is already active for this Issue")
             if (
                 fresh.state is not FlowState.ARCHIVED
-                or ActivityStore(tx).archived(fresh.id, expected_round_no) is None
+                or ActivityStore(tx).archived(fresh.id, expected_attempt_id) is None
             ):
-                raise ValueError("only an archived round can be resumed")
+                raise ValueError("only an archived Attempt can be resumed")
             binding = self.flows.using(tx).get_flow_execution(fresh.id)
             if binding is not None and binding.released_at is None:
                 raise ValueError("archived execution is not released")
-            ConsoleSyncStore(tx).reset_round(fresh.id)
-            ReconcileStore(tx).reset_round(fresh.id)
-            resumed = flows.transition(fresh, FlowEvent.ROUND_RESUMED)
-            delivery = self.deliveries.using(tx).get_delivery(resumed.id)
+            ConsoleSyncStore(tx).reset_attempt(fresh.id)
+            ReconcileStore(tx).reset_attempt(fresh.id)
+            resumed = flows.transition(fresh, FlowEvent.ATTEMPT_STARTED)
+            deliveries = self.deliveries.using(tx)
+            delivery = deliveries.get_attempt_delivery(expected_attempt_id)
             if delivery is not None:
-                stem = delivery.branch
-                if fresh.current_round_no > 1:
-                    stem = stem.removesuffix(f"-round-{fresh.current_round_no}")
-                self.deliveries.using(tx).reset_round(
-                    resumed.id, f"{stem}-round-{resumed.current_round_no}",
+                stem = delivery.branch.removesuffix(f"-attempt-{expected_attempt_id}")
+                deliveries.get_or_create_delivery(
+                    resumed.required_attempt_id, reopened_branch(stem, resumed.required_attempt_id),
                 )
             flows.select_owner(resumed)
             self.jobs.using(tx).enqueue_job(
@@ -220,7 +220,7 @@ class ControlService:
             remote = payload.get("pull_request") or {}
             if (
                 fresh is None
-                or fresh.current_round_no != flow.current_round_no
+                or fresh.current_attempt_id != flow.current_attempt_id
                 or delivery is None
                 or delivery.pr_number != remote.get("number")
                 or fresh.installation_id is None
@@ -254,7 +254,6 @@ class ControlService:
             jobs_tx = self.jobs.using(tx)
             webhook_store_tx = self.webhook_store.using(tx)
             fresh = context.flow
-            delivery = deliveries_tx.get_delivery(flow.id)
             if (
                 fresh is None
                 or payload.get("action") != "closed"
@@ -264,14 +263,18 @@ class ControlService:
             ):
                 logger.warning("merge identity does not match flow {}", flow.id)
                 return
-            historical = ActivityStore(tx).archived_pr(fresh.repo, merge.number)
-            if historical is not None and historical[0] == fresh.id:
+            delivery = deliveries_tx.delivery_by_pr(fresh.repo, merge.number)
+            if delivery is None:
+                # An upgraded archive may preserve the PR fact but have no recoverable delivery row.
+                historical = ActivityStore(tx).archived_pr(fresh.repo, merge.number)
+                if historical is None or historical[0] != fresh.id:
+                    return
                 if webhook_store_tx.record_event(delivery_id, "pull_request", fresh.id, payload):
                     flows_tx.observe_archived_merge(
                         fresh.id, historical[1], merge, origin="webhook"
                     )
                 return
-            if delivery is None or delivery.pr_number != merge.number:
+            if delivery.flow_id != fresh.id:
                 return
             if not webhook_store_tx.record_event(delivery_id, "pull_request", fresh.id, payload):
                 return
@@ -297,7 +300,7 @@ class ControlService:
         self._jobs_available()
 
     def append_agent_task(self, flow_id: int, instruction: str, request_id: str) -> None:
-        """Accept messages independently of whether this round can dispatch work now."""
+        """Accept messages independently of whether this Attempt can dispatch work now."""
         with self.flows.locked(flow_id) as context:
             tx, fresh = context.database, context.flow
             if fresh is None:
@@ -329,10 +332,11 @@ class ControlService:
         jobs, reviews = self.jobs.using(tx), self.reviews.using(tx)
         delivery = self.deliveries.using(tx).get_delivery(flow.id)
         execution = self.flows.using(tx).get_flow_execution(flow.id)
-        if (flow.current_attempt_id is None or flow.installation_id is None or not delivery
+        if (flow.installation_id is None or not delivery
                 or delivery.state is not DeliveryState.OPEN or not execution or execution.released_at
                 or self.stops.using(tx).has_pending(flow.id) or jobs.reopen_blocked(flow.id)
-                or any(job.state in {JobState.QUEUED, JobState.RUNNING} for job in jobs.list_jobs(flow.id))):
+                or any(job.attempt_id == flow.current_attempt_id and job.state in {JobState.QUEUED, JobState.RUNNING}
+                       for job in jobs.list_jobs(flow.id))):
             return False
         failed = jobs.latest_failed_job(flow.id) if flow.state is FlowState.BLOCKED else None
         if flow.state is FlowState.BLOCKED and (not failed or failed.kind is not JobKind.REVISION
@@ -396,7 +400,7 @@ class ControlService:
                 raise RetryRejected("flow_not_found", f"flow {flow.id} disappeared")
             if fresh.state is FlowState.ARCHIVED:
                 notices = [result_store_tx.get_plan(job.id) for job in jobs_tx.list_jobs(fresh.id)
-                           if job.round_no == fresh.current_round_no
+                           if job.attempt_id == fresh.current_attempt_id
                            and job.result_applied_at is None and job.assigned_worker_id is None
                            and job.kind is JobKind.ARCHIVE]
                 plan = next((item for item in notices
@@ -456,7 +460,8 @@ class ControlService:
                     )
                 if fresh.state in WORKING_STATES or fresh.state is FlowState.FINALIZING:
                     return False
-                if any(job.state is JobState.RUNNING for job in jobs_tx.list_jobs(fresh.id)):
+                if any(job.attempt_id == fresh.current_attempt_id and job.state is JobState.RUNNING
+                       for job in jobs_tx.list_jobs(fresh.id)):
                     raise RetryRejected(
                         "retry_execution_unsettled", "original executor is not settled"
                     )

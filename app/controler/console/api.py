@@ -233,7 +233,7 @@ async def archive(request: Request, flow_id: FlowId, body: ArchiveRequest) -> Fl
                 flow,
                 reason=body.reason,
                 summary=body.summary,
-                expected_round_no=body.expected_round_no,
+                expected_attempt_id=body.expected_attempt_id,
             )
         except ValueError as error:
             raise ConsoleFailure("archive_rejected") from error
@@ -258,7 +258,7 @@ async def resume(request: Request, flow_id: FlowId, body: ResumeRequest) -> Flow
             raise ConsoleFailure("flow_not_found", 404)
         try:
             ControlService(database=runtime.database, jobs_available=notify_jobs).resume(
-                flow, expected_round_no=body.expected_round_no
+                flow, expected_attempt_id=body.expected_attempt_id
             )
         except ValueError as error:
             raise ConsoleFailure("resume_rejected") from error

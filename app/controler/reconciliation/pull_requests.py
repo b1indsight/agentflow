@@ -116,6 +116,7 @@ class Reconciler:
                 if (
                     flow is None
                     or delivery is None
+                    or delivery.attempt_id != check.attempt_id
                     or delivery.pr_number is None
                     or delivery.state is DeliveryState.MERGED
                 ):
@@ -157,18 +158,19 @@ class Reconciler:
                 reconcile_store_tx = self.reconcile_store.using(tx)
                 stops_tx = self.stops.using(tx)
                 fresh = context.flow
-                current = deliveries_tx.get_delivery(flow.id)
-                if (
-                    fresh is None
-                    or current is None
-                    or not context.matches(round_no=flow.current_round_no,
-                                           attempt_id=flow.current_attempt_id)
-                    or fresh.state != flow.state
+                if fresh is None:
+                    return
+                historical = fresh.current_attempt_id != check.attempt_id
+                if historical and not remote.merged:
+                    return
+                current = deliveries_tx.get_attempt_delivery(check.attempt_id)
+                if (current is None
                     or fresh.installation_id != flow.installation_id
-                    or current.version != delivery.version
                     or current.pr_number != delivery.pr_number
+                    or (not historical and (fresh.state != flow.state or current.version != delivery.version))
                 ):
-                    reconcile_store_tx.defer(flow.id)
+                    if not historical:
+                        reconcile_store_tx.defer(flow.id)
                     return
                 if remote.merged:
                     if remote.state != "closed":
@@ -188,6 +190,8 @@ class Reconciler:
                         assignments=self.assignments.using(tx),
                         origin="reconciliation",
                     )
+                    if historical:
+                        return  # Merge evidence belongs to A; B owns the active scheduling row.
                 elif fresh.state is not FlowState.ARCHIVED:
                     if remote.state == "closed":
                         close_delivery(
@@ -198,7 +202,7 @@ class Reconciler:
                             stops=stops_tx,
                             assignments=self.assignments.using(tx),
                         )
-                        diagnostic = "PR closed; round finalization requested"
+                        diagnostic = "PR closed; attempt finalization requested"
                     elif fresh.archive_reason is not None:
                         diagnostic = "PR reopened; explicit resume after archive is required"
                     elif current.state is DeliveryState.CLOSED:
@@ -229,12 +233,15 @@ class Reconciler:
             delay = retry_delay(check.failures + 1, self.database.now(), error)
             if error.kind not in {GitHubErrorKind.TRANSIENT, GitHubErrorKind.RATE_LIMITED}:
                 delay = max(1800.0, delay)
-            self.reconcile_store.failed(check.flow_id, delay, error.kind.value)
+            diagnostic = error.kind.value
         except Exception as error:  # noqa: BLE001 -- do not persist raw SDK/SQL/credential messages
-            self.reconcile_store.failed(
-                check.flow_id, retry_delay(check.failures + 1, self.database.now()),
-                f"observation failed: {type(error).__name__}",
-            )
+            delay = retry_delay(check.failures + 1, self.database.now())
+            diagnostic = f"observation failed: {type(error).__name__}"
+        else:
+            return
+        with self.flows.locked(check.flow_id) as context:
+            if context.flow is not None and context.flow.current_attempt_id == check.attempt_id:
+                self.reconcile_store.using(context.database).failed(check.flow_id, delay, diagnostic)
 
     def stop(self) -> None:
         self._stop.set()

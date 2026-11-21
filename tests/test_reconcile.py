@@ -119,7 +119,7 @@ async def test_persisted_merged_backlog_archives_without_new_webhook_or_binding(
             flow = context.flow
             flow.archive_reason = ArchiveReason.SUCCEEDED
             store.flows.using(context.database).transition(flow, FlowEvent.RESULT_FAILED)
-        delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+        delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, flow.initial_branch)
         delivery.pr_number, delivery.state = flow.issue_number, DeliveryState.MERGED
         delivery.merged_at = datetime(2026, 9, 8, 8, tzinfo=UTC)
         delivery.merge_commit_sha = "a" * 40 if flow.id == missing.id else None
@@ -135,10 +135,10 @@ async def test_persisted_merged_backlog_archives_without_new_webhook_or_binding(
     for flow in (released, missing):
         current = store.flows.get_flow(flow.id)
         assert (current.state, current.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
-        assert len([event for event in ActivityStore(store.database).history(flow.id, 1)
+        assert len([event for event in ActivityStore(store.database).history(flow.id, flow.required_attempt_id)
                     if event.kind == "archive"]) == 1
         notices = [job for job in store.jobs.list_jobs(flow.id)
-                   if job.result_payload and job.result_payload.get("version") == 2]
+                   if job.result_payload and job.result_payload.get("source") == "control"]
         assert len(notices) == 1 and notices[0].assigned_worker_id is None
     assert store.flows.get_flow_execution(released.id) == binding
     assert store.flows.get_flow_execution(missing.id) is None
@@ -230,13 +230,17 @@ async def test_late_query_cannot_overwrite_a_changed_workflow(store, merge_flow,
             delivery.version += 1
             store.deliveries.update_delivery(delivery)
         elif change == "attempt":
-            fresh = store.flows.get_flow(merge_flow.id)
-            fresh.current_attempt_id = store.flows.create_attempt(fresh.id).id
-            store.flows.set_current_attempt(fresh)
+            service = ControlService(database=store.database)
+            service.cancel(merge_flow)
+            service.resume(merge_flow, expected_attempt_id=merge_flow.required_attempt_id)
 
     github.before_return = mutate
     await subject(store, github)._sweep()
     jobs = store.jobs.list_jobs(merge_flow.id)
+    if change == "attempt":
+        assert [j.kind for j in jobs] == [JobKind.INITIAL]
+        assert store.deliveries.get_delivery(merge_flow.id).pr_number is None
+        return
     assert [j.kind for j in jobs] == ([JobKind.ARCHIVE] if change == "merged" else [])
     expected = DeliveryState.MERGED if change == "merged" else DeliveryState.OPEN
     assert store.deliveries.get_delivery(merge_flow.id).state is expected
@@ -247,16 +251,17 @@ async def test_historical_archived_flow_corrects_prearchive_merge_without_reacti
 ):
     ControlService(database=store.database).cancel(merge_flow)
     activity = ActivityStore(store.database)
-    archived = activity.archived(merge_flow.id, 1)
+    archived = activity.archived(merge_flow.id, merge_flow.required_attempt_id)
     assert archived is not None and archived.metadata["archive_reason"] == "abandoned"
     delivery = store.deliveries.get_delivery(merge_flow.id)
     remote = status(merge_flow, merged_at=archived.occurred_at - timedelta(seconds=5))
     await subject(store, GitHub(remote))._sweep()
     assert store.flows.get_flow(merge_flow.id).state is FlowState.ARCHIVED
     assert store.flows.get_flow(merge_flow.id).archive_reason is ArchiveReason.SUCCEEDED
-    assert store.deliveries.get_delivery(merge_flow.id) == delivery
-    assert activity.archived(merge_flow.id, 1) == archived
-    history = activity.history(merge_flow.id, 1)
+    corrected = store.deliveries.get_attempt_delivery(delivery.attempt_id)
+    assert corrected.state is DeliveryState.MERGED and corrected.pr_number == delivery.pr_number
+    assert activity.archived(merge_flow.id, merge_flow.required_attempt_id) == archived
+    history = activity.history(merge_flow.id, merge_flow.required_attempt_id)
     merges = [item for item in history if item.kind == "merge"]
     assert len(merges) == 1
     assert merges[0].metadata["merge_commit_sha"] == "a" * 40
@@ -267,7 +272,7 @@ async def test_historical_archived_flow_corrects_prearchive_merge_without_reacti
 async def test_polling_is_bounded_and_one_error_does_not_starve_later_flows(store, merge_flow, polling_resources):
     for i in range(3):
         flow = store.flows.create_flow(f"owner/repo-{i}", 100 + i, 43 + i)
-        delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+        delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, f"flow/{flow.id}")
         delivery.pr_number, delivery.state = 20 + i, DeliveryState.OPEN
         store.deliveries.update_delivery(delivery)
     github = GitHub(GitHubError(GitHubErrorKind.TRANSIENT, "status"))
@@ -309,7 +314,7 @@ async def test_status_adapter_reads_by_number_and_keeps_merge_sha(tmp_path, monk
 async def test_reconcile_concurrency_and_shutdown_are_bounded(store, merge_flow, polling_resources, monkeypatch):
     for i in range(2):
         flow = store.flows.create_flow("owner/repo", 100 + i, 42)
-        delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+        delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, f"flow/{flow.id}")
         delivery.pr_number, delivery.state = 20 + i, DeliveryState.OPEN
         store.deliveries.update_delivery(delivery)
     started, release = asyncio.Event(), asyncio.Event()

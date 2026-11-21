@@ -1,8 +1,28 @@
 # 当前版本部署与重启
 
-当前格式为 wire protocol v27、worker journal v5、执行 ResultInbox v1、Control 合并通知 inbox v2、workspace manifest v3。serve 和 worker 拒绝不匹配的在线协议；在维护窗口停止新分配，等待在途准备、推理、执行和已发远端操作收敛，再备份并协调更新两端。设置页的模型目录查询不需要更换原生 CLI 或转换 journal。
+当前格式为 wire protocol v28、worker journal v5、执行 ResultInbox v1、Control 合并通知 inbox v3、workspace manifest v3。serve 和 worker 拒绝不匹配的在线协议；在维护窗口停止新分配，等待在途准备、推理、执行和已发远端操作收敛，再备份并协调更新两端。设置页的模型目录查询不需要更换原生 CLI 或转换 journal。
 首次部署选择新数据库/schema 与新 worker root，serve/worker 固定到同一 commit/镜像 digest；
 schema 初始化只创建当前结构。合并归档调整不增加 DDL；前置的[多工作区并发版本](../plan/worker-workspace-concurrency.md)仍须独立核验 workers 结构及物理位置迁移。
+
+## 从轮号切换至 Attempt（数据库 schema v2）
+
+仅支持已有六态账本、合表和多工作区的未标记旧库。空库直接初始化；当前库的 `flowtool_schema_version.version` 为 `2`。启动控制端不会自动迁移旧库。先在旧版本核对账本，按[冷备与恢复](backup-restore.md)恢复一个独立 PostgreSQL 副本。以下从**新版本源码根目录**运行，示例 service 名指向副本，不能让副本连接生产 Worker 或 GitHub：
+
+```sh
+uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_copy' > preflight.json
+uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_copy' --apply > applied.json
+uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_copy' --apply
+```
+
+第一条以只读快照检查每轮原始开工事实、首个 initial、候选 Attempt、归档/更正、当前交付和回执摘要。查看 `rounds[].disposition`（`preserve`/`create`/`conflict`）及**所有** `conflicts`；只要有冲突，整个库都不能切换。多个候选、开工时间不明、归属矛盾或摘要不符时，根据报告的 Flow、轮号、Job 或活动版本调查原始证据；不能按最大 ID、快照采集时间或 PR 更新时间猜测。首轮快照可用其原始 Flow 创建时间，后续轮次必须有可信的重开边界。
+
+`--apply` 在锁内重做检查，同一事务内回填并重放账本、安装约束和新投影，最后提交；二次执行应为 `status=current, applied=false`。复核每个 Flow 的当前指针、每个 Job 的归属、各 Attempt 的开工时间及归档结论，核对备份中的活动版本、key、父引用、结果与 digest。只迁移仍在 Flow 上的交付，不从旧 PR/归档事实伪造已被覆盖的分支或 head。未归属的共享活动和独立推理保持无归属。
+
+历史兼容表 `flow_attempt_legacy_map(flow_id,round_no,attempt_id)` 只服务迁移前的身份，不为新开工分配轮号。旧 v2 合并通知先按原格式和 digest 核验；仅可用该映射及原 Job 读取，不能替换 JSON 或重签摘要。已冻结计划、旧回执与 effects 保留原值。
+
+首次重新采集外部活动时，使用来源传入的原始时间与文本核对旧摘要，不从数据库时区或转义后的显示正文重造签名。Worker 历史应带有可验证的 `metadata.attempt_id`；其与原轮号冲突时预检拒绝。复核同一条未改的 GitHub/Worker 记录没有增加版本、共享 Issue 内容仍无归属；真实编辑和 thread/check 状态往返仍应保留。
+
+正式切换需另行授权。停止**全部**入口、控制端、Worker、定时写入方；记录/排空在途任务、外部操作和未确认停止，保存并验证数据库及原 Worker root/HOME 备份可恢复，再在停写库执行上述核对。API、Console、CLI、Worker 同步发布。恢复写入前若失败，事务会回滚；若已提交可恢复停写备份并运行旧版本。恢复写入后**不可**直接降级或覆盖库：先停写、保存增量与外部事实，再前向修复或对账恢复。
 
 ## 升级前核对数据库与工作区
 

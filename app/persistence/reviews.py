@@ -104,23 +104,14 @@ class ReviewStore(Repository):
             return True
 
     def issue_comment_cutoff(self, flow: Flow) -> datetime | None:
-        """Read under the workflow lock; original Issue history stays out of resumed rounds.
-
-        The first INITIAL is inserted atomically with resume and survives retries. GitHub
-        has second precision, so the entire ambiguous start second is excluded. Clocks
-        must be synchronized; this boundary does not compensate for remote clock skew.
-        """
-        if flow.current_round_no == 1:
-            return None
+        """Only a reopened Attempt excludes Issue history, including its ambiguous start second."""
         with self._db.connection() as connection:
             row = connection.execute(
-                "SELECT MIN(created_at) AS started_at FROM jobs"
-                " WHERE flow_id=%s AND round_no=%s AND kind='initial'",
-                (flow.id, flow.current_round_no),
+                "SELECT a.created_at FROM attempts a WHERE a.id=%s AND EXISTS"
+                " (SELECT 1 FROM attempts other WHERE other.flow_id=a.flow_id AND other.id<>a.id)",
+                (flow.current_attempt_id,),
             ).fetchone()
-        if row is None or row["started_at"] is None:
-            raise ValueError("current round has no durable start boundary")
-        return row["started_at"].replace(microsecond=0) + timedelta(seconds=1)
+        return row["created_at"].replace(microsecond=0) + timedelta(seconds=1) if row else None
 
     def _append_version(
         self,
@@ -234,8 +225,7 @@ class ReviewStore(Repository):
             return (
                 connection.execute(
                     f"SELECT 1 FROM review_versions v WHERE {_CURRENT}"
-                    " AND v.attempt_id IN (SELECT a.id FROM attempts a JOIN flows f ON f.id=a.flow_id"
-                    " WHERE f.id=%s AND a.round_no=f.current_round_no)"
+                    " AND v.attempt_id=(SELECT current_attempt_id FROM flows WHERE id=%s)"
                     " AND v.consumed_at IS NULL AND v.relayed_at IS NULL"
                     " AND NOT (v.content->>'deleted')::boolean"
                     " AND v.content->>'signal' = 'request_changes'"
@@ -259,8 +249,7 @@ class ReviewStore(Repository):
             rows = connection.execute(
                 "WITH pending AS (SELECT v.item_id AS id,v.version,v.content,v.relayed_at"
                 f" FROM review_versions v WHERE {_CURRENT}"
-                " AND v.attempt_id IN (SELECT a.id FROM attempts a JOIN flows f ON f.id=a.flow_id"
-                " WHERE f.id=%s AND a.round_no=f.current_round_no)"
+                " AND v.attempt_id=(SELECT current_attempt_id FROM flows WHERE id=%s)"
                 " AND v.consumed_at IS NULL AND NOT (v.content->>'deleted')::boolean"
                 " AND NOT COALESCE((v.content->>'inert')::boolean,FALSE)), first_text AS ("
                 " SELECT id FROM pending WHERE content->>'body' !~ '^[[:space:]]*$'"
@@ -321,8 +310,8 @@ class ReviewStore(Repository):
             if decision is None:
                 return None
             connection.execute(
-                "UPDATE review_batches SET state='completed' WHERE flow_id=%s AND state='waiting'",
-                (flow_id,),
+                "UPDATE review_batches SET state='completed' WHERE attempt_id=%s AND state='waiting'",
+                (attempt_id,),
             )
             batch = self.create_batch(flow, trigger=decision.trigger, feedback=feedback,
                                       open_points=decision.open_points)
@@ -337,7 +326,7 @@ class ReviewStore(Repository):
         with self._db.connection() as connection:
             return (
                 connection.execute(
-                    "SELECT 1 FROM review_batches WHERE flow_id=%s"
+                    "SELECT 1 FROM review_batches WHERE attempt_id=(SELECT current_attempt_id FROM flows WHERE id=%s)"
                     " AND state IN ('ready','processing')",
                     (flow_id,),
                 ).fetchone()
@@ -348,7 +337,7 @@ class ReviewStore(Repository):
         """Carry unresolved questions into the next review or owner-requested revision."""
         with self._db.connection() as connection:
             rows = connection.execute(
-                "SELECT open_points FROM review_batches WHERE flow_id=%s AND state='waiting'"
+                "SELECT open_points FROM review_batches WHERE attempt_id=(SELECT current_attempt_id FROM flows WHERE id=%s) AND state='waiting'"
                 " ORDER BY id", (flow_id,),
             ).fetchall()
         return list(dict.fromkeys(point for row in rows for point in row["open_points"]))
@@ -382,9 +371,10 @@ class ReviewStore(Repository):
                 connection.cursor(row_factory=class_row(ReviewBatch))
                 .execute(
                     "SELECT b.* FROM review_batches b JOIN flows f ON f.id=b.flow_id"
+                    " JOIN attempts a ON a.id=b.attempt_id"
                     " WHERE b.state='ready' AND b.job_id IS NULL AND f.state IN ('queued','running','review')"
                     " AND f.archive_reason IS NULL"
-                    " AND b.attempt_id=f.current_attempt_id AND f.delivery_state='open' ORDER BY b.id"
+                    " AND b.attempt_id=f.current_attempt_id AND a.delivery_state='open' ORDER BY b.id"
                 )
                 .fetchall()
             )

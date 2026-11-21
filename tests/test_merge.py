@@ -58,10 +58,7 @@ async def route_merge(store: Store, flow: Flow, event: str = "merge-1", payload=
 @pytest.fixture
 def merge_flow(store: Store) -> Flow:
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, f"flow/{flow.id}")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
     delivery.head_sha = "b" * 40  # A squash/rebase merge need not equal the PR head.
     store.deliveries.update_delivery(delivery)
@@ -90,7 +87,7 @@ async def test_merge_transaction_failure_can_replay_same_delivery(store, monkeyp
     assert store.deliveries.get_delivery(flow.id).state is DeliveryState.OPEN
     assert store.flows.get_flow(flow.id).state is FlowState.RUNNING
     assert not store.stops.has_pending(flow.id)
-    assert ActivityStore(store.database).archived(flow.id, 1) is None
+    assert ActivityStore(store.database).archived(flow.id, flow.required_attempt_id) is None
     assert not any(job.kind is JobKind.ARCHIVE for job in store.jobs.list_jobs(flow.id))
     assert store.jobs.get_job(queued.id).state is JobState.QUEUED
     await route_merge(store, flow)
@@ -141,11 +138,12 @@ async def test_invalid_merge_facts_can_be_corrected_before_redelivery(store, mer
 
 
 @pytest.mark.parametrize("binding", ["missing", "released", "running", "offline"])
-async def test_merge_archives_business_without_waiting_for_worker(store, merge_flow, binding):
+async def test_merge_archives_business_without_waiting_for_worker(store, request, binding):
     # A released binding was the production blocker; an active executor must instead
     # retain its exact resources without delaying the business conclusion.
-    flow = merge_flow
-    if binding != "missing":
+    if binding == "missing":
+        flow = request.getfixturevalue("merge_flow")
+    else:
         job, _ = accepted_coding(store, receive=False)
         flow = store.flows.get_flow(job.flow_id)
         if binding == "released":
@@ -159,7 +157,7 @@ async def test_merge_archives_business_without_waiting_for_worker(store, merge_f
     await route_merge(store, flow, "merge-duplicate")
     archived = store.flows.get_flow(flow.id)
     assert (archived.state, archived.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
-    history = ActivityStore(store.database).history(flow.id, 1)
+    history = ActivityStore(store.database).history(flow.id, flow.required_attempt_id)
     assert len([item for item in history if item.kind == "archive"]) == 1
     notices = [item for item in store.jobs.list_jobs(flow.id) if item.kind is JobKind.ARCHIVE]
     assert len(notices) == 1

@@ -54,7 +54,7 @@ PostgreSQL 仍是唯一运行时数据库。全部表按职责分为五类，每
 
 | 行 | `source` / `kind` | 写入方 | 性质 |
 |---|---|---|---|
-| Flow 证据 | `flow` / `archive`、`merge`、`archive_correction` | 业务事务调用 `ActivityStore.append_flow` | 不可变事实；触发器拒绝更新与删除，每轮每种至多一条 |
+| Flow 证据 | `flow` / `archive`、`merge`、`archive_correction` | 业务事务调用 `ActivityStore.append_flow` | 不可变事实；触发器拒绝更新与删除，每个 Attempt 每种至多一条 |
 | 状态快照 | `flow` / `state`、`baseline` | 数据库触发器 `console_refresh` | 展示数据；正文是 `console_facts` 视图的前后快照 |
 | 推理通知 | `flow` / `inference_exhausted` | `InferenceNoticeStore.append` | 按批次保留最新版本的通知 |
 | 采集内容 | `issue.*`、`pr.*`、`worker` 等 | 控制台同步器与 webhook 观察 | GitHub 与 Worker 内容的展示版本，按 digest 去重 |
@@ -79,8 +79,8 @@ PR #171 已把 Flow 状态写入收拢到 `FlowStore.transition(flow, FlowEvent)
 的行。种类有四组：
 
 - **起点**：`created`（新 Flow）、`snapshot`（账本之前的存量 Flow）；
-- **状态转换**：`FlowEvent` 的值，如 `job_enqueued`、`result_failed`、`round_resumed`；
-  其中 `ROUND_ARCHIVED` 由已有的 `archive` 证据行记录，不另写一行；
+- **状态转换**：`FlowEvent` 的值，如 `job_enqueued`、`result_failed`、`attempt_started`；
+  其中 `ATTEMPT_ARCHIVED` 由已有的 `archive` 证据行记录，不另写一行；
 - **归档后证据**：`merge`、`archive_correction`；
 - **标题**：`titled`。
 
@@ -93,8 +93,8 @@ PR #171 已把 Flow 状态写入收拢到 `FlowStore.transition(flow, FlowEvent)
 | 列 | 事实行中的含义 |
 |---|---|
 | `flow_id`、`version` | 所属 Flow 与该 Flow 内的严格递增序号；重放顺序即 `version` 顺序 |
-| `round_no` | 事实所属轮次；`round_resumed` 属于它开启的新轮次 |
-| `key` | 事实身份：`archive`、`merge`、`archive_correction`、`round_resumed` 为 `flow:<id>:round:<n>:<kind>`；起点为 `flow:<id>:<kind>`；其余为 `flow:<id>:fact:<version>` |
+| `attempt_id` | 事实所属 Attempt；`attempt_started` 属于它开启的新 Attempt |
+| `key` | 事实身份：`archive`、`merge`、`archive_correction`、`attempt_started` 为 `flow:<id>:attempt:<id>:<kind>`；起点为 `flow:<id>:<kind>`；其余为 `flow:<id>:fact:<version>` |
 | `kind` | 事实种类，决定如何改变 `flows` 行 |
 | `occurred_at` | 业务时间：即该次写入的 `updated_at`；`archive` 的该值同时是 `archived_at` |
 | `observed_at` | 数据库写入时间 |
@@ -112,8 +112,8 @@ PR #171 已把 Flow 状态写入收拢到 `FlowStore.transition(flow, FlowEvent)
 - **不可变**：触发器 `console_preserve_evidence` 拒绝更新和删除任一账本行；判断方式与
   `ActivityStore` 一致，按“除展示快照和通知外的 `source='flow'` 行”识别。
 - **唯一性**：`created`、`snapshot` 每个 Flow 合计至多一条（`ux_console_flow_origin`）；
-  `round_resumed` 每轮至多一条（`ux_console_flow_round_start`）；`archive`、`merge`、
-  `archive_correction` 沿用每轮至多一条的既有索引。其余转换一轮内可以出现多次。
+  `attempt_started` 每个 Attempt 至多一条（`ux_console_flow_attempt_start`）；`archive`、`merge`、
+  `archive_correction` 沿用每个 Attempt 至多一条的既有索引。其余转换一轮内可以出现多次。
 - **不需要幂等键**：事实只在持有 Flow 行锁、条件更新成功后写入，与状态同事务提交。
 
 ## 5. 状态表 `flows`
@@ -123,15 +123,14 @@ PR #171 已把 Flow 状态写入收拢到 `FlowStore.transition(flow, FlowEvent)
 | `id` | 身份 | 插入时由数据库分配 |
 | `repo`、`issue_number`、`task_content`、`installation_id`、`created_at` | 账本 | `created`；存量 Flow 为 `snapshot` |
 | `state`、`archive_reason`、`archive_summary` | 账本 | 状态转换事实；`archive_correction` 更正结论 |
-| `current_round_no` | 账本 | `round_resumed` |
-| `archived_at` | 账本 | `archive` 设置，`round_resumed` 清空 |
+| `current_attempt_id` | 账本 | `created` 选中首次 Attempt；`attempt_started` 切换到新 Attempt；归档不清空 |
+| `archived_at` | 账本 | `archive` 设置，`attempt_started` 清空 |
 | `title` | 账本 | `titled` |
 | `updated_at` | 账本 | 最后一条状态转换事实的 `occurred_at`；`titled`、`merge`、`archive_correction` 不推进 |
-| `current_attempt_id` | 指针 | `FlowStore.set_current_attempt`，不由账本重建；`round_resumed` 时清空 |
 | `title_job_id` | 指针 | `FlowStore.set_title_job`，不由账本重建 |
-| `is_issue_owner`、`delivery_*` | Issue 展示归属与当前交付 | 创建/恢复时选择展示归属；交付写入保留独立版本与时间戳。这些列不由 Flow 生命周期账本重放。 |
+| `is_issue_owner` | Issue 展示归属 | 创建/恢复时选择，不由生命周期账本重放。 |
 
-唯一行为变化：设置 `current_attempt_id` 不再推进 `updated_at`，也不再回写未变化的 `installation_id`。
+`delivery_*` 保存在各自的 Attempt 上。历史 PR 的合并证据可以更正原 Attempt 的结论，不会更新新 Attempt 的交付或 Flow 状态。
 控制台卡片的更新时间取多表最大值，已包含 `attempts.updated_at`。
 
 表上的约束全部保留。投影更新违反约束时整个事务回滚，事实也不会留下。
@@ -140,13 +139,13 @@ PR #171 已把 Flow 状态写入收拢到 `FlowStore.transition(flow, FlowEvent)
 
 | `kind` | `metadata` | 对 `flows` 的改变 | 写入方 |
 |---|---|---|---|
-| `created` | `repo`、`issue_number`、`installation_id`、`task_digest` | 插入行：`queued`、第 1 轮 | `FlowStore.create_flow` |
+| `created` | `repo`、`issue_number`、`installation_id`、`task_digest` | 插入行：`queued`、首个 Attempt | `FlowStore.create_flow` |
 | `snapshot` | 除 `task_content` 外账本拥有的全部列，以及 `task_digest` | 无；存量 Flow 的重放起点 | schema 初始化的最后一步 |
-| `FlowEvent` 的值（`round_archived` 除外） | `state`、`archive_reason`、`archive_summary`（写入后的值） | 按 `decide_flow_state`；`updated_at=occurred_at` | `FlowStore.transition` |
-| `round_resumed` | `state` | 轮次加一，清空归档字段 | `FlowStore.transition` |
-| `archive` | 现有字段：`repo`、`pr_number`、`archive_reason`、`archive_summary`、`merged_at`、`merge_commit_sha` | `archived`，`archived_at=occurred_at` | `FlowStore.archive_round` |
+| `FlowEvent` 的值（`attempt_archived` 除外） | `state`、`archive_reason`、`archive_summary`（写入后的值） | 按 `decide_flow_state`；`updated_at=occurred_at` | `FlowStore.transition` |
+| `attempt_started` | `state` | 选中新 Attempt，清空归档字段 | `FlowStore.transition` |
+| `archive` | 现有字段：`repo`、`pr_number`、`archive_reason`、`archive_summary`、`merged_at`、`merge_commit_sha` | `archived`，`archived_at=occurred_at` | `FlowStore.archive_attempt` |
 | `merge` | 现有字段 | 无 | `FlowStore.observe_archived_merge` |
-| `archive_correction` | 现有字段 | 该轮仍是当前轮且已归档时 `archive_reason=succeeded` | `FlowStore.observe_archived_merge` |
+| `archive_correction` | 现有字段 | 该 Attempt 仍为当前执行且已归档时 `archive_reason=succeeded` | `FlowStore.observe_archived_merge` |
 | `titled` | `title`、`job_id` | `title` | `FlowStore.set_title` |
 
 各事件的合法来源状态见 [`flow_policy.py`](../../app/domain/flow_policy.py)；状态转换事实只保存结果列，
@@ -166,7 +165,7 @@ FlowStore.transition(flow, event)          调用方已持有 lock_workflow
 - **先状态、后事实**：条件更新成功后才追加事实，所以调用方捕获“状态已变化”错误时不会留下孤立事实。
   两者同事务提交，顺序不影响一致性。
 - **创建**：`flows` 的 ID 由数据库分配，同一事务内先插入行，再追加 `created`。
-- **归档**：`archive_round` 先追加 `archive`，再以同一时间调用 `transition(ROUND_ARCHIVED)`。
+- **归档**：`archive_attempt` 先追加 `archive`，再以同一时间调用 `transition(ATTEMPT_ARCHIVED)`。
 - **标题与指针**：`set_title` 在条件更新成功后追加 `titled`；`set_current_attempt`、`set_title_job`
   只改指针列，不产生事实。
 - **锁顺序不变**：Worker 行 → `flows` 行 → `console_flows` 行。
@@ -179,7 +178,7 @@ FlowStore.transition(flow, event)          调用方已持有 lock_workflow
 `decide_flow_state` 重新判断：前一状态下该事件必须生效，且结果等于记录的 `state`，否则报错。
 
 `FlowStore.verify(flow_id)` 在 `FOR SHARE` 锁住 `flows` 行后读取事实并重放，返回以下列中不一致的项：
-`repo`、`issue_number`、`task_content`、`installation_id`、`title`、`state`、`current_round_no`、
+`repo`、`issue_number`、`task_content`、`installation_id`、`title`、`state`、`current_attempt_id`、
 `archive_reason`、`archive_summary`、`archived_at`、`created_at`、`updated_at`。
 
 `flowtool flow verify [FLOW_ID]` 不带参数时检查全部 Flow，只报告差异并以非零状态退出，不自动修复。
@@ -202,7 +201,7 @@ schema 初始化的最后一步（`FLOW_LEDGER_BACKFILL`）为每个既没有 `c
 
 - 调度、对账、API 和 CLI 继续读 `flows`；
 - 控制台卡片继续读 `console_flows.facts`，时间线继续排除 `source='flow'` 的行；
-- `flowtool flow history` 按轮次列出 `source='flow'` 的行，包括事实、状态快照和通知。
+- `flowtool flow history` 按 Attempt列出 `source='flow'` 的行，包括事实、状态快照和通知。
 
 ## 11. 不变量
 

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.controler.reconciliation.feedback import FeedbackReconciler, ThreadScanState
+from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState
 from app.github import Batch, GitHubError, GitHubErrorKind, PullRequest, ReviewComment, ReviewThread
 from app.persistence.reconciliation import ReconcileStore
@@ -132,6 +133,37 @@ async def test_retired_or_changed_delivery_rejects_inflight_page(store, review_f
     github.before_return = changed
     await sweep(store, github)
     assert store.reviews.pending(flow.id) == []
+
+
+@pytest.mark.parametrize("remote_failure", [False, True])
+async def test_late_page_neither_advances_nor_delays_new_attempt(store, review_flow, remote_failure, thread_page_resources):
+    # The new attempt can already have its own row under the same (flow, source) key when A returns.
+    service = ControlService(database=store.database)
+    flow, clock = review_flow
+    github = GitHub(clock)
+    if remote_failure:
+        github.pages[None] = GitHubError(GitHubErrorKind.TRANSIENT, "fetch_threads")
+    else:
+        github.pages[None] = page(clock, cursor="obsolete-continuation")
+
+    def start_new_attempt():
+        service.cancel(flow)
+        resumed = service.resume(flow, expected_attempt_id=flow.required_attempt_id)
+        delivery = store.deliveries.get_attempt_delivery(resumed.required_attempt_id)
+        assert delivery is not None
+        delivery.pr_number, delivery.state = 29, DeliveryState.OPEN
+        store.deliveries.update_delivery(delivery)
+        store.reconcile.feedback_seed(64)
+
+    github.before_return = start_new_attempt
+    store.reconcile.feedback_seed(64)
+    check = store.reconcile.feedback_get(flow.id, "threads")
+    reconciler = FeedbackReconciler(github, settle_seconds=75, database=store.database)
+    await reconciler._check(check)
+    fresh = store.reconcile.feedback_get(flow.id, "threads")
+    assert fresh.attempt_id != check.attempt_id
+    assert fresh.cursor is None and fresh.last_success_at is None and fresh.failures == 0
+    assert fresh.next_at == clock.now and not store.reviews.pending(flow.id)
 
 
 async def test_later_pages_cannot_erase_an_incomplete_scan(store, review_flow, thread_page_resources):

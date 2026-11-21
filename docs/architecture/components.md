@@ -60,19 +60,19 @@ Codex 等长任务占用 GitHub 的 Webhook 请求。
 
 Flow 持久化 `queued/running/review/blocked/finalizing/archived`，所有看板与 Projects 只映射
 这个字段；finalizing 合并到进行中。失败为 blocked，继续占用 Issue；归档结果只有 succeeded/abandoned。
-`POST /api/flows/{id}/archive` 接受 `{reason,summary,expected_round_no}`，复用单 owner Access
+`POST /api/flows/{id}/archive` 接受 `{reason,summary,expected_attempt_id}`，复用单 owner Access
 验签及同源检查，通过现有 ControlService 请求收尾。无 PR 的成功调查必须提供非空结论。
 停止、结果、已派发副作用与工作区处置均确认后，事务内释放绑定、追加归档 activity 并写 archived。
 弃置/调查保留工作区；合并交付继续要求原 worker 的 ArchiveResult。
-`POST /api/flows/{id}/resume` 接受 `{expected_round_no}`，检查 Issue 冲突并开启同一 Flow 的新轮次。
-旧 PR、Job、Attempt 与反馈不授权新轮工作；旧分页游标重新开始，activity 历史保留。
-轮次由 Flow/Job/Attempt/activity 的字段表达，无独立 Round 实体。归档 activity 保留原始结果、时间和 PR 身份。
+`POST /api/flows/{id}/resume` 接受 `{expected_attempt_id}`，检查 Issue 冲突并开启同一 Flow 的新 Attempt。
+旧 PR、Job 与反馈不授权新 Attempt 工作；分页游标重新开始，activity 历史保留。
+Job 和执行活动通过 `attempt_id` 关联到当时开工的 Attempt。归档 activity 保留原始结果、时间和 PR 身份。
 已核验 webhook 与补偿查询自动更正归档前已合并的 abandoned 结果；严格要求 merged_at 加一秒早于 archived_at。
-合并证据、更正 activity 与当前归档结果同事务提交，重复消息幂等，不改变原归档时间、当前轮次、owner 或执行。
+合并证据、更正 activity 与当前归档结果同事务提交，重复消息幂等，不改变原归档时间、当前 Attempt、owner 或执行。
 状态 activity 继续由数据库触发器产生；归档、合并证据和更正由内部事务写入，不能覆盖或作为缓存清理。
 这一做法已推广到全部 Flow 状态变化：每次 `FlowStore.transition` 同事务追加一条以事件命名的事实，
 触发器快照只作展示，见 [Flow 事实账本与状态表](flow-ledger.md)。
-Worker 内容按 Attempt 归属，PR 内容按交付身份归属，Issue 共享/未知归属内容的 round_no 为 NULL。
+Worker 内容按 Attempt 归属，PR 内容按交付身份归属，Issue 共享/未知归属内容的 attempt_id 为 NULL。
 详见[控制台说明](../../app/controler/web/README.md)；原展示归档记录保留在历史规划中。
 
 ## 4.2 Event Router
@@ -93,7 +93,7 @@ Worker 内容按 Attempt 归属，PR 内容按交付身份归属，Issue 共享/
 M2 F1 自动化覆盖反馈工作流锁、同 Flow 批次串行、重启恢复和精确版本消费。
 WebhookConsumer 已持久化失败退避和重放；PR 对账处理已追踪 PR 的 merge/close/reopen，
 反馈对账补充 Issue/PR/review/线程漏投。未合并 close 请求废弃收尾，reopen 不恢复执行，
-恢复只通过显式新轮次操作；漏失的新 Flow trigger 不由对账补建。真实 GitHub payload 兼容性
+恢复只通过显式新 Attempt操作；漏失的新 Flow trigger 不由对账补建。真实 GitHub payload 兼容性
 仍需服务验收。依据：[消费者](../../app/controler/events/webhooks.py)、
 [PR 对账](../../app/controler/reconciliation/pull_requests.py)、
 [反馈对账](../../app/controler/reconciliation/feedback.py)。
@@ -104,7 +104,7 @@ WebhookConsumer 已持久化失败退避和重放；PR 对账处理已追踪 PR 
 
 | 记录 | 状态 | 约束 |
 | --- | --- | --- |
-| Flow | queued、running、review、blocked、finalizing、archived | 非 archived 继续占用 Issue；新轮次仅显式恢复 |
+| Flow | queued、running、review、blocked、finalizing、archived | 非 archived 继续占用 Issue；新 Attempt仅显式恢复 |
 | Delivery | none、opening、open、closed、merged | 原生 PR 事实不替代 Flow；关闭/合并经业务处理器更新 Flow |
 | Review | ready、processing、completed、waiting、cancelled | blocked 暂停；finalizing/archived 退休活动批次 |
 
@@ -146,7 +146,7 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 - 冻结上下文尚不包含 CI 状态；
 - cancel 持久化停止意图，worker 取消执行并回收持有的进程组；未知旧执行和未决 effects
   保留绑定，无强制释放。cancel 不撤销已发生的 push/PR/评论；确认停止后保留工作区并归档；
-- 未合并 close 结束本轮，reopen 只记事实；显式 resume 创建新轮次。修订拒绝远端 head 漂移，
+- 未合并 close 结束本次执行，reopen 只记事实；显式 resume 创建新 Attempt。修订拒绝远端 head 漂移，
   人工 push 的自动接纳、rebase/冲突处理尚未实现。
 
 因此状态转换代码存在不等于目标闭环可用。
@@ -332,8 +332,8 @@ M2 已加入类型化 GraphQL 线程/comment 分页、共享预算、原线程�
 | execution policy | 否 | worker config / `CodexAgent` | full access 需专用 account/container/VM；目录只表达所有权 |
 | VCS | 否 | `agent_guidance/verify_pushed_outcome` | Agent 自探测；worker 在 tool 前用固定 remote 和净化、限时命令验证 ancestry/clean/remote SHA |
 
-INITIAL 复用原 title inference job，一次返回 `title` 与英文 kebab-case `branch_slug`；control 直接校验两个字段，沿用原有标题写入和 inference 结果保存，从该结果读取 slug 后才创建 delivery、派发编码。实际分支由 `flows.delivery_branch` 保存，不做分支占名写入。等待使用独立异步 preparation，不持有事务或阻塞 inference 槽；逻辑调用仍限 30 秒。命名失败不会生成 ID 分支。
-重试沿用已有 delivery 分支或原 inference 结果，后续 round 从 delivery 的实际分支去掉当前轮次后缀，再加 `-round-N`。已有 delivery/PR 不重命名；首次派发前只读检查远端同名 ref，拒绝接管，不自动添加数字后缀。该检查不构成远端原子占名，也不在数据库中预留名称。
+INITIAL 复用当前 Attempt 的命名推理结果，校验 `title` 和英文 kebab-case `branch_slug` 后才创建 delivery、派发编码。实际分支由 `attempts.delivery_branch` 保存。等待使用独立异步 preparation，不持有事务或阻塞 inference 槽；逻辑调用仍限 30 秒。
+重试沿用已有分支。重新开工时，新交付分支用 `-attempt-<id>` 区分，旧分支与 PR 保留。首次派发前只读检查远端同名 ref，拒绝接管；该检查不构成远端原子占名。
 worker 内的 Code Agent 在 Flow repo 完成 branch/bookmark、commit 和
 push；worker 在转发 `flow.open_pr` 前核验，control 再读取 GitHub ref 核对 SHA 后才创建/复用 PR，最后以
 terminal result 三方核对。当前缺口包括：

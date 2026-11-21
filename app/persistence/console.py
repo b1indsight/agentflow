@@ -111,7 +111,8 @@ def _summary(row: Row) -> FlowSummary:
         pr_number=pr,
         pr_url=f"https://github.com/{repo}/pull/{pr}" if pr else None,
         lifecycle=facts["lifecycle"],
-        current_round_no=facts["current_round_no"],
+        current_attempt_id=facts["current_attempt_id"],
+        attempt_started_at=facts["attempt_started_at"],
         archive_reason=facts["archive_reason"],
         archive_summary=facts["archive_summary"],
         phase=facts["phase"],
@@ -132,10 +133,10 @@ def _explanation(row: Row) -> tuple[str, str]:
     facts = row["facts"]
     if facts["lifecycle"] == "archived":
         outcome = "成功" if facts["archive_reason"] == "succeeded" else "废弃"
-        return f"本轮已归档 · {outcome}", "需要继续时显式恢复推进，开启新轮次；不会重开历史 PR"
+        return f"本次执行已归档 · {outcome}", "如需继续，请重新开工；不会重开历史 PR"
     if facts["lifecycle"] == "finalizing":
-        return "正在结束本轮，尚未归档", "等待停止确认、结果对账和工作区处置完成；不会继续编码"
-    label = {"initial": "首轮编码", "revision": "修订", "archive": "归档"}.get(
+        return "正在结束本次执行，尚未归档", "等待停止确认、结果对账和工作区处置完成；不会继续编码"
+    label = {"initial": "初始编码", "revision": "修订", "archive": "归档"}.get(
         row["diagnostic_kind"], "任务"
     )
     job = f"任务 #{row['diagnostic_job_id']}（{label}）"
@@ -266,7 +267,7 @@ class ConsoleStore(Repository):
                 " EXISTS (SELECT 1 FROM result_effects e WHERE e.job_id=j.id"
                 " AND j.result_applied_at IS NULL AND e.state='failed') AS effect_failed"
                 " FROM jobs j WHERE j.flow_id=c.flow_id AND j.kind<>'inference'"
-                " AND j.round_no=(c.facts->>'current_round_no')::int"
+                " AND j.attempt_id=(c.facts->>'current_attempt_id')::bigint"
                 " ORDER BY effect_failed DESC,result_pending DESC,(j.state='running') DESC,"
                 " (j.state='queued') DESC,j.id DESC LIMIT 1"
                 ") diagnostic ON TRUE WHERE c.flow_id=%s",
@@ -348,7 +349,7 @@ class ConsoleStore(Repository):
                 else PageCursor(scope=scope, after=high["n"], ceiling=high["n"])
             )
             rows = connection.execute(
-                "SELECT id,flow_id,attempt,kind,state,assigned_worker_id AS worker_id,"
+                "SELECT id,flow_id,attempt_id,attempt,kind,state,assigned_worker_id AS worker_id,"
                 "started_at,updated_at,created_at,CASE WHEN state IN ('succeeded','failed')"
                 " THEN updated_at ELSE NULL END AS finished_at,CASE WHEN last_error IS NOT NULL"
                 " OR prepare_last_error IS NOT NULL OR verify_last_error IS NOT NULL"

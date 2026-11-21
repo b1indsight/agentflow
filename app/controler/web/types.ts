@@ -35,7 +35,8 @@ export interface FlowSummary {
   branch: string | null;
   created_at: string;
   updated_at: string;
-  current_round_no: number;
+  current_attempt_id: number;
+  attempt_started_at: string;
   archive_reason: ArchiveReason | null;
   archive_summary: string | null;
   archived_at: string | null;
@@ -77,6 +78,7 @@ export interface RepositoryPage {
 export interface JobSummary {
   id: number;
   flow_id: number;
+  attempt_id: number;
   attempt: number;
   kind: string;
   state: string;
@@ -132,7 +134,7 @@ export interface ActivityItem {
   version: number;
   source: string;
   kind: string;
-  round_no: number | null;
+  attempt_id: number | null;
   occurred_at: string;
   updated_at: string;
   observed_at: string;
@@ -155,7 +157,7 @@ export interface ActivityIdentity extends Pick<
   | "version"
   | "source"
   | "kind"
-  | "round_no"
+  | "attempt_id"
   | "author"
   | "occurred_at"
   | "body_length"
@@ -206,7 +208,14 @@ export interface ActivityProvenanceRange {
 /** Full source metadata is retained only for the selected, bounded provenance page. */
 export type ActivityProvenanceItem = Pick<
   ActivityItem,
-  "key" | "version" | "source" | "author" | "occurred_at" | "url" | "metadata"
+  | "attempt_id"
+  | "key"
+  | "version"
+  | "source"
+  | "author"
+  | "occurred_at"
+  | "url"
+  | "metadata"
 >;
 
 export interface ActivityProvenancePage {

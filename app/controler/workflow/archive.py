@@ -86,7 +86,7 @@ def archive_task(
     if (
         flow.state not in {FlowState.FINALIZING, FlowState.BLOCKED}
         or flow.current_attempt_id is None
-        or job.round_no != flow.current_round_no
+        or job.attempt_id != flow.current_attempt_id
         or job.kind is not JobKind.ARCHIVE
         or job.state is not JobState.RUNNING
         or delivery is None
@@ -130,10 +130,12 @@ def verify_merge_notice(
     flow: Flow, job: Job, notice: MergeArchiveNotice, *, activity: ActivityStore,
 ) -> None:
     """Authorize only an unassigned Control notice backed by immutable archive facts."""
-    archived = activity.archived(flow.id, notice.round_no)
+    owner = (activity.legacy_attempt(flow.id, notice.round_no) if notice.round_no is not None
+             else notice.attempt_id)
+    archived = activity.archived(flow.id, job.attempt_id) if job.attempt_id is not None else None
     if (job.kind is not JobKind.ARCHIVE or notice.job_id != job.id
             or notice.flow_id != flow.id or notice.repo != flow.repo
-            or notice.round_no != job.round_no
+            or owner != job.attempt_id
             or job.started_at is not None or job.dispatch_authorized_at is not None
             or any(value is not None for value in (
                 job.assigned_worker_id, job.assignment_token, job.workspace, job.generation,
@@ -144,7 +146,7 @@ def verify_merge_notice(
             or archived.metadata.get("pr_number") != notice.pr_number
             or archived.metadata.get("merge_commit_sha") != notice.merge_commit_sha
             or archived.metadata.get("merged_at") != notice.merged_at.isoformat()):
-        raise ValueError("merge notice does not match its archived round")
+        raise ValueError("merge notice does not match its archived attempt")
 
 
 def archive_effects(
@@ -156,7 +158,7 @@ def archive_effects(
         raise ValueError("archive notification requires installation and persisted merge facts")
     issue_line = f"关联 Issue：{flow.repo}#{flow.issue_number}\n" if flow.issue_number is not None else ""
     body = (
-        f"✅ Flow {flow.id} 的 PR 已合并，本轮已归档\n\n"
+        f"✅ Flow {flow.id} 的 PR 已合并，本次执行已归档\n\n"
         f"{issue_line}"
         f"关联 PR：{flow.repo}#{delivery.pr_number}\n"
         f"合并 SHA：`{delivery.merge_commit_sha}`\n"
@@ -184,7 +186,7 @@ def archive_progress(
 ) -> str:
     """Derive operator-visible cleanup progress from existing jobs and frozen results."""
     archive = next((job for job in reversed(jobs)
-                    if job.kind is JobKind.ARCHIVE and job.round_no == flow.current_round_no), None)
+                    if job.kind is JobKind.ARCHIVE and job.attempt_id == flow.current_attempt_id), None)
     if flow.state is FlowState.ARCHIVED:
         binding = flows.get_flow_execution(flow.id)
         cleanup = ("execution binding released" if binding is None or binding.released_at is not None

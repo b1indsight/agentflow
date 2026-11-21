@@ -106,11 +106,8 @@ async def test_three_missing_sources_are_ingested_once_without_webhook_or_strong
 async def test_direct_feedback_skips_issue_seed_and_stale_issue_check_but_keeps_pr_sources(store, feedback_resources):
     # A stale or manually inserted Issue scan must also be inert, not just absent from new seeds.
     flow = store.flows.create_flow("owner/repo", None, 42, task_content="Direct")
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
     flow = apply_flow_event(store, flow, FlowEvent.DELIVERY_APPLIED)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, flow.initial_branch)
+    delivery = store.deliveries.get_or_create_delivery(flow.current_attempt_id, flow.initial_branch)
     delivery.pr_number, delivery.state = 17, DeliveryState.OPEN
     store.deliveries.update_delivery(delivery)
     clock = SimpleNamespace(now=store.now())
@@ -410,7 +407,7 @@ async def test_source_pool_is_bounded_and_cancellation_joins_reads(store, review
 
 
 @pytest.mark.parametrize("source", ["poll", "webhook"])
-async def test_resumed_round_rejects_old_issue_comments_even_if_first_seen_or_edited(
+async def test_resumed_attempt_rejects_old_issue_comments_even_if_first_seen_or_edited(
     store, review_flow, feedback_resources, source,
 ):
     # Cursor reset must not attach unseen historical Issue comments to the new Attempt.
@@ -424,16 +421,13 @@ async def test_resumed_round_rejects_old_issue_comments_even_if_first_seen_or_ed
     service.cancel(flow)
     clock.now += timedelta(seconds=10, microseconds=500_000)
     started = clock.now
-    resumed = service.resume(flow, expected_round_no=1)
-    # An INITIAL retry / late preparation must not move the round's feedback boundary.
+    resumed = service.resume(flow, expected_attempt_id=flow.current_attempt_id)
+    # Late delivery preparation must not move the attempt's feedback boundary.
     clock.now += timedelta(seconds=10)
     store.assignments.retire_queued_work(flow.id)
-    resumed.current_attempt_id = store.flows.create_attempt(flow.id).id
-    store.flows.set_current_attempt(resumed)
     resumed = apply_flow_event(store, resumed, FlowEvent.DELIVERY_APPLIED)
-    delivery = store.deliveries.get_delivery(flow.id)
-    if delivery is None:
-        delivery = store.deliveries.get_or_create_delivery(flow.id, f"flow/{flow.id}-round-2")
+    delivery = store.deliveries.get_attempt_delivery(resumed.required_attempt_id)
+    assert delivery is not None
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 18
     store.deliveries.update_delivery(delivery)
     created = [

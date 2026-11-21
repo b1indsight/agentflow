@@ -28,7 +28,8 @@ const flow: FlowSummary & Pick<FlowDetail, "task_content"> = {
   branch: "flow/85",
   created_at: now,
   updated_at: now,
-  current_round_no: 1,
+  current_attempt_id: 73,
+  attempt_started_at: now,
   archive_reason: null,
   archive_summary: null,
   archived_at: null,
@@ -49,10 +50,13 @@ const archivedFlow: FlowDetail = {
   phase: "archived",
   action: "archived",
   archive_reason: "succeeded",
-  archive_summary: "本轮实现与验证已完成。",
-  archived_at: now,
-  reason: "本轮已完成归档",
-  next_condition: "如需继续，请显式恢复推进",
+  archive_summary: "已完成实现并通过验证。",
+  attempt_started_at: "2026-10-17T13:00:00Z",
+  archived_at: "2026-10-17T14:30:00Z",
+  updated_at: "2026-10-17T14:30:00Z",
+  worker_historical: true,
+  reason: "本次执行已归档",
+  next_condition: "如需继续，请重新开工",
 };
 
 /** Preview real components against mutable DTOs, including post-write board refreshes. */
@@ -92,7 +96,7 @@ async function mockFlows(page: Page, current: () => FlowDetail[]) {
 const activity = {
   key: "comment-1",
   version: 2,
-  round_no: null,
+  attempt_id: null,
   source: "github",
   kind: "comment",
   occurred_at: now,
@@ -638,6 +642,7 @@ test("execution timeline keeps timestamps and metadata when loading older jobs",
     (state, i) => ({
       id: 4 - i,
       flow_id: flow.id,
+      attempt_id: 73,
       attempt: 1,
       kind: "initial",
       state,
@@ -728,6 +733,7 @@ test("unified inference jobs show dispatched attempts and queued zero", async ({
         items: ["queued", "running", "failed", "done"].map((state, i) => ({
           id: 10 - i,
           flow_id: 42,
+          attempt_id: 73,
           attempt: state === "queued" ? 0 : state === "failed" ? 3 : 1,
           kind: "inference",
           state,
@@ -866,6 +872,7 @@ test("inference notice read failures preserve jobs and loaded notices, with safe
                   id: 1,
                   flow_id: 42,
                   kind: "initial",
+                  attempt_id: 73,
                   attempt: 1,
                   state: "done",
                   created_at: now,
@@ -1069,6 +1076,7 @@ test("shared virtual lists preserve distant focus, omitted gaps and keyboard ord
         items: Array.from({ length: Math.min(50, 90 - start) }, (_, i) => ({
           id: 90 - start - i,
           flow_id: 111,
+          attempt_id: 73,
           attempt: start + i + 1,
           kind: "initial",
           state: "done",
@@ -1209,16 +1217,16 @@ for (const width of [1440, 390]) {
         archive_reason: "succeeded",
         archive_summary: "PR 已合并，等待收尾。",
         title: "PR 合并，正在安全收尾",
-        reason: "PR 已合并，清理尚未完成",
+        reason: "正在结束本次执行，尚未归档",
         next_condition: "等待原 Worker 收尾完成",
       },
-      { ...archivedFlow, id: 47, title: "本轮已成功归档" },
+      { ...archivedFlow, id: 47, title: "本次执行已成功归档" },
       {
         ...archivedFlow,
         id: 48,
         archive_reason: "abandoned",
-        title: "本轮已废弃归档",
-        archive_summary: "需求调整，结束本轮。",
+        title: "本次执行已废弃归档",
+        archive_summary: "需求调整，结束本次执行。",
       },
     ];
     await mockFlows(page, () => items);
@@ -1290,10 +1298,10 @@ for (const width of [1440, 390]) {
       page.getByRole("heading", { name: "正在收尾（finalizing）" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: /^(重试|恢复推进|结束本轮)$/ }),
+      page.getByRole("button", { name: /^(重试|重新开工|归档)$/ }),
     ).toHaveCount(0);
     await page.screenshot({
-      path: `../../../.amp/in/artifacts/flow-finalizing-${width}.png`,
+      path: `../../../.amp/in/artifacts/flow-execution-finalizing-${width}.png`,
     });
     await page.evaluate(() => {
       location.hash = "flow/47/overview";
@@ -1301,22 +1309,32 @@ for (const width of [1440, 390]) {
     await expect(page.locator(".detail-head .badge")).toHaveText(
       "已归档 · 成功",
     );
-    await expect(
-      page.getByRole("button", { name: "恢复推进", exact: true }),
-    ).toBeVisible();
+    const reopen = page.getByRole("button", { name: "重新开工", exact: true });
+    await reopen.click({ trial: true });
     await expect(
       page.getByRole("button", { name: "重试", exact: true }),
     ).toHaveCount(0);
     await expect(page.locator(".task-facts")).toContainText("归档时间");
     await page.screenshot({
-      path: `../../../.amp/in/artifacts/flow-archived-${width}.png`,
+      path: `../../../.amp/in/artifacts/flow-execution-archived-actions-${width}.png`,
     });
     const archivedAt = page.getByText("归档时间", { exact: true });
     await archivedAt.scrollIntoViewIfNeeded();
-    await expect(archivedAt).toBeVisible();
+    await expect(archivedAt.locator("+ dd")).toBeInViewport({ ratio: 1 });
+    // The fixed composer sits outside the overview scroller. Show the execution
+    // start, outcome and branch together, including on a narrow phone.
+    await page
+      .locator(".task-facts")
+      .evaluate((el) => el.scrollIntoView({ block: "start" }));
+    for (const field of ["开工时间", "归档结果", "本次执行结论", "分支"]) {
+      await expect(
+        page.getByText(field, { exact: true }).locator("+ dd"),
+      ).toBeInViewport({ ratio: 1 });
+    }
     await page.screenshot({
-      path: `../../../.amp/in/artifacts/flow-archived-facts-${width}.png`,
+      path: `../../../.amp/in/artifacts/flow-execution-archived-facts-${width}.png`,
     });
+    await reopen.click({ trial: true });
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
@@ -1437,7 +1455,7 @@ test("retry disables both commands until commit, then refreshes detail and board
     page.getByRole("button", { name: "正在提交重试…" }),
   ).toBeDisabled();
   await expect(
-    page.getByRole("button", { name: "结束本轮", exact: true }),
+    page.getByRole("button", { name: "归档", exact: true }),
   ).toBeDisabled();
   await expect(page.locator(".rail-group.phase-blocked .count")).toHaveText(
     "1",
@@ -1493,11 +1511,8 @@ for (const [code, message] of [
   });
 }
 
-for (const [width, reason, label] of [
-  [1440, "succeeded", "成功"],
-  [390, "abandoned", "废弃"],
-] as const) {
-  test(`round archive ${reason} waits for finalization then resumes a new round at ${width}px`, async ({
+for (const width of [1440, 390]) {
+  test(`one-click archive waits for finalization then resumes at ${width}px`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 900 });
@@ -1505,7 +1520,7 @@ for (const [width, reason, label] of [
       ...blockedFlow,
       pr_number: null,
       pr_url: null,
-      title: "结束本轮并保留全部历史",
+      title: "结束本次执行并保留全部历史",
     };
     await mockFlows(page, () => [current]);
     let requests = 0;
@@ -1520,17 +1535,17 @@ for (const [width, reason, label] of [
         "application/json",
       );
       expect(route.request().postDataJSON()).toEqual({
-        reason,
-        summary: "本轮结论",
-        expected_round_no: 1,
+        reason: "abandoned",
+        summary: "",
+        expected_attempt_id: 73,
       });
       await committed;
       current = {
         ...current,
         lifecycle: "finalizing",
         phase: "running",
-        archive_reason: reason,
-        archive_summary: "本轮结论",
+        archive_reason: "abandoned",
+        archive_summary: null,
         state_version: 3,
         reason: "已受理结束请求，正在停止和收尾",
         next_condition: "等待停止确认、结果对账及收尾完成",
@@ -1538,30 +1553,25 @@ for (const [width, reason, label] of [
       return route.fulfill({ json: current });
     });
     await page.goto("/?q=repo%3Aowner%2Fagentflow#flow/42/overview");
-    await page.getByRole("button", { name: "结束本轮", exact: true }).click();
     const archive = page.getByRole("button", {
-      name: "确认结束本轮",
+      name: "归档",
       exact: true,
     });
-    await expect(archive).toBeDisabled();
-    await page.getByLabel("本轮结论（必填）").fill("   ");
-    await expect(archive).toBeDisabled();
-    expect(requests).toBe(0);
-    await page.getByRole("radio", { name: label, exact: true }).check();
-    await page.getByLabel("本轮结论（必填）").fill("  本轮结论  ");
     await expect(archive).toBeEnabled();
+    await archive.evaluate((el) => el.scrollIntoView({ block: "center" }));
+    await archive.click({ trial: true });
+    await expect(archive).toBeInViewport({ ratio: 1 });
     await page.screenshot({
-      path: `../../../.amp/in/artifacts/flow-end-round-${width}.png`,
+      path: `../../../.amp/in/artifacts/flow-one-click-archive-${width}.png`,
       animations: "disabled",
     });
     await archive.click();
     await expect(
-      page.getByRole("button", { name: "正在提交结束请求…" }),
+      page.getByRole("button", { name: "正在请求归档…" }),
     ).toBeDisabled();
     await expect(
       page.getByRole("button", { name: "重试", exact: true }),
     ).toBeDisabled();
-    await expect(page.getByLabel("本轮结论（必填）")).toBeDisabled();
     await expect(page.locator(".detail-head .badge")).toHaveText("受阻");
     // Keep sidebar reloads pending so the command notice coexists with other live statuses.
     let finishRefresh = () => {};
@@ -1579,7 +1589,7 @@ for (const [width, reason, label] of [
       );
     await expect(
       page.locator(".execution-summary").getByRole("status"),
-    ).toContainText("结束本轮请求已受理");
+    ).toContainText("归档请求已受理");
     finishRefresh();
     await expect(page.locator(".detail-head .badge")).toHaveText("进行中");
     await expect(page.locator(".task-facts")).toContainText(
@@ -1587,7 +1597,7 @@ for (const [width, reason, label] of [
     );
     await expect(page.getByText("归档时间", { exact: true })).toHaveCount(0);
     await expect(
-      page.getByRole("button", { name: "恢复推进", exact: true }),
+      page.getByRole("button", { name: "重新开工", exact: true }),
     ).toHaveCount(0);
     await expect(page.locator(".rail-group.phase-archived .count")).toHaveText(
       "0",
@@ -1598,18 +1608,18 @@ for (const [width, reason, label] of [
       phase: "archived",
       archived_at: now,
       state_version: 4,
-      reason: "本轮已归档",
-      next_condition: "可显式恢复推进",
+      reason: "本次执行已归档",
+      next_condition: "可重新开工",
     };
     await page.getByRole("button", { name: "刷新当前视图" }).click();
     await expect(page.locator(".detail-head .badge")).toHaveText(
-      `已归档 · ${label}`,
+      "已归档 · 废弃",
     );
     await expect(page.locator(".task-facts")).toContainText("归档时间");
-    await expect(page.locator(".task-facts")).toContainText("本轮结论");
+    await expect(page.locator(".task-facts")).not.toContainText("本次执行结论");
     await page.reload();
     await expect(page.locator(".detail-head .badge")).toHaveText(
-      `已归档 · ${label}`,
+      "已归档 · 废弃",
     );
     await page.getByRole("tab", { name: "会话" }).click();
     await expect(page.getByText("真实活动正文", { exact: true })).toBeVisible();
@@ -1617,7 +1627,9 @@ for (const [width, reason, label] of [
     await expect(
       page.getByRole("button", { name: "重试", exact: true }),
     ).toHaveCount(0);
-    await expect(page.getByText(/同一 Flow 开启新轮次/)).toContainText("新 PR");
+    await expect(page.getByText(/同一 Flow 开始新的执行/)).toContainText(
+      "新 PR",
+    );
     let resumeRequests = 0;
     let resume = () => {};
     const resumed = new Promise<void>((resolve) => {
@@ -1629,34 +1641,60 @@ for (const [width, reason, label] of [
       expect(route.request().headers()["content-type"]).toBe(
         "application/json",
       );
-      expect(route.request().postDataJSON()).toEqual({ expected_round_no: 1 });
+      expect(route.request().postDataJSON()).toEqual({
+        expected_attempt_id: 73,
+      });
       await resumed;
       current = {
         ...current,
         lifecycle: "queued",
         phase: "queued",
-        current_round_no: 2,
+        current_attempt_id: 108,
+        action: "initial:queued",
+        next_condition: "等待可用 Worker 领取任务",
+        attempt_started_at: "2026-10-18T12:00:00Z",
+        updated_at: "2026-10-18T12:00:00Z",
+        revision_cycles: 0,
+        worker_id: null,
+        branch: null,
         archived_at: null,
         archive_reason: null,
         archive_summary: null,
         state_version: 5,
-        reason: "新轮次待处理",
+        reason: "已重新开工，等待处理",
       };
       return route.fulfill({ json: current });
     });
-    await page.getByRole("button", { name: "恢复推进", exact: true }).click();
+    await page.getByRole("button", { name: "重新开工", exact: true }).click();
     await expect(
-      page.getByRole("button", { name: "正在恢复推进…" }),
+      page.getByRole("button", { name: "正在重新开工…" }),
     ).toBeDisabled();
     await expect(page.locator(".detail-head .badge")).toHaveText(
-      `已归档 · ${label}`,
+      "已归档 · 废弃",
     );
     resume();
     await expect(
       page.locator(".execution-summary").getByRole("status"),
-    ).toContainText("恢复推进请求已受理");
+    ).toContainText("重新开工请求已受理");
     await expect(page.locator(".detail-head .badge")).toHaveText("待处理");
-    await expect(page.locator(".task-facts")).toContainText("第 2 轮");
+    await expect(page.locator(".task-facts")).not.toContainText("Attempt");
+    const startLabel = page.getByText("开工时间", { exact: true });
+    await page
+      .locator(".task-facts")
+      .evaluate((el) => el.scrollIntoView({ block: "start" }));
+    await expect(startLabel.locator("+ dd")).toBeInViewport({ ratio: 1 });
+    await expect(page.getByText("尚未创建", { exact: true })).toBeInViewport({
+      ratio: 1,
+    });
+    await expect(startLabel.locator("+ dd")).toHaveText(
+      await page.evaluate(() =>
+        new Date("2026-10-18T12:00:00Z").toLocaleString(),
+      ),
+    );
+    await page.screenshot({
+      path: `../../../.amp/in/artifacts/flow-execution-restarted-${width}.png`,
+      animations: "disabled",
+    });
     await expect(page).toHaveURL(
       /q=repo%3Aowner%2Fagentflow#flow\/42\/overview/,
     );
@@ -1696,16 +1734,12 @@ for (const action of ["archive", "resume"] as const) {
           : route.fulfill({ status: 409, json: { detail: "round_conflict" } });
       });
       await page.goto("/#flow/42/overview");
-      if (action === "archive") {
-        await page
-          .getByRole("button", { name: "结束本轮", exact: true })
-          .click();
-        await page.getByLabel("本轮结论（必填）").fill("保留这份结论");
-        await page.getByRole("button", { name: "确认结束本轮" }).click();
-      } else
-        await page
-          .getByRole("button", { name: "恢复推进", exact: true })
-          .click();
+      await page
+        .getByRole("button", {
+          name: action === "archive" ? "归档" : "重新开工",
+          exact: true,
+        })
+        .click();
       await expect(
         page.locator(".execution-summary").getByRole("alert"),
       ).toContainText(failure === "conflict" ? "未受理" : "无法确认");
@@ -1718,32 +1752,10 @@ for (const action of ["archive", "resume"] as const) {
       await expect(page.locator(".detail-head .badge")).toHaveText(
         action === "archive" ? "受阻" : "已归档 · 成功",
       );
-      if (action === "archive")
-        await expect(page.getByLabel("本轮结论（必填）")).toHaveValue(
-          "保留这份结论",
-        );
       expect(requests).toBe(1);
     });
   }
 }
-
-test("round form cannot silently retarget a newer round after refresh", async ({
-  page,
-}) => {
-  let current = blockedFlow;
-  await mockFlows(page, () => [current]);
-  await page.goto("/#flow/42/overview");
-  await page.getByRole("button", { name: "结束本轮", exact: true }).click();
-  await page.getByLabel("本轮结论（必填）").fill("旧轮次结论");
-  current = { ...current, current_round_no: 2, state_version: 3 };
-  await page.getByRole("button", { name: "刷新当前视图" }).click();
-  await expect(
-    page.locator(".execution-summary").getByRole("alert"),
-  ).toContainText("轮次已变化");
-  await expect(
-    page.getByRole("button", { name: "确认结束本轮" }),
-  ).toBeDisabled();
-});
 
 test("a retry finishing after navigation cannot overwrite another flow", async ({
   page,
@@ -4432,7 +4444,7 @@ test("assistant tools share one compact activity bar across pages without crossi
       author: "tool",
       kind: "tool_result",
       title: "tool_result",
-      body: "下一轮的目录",
+      body: "下一次执行的目录",
       body_length: 6,
       metadata: { ...context, call_id: "call-a" },
     },
@@ -4475,7 +4487,7 @@ test("assistant tools share one compact activity bar across pages without crossi
     /continuation/,
   );
   await expect(
-    page.getByText("下一轮的目录", { exact: true }),
+    page.getByText("下一次执行的目录", { exact: true }),
   ).not.toBeVisible();
   // Capture this turn only; later fixture rows deliberately exercise unrelated sessions/turns.
   const captureOutput = async (name: string) => {
@@ -4500,7 +4512,7 @@ test("assistant tools share one compact activity bar across pages without crossi
     page.getByText("其他会话的结果", { exact: true }),
   ).not.toBeVisible();
   await expect(
-    page.getByText("下一轮的目录", { exact: true }),
+    page.getByText("下一次执行的目录", { exact: true }),
   ).not.toBeVisible();
   await expect(page.locator(".tool-activity-body pre")).toHaveText([
     "exec git status --short",
@@ -4553,11 +4565,13 @@ test("assistant tools share one compact activity bar across pages without crossi
       exact: true,
     })
     .click();
-  await expect(page.getByText("下一轮的目录", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("下一次执行的目录", { exact: true }),
+  ).toBeVisible();
   await expect(
     page
       .locator("article[data-entry='next-result']")
-      .getByText("下一轮的目录", { exact: true }),
+      .getByText("下一次执行的目录", { exact: true }),
   ).toBeVisible();
   await page
     .locator("[data-activity-summary='orphan']")
@@ -5062,7 +5076,7 @@ test("long tool activity remains bounded and readable across virtual windows", a
       json: activityPage(
         Array.from({ length: Math.min(20, 321 - start) }, (_, index) => {
           const n = start + index;
-          const body = n === 320 ? "本轮全部完成" : `工具记录 ${n}`;
+          const body = n === 320 ? "本次执行全部完成" : `工具记录 ${n}`;
           return {
             ...activity,
             key: `tool-run-${n}`,
@@ -5134,11 +5148,13 @@ test("long tool activity remains bounded and readable across virtual windows", a
       // Measured tool rows can grow after scrolling; reach the final message as well.
       return (
         (await page.getByText("工具记录 319", { exact: true }).isVisible()) &&
-        (await page.getByText("本轮全部完成", { exact: true }).isVisible())
+        (await page.getByText("本次执行全部完成", { exact: true }).isVisible())
       );
     })
     .toBe(true);
-  await expect(page.getByText("本轮全部完成", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("本次执行全部完成", { exact: true }),
+  ).toBeVisible();
   expect(
     await list.locator(":scope > [data-window-row]").count(),
   ).toBeLessThanOrEqual(60);

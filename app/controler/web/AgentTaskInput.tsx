@@ -9,11 +9,11 @@ const composerCopy = {
   },
   note: {
     label: "收尾留言",
-    placeholder: "记录本轮的收尾事项…",
+    placeholder: "记录本次执行的收尾事项…",
   },
   archived: {
-    label: "本轮消息",
-    placeholder: "本轮已归档",
+    label: "本次执行消息",
+    placeholder: "本次执行已归档",
   },
 };
 

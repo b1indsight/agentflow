@@ -62,7 +62,7 @@ export function activityIdentity(entry: ActivityItem): ActivityIdentity {
   return {
     key: entry.key,
     version: entry.version,
-    round_no: entry.round_no,
+    attempt_id: entry.attempt_id,
     source: entry.source,
     kind: entry.kind,
     author: entry.author,
@@ -286,8 +286,26 @@ export async function readConversationProvenance(
       }
       item = fetchedItems[position.indexes.indexOf(index)];
     }
-    const { key, version, source, author, occurred_at, url, metadata } = item;
-    items.push({ key, version, source, author, occurred_at, url, metadata });
+    const {
+      key,
+      version,
+      attempt_id,
+      source,
+      author,
+      occurred_at,
+      url,
+      metadata,
+    } = item;
+    items.push({
+      key,
+      version,
+      attempt_id,
+      source,
+      author,
+      occurred_at,
+      url,
+      metadata,
+    });
   }
   return {
     items,

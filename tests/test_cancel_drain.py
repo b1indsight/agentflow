@@ -20,9 +20,8 @@ from tests.workspace_fixtures import register_worker
 
 def running(store):
     flow = store.flows.create_flow("owner/repo", 1, 1)
-    attempt = store.flows.create_attempt(flow.id)
-    flow.current_attempt_id = attempt.id
-    store.flows.set_current_attempt(flow)
+    attempt = store.flows.get_current_attempt(flow)
+    assert attempt is not None
     register_worker(store, "w", repo=flow.repo, epoch="epoch")
     job = enqueue_job(store, flow.id, JobKind.INITIAL)
     assert store.assignments.assign_job("w", "token", "epoch")
@@ -116,7 +115,7 @@ def test_never_dispatched_cancel_needs_no_stop(store):
 @pytest.mark.parametrize("reconnect", [False, True])
 async def test_merge_during_cancel_retains_binding_until_original_stop_settles(store, reconnect):
     flow, job = running(store)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "flow/1")
     delivery.state, delivery.pr_number, delivery.head_sha = DeliveryState.OPEN, 17, "b" * 40
     store.deliveries.update_delivery(delivery)
     ControlService(
@@ -203,7 +202,7 @@ def test_stopped_writer_does_not_block_its_pending_terminal_application(store):
 
 async def test_finalizing_flow_reserves_issue_until_late_merge_cleanup_settles(store):
     flow, _job = running(store)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "flow/1")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
     store.deliveries.update_delivery(delivery)
     ControlService(
@@ -271,7 +270,7 @@ def test_confirmed_stop_can_be_reacknowledged_after_flow_rebind(store):
     assert store.stops.confirm("w", receipt, "epoch")
     ControlService(
         database=store.database,
-    ).resume(store.flows.get_flow(flow.id), expected_round_no=flow.current_round_no)
+    ).resume(store.flows.get_flow(flow.id), expected_attempt_id=flow.required_attempt_id)
     register_worker(store, "new-worker", repo=flow.repo, epoch="new-epoch")
     replacement = store.assignments.assign_job("new-worker", "new-token", "new-epoch")
     assert replacement is not None
@@ -289,7 +288,7 @@ async def test_cancelled_creation_persists_pr_identity_and_merge_before_stop(
     recording_resources,
 ):
     flow, job = running(store)
-    delivery = store.deliveries.get_or_create_delivery(flow.id, "flow/1")
+    delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "flow/1")
     delivery.state, delivery.base_branch, delivery.head_sha = (
         DeliveryState.OPENING,
         "main",

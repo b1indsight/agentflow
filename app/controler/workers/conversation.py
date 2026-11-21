@@ -123,7 +123,7 @@ class ConversationService:
         if execution is None:
             return None, []
         attempts: dict[str, Attempt] = {}
-        for attempt in sorted(self.flows.list_attempts(flow_id), key=lambda a: a.id):
+        for attempt in self.flows.list_attempts(flow_id):
             if attempt.codex_session_id:
                 try:
                     HistoryQuery(session_id=attempt.codex_session_id)
@@ -176,15 +176,24 @@ class ConversationService:
             )
         except ValidationError as exc:
             raise ConversationFailure("cursor_invalid") from exc
-        page = await self.broker.query(worker_id, query)
+        owner = await asyncio.to_thread(self.flows.session_worker, attempt.id)
+        try:
+            if owner is None:
+                raise ConversationFailure("worker_unavailable")
+            page = await self.broker.query(owner, query)
+        except ConversationFailure as exc:
+            if exc.code != "worker_unavailable" or index + 1 == len(attempts):
+                raise
+            # Persist the historical gap and advance; the live tail retains its retry semantics.
+            page = None
         # Only control attaches trusted Flow/Attempt attribution to worker records.
         attribution = {
             "attempt_id": attempt.id,
             "session_id": attempt.codex_session_id,
             "session_generation": attempt.session_generation,
         }
-        next_index, next_inner = index, page.next_cursor
-        has_more = page.has_more
+        next_index, next_inner = index, page.next_cursor if page else None
+        has_more = page.has_more if page else False
         if not has_more and index + 1 < len(attempts):
             next_index, next_inner, has_more = index + 1, None, True
         # At the final session, retain its EOF cursor so later polls see appended records.
@@ -198,14 +207,14 @@ class ConversationService:
             items=[
                 ConversationItem.model_validate({**item.model_dump(), **attribution})
                 for item in page.items
-            ],
+            ] if page else [],
             sessions=[
                 SessionHistory.model_validate(
                     {
                         **attribution,
-                        "status": page.status,
+                        "status": page.status if page else "worker_unavailable",
                         "starts_at_beginning": inner_cursor is None,
-                        "reached_end": not page.has_more,
+                        "reached_end": page is not None and not page.has_more,
                     }
                 )
             ],
