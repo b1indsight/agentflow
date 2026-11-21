@@ -57,7 +57,7 @@ class SessionHistory(ConversationModel):
     attempt_id: int = Field(gt=0)
     session_id: SessionId
     session_generation: int = Field(ge=0)
-    status: Literal["available", "not_found", "unsupported"]
+    status: Literal["available", "not_found", "unsupported", "worker_unavailable"]
     starts_at_beginning: bool
     reached_end: bool
 

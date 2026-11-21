@@ -174,7 +174,15 @@ END $$;
 CREATE OR REPLACE FUNCTION console_worker_changed() RETURNS TRIGGER AS $$
 BEGIN
  IF TG_OP='INSERT' OR NEW.connection_epoch IS DISTINCT FROM OLD.connection_epoch THEN
- PERFORM console_enqueue(flow_id) FROM flow_executions WHERE worker_id=NEW.worker_id ORDER BY flow_id;
+ PERFORM console_enqueue(flow_id) FROM (
+   SELECT flow_id FROM flow_executions WHERE worker_id=NEW.worker_id
+   UNION
+   -- Include outstanding historical gaps and in-flight scans racing this reconnect.
+   SELECT j.flow_id FROM jobs j JOIN console_sync s ON s.flow_id=j.flow_id
+   WHERE j.assigned_worker_id=NEW.worker_id AND j.kind IN ('initial','revision')
+   AND ((s.pending AND s.source='worker') OR
+        (s.reason='worker_unavailable' AND s.source LIKE 'worker:'||j.attempt_id||':%'))
+ ) affected ORDER BY flow_id;
  END IF;
  RETURN NEW;
 END;

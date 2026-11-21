@@ -56,10 +56,13 @@ async def test_control_owns_session_order_attribution_and_tail(store, completed_
         attempt.codex_session_id, attempt.session_generation = session, generation
         store.flows.update_attempt(attempt)
     calls = []
+    offline = set()
     reader = codex_agent(tmp_path, monkeypatch)
 
     async def query(worker_id, request):
         assert worker_id == ("worker-a" if request.session_id == SESSION else "worker-b")
+        if worker_id in offline:
+            raise ConversationFailure("worker_unavailable")
         calls.append(request)
         return reader.read_history(request)
 
@@ -83,6 +86,17 @@ async def test_control_owns_session_order_attribution_and_tail(store, completed_
     store.flows.update_attempt(attempts[1])
     with pytest.raises(ConversationFailure, match="cursor_invalid"):
         await service.read(flow.id, tail.next_cursor, 100)
+    # A disconnected former owner leaves a coverage gap, not a barrier to the live tail.
+    offline.add("worker-a")
+    gap = await service.read(flow.id, None, 100)
+    assert not gap.items and gap.has_more and not gap.sessions[0].reached_end
+    assert (gap.sessions[0].attempt_id, gap.sessions[0].status) == (attempts[0].id, "worker_unavailable")
+    live = await service.read(flow.id, gap.next_cursor, 100)
+    assert [i.content.text for i in live.items] == ["two", "tail"]
+    offline.add("worker-b")
+    with pytest.raises(ConversationFailure, match="worker_unavailable"):
+        await service.read(flow.id, live.next_cursor, 100)
+    offline.clear()
     first_path.unlink()
     missing = await service.read(flow.id, None, 100)
     assert missing.items == [] and missing.has_more

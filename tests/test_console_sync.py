@@ -306,23 +306,33 @@ async def test_worker_availability_recovers_without_a_permanent_coverage_gap(
     assert after.limitations == [] and after.last_success_at is not None
 
 
-@pytest.mark.parametrize("status", ["not_found", "unsupported"])
+@pytest.mark.parametrize("status", ["not_found", "unsupported", "worker_unavailable"])
 async def test_missing_session_recovers_only_after_that_session_is_reread(
-    store: Store, status: Literal["not_found", "unsupported"]
+    store: Store, status: Literal["not_found", "unsupported", "worker_unavailable"]
 ) -> None:
     # A clean later session must not hide an earlier missing one, including after restart.
     flow = store.flows.create_flow("owner/repo", 7, 42)
+    register_worker(store, "old", repo=flow.repo, epoch="first")
+    enqueue_job(store, flow.id, JobKind.INITIAL)
+    assert store.assignments.assign_job("old", "first-job", "first")
+    control = ControlService(database=store.database)
+    control.cancel(flow)
+    reopened = control.resume(flow, expected_attempt_id=flow.required_attempt_id)
+    register_worker(store, "new", repo=flow.repo, epoch="second")
+    assert store.assignments.assign_job("new", "second-job", "second")
     only_worker(store._db)
+    with store.connection() as connection:
+        connection.execute("UPDATE console_sync SET dirty=FALSE")
     first = SessionHistory(
         attempt_id=flow.required_attempt_id,
         session_id="12345678-1234-1234-1234-123456789abc",
         session_generation=0,
         status=status,
         starts_at_beginning=True,
-        reached_end=True,
+        reached_end=status != "worker_unavailable",
     )
     second = SessionHistory(
-        attempt_id=flow.required_attempt_id,
+        attempt_id=reopened.required_attempt_id,
         session_id="12345678-1234-1234-1234-123456789def",
         session_generation=0,
         status="available",
@@ -338,7 +348,7 @@ async def test_missing_session_recovers_only_after_that_session_is_reread(
             ConversationPage(flow_id=flow.id, sessions=[second], next_cursor="eof"),
             ConversationPage(
                 flow_id=flow.id,
-                sessions=[first.model_copy(update={"status": "available"})],
+                sessions=[first.model_copy(update={"status": "available", "reached_end": True})],
                 has_more=True,
                 next_cursor="second",
             ),
@@ -349,8 +359,15 @@ async def test_missing_session_recovers_only_after_that_session_is_reread(
     for index, cursor in enumerate([None, "second", None, "second"]):
         if index == 2:
             sync = ConsoleSynchronizer(Mock(), conversations, database=store._db)
-            ConsoleStore(store._db).request_sync(flow.id)
-            only_worker(store._db)
+            if status == "worker_unavailable":
+                # Only the old owner's reconnect wakes the finished scan; no manual refresh.
+                assert sync.store.claim() is None
+                register_worker(store, "old", repo=flow.repo, epoch="back")
+                with store.connection() as connection:
+                    connection.execute("UPDATE console_sync SET pending=FALSE WHERE source='github'")
+            else:
+                ConsoleStore(store._db).request_sync(flow.id)
+                only_worker(store._db)
         with store.connection() as connection:
             connection.execute("UPDATE console_sync SET next_at=now()")
         claim = sync.store.claim()
