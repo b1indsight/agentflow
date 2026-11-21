@@ -30,6 +30,7 @@ from app.contracts.protocol import (
     call_header,
     message_header,
 )
+from app.controler.workflow.service import FlowReadOnly
 from app.domain.models import Attempt
 from app.persistence.database import Database
 from app.persistence.flows import FlowStore
@@ -117,8 +118,11 @@ class ConversationService:
         self.broker = broker
 
     def _resolve(self, flow_id: int) -> tuple[str | None, list[Attempt]]:
-        if self.flows.get_flow(flow_id) is None:
+        flow = self.flows.get_flow(flow_id)
+        if flow is None:
             raise ConversationFailure("flow_not_found")
+        if flow.history_only:
+            raise FlowReadOnly()
         execution = self.flows.get_flow_execution(flow_id)
         if execution is None:
             return None, []

@@ -80,6 +80,7 @@ class CreateFlowRequest(FlowTarget):
     """Manual intake accepts exactly one live Issue or bounded direct task."""
 
     issue_number: int | None = Field(default=None, strict=True, gt=0)
+    continued_from_flow_id: int | None = Field(default=None, strict=True, gt=0)
     task_content: str | None = None
 
     @model_validator(mode="after")
@@ -133,6 +134,8 @@ class FlowSummary(ConsoleModel):
     pr_number: int | None
     pr_url: str | None
     lifecycle: FlowState
+    history_only: bool
+    continued_from_flow_id: int | None
     current_attempt_id: int
     attempt_started_at: datetime
     archive_reason: ArchiveReason | None
@@ -159,6 +162,7 @@ class SourceStatus(ConsoleModel):
 
 class FlowDetail(FlowSummary):
     reason: str
+    installation_id: int | None
     next_condition: str
     sources: list[SourceStatus]
     task_content: str | None = None

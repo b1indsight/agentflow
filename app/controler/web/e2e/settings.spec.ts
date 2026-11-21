@@ -43,6 +43,9 @@ const catalog: ModelCatalog = {
 };
 const flow: FlowDetail = {
   id: 42,
+  history_only: false,
+  continued_from_flow_id: null,
+  installation_id: 71,
   repo: "owner/agentflow",
   issue_number: null,
   issue_url: null,

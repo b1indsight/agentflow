@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 切换前的 Flow 保留原链接和最后状态，只能查看历史。要继续工作，可从旧详情创建新 Flow；同一 Issue 已有活动 Flow 时打开该 Flow。升级须先结清在途工作，再按[离线升级说明](docs/operations/upgrade.md)操作。
+
 - Flow 保留原 ID，每次显式开工建立一个 Attempt；Job、编码会话、交付和归档历史按 Attempt 归属。归档/重开的客户端需传 `expected_attempt_id`。已有数据库须按[升级说明](docs/operations/upgrade.md)停写、备份并迁移，不支持新旧控制端混跑。
 
 - 网页会话可在所有未归档状态发送消息，收尾期间仅留言。会话同时显示编码摘要和待澄清问题。显式重试修订时使用原会话处理本地与远端变化，不提前覆盖工作区。serve 与 worker 须协调升级到 wire28。

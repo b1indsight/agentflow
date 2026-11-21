@@ -7,7 +7,6 @@ from datetime import timedelta
 from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 
-from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import EffectReceipt, EffectRecord, EffectState, ResultPlan
 from app.domain.models import Job
 from app.github import GitHubError, retry_delay
@@ -28,7 +27,7 @@ RESOURCE_JOB_SQL = (
     " AND j.assignment_token IS NULL AND j.workspace IS NULL AND j.generation IS NULL"
     " AND j.started_at IS NULL AND j.dispatch_authorized_at IS NULL"
     " AND jsonb_typeof(j.result_payload->'version')='number'"
-    " AND j.result_payload->>'version' IN ('2','3') AND j.result_payload->>'source'='control'"
+    " AND j.result_payload->>'version'='3' AND j.result_payload->>'source'='control'"
     " AND j.result_payload->'terminal'->>'type'='merge_archive',FALSE)"
 )
 
@@ -37,12 +36,12 @@ class ResultStore(Repository):
     """Share the database context's connection, including its explicit transaction when preparing."""
 
     def get_plan(self, job_id: int) -> ResultPlan | None:
+        """Read executable intent only; frozen historical JSON stays untouched and unparsed."""
         with self._db.connection() as connection:
             row = connection.execute(
-                "SELECT r.plan,r.digest,j.flow_id,j.attempt_id,j.result_digest,j.assignment_token,"
-                " j.result_payload,m.round_no FROM result_applications r JOIN jobs j ON j.id=r.job_id"
-                " LEFT JOIN flow_attempt_legacy_map m ON m.flow_id=j.flow_id AND m.attempt_id=j.attempt_id"
-                " WHERE r.job_id=%s",
+                "SELECT r.plan,r.digest,j.flow_id,j.attempt_id,j.result_digest"
+                " FROM result_applications r JOIN jobs j ON j.id=r.job_id JOIN flows f ON f.id=j.flow_id"
+                " WHERE r.job_id=%s AND NOT f.history_only",
                 (job_id,),
             ).fetchone()
             if row is None:
@@ -51,13 +50,6 @@ class ResultStore(Repository):
             if (data.get("job_id") != job_id or data.get("flow_id") != row["flow_id"]
                     or data.get("digest") != row["digest"] or row["digest"] != row["result_digest"]):
                 raise ValueError("result plan owner or digest conflicts with inbox")
-            delivery = data.get("delivery")
-            if row["round_no"] is not None and (
-                data.get("attempt_id") is None or (isinstance(delivery, dict) and "attempt_id" not in delivery)
-            ):
-                decode_result_inbox(row["result_payload"], job_id=job_id,
-                                    assignment_token=row["assignment_token"], result_digest=row["digest"])
-                return ResultPlan.from_legacy(data, flow_id=row["flow_id"], attempt_id=row["attempt_id"])
             plan = ResultPlan.model_validate(data)
             if plan.attempt_id != row["attempt_id"] or (plan.delivery is not None and
                     (plan.delivery.flow_id, plan.delivery.attempt_id) != (plan.flow_id, plan.attempt_id)):

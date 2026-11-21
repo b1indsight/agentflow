@@ -70,7 +70,8 @@ class DeliveryStore(Repository):
         with self._db.connection() as connection:
             rows = connection.cursor(row_factory=class_row(FlowDelivery)).execute(
                 f"SELECT {_DELIVERY} FROM attempts WHERE delivery_pr_number=%s AND delivery_branch IS NOT NULL"
-                " AND flow_id IN (SELECT id FROM flows WHERE lower(repo)=lower(%s)) LIMIT 2", (pr_number, repo),
+                " AND flow_id IN (SELECT id FROM flows WHERE NOT history_only AND lower(repo)=lower(%s)) LIMIT 2",
+                (pr_number, repo),
             ).fetchall()
         if len(rows) > 1:
             raise ValueError(f"multiple attempts claim PR {repo}#{pr_number}")

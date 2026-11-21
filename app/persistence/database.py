@@ -18,7 +18,7 @@ from app.persistence.schema import SCHEMAS
 
 
 def flow_schema_version(connection: Connection[Row]) -> str:
-    """Only unmarked databases need structural identification; never auto-upgrade them."""
+    """Identify a supported source or target schema; never infer a completed cutover from rows."""
     tables = connection.execute(
         "SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace"
         " AND relkind IN ('r','p')"
@@ -63,33 +63,74 @@ def flow_schema_version(connection: Connection[Row]) -> str:
         ("jobs", "attempt_id"),
         ("console_activity", "attempt_id"),
     }
+    boundary = {("flows", "history_only"), ("flows", "continued_from_flow_id")}
+    required = {
+        "runtime_settings",
+        "flows",
+        "attempts",
+        "jobs",
+        "workers",
+        "worker_file_links",
+        "flow_executions",
+        "flow_tool_calls",
+        "events",
+        "execution_stops",
+        "result_applications",
+        "result_effects",
+        "review_versions",
+        "review_buffers",
+        "review_batches",
+        "reconcile_checks",
+        "project_destinations",
+        "project_projections",
+        "console_flows",
+        "console_activity",
+        "console_sync",
+        "console_installation_backoff",
+    }
+    if ("flows", "is_issue_owner") not in columns:
+        raise ValueError("incomplete Flow schema: offline investigation required")
+    obsolete = {
+        "review_items",
+        "review_pending_edits",
+        "review_thread_observations",
+        "feedback_reconcile",
+        "flow_reconcile",
+    }
+    map_columns = {name for table, name in columns if table == "flow_attempt_legacy_map"}
     if "flowtool_schema_version" in names:
         versions = connection.execute("SELECT version FROM flowtool_schema_version").fetchall()
-        if versions != [{"version": 2}]:
+        if versions not in ([{"version": 2}], [{"version": 3}]):
             raise ValueError(f"unsupported Flow schema version: {versions}")
-        if new <= columns and not (legacy & columns) and "flow_attempt_legacy_map" in names:
-            return "current"
+        if new <= columns and not (legacy & columns):
+            if (
+                versions == [{"version": 3}]
+                and boundary <= columns
+                and "flow_attempt_legacy_map" not in names
+            ):
+                return "current"
+            if (
+                versions == [{"version": 2}]
+                and required <= names
+                and not (boundary & columns or obsolete & names)
+                and map_columns == {"flow_id", "round_no", "attempt_id"}
+            ):
+                return "v2"
     elif (
-        legacy <= columns
-        and not (new & columns)
-        and "flow_attempt_legacy_map" not in names
-        and {"workers", "result_applications", "flow_tool_calls", "review_batches", "events"}
-        <= names
-        and ("flows", "is_issue_owner") in columns
+        required <= names
+        and legacy <= columns
+        and not ((new | boundary) & columns)
+        and not ((obsolete | {"flow_attempt_legacy_map"}) & names)
     ):
         return "legacy"
     raise ValueError("unrecognized or partial Flow schema: offline investigation required")
 
 
 def mark_flow_schema_current(connection: Connection[Row]) -> None:
-    """Publish the cutover in the same commit as the complete schema and legacy mapping."""
+    """Publish the history boundary only when schema and data commit together."""
     connection.execute("""
-        CREATE TABLE flow_attempt_legacy_map (
-          flow_id bigint NOT NULL, round_no integer NOT NULL CHECK(round_no>0),
-          attempt_id bigint NOT NULL UNIQUE, PRIMARY KEY(flow_id,round_no),
-          FOREIGN KEY(flow_id,attempt_id) REFERENCES attempts(flow_id,id));
-        CREATE TABLE flowtool_schema_version(version integer PRIMARY KEY CHECK(version=2));
-        INSERT INTO flowtool_schema_version VALUES(2);
+        CREATE TABLE flowtool_schema_version(version integer PRIMARY KEY CHECK(version=3));
+        INSERT INTO flowtool_schema_version VALUES(3);
     """)
 
 
@@ -230,7 +271,7 @@ class Database:
         """Initialize the complete schema in its foreign-key dependency order."""
         with self.connection() as connection:
             version = flow_schema_version(connection)
-            if version == 'legacy':
+            if version in {'legacy', 'v2'}:
                 raise ValueError('legacy Flow schema: stop writers and run scripts.migrate_flow_attempts offline')
             for schema in SCHEMAS:
                 connection.execute(schema)

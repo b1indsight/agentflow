@@ -22,7 +22,7 @@ from app.contracts.conversation import (
 )
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workers.conversation import ConversationService
-from app.controler.workflow.service import ControlService
+from app.controler.workflow.service import ControlService, FlowReadOnly
 from app.domain.models import DeliveryState, JobKind
 from app.github import GitHubApp
 from app.persistence.activity import ActivityStore
@@ -36,6 +36,35 @@ from tests.workspace_fixtures import register_worker
 def only_worker(database):
     with database.connection() as connection:
         connection.execute("UPDATE console_sync SET pending=(source='worker')")
+
+
+async def test_history_only_reconnect_preserves_publication_and_cannot_read_worker(store):
+    # Released bindings remain historical facts; reconnect must not wake their old source scans.
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    register_worker(store, "w", repo=flow.repo, epoch="old")
+    enqueue_job(store, flow.id, JobKind.INITIAL)
+    assert store.assignments.assign_job("w", "token", "old")
+    ControlService(database=store.database).cancel(flow)
+    assert store.flows.get_flow_execution(flow.id).released_at is not None
+    only_worker(store.database)
+    sync = ConsoleSyncStore(store.database)
+    claim = sync.claim()
+    assert claim is not None and claim.source == "worker"
+    archive = ActivityStore(store.database)
+    before = archive.history(flow.id, flow.required_attempt_id)
+    with store.connection() as c:
+        c.execute("UPDATE flows SET history_only=true,is_issue_owner=false WHERE id=%s", (flow.id,))
+        c.execute("UPDATE console_sync SET pending=false,dirty=false")
+    register_worker(store, "w", repo=flow.repo, epoch="again")
+    assert sync.claim() is None
+    assert not sync.finish(claim, [], cursor="late", more=False, limitations=[])
+    broker = AsyncMock()
+    with pytest.raises(FlowReadOnly):
+        await ConversationService(broker, database=store.database).read(flow.id, None, 10)
+    broker.query.assert_not_awaited()
+    with store.connection() as c:
+        assert not c.execute("SELECT 1 FROM console_sync WHERE pending OR dirty").fetchone()
+    assert archive.history(flow.id, flow.required_attempt_id) == before
 
 
 async def test_direct_task_registers_only_real_remote_sources_and_still_reads_worker(store):

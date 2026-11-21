@@ -16,7 +16,7 @@ from app.domain.inference_policy import decide_inference_cancellation, decide_in
 from app.domain.models import Job, JobKind, JobState
 from app.persistence.flows import FlowStore
 from app.persistence.inference_notices import InferenceNoticeStore
-from app.persistence.jobs import CURRENT_WORKSPACE_SQL, JobStore
+from app.persistence.jobs import CURRENT_WORKSPACE_SQL, WRITABLE_JOB_SQL, JobStore
 from app.persistence.records import required
 from app.persistence.repository import Repository
 from app.persistence.reviews import ReviewStore
@@ -49,6 +49,8 @@ class InferenceStore(Repository):
             flow = tx.lock_workflow(flow_id) if flow_id is not None else None
             if flow_id is not None and flow is None:
                 raise ValueError("inference source Flow does not exist")
+            if flow is not None and flow.history_only:
+                raise ValueError("history-only Flow cannot enqueue inference")
             attempt_id = flow.required_attempt_id if flow else None
             previous = None
             batch = None
@@ -264,6 +266,7 @@ class InferenceStore(Repository):
         with self._db.connection() as connection:
             rows = connection.execute(
                 "SELECT id FROM jobs WHERE kind='inference' AND state='running' AND result_received_at IS NULL"
+                f" AND {WRITABLE_JOB_SQL}"
                 " AND (%s::text IS NULL OR assigned_worker_id=%s) ORDER BY id", (worker_id, worker_id),
             ).fetchall()
             for row in rows:
@@ -280,7 +283,7 @@ class InferenceStore(Repository):
         requeued = failed = 0
         with self._db.connection() as connection:
             pending = connection.execute(
-                "SELECT id FROM jobs WHERE kind='inference' AND state IN ('queued','running') ORDER BY id",
+                f"SELECT id FROM jobs WHERE kind='inference' AND state IN ('queued','running') AND {WRITABLE_JOB_SQL} ORDER BY id",
             ).fetchall()
             for item in pending:
                 job = self._lock_inference(item["id"])

@@ -71,7 +71,7 @@ class Reconciler:
                     with self.flows.locked(flow_id) as context:
                         tx, flow = context.database, context.flow
                         delivery = self.deliveries.using(tx).get_delivery(flow_id)
-                        if (flow is None or flow.state is FlowState.ARCHIVED
+                        if (flow is None or flow.history_only or flow.state is FlowState.ARCHIVED
                                 or delivery is None or delivery.state is not DeliveryState.MERGED):
                             continue
                         merge = PullRequestMerge.model_validate({
@@ -115,6 +115,7 @@ class Reconciler:
                 delivery = deliveries_tx.get_delivery(check.flow_id)
                 if (
                     flow is None
+                    or flow.history_only
                     or delivery is None
                     or delivery.attempt_id != check.attempt_id
                     or delivery.pr_number is None
@@ -158,7 +159,7 @@ class Reconciler:
                 reconcile_store_tx = self.reconcile_store.using(tx)
                 stops_tx = self.stops.using(tx)
                 fresh = context.flow
-                if fresh is None:
+                if fresh is None or fresh.history_only:
                     return
                 historical = fresh.current_attempt_id != check.attempt_id
                 if historical and not remote.merged:

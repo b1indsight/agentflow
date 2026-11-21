@@ -11,7 +11,6 @@ from app.controler.config import ServerSettings
 from app.controler.workflow.service import ControlService
 from app.domain.models import ReviewItemKind
 from app.domain.review_models import FeedbackUpdate
-from app.persistence.activity import ActivityStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
@@ -83,7 +82,7 @@ class EventRouter:
         review = event_type == "pull_request_review"
         number = payload["issue" if conversation else "pull_request"]["number"]
         flow = self.flows.get_flow_by_pr(repo, number)
-        if conversation and flow is None:
+        if conversation and flow is None and "pull_request" not in payload["issue"]:
             flow = self.flows.get_active_flow(repo, number)
         action = payload.get("action")
         allowed = (
@@ -160,11 +159,6 @@ class EventRouter:
         repo = payload["repository"]["full_name"]
         delivery = DeliveryStore(self.database).delivery_by_pr(repo, pull_request["number"])
         flow = self.flows.get_flow(delivery.flow_id) if delivery is not None else None
-        if delivery is None and pull_request.get("merged") is True:
-            # Pre-migration archives can prove the PR identity without a branch or a full delivery.
-            historical = ActivityStore(self.database).archived_pr(repo, pull_request["number"])
-            if historical is not None:
-                flow = self.flows.get_flow(historical[0])
         if flow and payload.get("action") == "closed" and pull_request.get("merged") is True:
             self.service.on_merged(flow, delivery_id, payload)
         elif flow and delivery and flow.current_attempt_id != delivery.attempt_id:

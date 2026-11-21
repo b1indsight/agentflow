@@ -33,7 +33,7 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  OR j.verify_last_error IS NOT NULL THEN 'execution_error' ELSE NULL END AS error_code,
  a.id AS attempt_id,a.codex_session_id,a.session_generation,a.last_revision_summary,
  f.current_attempt_id,a.created_at AS attempt_started_at,f.archive_reason,
- f.archive_summary,f.archived_at,f.title AS task_title
+ f.archive_summary,f.archived_at,f.title AS task_title,f.history_only,f.continued_from_flow_id
 FROM flows f
 LEFT JOIN flow_executions x ON x.flow_id=f.id
 LEFT JOIN attempts a ON a.id=f.current_attempt_id
@@ -115,6 +115,7 @@ CREATE OR REPLACE FUNCTION console_enqueue(identity BIGINT) RETURNS VOID AS $$
 BEGIN
  -- Reconnects also refresh execution facts: use the same publication -> source order.
  PERFORM flow_id FROM console_flows WHERE flow_id=identity FOR UPDATE;
+ IF EXISTS (SELECT 1 FROM flows WHERE id=identity AND history_only) THEN RETURN; END IF;
  INSERT INTO console_sync(flow_id,source) VALUES(identity,'github'),(identity,'worker')
  ON CONFLICT(flow_id,source) DO UPDATE SET
  dirty=console_sync.pending,
@@ -135,6 +136,17 @@ BEGIN
  SELECT facts INTO previous_facts
  FROM console_flows WHERE flow_id=identity FOR UPDATE;
  SELECT to_jsonb(f) INTO next_facts FROM console_facts f WHERE id=identity;
+ IF (next_facts->>'history_only')::boolean THEN
+   -- Keep the last published card and its activity history. Classification is not a new event.
+   IF previous_facts->>'history_only'='true' THEN RETURN; END IF;
+   -- Older cards may lack an Attempt or its start time, filled by the offline migration.
+   next_facts := next_facts || previous_facts || jsonb_build_object('history_only',TRUE,
+     'continued_from_flow_id',next_facts->'continued_from_flow_id',
+     'current_attempt_id',next_facts->'current_attempt_id','attempt_started_at',next_facts->'attempt_started_at');
+   UPDATE console_flows SET facts=next_facts,state_version=state_version+1
+    WHERE flow_id=identity AND facts IS DISTINCT FROM next_facts;
+   RETURN;
+ END IF;
  IF next_facts->>'current_attempt_id' IS NULL THEN RETURN; END IF;
  IF previous_facts-'updated_at'=next_facts-'updated_at' THEN RETURN; END IF;
  UPDATE console_flows SET facts=next_facts,state_version=state_version+1,
@@ -195,7 +207,8 @@ SELECT console_refresh(id,TRUE) FROM flows
 -- Reclassify existing cards once when a display phase or action rule changes.
 SELECT console_refresh(c.flow_id) FROM console_flows c
  JOIN console_facts f ON f.id=c.flow_id
- WHERE c.facts-'updated_at' IS DISTINCT FROM to_jsonb(f)-'updated_at'
+ WHERE c.facts->>'history_only' IS DISTINCT FROM 'true'
+ AND c.facts-'updated_at' IS DISTINCT FROM to_jsonb(f)-'updated_at'
  ORDER BY c.flow_id;
 """
 

@@ -75,9 +75,10 @@ class ProjectSync:
         config = self.configs.get(row.repo)
         if not config or config.project_id != row.project_id:
             return
-        row = self.projects.refresh(row.id, config)
-        if row.blocked or row.next_at > self.database.now():
+        refreshed = self.projects.refresh(row.id, config)
+        if refreshed is None or refreshed.blocked or refreshed.next_at > self.database.now():
             return
+        row = refreshed
         installation = self.github.installation(config.installation_id)
         repository = installation.repository(row.repo)
         api = installation.project(config)
@@ -101,7 +102,7 @@ class ProjectSync:
                     return
                 else:
                     fresh = self.projects.refresh(row.id, config)
-                    if fresh.desired_version != row.desired_version or fresh.blocked:
+                    if fresh is None or fresh.desired_version != row.desired_version or fresh.blocked:
                         return
                     assert row.content_id is not None
                     self.projects.save(row, add_started=True, cursor=None, scan_incomplete=False)
@@ -119,7 +120,7 @@ class ProjectSync:
                 self.projects.save(row, blocked=True, last_error="known project item missing, archived, or content unavailable")
                 return
             fresh = self.projects.refresh(row.id, config)
-            if fresh.desired_version != row.desired_version or fresh.blocked:
+            if fresh is None or fresh.desired_version != row.desired_version or fresh.blocked:
                 return
             if remote.option_id != config.options[row.desired_status]:
                 await self._call(row, config, lambda: remote.set_status(row.desired_status))

@@ -54,7 +54,11 @@ npm run preview -- --port 8767
 
 ## 页面与读取语义
 
-详情各页签底部的 `AgentTaskInput` 与「新建 Flow」共用 `FlowTaskInput` 文本组件，保留粘贴换行及输入光标。
+迁移后标记为 `history_only: true` 的 Flow 保留原详情地址，显示「历史记录 · 只读」。概览、会话和执行记录只读已保存的数据，不重新同步、不打开 Worker 附件，也不提供归档、重试、重新开工或 Agent 输入。
+「创建新 Flow 继续」沿用来源详情的仓库与 installation；缺少 installation 时不提供创建操作。Issue 任务沿用同一 Issue，直接任务预填原始任务正文，可在提交前编辑。
+确认后用 `POST /api/flows` 提交 `continued_from_flow_id` 和原仓库授权，按任务类型只传 `issue_number` 或 `task_content`。首次创建和再次继续都打开服务端返回的 Flow ID，新详情可通过「来源 Flow」返回只读记录。
+
+普通 Flow 详情各页签底部的 `AgentTaskInput` 与「新建 Flow」共用 `FlowTaskInput` 文本组件，保留粘贴换行及输入光标。
 继续工作支持 Enter 换行、Ctrl / ⌘ + Enter 发送，中文输入法确认不发送；空白不可提交，最多 16000 字。
 切换页签保留草稿，切换 Flow 清空。提交中禁止重复发送；响应不确定时重试沿用 UUID。
 `POST /api/flows/{id}/agent-tasks` 接收 `instruction`、`request_id`，要求 owner 同源 JSON，向未归档的 Flow 追加消息，无需等待 PR。
@@ -124,7 +128,7 @@ Amp 未指定模型、未知模型或没有可选强度时，禁用空强度框�
 五列依次为待处理、进行中、待审核、受阻、已归档。Flow 生命周期为
 `queued/running/review/blocked/finalizing/archived`，其中 `finalizing` 映射到 `running` 列，
 卡片及主徽标以 `phase` 为准，详情可查看真实生命周期与当前动作。
-`is:archived` 与 `status:archived` 查询真实业务归档；`is:active` 排除已归档 Flow，包含受阻与收尾中的 Flow。
+`is:archived` 与 `status:archived` 查询真实业务归档；`is:active` 排除历史只读和已归档的 Flow，包含仍可工作的受阻与收尾中的 Flow。
 PR 合并、关闭或停止执行都不等于业务归档，只有生命周期为 `archived` 才进入已归档列，
 结果标记为成功或废弃。`is:done` 和 `status:done` 均无兼容别名，提交会提示无效查询。
 Enter 提交；聚焦或输入字段显示统一建议，方向键 / 点击选择，Enter 补入后再次 Enter 提交。
@@ -339,7 +343,7 @@ Issue/PR 关联但标题为 null 时的 `Flow #ID` 标题和独立身份徽标�
 六态预览及执行操作回归可单独复现（同时生成桌面/手机截图）：
 
 ```sh
-npm run test:e2e -- --workers=2 --grep 'six-state preview|one-click archive|round commands'
+npm run test:e2e -- --workers=2 --grep 'six-state preview|one-click archive|lifecycle commands'
 ```
 
 预览在 `e2e/console.spec.ts` 使用带类型的六态 DTO，覆盖五列默认看板、finalizing 详情、

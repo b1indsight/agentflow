@@ -68,6 +68,15 @@ class AgentTaskRejected(ValueError):
     """An Agent task cannot safely be appended to the Flow."""
 
 
+class FlowReadOnly(Exception):
+    def __init__(self) -> None:
+        super().__init__("flow_read_only")
+
+
+class ContinuationRejected(ValueError):
+    """The requested input does not match the historical source or its successor."""
+
+
 class ControlService:
     def __init__(
         self,
@@ -99,17 +108,31 @@ class ControlService:
 
     def create_flow(
         self, repo: str, issue_number: int | None, installation_id: int | None,
-        *, task_content: str | None = None,
+        *, task_content: str | None = None, continued_from_flow_id: int | None = None,
     ) -> Flow | None:
         """Atomically queue a task; only Issue identities deduplicate active Flows."""
         with self.database.transaction() as tx:
             flows_tx = self.flows.using(tx)
             jobs_tx = self.jobs.using(tx)
             tx.serialize_issue(repo, issue_number)
-            if flows_tx.get_active_flow(repo, issue_number):
+            if continued_from_flow_id is not None:
+                # Serialize even direct-task continuations, which have no Issue lock.
+                source = tx.lock_workflow(continued_from_flow_id)
+                if (source is None or not source.history_only or source.repo != repo
+                        or source.issue_number != issue_number or source.installation_id != installation_id):
+                    raise ContinuationRejected("continuation_source_invalid")
+            active = flows_tx.get_active_flow(repo, issue_number)
+            if active is not None:
                 logger.info("flow already active for {}#{}", repo, issue_number)
-                return None
-            flow = flows_tx.create_flow(repo, issue_number, installation_id, task_content=task_content)
+                return active if continued_from_flow_id is not None else None
+            if continued_from_flow_id is not None:
+                previous = flows_tx.continuation(continued_from_flow_id)
+                if previous is not None:
+                    if previous.task_content != task_content:
+                        raise ContinuationRejected("continuation_input_conflict")
+                    return previous
+            flow = flows_tx.create_flow(repo, issue_number, installation_id, task_content=task_content,
+                                        continued_from_flow_id=continued_from_flow_id)
             jobs_tx.enqueue_job(
                 flow, JobKind.INITIAL,
                 payload={"issue_number": issue_number} if issue_number is not None else {},
@@ -138,6 +161,8 @@ class ControlService:
             jobs_tx = self.jobs.using(tx)
             stops_tx = self.stops.using(tx)
             fresh = context.flow
+            if fresh is not None and fresh.history_only:
+                raise FlowReadOnly()
             if fresh is None or fresh.current_attempt_id != expected_attempt_id:
                 raise ValueError("Flow Attempt is no longer current")
             if fresh.state is FlowState.ARCHIVED:
@@ -179,6 +204,8 @@ class ControlService:
             tx.serialize_issue(flow.repo, flow.issue_number)
             fresh = tx.lock_workflow(flow.id)
             flows = self.flows.using(tx)
+            if fresh is not None and fresh.history_only:
+                raise FlowReadOnly()
             if fresh is None or fresh.current_attempt_id != expected_attempt_id:
                 raise ValueError("Flow Attempt is no longer current")
             active = flows.get_active_flow(fresh.repo, fresh.issue_number)
@@ -220,6 +247,7 @@ class ControlService:
             remote = payload.get("pull_request") or {}
             if (
                 fresh is None
+                or fresh.history_only
                 or fresh.current_attempt_id != flow.current_attempt_id
                 or delivery is None
                 or delivery.pr_number != remote.get("number")
@@ -256,6 +284,7 @@ class ControlService:
             fresh = context.flow
             if (
                 fresh is None
+                or fresh.history_only
                 or payload.get("action") != "closed"
                 or (payload.get("repository") or {}).get("full_name") != fresh.repo
                 or fresh.installation_id is None
@@ -264,17 +293,7 @@ class ControlService:
                 logger.warning("merge identity does not match flow {}", flow.id)
                 return
             delivery = deliveries_tx.delivery_by_pr(fresh.repo, merge.number)
-            if delivery is None:
-                # An upgraded archive may preserve the PR fact but have no recoverable delivery row.
-                historical = ActivityStore(tx).archived_pr(fresh.repo, merge.number)
-                if historical is None or historical[0] != fresh.id:
-                    return
-                if webhook_store_tx.record_event(delivery_id, "pull_request", fresh.id, payload):
-                    flows_tx.observe_archived_merge(
-                        fresh.id, historical[1], merge, origin="webhook"
-                    )
-                return
-            if delivery.flow_id != fresh.id:
+            if delivery is None or delivery.flow_id != fresh.id:
                 return
             if not webhook_store_tx.record_event(delivery_id, "pull_request", fresh.id, payload):
                 return
@@ -305,6 +324,8 @@ class ControlService:
             tx, fresh = context.database, context.flow
             if fresh is None:
                 raise AgentTaskRejected("flow_not_found")
+            if fresh.history_only:
+                raise FlowReadOnly()
             inputs = AgentInputStore(tx)
             previous = inputs.previous(flow_id, request_id)
             if previous is not None:
@@ -398,6 +419,8 @@ class ControlService:
             fresh = tx.lock_workflow(flow.id)
             if fresh is None:
                 raise RetryRejected("flow_not_found", f"flow {flow.id} disappeared")
+            if fresh.history_only:
+                raise FlowReadOnly()
             if fresh.state is FlowState.ARCHIVED:
                 notices = [result_store_tx.get_plan(job.id) for job in jobs_tx.list_jobs(fresh.id)
                            if job.attempt_id == fresh.current_attempt_id

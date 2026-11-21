@@ -67,9 +67,7 @@ class MergeArchiveNotice(ProtocolModel):
     type: Literal["merge_archive"] = "merge_archive"
     job_id: int = Field(gt=0)
     flow_id: int = Field(gt=0)
-    # The v2 field remains readable without changing its persisted digest.
-    round_no: int | None = Field(default=None, gt=0, exclude_if=lambda value: value is None)
-    attempt_id: int | None = Field(default=None, gt=0, exclude_if=lambda value: value is None)
+    attempt_id: int = Field(gt=0)
     repo: str = Field(min_length=1)
     pr_number: int = Field(gt=0)
     merged_at: AwareDatetime
@@ -86,18 +84,15 @@ def merge_notice_digest(notice: MergeArchiveNotice) -> str:
 class ResultInbox(ProtocolModel):
     """One stored business outcome and its origin, with no delivery metadata."""
 
-    version: Annotated[Literal[1, 2, 3], BeforeValidator(_INTEGER.validate_python)] = 1
+    version: Annotated[Literal[1, 3], BeforeValidator(_INTEGER.validate_python)] = 1
     source: Literal["worker", "control"]
     terminal: Annotated[Succeeded | Failed | MergeArchiveNotice, Field(discriminator="type")]
 
     @model_validator(mode="after")
     def _control_outcome(self) -> Self:
         if isinstance(self.terminal, MergeArchiveNotice):
-            if self.source != "control" or self.version == 1 or (
-                (self.version == 2) != (self.terminal.round_no is not None)
-                or (self.version == 3) != (self.terminal.attempt_id is not None)
-            ):
-                raise ValueError("merge notice identity does not match its Control inbox version")
+            if self.source != "control" or self.version != 3:
+                raise ValueError("merge notices require a v3 Control inbox")
             return self
         if self.version != 1:
             raise ValueError("execution outcomes require the v1 inbox")

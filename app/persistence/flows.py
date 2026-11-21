@@ -44,7 +44,8 @@ class LockedFlow:
 
     def matches(self, *, attempt_id: int | None) -> bool:
         """Compare exact ownership; a None attempt is not a wildcard."""
-        return self.flow is not None and attempt_id is not None and self.flow.current_attempt_id == attempt_id
+        return (self.flow is not None and not self.flow.history_only and attempt_id is not None
+                and self.flow.current_attempt_id == attempt_id)
 
 
 class FlowStore(Repository):
@@ -58,7 +59,7 @@ class FlowStore(Repository):
 
     def create_flow(
         self, repo: str, issue_number: int | None, installation_id: int | None,
-        *, task_content: str | None = None,
+        *, task_content: str | None = None, continued_from_flow_id: int | None = None,
     ) -> Flow:
         if (issue_number is None) == (task_content is None):
             raise ValueError("provide exactly one of issue_number and task_content")
@@ -71,9 +72,9 @@ class FlowStore(Repository):
             tx.serialize_issue(repo, issue_number)
             row = cursor.execute(
                 "INSERT INTO flows(repo, issue_number, installation_id, task_content, state,"
-                " created_at, updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                " created_at, updated_at, continued_from_flow_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                 (repo, issue_number, installation_id, task_content,
-                 decide_flow_state(None, FlowEvent.CREATED, archive_reason=None), now, now),
+                 decide_flow_state(None, FlowEvent.CREATED, archive_reason=None), now, now, continued_from_flow_id),
             ).fetchone()
             flow = required(row)
             attempt = FlowStore(tx).create_current_attempt(flow)
@@ -106,6 +107,12 @@ class FlowStore(Repository):
                 (repo, issue_number),
             ).fetchone()
 
+    def continuation(self, source_id: int) -> Flow | None:
+        with self._db.connection() as connection, connection.cursor(row_factory=class_row(Flow)) as cursor:
+            return cursor.execute(
+                "SELECT * FROM flows WHERE continued_from_flow_id=%s", (source_id,)
+            ).fetchone()
+
     def get_flow_by_pr(self, repo: str, pr_number: int) -> Flow | None:
         with (
             self._db.connection() as connection,
@@ -113,7 +120,7 @@ class FlowStore(Repository):
         ):
             return cursor.execute(
                 "SELECT f.* FROM flows f JOIN attempts a ON a.id=f.current_attempt_id"
-                " WHERE f.repo=%s AND a.delivery_pr_number=%s ORDER BY f.id DESC LIMIT 1",
+                " WHERE NOT f.history_only AND f.repo=%s AND a.delivery_pr_number=%s ORDER BY f.id DESC LIMIT 1",
                 (repo, pr_number),
             ).fetchone()
 
@@ -131,6 +138,8 @@ class FlowStore(Repository):
 
         if self._db._bound_connection is None:
             raise RuntimeError("Flow transition requires a workflow transaction")
+        if flow.history_only:
+            raise ValueError("flow_read_only")
         state = decide_flow_state(flow.state, event, archive_reason=flow.archive_reason)
         if state is None:
             return flow
@@ -201,9 +210,10 @@ class FlowStore(Repository):
                 metadata={"title": title, "job_id": job_id},
             )
 
-    def verify(self, flow_id: int) -> dict[str, tuple[object, object]]:
+    def verify(self, flow_id: int) -> dict[str, tuple[object, object]] | None:
         """Compare a ledger replay with the stored row as ``column: (replayed, stored)``.
 
+        None means the frozen source ledger was checked at cutover, not replayed here.
         Raises ValueError for an unknown Flow or a ledger that cannot be replayed.
         """
         with self._db.transaction() as tx, tx.connection() as connection, \
@@ -214,6 +224,8 @@ class FlowStore(Repository):
             ).fetchone()
             if stored is None:
                 raise ValueError(f"Flow {flow_id} does not exist")
+            if stored.history_only:
+                return None
             replayed = replay_flow(
                 flow_id, ActivityStore(tx).flow_facts(flow_id), task_content=stored.task_content
             )

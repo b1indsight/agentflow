@@ -497,7 +497,7 @@ async def test_concurrent_application_has_one_remote_sender(scenario, monkeypatc
     assert [j.kind for j in store.jobs.list_jobs(job.flow_id)] == [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
 
 
-async def test_process_interruption_recovers_a_running_effect(scenario, monkeypatch) -> None:
+async def test_process_interruption_recovers_effect_without_duplicate_comment(scenario, monkeypatch) -> None:
     store, github, job, result = scenario
     accepted = asyncio.Event()
     original = Issue.comment

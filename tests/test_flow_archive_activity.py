@@ -119,7 +119,6 @@ def test_delayed_old_attempt_merge_does_not_change_resumed_flow(store, archived)
     assert store.flows.get_flow(resumed.id) == resumed
     assert authority(store, resumed.id) == before
     assert activity.archived(resumed.id, archived.required_attempt_id) == original
-    assert activity.archived_pr(resumed.repo, MERGE.number) == (resumed.id, archived.required_attempt_id)
     history = activity.history(resumed.id, archived.required_attempt_id)
     merges = [item for item in history if item.kind == "merge"]
     assert len(merges) == 1
@@ -283,6 +282,20 @@ def test_saved_merge_evidence_can_be_corrected_despite_unrelated_comments(store,
     events = activity.history(archived.id, archived.required_attempt_id)
     assert len([e for e in events if e.kind == "merge"]) == 1
     assert len([e for e in events if e.kind == "archive_correction"]) == 1
+
+
+def test_history_only_rejects_new_activity_without_advancing_snapshot(store, archived):
+    # A stale collector or direct ledger call must not change the preserved conversation.
+    with store.connection() as connection:
+        connection.execute("UPDATE flows SET history_only=TRUE WHERE id=%s", (archived.id,))
+    activity = ActivityStore(store.database)
+    snapshot = activity.page(archived.id).snapshot
+    observation = Observation(key="late", source="issue.comments", kind="comment", author="user",
+                              occurred_at=NOW, updated_at=NOW, body="Late comment")
+    assert not activity.append(archived.id, observation)
+    with pytest.raises(ValueError, match="flow_read_only"):
+        activity.append_flow(archived.id, archived.required_attempt_id, "merge", occurred_at=NOW, metadata={})
+    assert activity.page(archived.id).snapshot == snapshot
 
 
 def test_workflow_evidence_cannot_be_overwritten_or_forged_by_observation(store, archived):

@@ -64,6 +64,7 @@ class ReviewStore(Repository):
             delivery = DeliveryStore(tx).get_delivery(flow_id)
             if (
                 flow is None
+                or flow.history_only
                 or flow.state in TERMINAL_STATES
                 or flow.archive_reason is not None
                 or flow.current_attempt_id is None
@@ -104,12 +105,12 @@ class ReviewStore(Repository):
             return True
 
     def issue_comment_cutoff(self, flow: Flow) -> datetime | None:
-        """Only a reopened Attempt excludes Issue history, including its ambiguous start second."""
+        """Exclude shared Issue history before a continuation or reopened Attempt starts."""
         with self._db.connection() as connection:
             row = connection.execute(
-                "SELECT a.created_at FROM attempts a WHERE a.id=%s AND EXISTS"
-                " (SELECT 1 FROM attempts other WHERE other.flow_id=a.flow_id AND other.id<>a.id)",
-                (flow.current_attempt_id,),
+                "SELECT a.created_at FROM attempts a WHERE a.id=%s AND (%s OR EXISTS"
+                " (SELECT 1 FROM attempts other WHERE other.flow_id=a.flow_id AND other.id<>a.id))",
+                (flow.current_attempt_id, flow.continued_from_flow_id is not None),
             ).fetchone()
         return row["created_at"].replace(microsecond=0) + timedelta(seconds=1) if row else None
 
@@ -265,9 +266,10 @@ class ReviewStore(Repository):
         """Settle at most one batch per Flow under the existing workflow lock."""
         with self._db.connection() as connection:
             candidates = connection.execute(
-                "SELECT flow_id FROM review_buffers WHERE due_at<=%s"
+                "SELECT r.flow_id FROM review_buffers r JOIN flows f ON f.id=r.flow_id"
+                " WHERE NOT f.history_only AND due_at<=%s"
                 " UNION SELECT b.flow_id FROM review_batches b JOIN flows f ON f.id=b.flow_id"
-                " WHERE b.state IN ('ready','processing','waiting') AND f.state IN ('finalizing','archived')"
+                " WHERE NOT f.history_only AND b.state IN ('ready','processing','waiting') AND f.state IN ('finalizing','archived')"
                 " ORDER BY flow_id",
                 (self._db.now(),),
             ).fetchall()

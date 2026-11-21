@@ -19,7 +19,10 @@ from app.contracts.protocol import (
     result_header,
 )
 from app.controler.workers.files import FileService
+from app.persistence.database import Database
+from scripts.migrate_flow_attempts import migrate
 from tests.test_conversation_proxy import history_connection as history_connection  # noqa: PLC0414
+from tests.test_flow_attempt_migration import legacy as legacy  # noqa: PLC0414
 
 
 @pytest.fixture
@@ -42,6 +45,23 @@ async def answer(socket, request, *, epoch="epoch", content=b"", payload=None):
                           content_base64=payload if payload is not None else base64.b64encode(content).decode())
     await socket.incoming.put(WorkerMessage(**message_header(epoch), control=None,
                                             payload=[response]).model_dump_json())
+
+
+async def test_cutover_retires_old_file_links_without_reusing_them(legacy, peers):
+    # Public file links have no Flow ID. Even the same worker/file pair must get a
+    # new capability when a writable Flow registers it after the offline cutover.
+    db = Database(legacy)
+    files = FileService(peers, database=db)
+    try:
+        old = files.store.register("worker", uuid4().hex)
+        assert migrate(legacy, apply=True)["applied"]
+        with pytest.raises(FileFailure, match="file_not_found"):
+            await files.read(old.link_id)
+        fresh = files.store.register(old.worker_id, old.file_id)
+        assert fresh.link_id != old.link_id
+        assert files.store.get(fresh.link_id) == fresh
+    finally:
+        db.close()
 
 
 async def test_file_routing_isolates_worker_identity(files, peers, history_connection):

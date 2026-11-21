@@ -46,6 +46,7 @@ import {
 } from "./activity";
 import { ConversationSources, SourceList } from "./ConversationSources";
 import { CreateFlow } from "./CreateFlow";
+import { ContinueFlow } from "./ContinueFlow";
 import { FileViewer } from "./FileViewer";
 import { AgentTaskInput } from "./AgentTaskInput";
 import type { WorkerFile } from "./files";
@@ -479,7 +480,7 @@ function DetailPanel({
   }, []);
   const submit = async (action: "archive" | "resume" | "retry") => {
     // Fence all writes synchronously, before React renders disabled buttons.
-    if (writing.current || !flow) return;
+    if (writing.current || !flow || flow.history_only) return;
     writing.current = true;
     setPending(action);
     setWriteError("");
@@ -518,7 +519,8 @@ function DetailPanel({
     }
   };
   const [compactHead, setCompactHead] = useState(false);
-  const [files, setFiles] = useState<WorkerFile[]>([]);
+  const [openFiles, setFiles] = useState<WorkerFile[]>([]);
+  const files = flow?.history_only ? [] : openFiles;
   const activeFile = files.find((file) => `file-${file.id}` === tab);
   const baseTab =
     flowTabs.find(({ value }) => value === tab)?.value ?? "conversation";
@@ -796,6 +798,11 @@ function DetailPanel({
             </div>
             <div className="links">
               <span>{flow.repo}</span>
+              {flow.continued_from_flow_id != null && (
+                <a href={`#flow/${flow.continued_from_flow_id}/overview`}>
+                  来源 Flow #{flow.continued_from_flow_id}
+                </a>
+              )}
               {flow.issue_number !== null && flow.issue_url && (
                 <a href={flow.issue_url} target="_blank" rel="noreferrer">
                   Issue #{flow.issue_number} ↗
@@ -808,6 +815,15 @@ function DetailPanel({
                 <a href={flow.pr_url} target="_blank" rel="noreferrer">
                   PR #{flow.pr_number} ↗
                 </a>
+              )}
+              {flow.history_only && (
+                <ContinueFlow
+                  source={flow}
+                  onCreated={(next) => {
+                    onChanged();
+                    location.hash = `flow/${next}/overview`;
+                  }}
+                />
               )}
             </div>
             <TabsList aria-label="Flow 详情">
@@ -883,82 +899,92 @@ function DetailPanel({
                   {
                     overview: (
                       <>
-                        <section
-                          className={`execution-summary phase-${flow.phase}`}
-                        >
-                          <span className="eyebrow">当前动作</span>
-                          <h2>{actionLabel(flow)}</h2>
-                          <p>{flow.reason}</p>
-                          <div className="next-step">
-                            <span>下一步条件</span>
-                            <p>{flow.next_condition}</p>
-                          </div>
-                          <div className="round-actions">
-                            {flow.lifecycle === "blocked" && (
-                              <Button
-                                className="btn"
-                                aria-label={
-                                  pending === "retry" ? "正在提交重试…" : "重试"
-                                }
-                                title={
-                                  pending === "retry" ? "正在提交重试…" : "重试"
-                                }
-                                disabled={pending !== null}
-                                onClick={() => void submit("retry")}
-                              >
-                                <RefreshCw />
-                                {pending === "retry" && "正在提交重试…"}
-                              </Button>
-                            )}
-                            {flow.lifecycle === "archived" ? (
-                              <>
-                                <p id="resume-hint">
-                                  重新开工将在同一 Flow
-                                  开始新的执行，从待处理开始并使用新
-                                  PR，保留历史记录；不会重试已结束的执行。
-                                </p>
+                        {!flow.history_only && (
+                          <section
+                            className={`execution-summary phase-${flow.phase}`}
+                          >
+                            <span className="eyebrow">当前动作</span>
+                            <h2>{actionLabel(flow)}</h2>
+                            <p>{flow.reason}</p>
+                            <div className="next-step">
+                              <span>下一步条件</span>
+                              <p>{flow.next_condition}</p>
+                            </div>
+                            <div className="round-actions">
+                              {flow.lifecycle === "blocked" && (
                                 <Button
                                   className="btn"
-                                  aria-describedby="resume-hint"
+                                  aria-label={
+                                    pending === "retry"
+                                      ? "正在提交重试…"
+                                      : "重试"
+                                  }
+                                  title={
+                                    pending === "retry"
+                                      ? "正在提交重试…"
+                                      : "重试"
+                                  }
                                   disabled={pending !== null}
-                                  onClick={() => void submit("resume")}
+                                  onClick={() => void submit("retry")}
                                 >
                                   <RefreshCw />
-                                  {pending === "resume"
-                                    ? "正在重新开工…"
-                                    : "重新开工"}
+                                  {pending === "retry" && "正在提交重试…"}
                                 </Button>
-                              </>
-                            ) : flow.lifecycle === "finalizing" ? (
-                              <p>
-                                正在结束本次执行。停止确认、结果对账及收尾未完成前不会归档，请刷新查看进展。
-                              </p>
-                            ) : (
-                              <Button
-                                className="btn"
-                                disabled={pending !== null}
-                                onClick={() => void submit("archive")}
-                              >
-                                <Archive />
-                                {pending === "archive"
-                                  ? "正在请求归档…"
-                                  : "归档"}
-                              </Button>
-                            )}
-                          </div>
-                          {writeError && <p role="alert">{writeError}</p>}
-                          {writeNotice && <p role="status">{writeNotice}</p>}
-                        </section>
+                              )}
+                              {flow.lifecycle === "archived" ? (
+                                <>
+                                  <p id="resume-hint">
+                                    重新开工将在同一 Flow
+                                    开始新的执行，从待处理开始并使用新
+                                    PR，保留历史记录；不会重试已结束的执行。
+                                  </p>
+                                  <Button
+                                    className="btn"
+                                    aria-describedby="resume-hint"
+                                    disabled={pending !== null}
+                                    onClick={() => void submit("resume")}
+                                  >
+                                    <RefreshCw />
+                                    {pending === "resume"
+                                      ? "正在重新开工…"
+                                      : "重新开工"}
+                                  </Button>
+                                </>
+                              ) : flow.lifecycle === "finalizing" ? (
+                                <p>
+                                  正在结束本次执行。停止确认、结果对账及收尾未完成前不会归档，请刷新查看进展。
+                                </p>
+                              ) : (
+                                <Button
+                                  className="btn"
+                                  disabled={pending !== null}
+                                  onClick={() => void submit("archive")}
+                                >
+                                  <Archive />
+                                  {pending === "archive"
+                                    ? "正在请求归档…"
+                                    : "归档"}
+                                </Button>
+                              )}
+                            </div>
+                            {writeError && <p role="alert">{writeError}</p>}
+                            {writeNotice && <p role="status">{writeNotice}</p>}
+                          </section>
+                        )}
                         {flow.task_content && (
                           <section
                             className="task-content"
                             aria-label="原始任务内容"
                           >
                             <h2 className="panel-title">原始任务内容</h2>
-                            <ActivityMarkdown
-                              text={flow.task_content}
-                              url={null}
-                            />
+                            <OpenWorkerFile
+                              value={flow.history_only ? "history-only" : null}
+                            >
+                              <ActivityMarkdown
+                                text={flow.task_content}
+                                url={null}
+                              />
+                            </OpenWorkerFile>
                           </section>
                         )}
                         <h2 className="panel-title">任务信息</h2>
@@ -1021,12 +1047,16 @@ function DetailPanel({
                       </>
                     ),
                     conversation: (
-                      <OpenWorkerFile value={openFile}>
+                      <OpenWorkerFile
+                        value={flow.history_only ? "history-only" : openFile}
+                      >
                         <Conversation
                           key={id}
                           id={id}
                           root={detail}
-                          refresh={refresh + acceptedInputs}
+                          refresh={
+                            flow.history_only ? null : refresh + acceptedInputs
+                          }
                           lastRefresh={lastActivityRefresh}
                         />
                       </OpenWorkerFile>
@@ -1094,36 +1124,40 @@ function DetailPanel({
             </section>
           </TabsContent>
         </div>
-        <AgentTaskInput
-          busy={pending !== null}
-          mode={
-            flow.lifecycle === "archived"
-              ? "archived"
-              : flow.lifecycle === "finalizing" || flow.archive_reason !== null
-                ? "note"
-                : "active"
-          }
-          onSubmit={async (instruction, requestId) => {
-            if (writing.current) throw new Error("正在提交其他操作，请稍候。");
-            writing.current = true;
-            setPending("agent-task");
-            try {
-              const value = await appendAgentTask(id, instruction, requestId);
-              onChanged();
-              if (mounted.current) {
-                setAcceptedInputs((count) => count + 1);
-                setFlow((prior) =>
-                  prior && prior.state_version > value.state_version
-                    ? prior
-                    : value,
-                );
-              }
-            } finally {
-              writing.current = false;
-              if (mounted.current) setPending(null);
+        {!flow.history_only && (
+          <AgentTaskInput
+            busy={pending !== null}
+            mode={
+              flow.lifecycle === "archived"
+                ? "archived"
+                : flow.lifecycle === "finalizing" ||
+                    flow.archive_reason !== null
+                  ? "note"
+                  : "active"
             }
-          }}
-        />
+            onSubmit={async (instruction, requestId) => {
+              if (writing.current)
+                throw new Error("正在提交其他操作，请稍候。");
+              writing.current = true;
+              setPending("agent-task");
+              try {
+                const value = await appendAgentTask(id, instruction, requestId);
+                onChanged();
+                if (mounted.current) {
+                  setAcceptedInputs((count) => count + 1);
+                  setFlow((prior) =>
+                    prior && prior.state_version > value.state_version
+                      ? prior
+                      : value,
+                  );
+                }
+              } finally {
+                writing.current = false;
+                if (mounted.current) setPending(null);
+              }
+            }}
+          />
+        )}
       </main>
     </Tabs>
   );
@@ -1137,9 +1171,10 @@ function Conversation({
 }: {
   id: number;
   root: React.RefObject<HTMLElement | null>;
-  refresh: number;
+  refresh: number | null;
   lastRefresh: React.RefObject<number>;
 }) {
+  const historyOnly = refresh === null;
   const { state, load, onRange, onAnchor, readProvenance, retry } =
     useConversation(id, refresh, lastRefresh);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(
@@ -1251,11 +1286,13 @@ function Conversation({
   ]);
   return (
     <>
-      <ConversationSources
-        sources={state.sources}
-        busy={state.busy}
-        refresh={() => load(true)}
-      />
+      {!historyOnly && (
+        <ConversationSources
+          sources={state.sources}
+          busy={state.busy}
+          refresh={() => load(true)}
+        />
+      )}
       {Object.values(state.changes).some(Boolean) && (
         <p className="conversation-divider" role="status">
           快照更新：
@@ -1372,6 +1409,8 @@ function Conversation({
             {state.busy && "正在加载更多交互…"}
           </button>
         </div>
+      ) : historyOnly ? (
+        <p className="conversation-divider">已到保存记录末尾</p>
       ) : (
         <button
           className="refresh-boundary conversation-divider"

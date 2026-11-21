@@ -120,6 +120,8 @@ class ConsoleSynchronizer:
                     )
                 else:
                     assert claim.installation_id is not None
+                    if not await self.db(lambda: self.store.remote_read_allowed(claim)):
+                        return
                     repo = self.github.installation(claim.installation_id).repository(claim.repo)
                     page_remote = await read_source(
                         repo, claim.issue_number, claim.pr_number, claim.source, claim.cursor, 20

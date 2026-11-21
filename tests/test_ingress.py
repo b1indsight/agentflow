@@ -19,7 +19,7 @@ from app.controler.events.webhooks import WebhookConsumer
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.conversation import ConversationService
 from app.controler.workflow.service import ControlService
-from app.domain.models import Flow, FlowState, JobKind
+from app.domain.models import FlowState
 from app.persistence.store import Store
 from app.plugins import get_plugin_manager
 from app.telemetry.metrics import Metrics
@@ -73,24 +73,6 @@ class WebhookRuntime(ServerRuntime):
             await asyncio.gather(*self.tasks)
 
 
-class RoutingService(ControlService):
-    def __init__(self, store: Store) -> None:
-        super().__init__(database=store.database)
-
-    def create_flow(
-        self, repo: str, issue_number: int | None, installation_id: int | None,
-        *, task_content: str | None = None,
-    ) -> Flow:
-        flow = self.flows.create_flow(repo, issue_number, installation_id, task_content=task_content)
-        with self.flows.locked(flow.id) as context:
-            assert context.flow is not None
-            self.jobs.using(context.database).enqueue_job(context.flow, JobKind.INITIAL)
-        return flow
-
-    def notify_jobs(self) -> None:
-        pass
-
-
 @pytest.fixture
 def runtime() -> WebhookRuntime:
     return WebhookRuntime()
@@ -133,7 +115,7 @@ async def test_valid_signature_dispatches_webhook(
     )
     runtime = WebhookRuntime(
         EventRouter(
-            RoutingService(store),
+            ControlService(database=store.database),
             settings,
             bot_login="flowtool[bot]",
             database=store.database,

@@ -4,9 +4,11 @@
 首次部署选择新数据库/schema 与新 worker root，serve/worker 固定到同一 commit/镜像 digest；
 schema 初始化只创建当前结构。合并归档调整不增加 DDL；前置的[多工作区并发版本](../plan/worker-workspace-concurrency.md)仍须独立核验 workers 结构及物理位置迁移。
 
-## 从轮号切换至 Attempt（数据库 schema v2）
+## 将旧 Flow 保留为只读历史（数据库 schema v3）
 
-仅支持已有六态账本、合表和多工作区的未标记旧库。空库直接初始化；当前库的 `flowtool_schema_version.version` 为 `2`。启动控制端不会自动迁移旧库。先在旧版本核对账本，按[冷备与恢复](backup-restore.md)恢复一个独立 PostgreSQL 副本。以下从**新版本源码根目录**运行，示例 service 名指向副本，不能让副本连接生产 Worker 或 GitHub：
+**只迁移全部 Flow 均已归档的旧库。** 预检和 `--apply` 都检查这个条件。发现未归档记录时报告 Flow ID 和状态并停止，不跳过记录，也不替用户归档。迁移保留原链接、归档结论和任务正文，释放 Issue 所有权。需要继续处理时，从旧详情创建新 Flow；切换后创建的 Flow 可正常运行和重新开工。
+
+支持已有六态账本、合表和多工作区的未标记轮号库，以及有标记的 v2 Attempt 库。空库直接初始化为 v3。旧库不能通过启动服务来升级；未知或混合结构需人工核对。先在旧版本核对账本、按[冷备与恢复](backup-restore.md)恢复独立 PostgreSQL 副本。以下从**新版本源码根目录**运行，service 名指向副本，不要让副本连接生产 Worker 或 GitHub：
 
 ```sh
 uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_copy' > preflight.json
@@ -14,13 +16,11 @@ uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_
 uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_copy' --apply
 ```
 
-第一条以只读快照检查每轮原始开工事实、首个 initial、候选 Attempt、归档/更正、当前交付和回执摘要。查看 `rounds[].disposition`（`preserve`/`create`/`conflict`）及**所有** `conflicts`；只要有冲突，整个库都不能切换。多个候选、开工时间不明、归属矛盾或摘要不符时，根据报告的 Flow、轮号、Job 或活动版本调查原始证据；不能按最大 ID、快照采集时间或 PR 更新时间猜测。首轮快照可用其原始 Flow 创建时间，后续轮次必须有可信的重开边界。
+第一条只读。检查 `status`（`legacy` 或 `v2`）、**全部** `conflicts` 及轮号库的 `rounds[].disposition`。预检拒绝未完成的 Job（含独立推理）、未应用的收件、未释放的绑定/Worker 占位、未确认停止、未结清的工具调用或副作用、未处理 webhook、未定的 Projects 远端新增、仍在处理的评审批次。不要删队列、伪造停止回执或覆写结果让检查通过。回到旧版本按报出的身份结清；无法证明真实进程已退出或远端写入已对账时，停止升级。
 
-`--apply` 在锁内重做检查，同一事务内回填并重放账本、安装约束和新投影，最后提交；二次执行应为 `status=current, applied=false`。复核每个 Flow 的当前指针、每个 Job 的归属、各 Attempt 的开工时间及归档结论，核对备份中的活动版本、key、父引用、结果与 digest。只迁移仍在 Flow 上的交付，不从旧 PR/归档事实伪造已被覆盖的分支或 head。未归属的共享活动和独立推理保持无归属。
+`--apply` 在独占锁内重做检查，同一事务内完成身份回填、历史标记、队列退役和版本提交。原轮号与已存在 Attempt 必须有唯一对应；未曾准备执行的轮次，只按可证实的创建/重开边界补齐身份。保留原有 Attempt 的 ID、时间戳及会话；不猜测被覆盖的分支或 head。只在事务内使用临时轮号映射；v2 的旧映射表在同一事务内移除。历史收件、计划和 effects 作为原始证据保留，不解码旧计划、不改写 JSON、不重新签名，也不再派发或重试。
 
-历史兼容表 `flow_attempt_legacy_map(flow_id,round_no,attempt_id)` 只服务迁移前的身份，不为新开工分配轮号。旧 v2 合并通知先按原格式和 digest 核验；仅可用该映射及原 Job 读取，不能替换 JSON 或重签摘要。已冻结计划、旧回执与 effects 保留原值。
-
-首次重新采集外部活动时，使用来源传入的原始时间与文本核对旧摘要，不从数据库时区或转义后的显示正文重造签名。Worker 历史应带有可验证的 `metadata.attempt_id`；其与原轮号冲突时预检拒绝。复核同一条未改的 GitHub/Worker 记录没有增加版本、共享 Issue 内容仍无归属；真实编辑和 thread/check 状态往返仍应保留。
+在恢复入口前，二次执行应返回 `status=current, applied=false`。对比备份：Flow ID、选择的 Attempt、归档结论、活动版本/key/父引用/元数据、作业收件和 digest 应对应；无归属的共享活动仍无归属。核实 `SELECT count(*) FROM flows WHERE NOT history_only OR is_issue_owner` 为零，旧 Console 同步不再 pending、无 claim，旧 Projects/对账不再排队，来源限制、覆盖缺口和已采集正文仍可查看。**不要用重新采集旧内容验证切换**。在隔离副本上通过旧链接查看归档记录，验证继续工作时打开新 Flow，原链接仍指向旧记录。
 
 正式切换需另行授权。停止**全部**入口、控制端、Worker、定时写入方；记录/排空在途任务、外部操作和未确认停止，保存并验证数据库及原 Worker root/HOME 备份可恢复，再在停写库执行上述核对。API、Console、CLI、Worker 同步发布。恢复写入前若失败，事务会回滚；若已提交可恢复停写备份并运行旧版本。恢复写入后**不可**直接降级或覆盖库：先停写、保存增量与外部事实，再前向修复或对账恢复。
 
@@ -32,7 +32,7 @@ uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_
 
 ## 合并归档与资源回收分离
 
-Control 核验 PR 合并后先提交业务归档，原 Worker 的停止、精确回执与 GitHub 通知独立收尾。新合并不再派发 Worker ARCHIVE；仅新的 Control 通知写 inbox v2。Worker 执行仍写 v1，wire20、journal v5 和 manifest v3 不因这项调整再次升级。
+对可运行的 Flow，Control 核验 PR 合并后先提交业务归档，原 Worker 的停止、精确回执与 GitHub 通知独立收尾。新合并不再派发 Worker ARCHIVE；当前 Control 合并通知写 inbox v3，Worker 执行写 v1。只读历史不参加这套恢复流程。
 
 在维护窗口暂停入口和新分配，备份数据库及原 worker root/HOME，盘点冻结任务、dispatch authorization、终态回执、effect ledger、停止请求和各位置 generation。当前环境已由用户确认不存在遗留 Worker ARCHIVE 任务，本次不新增该类任务的恢复或交接逻辑；既有历史格式读取、原回执与 digest 保持不变。若盘点发现不符合此前提的任务，停止升级并单独核验。
 

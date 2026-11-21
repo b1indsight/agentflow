@@ -181,8 +181,7 @@ FlowStore.transition(flow, event)          调用方已持有 lock_workflow
 `repo`、`issue_number`、`task_content`、`installation_id`、`title`、`state`、`current_attempt_id`、
 `archive_reason`、`archive_summary`、`archived_at`、`created_at`、`updated_at`。
 
-`flowtool flow verify [FLOW_ID]` 不带参数时检查全部 Flow，只报告差异并以非零状态退出，不自动修复。
-测试夹具在每个 PostgreSQL 用例结束时对全部 Flow 运行同一校验。
+`flowtool flow verify [FLOW_ID]` 不带参数时检查所有新版 Flow，遇到差异以非零状态退出，不自动修复。迁移时已核对旧库账本并保留原始事件格式；命令会逐条说明跳过的只读 Flow，不把它们计入重放成功数。测试夹具对新版 Flow 运行同一校验。
 
 ## 9. 存量数据
 

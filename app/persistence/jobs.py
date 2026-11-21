@@ -29,8 +29,9 @@ MAY_HAVE_EXECUTED_SQL = (
 
 # New live operations require the immutable assignment's exact current claim (unaliased jobs).
 # Historical terminal receipt replays are validated against their stored digest instead.
+WRITABLE_JOB_SQL = "NOT EXISTS (SELECT 1 FROM flows WHERE id=jobs.flow_id AND history_only)"
 CURRENT_WORKSPACE_SQL = (
-    " EXISTS (SELECT 1 FROM workers slot WHERE slot.worker_id=jobs.assigned_worker_id"
+    f" {WRITABLE_JOB_SQL} AND EXISTS (SELECT 1 FROM workers slot WHERE slot.worker_id=jobs.assigned_worker_id"
     " AND slot.workspace=jobs.workspace AND slot.generation=jobs.generation"
     " AND ((jobs.kind='inference' AND slot.current_inference_job_id=jobs.id)"
     " OR (jobs.kind<>'inference' AND slot.current_job_id=jobs.id)))"
@@ -126,7 +127,7 @@ class JobStore(Repository):
             row = cursor.execute(
                 "INSERT INTO jobs(flow_id,attempt_id,kind,state,attempt,payload,created_at,"
                 " updated_at,source_job_id,source_key) SELECT id,current_attempt_id,%s,%s,0,%s,%s,%s,%s,%s"
-                " FROM flows WHERE id=%s AND current_attempt_id=%s AND (%s::bigint IS NULL OR EXISTS"
+                " FROM flows WHERE NOT history_only AND id=%s AND current_attempt_id=%s AND (%s::bigint IS NULL OR EXISTS"
                 " (SELECT 1 FROM jobs src WHERE src.id=%s AND src.attempt_id=flows.current_attempt_id))"
                 " ON CONFLICT(source_job_id,source_key) WHERE source_job_id IS NOT NULL"
                 " DO UPDATE SET source_key=excluded.source_key"
@@ -234,6 +235,7 @@ class JobStore(Repository):
         with self._db.connection() as connection:
             row = connection.execute(
                 "SELECT COALESCE(MAX(id),0) AS ceiling FROM jobs WHERE state=%s"
+                f" AND {WRITABLE_JOB_SQL}"
                 " AND result_received_at IS NOT NULL AND result_applied_at IS NULL",
                 (JobState.RUNNING,),
             ).fetchone()
@@ -251,6 +253,7 @@ class JobStore(Repository):
         ):
             return cursor.execute(
                 "SELECT * FROM jobs WHERE state=%s AND result_received_at IS NOT NULL"
+                f" AND {WRITABLE_JOB_SQL}"
                 " AND result_applied_at IS NULL AND id>%s"
                 " AND (%s::bigint IS NULL OR id<=%s) ORDER BY id LIMIT %s",
                 (JobState.RUNNING, after_id, through_id, through_id, limit),

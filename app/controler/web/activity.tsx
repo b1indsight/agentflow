@@ -64,7 +64,7 @@ function MarkdownImage({ src, alt, title }: ComponentProps<"img">) {
 }
 
 export const OpenWorkerFile = createContext<
-  ((file: WorkerFile) => void) | null
+  ((file: WorkerFile) => void) | "history-only" | null
 >(null);
 
 function MarkdownLink({
@@ -136,6 +136,7 @@ export function ActivityMarkdown({
   url: string | null;
   onFileOpen?: (file: WorkerFile) => void;
 }) {
+  const historyOnly = useContext(OpenWorkerFile) === "history-only";
   const id = useId();
   const body = useRef<HTMLDivElement>(null);
   const footnoteLabel = `${id}-footnote-label`;
@@ -234,6 +235,13 @@ export function ActivityMarkdown({
             const destination = /^[a-z][a-z\d+.-]*:/i.test(safe)
               ? new URL(safe)
               : new URL(safe, sourceUrl ?? undefined);
+            // A bare absolute attachment link would still read a live Worker in another tab.
+            if (
+              historyOnly &&
+              destination.origin === location.origin &&
+              destination.pathname.startsWith("/api/files/")
+            )
+              return undefined;
             if (key === "src" && !/^https?:$/.test(destination.protocol))
               return undefined;
             return defaultUrlTransform(destination.href) || undefined;
@@ -336,7 +344,9 @@ function BodyPage({
             text={part}
             url={entry.url}
             onFileOpen={
-              entry.source === "worker" ? (openFile ?? undefined) : undefined
+              entry.source === "worker" && typeof openFile === "function"
+                ? openFile
+                : undefined
             }
           />
         ),

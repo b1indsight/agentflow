@@ -170,6 +170,52 @@ def test_manual_creation_without_issue_is_atomic_visible_and_owner_only(console_
     assert console_runtime.gateway.wake_all.called
 
 
+def test_history_link_stays_readable_after_concurrent_continuation(console_runtime, store, recording_resources):
+    console_runtime.github = RecordingGitHub()
+    source = store.flows.create_flow("owner/repo", None, 42, task_content="旧任务")
+    ControlService(database=store.database).cancel(source)
+    with store.connection() as c:
+        c.execute("UPDATE flows SET history_only=true WHERE id=%s", (source.id,))
+    path = f"/api/flows/{source.id}"
+    identity = {"expected_attempt_id": source.required_attempt_id}
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        before = client.get(path, headers=headers).json()
+        assert before["history_only"] and before["lifecycle"] == "archived"
+        for action, body in (("archive", {**identity, "reason": "abandoned", "summary": ""}),
+                             ("resume", identity), ("retry", {}),
+                             ("agent-tasks", {"request_id": str(uuid4()), "instruction": "迟到的请求"})):
+            response = client.post(f"{path}/{action}", headers=headers, json=body)
+            assert (response.status_code, response.json()) == (409, {"detail": "flow_read_only"})
+        payload = {"repo": source.repo, "installation_id": 42, "task_content": "修订后的任务",
+                   "continued_from_flow_id": source.id}
+        with ThreadPoolExecutor(2) as pool:
+            responses = list(pool.map(lambda _: client.post("/api/flows", headers=headers, json=payload), range(2)))
+        assert [r.status_code for r in responses] == [200, 200]
+        new = responses[0].json()
+        assert new["id"] == responses[1].json()["id"] != source.id
+        assert new["continued_from_flow_id"] == source.id and not new["history_only"]
+        assert new["current_attempt_id"] != source.required_attempt_id and new["task_content"] == payload["task_content"]
+        assert [j.kind for j in store.jobs.list_jobs(new["id"])] == [JobKind.INITIAL]
+        assert [f["id"] for f in client.get("/api/flows?q=is:active", headers=headers).json()["items"]] == [new["id"]]
+        for mismatch in ({"installation_id": 43}, {"repo": "other/repo"}, {"continued_from_flow_id": new["id"]},
+                         {"task_content": "另一个标签页修改了正文"}):
+            assert client.post("/api/flows", headers=headers, json=payload | mismatch).status_code == 409
+        assert client.get(path, headers=headers).json() == before
+
+
+def test_continue_issue_opens_existing_live_flow_without_queuing_work(store):
+    service = ControlService(database=store.database)
+    source = store.flows.create_flow("owner/repo", 91, 42)
+    service.cancel(source)
+    with store.connection() as c:
+        c.execute("UPDATE flows SET history_only=true,is_issue_owner=false WHERE id=%s", (source.id,))
+    active = service.create_flow(source.repo, 91, 42)
+    jobs = store.jobs.list_jobs(active.id)
+    opened = service.create_flow(source.repo, 91, 42, continued_from_flow_id=source.id)
+    assert opened.id == active.id and store.jobs.list_jobs(active.id) == jobs
+
+
 @pytest.mark.parametrize("changes", [
     {"task_content": None},
     {"issue_number": 7},
@@ -708,7 +754,7 @@ async def test_merged_console_is_archived_while_original_cleanup_is_pending(cons
 
 
 @pytest.mark.parametrize("reason", ["succeeded", "abandoned"])
-def test_archive_is_idempotent_and_resume_opens_a_new_round(console_runtime, store, reason):
+def test_archive_is_idempotent_and_resume_starts_a_new_attempt(console_runtime, store, reason):
     flow = store.flows.create_flow("owner/repo", 7, 42)
     path = f"/api/flows/{flow.id}/archive"
     payload = {"reason": reason, "summary": "本次执行结论", "expected_attempt_id": flow.current_attempt_id}
@@ -785,12 +831,11 @@ def test_archive_is_idempotent_and_resume_opens_a_new_round(console_runtime, sto
             "int_type",
         ),
         (ResumeRequest, {}, "expected_attempt_id", "missing"),
-        (ResumeRequest, {"expected_round_no": 1}, "expected_attempt_id", "missing"),
         (ResumeRequest, {"expected_attempt_id": 0}, "expected_attempt_id", "greater_than"),
         (ResumeRequest, {"expected_attempt_id": "1"}, "expected_attempt_id", "int_type"),
     ],
 )
-def test_round_command_schema_rejects_invalid_fields(model, payload, field, error):
+def test_archive_and_resume_reject_invalid_fields(model, payload, field, error):
     # Field validation needs only the request DTO; HTTP rejection is covered above.
     with pytest.raises(ValidationError) as failure:
         model.model_validate(payload)

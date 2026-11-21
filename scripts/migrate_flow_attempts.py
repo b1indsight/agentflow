@@ -1,7 +1,6 @@
-"""Offline v1 (unmarked round ledger) → v2 migration. Run as python -m scripts.migrate_flow_attempts."""
+"""Offline history-only cutover for an unmarked round ledger or marked v2 Attempt ledger."""
 
 import argparse
-import hashlib
 import json
 from collections import defaultdict
 
@@ -9,77 +8,45 @@ import psycopg
 from psycopg import Connection, sql
 from psycopg.rows import dict_row
 
-from app.contracts.protocol import InferenceResult
-from app.contracts.receipts import MergeArchiveNotice, decode_result_inbox
-from app.contracts.result_models import ResultPlan
 from app.domain.flow_policy import LEDGER_COLUMNS, FlowFact, replay_flow
 from app.persistence.database import flow_schema_version, mark_flow_schema_current
 from app.persistence.records import Row
 from app.persistence.schema import SCHEMAS
 
 
-def _receipts(c: Connection[Row], conflicts: list[str]) -> list[Row]:
-    """Verify original-format digests before interpreting the round or frozen plan."""
-    receipts = []
-    for j in c.execute("""
-        SELECT j.id,j.kind,j.flow_id,j.round_no,j.result_payload,j.result_digest,j.assignment_token,
-               r.digest,r.plan,a.id AS candidate,f.repo FROM jobs j LEFT JOIN result_applications r ON r.job_id=j.id
-               LEFT JOIN flows f ON f.id=j.flow_id
-               LEFT JOIN attempts a ON a.flow_id=j.flow_id AND a.round_no=j.round_no
-        WHERE j.result_payload IS NOT NULL OR j.result_digest IS NOT NULL OR r.job_id IS NOT NULL
-        ORDER BY j.id
-        """):
-        receipts.append(
-            {"job_id": j["id"], "digest": j["result_digest"], "frozen_plan": j["plan"] is not None}
-        )
-        try:
-            payload = j["result_payload"]
-            if not isinstance(payload, dict) or not isinstance(j["result_digest"], str):
-                conflicts.append(f"job {j['id']}: missing receipt or digest")
-                continue
-            if j["kind"] == "inference":
-                result = InferenceResult.model_validate(payload)
-                if (
-                    result.job_id != j["id"]
-                    or result.assignment_token != j["assignment_token"]
-                    or hashlib.sha256(result.model_dump_json().encode()).hexdigest()
-                    != j["result_digest"]
-                ):
-                    raise ValueError("inference receipt owner or digest mismatch")
-            else:
-                inbox = decode_result_inbox(
-                    payload,
-                    job_id=j["id"],
-                    assignment_token=j["assignment_token"],
-                    result_digest=j["result_digest"],
-                )
-                if isinstance(inbox.terminal, MergeArchiveNotice) and (
-                    inbox.version != 2
-                    or j["kind"] != "archive"
-                    or inbox.terminal.repo != j["repo"]
-                    or (inbox.terminal.flow_id, inbox.terminal.round_no)
-                    != (j["flow_id"], j["round_no"])
-                ):
-                    raise ValueError("merge receipt owner mismatch")
-            plan = j["plan"]
-            if plan is not None and (
-                not isinstance(plan, dict)
-                or plan.get("job_id") != j["id"]
-                or plan.get("flow_id") != j["flow_id"]
-                or plan.get("digest") != j["result_digest"]
-                or j["digest"] != j["result_digest"]
-                or (plan.get("attempt_id") is not None and plan["attempt_id"] != j["candidate"])
-                or (
-                    plan.get("archive_notice") is not None
-                    and plan["archive_notice"] != payload.get("terminal")
-                )
-            ):
-                raise ValueError("frozen plan owner, receipt or digest mismatch")
-            if plan is not None:
-                ResultPlan.from_legacy(plan, flow_id=j["flow_id"], attempt_id=j["candidate"])
-        except ValueError as error:
-            conflicts.append(f"job {j['id']} receipt/plan: {error}")
-    return receipts
+def _unsafe(c: Connection[Row]) -> list[str]:
+    """Never discard execution, source receipts or an uncertain remote write to make a cutover pass."""
+    return [
+        f"{r['source']} {r['id']}: not settled"
+        for r in c.execute("""
+        SELECT 'job' AS source,j.id::text AS id FROM jobs j WHERE state NOT IN ('done','failed')
+          OR kind NOT IN ('initial','revision','archive','inference')
+          OR ((result_payload IS NOT NULL OR result_digest IS NOT NULL OR result_received_at IS NOT NULL
+               OR result_applied_at IS NOT NULL) AND (result_payload IS NULL OR result_digest IS NULL
+               OR result_received_at IS NULL OR result_applied_at IS NULL))
+          OR (kind<>'inference' AND (started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL
+              OR (kind='archive' AND payload->'archive' IS NOT NULL)) AND (result_received_at IS NULL
+              OR (started_at IS NOT NULL AND result_payload->>'source' IS DISTINCT FROM 'worker'))
+              AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.job_id=j.id
+                  AND s.flow_id=j.flow_id AND s.assignment_token=j.assignment_token AND s.state='confirmed'))
+        UNION ALL SELECT 'result application',j.id::text FROM result_applications r JOIN jobs j ON j.id=r.job_id
+          WHERE j.result_digest IS DISTINCT FROM r.digest OR j.result_applied_at IS NULL
+        UNION ALL SELECT 'binding',flow_id::text FROM flow_executions WHERE released_at IS NULL
+        UNION ALL SELECT 'worker slot',worker_id||':'||workspace FROM workers
+          WHERE current_job_id IS NOT NULL OR current_inference_job_id IS NOT NULL
+        UNION ALL SELECT 'stop',request_id FROM execution_stops WHERE state<>'confirmed'
+          OR confirmed_at IS NULL OR receipt_digest IS NULL
+        UNION ALL SELECT 'effect',concat(job_id,':',effect_key) FROM result_effects
+          WHERE state NOT IN ('succeeded','failed','skipped') OR claimed_by IS NOT NULL OR claim_expires_at IS NOT NULL
+          OR (dispatched_at IS NOT NULL AND receipt IS NULL)
+        UNION ALL SELECT 'tool call',call_id FROM flow_tool_calls WHERE response IS NULL
+        UNION ALL SELECT 'webhook',delivery_id FROM events WHERE state<>'done' OR claim_token IS NOT NULL
+          OR claim_expires_at IS NOT NULL
+        UNION ALL SELECT 'project add',id::text FROM project_projections WHERE add_started
+        UNION ALL SELECT 'review batch',id::text FROM review_batches WHERE state IN ('ready','processing')
+        ORDER BY source,id
+    """)
+    ]
 
 
 def _verify_ledger(flow: Row, facts: list[Row], current: int) -> None:
@@ -256,19 +223,18 @@ def _inventory(c: Connection[Row]) -> Row:
           HAVING count(DISTINCT (flow_id,round_no))>1
     """)
     conflicts.extend(f"{r['source']} {r['id']}: inconsistent owner" for r in ownership)
-    receipts = _receipts(c, conflicts)
     counts = c.execute(
         "SELECT (SELECT count(*) FROM jobs WHERE flow_id IS NULL) AS standalone_jobs,"
         "(SELECT count(*) FROM console_activity WHERE round_no IS NULL AND source<>'worker')"
         " AS unattributed_activity"
     ).fetchone()
     assert counts
-    return {"rounds": rounds, "receipt_jobs": receipts, "conflicts": conflicts, **counts}
+    return {"rounds": rounds, "conflicts": conflicts, **counts}
 
 
-def _apply(c: Connection[Row], rounds: list[Row]) -> None:
-    """No projections during backfill: reinstall canonical triggers/view after their inputs switch."""
-    for table in ("flows", "attempts", "jobs"):
+def _convert_rounds(c: Connection[Row], rounds: list[Row]) -> None:
+    """Only backfill structural ownership. Never rewrite opaque content or original evidence."""
+    for table in ("attempts", "jobs"):
         c.execute(sql.SQL("DROP TRIGGER console_fact_changed ON {}").format(sql.Identifier(table)))
     c.execute("DROP TRIGGER console_preserve_evidence ON console_activity; DROP VIEW console_facts")
     c.execute(
@@ -295,12 +261,12 @@ def _apply(c: Connection[Row], rounds: list[Row]) -> None:
     c.execute(
         "ALTER TABLE attempts ADD UNIQUE(flow_id,id); ALTER TABLE flows DROP CONSTRAINT fk_flows_current_attempt"
     )
-    mark_flow_schema_current(c)
+    c.execute("""CREATE TEMP TABLE round_map(flow_id bigint,round_no integer,attempt_id bigint UNIQUE,
+        PRIMARY KEY(flow_id,round_no)) ON COMMIT DROP""")
     for r in rounds:
         fid, n, start = r["flow_id"], r["round_no"], r["start"]
         if r["attempt_ids"]:
             (aid,) = r["attempt_ids"]
-            c.execute("UPDATE attempts SET created_at=%s WHERE id=%s", (start, aid))
         else:
             created = c.execute(
                 "INSERT INTO attempts(flow_id,round_no,created_at,updated_at) VALUES(%s,%s,%s,%s) RETURNING id",
@@ -308,18 +274,14 @@ def _apply(c: Connection[Row], rounds: list[Row]) -> None:
             ).fetchone()
             assert created
             aid = created["id"]
-        c.execute("INSERT INTO flow_attempt_legacy_map VALUES(%s,%s,%s)", (fid, n, aid))
+        c.execute("INSERT INTO pg_temp.round_map VALUES(%s,%s,%s)", (fid, n, aid))
     c.execute("""
-        UPDATE flows f SET current_attempt_id=m.attempt_id FROM flow_attempt_legacy_map m
+        UPDATE flows f SET current_attempt_id=m.attempt_id FROM pg_temp.round_map m
           WHERE (f.id,f.current_round_no)=(m.flow_id,m.round_no);
-        UPDATE jobs j SET attempt_id=m.attempt_id FROM flow_attempt_legacy_map m
+        UPDATE jobs j SET attempt_id=m.attempt_id FROM pg_temp.round_map m
           WHERE (j.flow_id,j.round_no)=(m.flow_id,m.round_no);
-        UPDATE console_activity a SET attempt_id=m.attempt_id,
-          kind=CASE WHEN source='flow' AND kind='round_resumed' THEN 'attempt_started' ELSE kind END,
-          metadata=CASE WHEN source='flow' AND kind='snapshot' THEN
-              (metadata-'current_round_no')||jsonb_build_object('current_attempt_id',m.attempt_id)
-            ELSE metadata END
-          FROM flow_attempt_legacy_map m WHERE (a.flow_id,a.round_no)=(m.flow_id,m.round_no);
+        UPDATE console_activity a SET attempt_id=m.attempt_id FROM pg_temp.round_map m
+          WHERE (a.flow_id,a.round_no)=(m.flow_id,m.round_no);
         UPDATE console_activity s SET attempt_id=a.id FROM attempts a WHERE s.source='worker'
           AND s.round_no IS NULL AND s.flow_id=a.flow_id AND s.metadata->>'attempt_id'=a.id::text;
         ALTER TABLE jobs ADD FOREIGN KEY(flow_id,attempt_id) REFERENCES attempts(flow_id,id) MATCH FULL;
@@ -331,14 +293,6 @@ def _apply(c: Connection[Row], rounds: list[Row]) -> None:
             " FROM flows f WHERE f.current_attempt_id=a.id"
         ).format(names, names)
     )
-    for flow in c.execute("SELECT * FROM flows ORDER BY id"):
-        facts = c.execute(
-            """SELECT kind,attempt_id,occurred_at,metadata FROM console_activity
-            WHERE flow_id=%s AND source='flow' AND kind NOT IN ('state','baseline','inference_exhausted')
-            ORDER BY version""",
-            (flow["id"],),
-        ).fetchall()
-        _verify_ledger(flow, facts, flow["current_attempt_id"])
     c.execute(
         sql.SQL("ALTER TABLE flows DROP current_round_no, {}").format(
             sql.SQL(",").join(
@@ -349,8 +303,39 @@ def _apply(c: Connection[Row], rounds: list[Row]) -> None:
     c.execute(
         "ALTER TABLE attempts DROP round_no; ALTER TABLE jobs DROP round_no; ALTER TABLE console_activity DROP round_no"
     )
+    # A populated round-era card is deliberately not re-published by the new frozen-card
+    # projection. Adapt only its structural identity fields; do not append another event.
+    c.execute("""UPDATE console_flows c SET facts=(c.facts-'current_round_no')||jsonb_build_object(
+            'current_attempt_id',a.id,'attempt_id',a.id,'attempt_started_at',a.created_at)
+        FROM flows f JOIN attempts a ON a.id=f.current_attempt_id
+        WHERE f.id=c.flow_id AND c.facts<>'{}'""")
+
+
+def _freeze(c: Connection[Row], status: str, rounds: list[Row]) -> None:
+    # Do not let the old projection trigger publish a state transition for a change in authority.
+    c.execute("DROP TRIGGER console_fact_changed ON flows")
+    if status == "legacy":
+        _convert_rounds(c, rounds)
+    else:
+        c.execute("DROP TABLE flow_attempt_legacy_map,flowtool_schema_version")
+    c.execute("ALTER TABLE flows ADD history_only boolean NOT NULL DEFAULT false")
+    c.execute("UPDATE flows SET history_only=true,is_issue_owner=false")
+    # A public link names a worker file, not a Flow. Retire old capabilities as one registry.
+    c.execute("ALTER TABLE worker_file_links RENAME TO historical_worker_file_links")
     for schema in SCHEMAS:
         c.execute(schema)
+    # Keep coverage, timestamps, gaps, cursors and source content. Stopping a scan does not
+    # imply it ever reached EOF. These are work queues, not external-write acknowledgements.
+    c.execute("""
+        UPDATE console_sync SET pending=false,dirty=false,claim_token=NULL,claim_until=NULL,
+          status=CASE WHEN status IN ('pending','syncing') THEN 'partial' ELSE status END
+          WHERE pending OR dirty OR claim_token IS NOT NULL OR claim_until IS NOT NULL;
+        DELETE FROM project_projections;
+        DELETE FROM reconcile_checks;
+        UPDATE review_buffers SET due_at=NULL WHERE due_at IS NOT NULL;
+        UPDATE console_activity SET awaiting_agent=false WHERE awaiting_agent;
+    """)
+    mark_flow_schema_current(c)
 
 
 def migrate(database_url: str, *, apply: bool = False) -> Row:
@@ -360,16 +345,40 @@ def migrate(database_url: str, *, apply: bool = False) -> Row:
             c.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         status = flow_schema_version(c)
         report: Row = {"status": status, "applied": False, "conflicts": [], "rounds": []}
-        if status != "legacy":
+        if status not in {"legacy", "v2"}:
             return report
         if apply:
             c.execute(
-                "LOCK flows,attempts,jobs,console_activity,console_flows,flow_tool_calls,"
-                "result_applications,review_batches IN ACCESS EXCLUSIVE MODE NOWAIT"
+                "LOCK flows,attempts,jobs,console_activity,console_flows,console_sync,flow_tool_calls,"
+                "result_applications,result_effects,workers,flow_executions,execution_stops,events,review_buffers,"
+                "review_batches,reconcile_checks,project_projections,worker_file_links IN ACCESS EXCLUSIVE MODE NOWAIT"
             )
-        report.update(_inventory(c))
+            # Another completed cutover may have released its locks since the first read.
+            if flow_schema_version(c) != status:
+                raise ValueError("schema changed during preflight; rerun offline")
+        report["conflicts"] = [
+            f"flow {row['id']}: not archived ({row['state']})"
+            for row in c.execute("SELECT id,state FROM flows WHERE state<>'archived' ORDER BY id")
+        ]
+        if report["conflicts"]:
+            return report
+        if status == "legacy":
+            report.update(_inventory(c))
+        else:
+            for f in c.execute("SELECT * FROM flows ORDER BY id"):
+                facts = c.execute(
+                    """SELECT kind,attempt_id,occurred_at,metadata FROM console_activity
+                    WHERE flow_id=%s AND source='flow' AND kind NOT IN ('state','baseline','inference_exhausted')
+                    ORDER BY version""",
+                    (f["id"],),
+                ).fetchall()
+                try:
+                    _verify_ledger(f, facts, f["current_attempt_id"])
+                except (ValueError, KeyError) as error:
+                    report["conflicts"].append(f"flow {f['id']}: {error}")
+        report["conflicts"].extend(_unsafe(c))
         if apply and not report["conflicts"]:
-            _apply(c, report["rounds"])
+            _freeze(c, status, report["rounds"])
             report["applied"] = True
         return report
 

@@ -130,12 +130,10 @@ def verify_merge_notice(
     flow: Flow, job: Job, notice: MergeArchiveNotice, *, activity: ActivityStore,
 ) -> None:
     """Authorize only an unassigned Control notice backed by immutable archive facts."""
-    owner = (activity.legacy_attempt(flow.id, notice.round_no) if notice.round_no is not None
-             else notice.attempt_id)
-    archived = activity.archived(flow.id, job.attempt_id) if job.attempt_id is not None else None
+    archived = activity.archived(flow.id, notice.attempt_id)
     if (job.kind is not JobKind.ARCHIVE or notice.job_id != job.id
             or notice.flow_id != flow.id or notice.repo != flow.repo
-            or owner != job.attempt_id
+            or notice.attempt_id != job.attempt_id
             or job.started_at is not None or job.dispatch_authorized_at is not None
             or any(value is not None for value in (
                 job.assigned_worker_id, job.assignment_token, job.workspace, job.generation,

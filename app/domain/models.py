@@ -121,6 +121,8 @@ class Flow(BaseModel):
     task_content: str | None = None
     title: str | None = None
     title_job_id: int | None = None
+    history_only: bool = False
+    continued_from_flow_id: int | None = None
     state: FlowState
     installation_id: int | None = None
     current_attempt_id: int | None = None
@@ -150,6 +152,8 @@ class Flow(BaseModel):
 
     def accepts(self, kind: JobKind) -> bool:
         """Finalization never authorizes more coding, even if its PR is reopened."""
+        if self.history_only:
+            return False
         if kind is JobKind.ARCHIVE:
             return self.state is FlowState.FINALIZING
         return self.state in WORKING_STATES and self.archive_reason is None

@@ -56,7 +56,7 @@ class ConsoleSyncStore(Repository):
                 "a.id AS attempt_id,a.delivery_pr_number AS pr_number,f.installation_id,f.created_at"
                 " FROM console_sync s JOIN flows f ON f.id=s.flow_id"
                 " JOIN attempts a ON a.id=f.current_attempt_id"
-                " WHERE s.pending AND s.next_at<=%s"
+                " WHERE NOT f.history_only AND s.pending AND s.next_at<=%s"
                 " AND (s.source='worker' OR NOT EXISTS (SELECT 1 FROM console_installation_backoff b"
                 " WHERE b.installation_id=f.installation_id AND b.until_at>%s))"
                 " AND (s.claim_until IS NULL OR s.claim_until<%s) ORDER BY s.next_at,s.flow_id,s.source"
@@ -73,13 +73,24 @@ class ConsoleSyncStore(Repository):
             )
         return SyncClaim(**row, claim_token=token)
 
+    def remote_read_allowed(self, claim: SyncClaim) -> bool:
+        """A queued page can lose its claim or PR while waiting for an I/O slot."""
+        with self._db.connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM console_sync s JOIN flows f ON f.id=s.flow_id"
+                " JOIN attempts a ON a.id=f.current_attempt_id"
+                " WHERE s.flow_id=%s AND s.source=%s AND s.claim_token=%s AND s.pending"
+                " AND NOT f.history_only AND a.id=%s AND a.delivery_pr_number IS NOT DISTINCT FROM %s",
+                (claim.flow_id, claim.source, claim.claim_token, claim.attempt_id, claim.pr_number),
+            ).fetchone() is not None
+
     @staticmethod
     def _owns_publication(connection: Connection[Row], claim: SyncClaim) -> bool:
         """Lock publication before source rows; worker pages span historical Attempts."""
         row = connection.execute(
             "SELECT facts FROM console_flows WHERE flow_id=%s FOR UPDATE", (claim.flow_id,)
         ).fetchone()
-        return row is not None and (claim.source == "worker" or (
+        return row is not None and not row["facts"]["history_only"] and (claim.source == "worker" or (
             row["facts"]["current_attempt_id"] == claim.attempt_id
             and row["facts"]["pr_number"] == claim.pr_number
         ))
@@ -282,9 +293,10 @@ class ConsoleSyncStore(Repository):
             flows = connection.execute(
                 "SELECT f.id,a.id AS attempt_id,a.delivery_pr_number AS pr_number FROM flows f"
                 " JOIN attempts a ON a.flow_id=f.id"
-                " WHERE lower(f.repo)=lower(%s) AND ((f.issue_number=%s AND a.id=f.current_attempt_id)"
-                " OR a.delivery_pr_number=ANY(%s) OR (%s::text IS NOT NULL AND a.delivery_head_sha=%s)) ORDER BY f.id",
-                (repo, issue_number, sorted(pull_numbers), sha, sha),
+                " WHERE NOT f.history_only AND lower(f.repo)=lower(%s)"
+                " AND ((f.issue_number=%s AND a.id=f.current_attempt_id)"
+                " OR a.delivery_pr_number=ANY(%s) OR a.delivery_head_sha=%s) ORDER BY f.id",
+                (repo, issue_number, sorted(pull_numbers), None if pull_numbers else sha),
             ).fetchall()
             owners: dict[int, set[int | None]] = {}
             matching_attempts: dict[int, set[int]] = {}
@@ -294,11 +306,6 @@ class ConsoleSyncStore(Repository):
                     flow["attempt_id"] if flow["pr_number"] in pull_numbers else None
                 )
             archive = ActivityStore(tx)
-            for pr_number in sorted(pull_numbers):
-                owner = archive.archived_pr(repo, pr_number)
-                if owner is not None:
-                    flow_id, archived_attempt_id = owner
-                    owners.setdefault(flow_id, set()).add(archived_attempt_id)
             for flow_id, attempts in sorted(owners.items()):
                 # A SHA alone, or a check shared by multiple Attempts, proves no one owner.
                 attempt_id = next(iter(attempts)) if len(attempts) == 1 else None

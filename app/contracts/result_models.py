@@ -115,19 +115,6 @@ class ResultPlan(FrozenModel):
     open_points: list[str] = Field(default_factory=list)
     effects: list[Effect] = Field(default_factory=list)
 
-    @classmethod
-    def from_legacy(cls, data: dict, *, flow_id: int, attempt_id: int | None) -> "ResultPlan":
-        """Project an offline-verified owner into an old frozen plan without rewriting its JSON."""
-        if data.get("flow_id") != flow_id or data.get("attempt_id") not in (None, attempt_id):
-            raise ValueError("frozen plan owner mismatch")
-        delivery = data.get("delivery")
-        if delivery is not None:
-            if (not isinstance(delivery, dict) or delivery.get("flow_id") != flow_id
-                    or "attempt_id" in delivery or attempt_id is None):
-                raise ValueError("unrecognized frozen delivery owner")
-            delivery = {**delivery, "attempt_id": attempt_id}
-        return cls.model_validate({**data, "attempt_id": attempt_id, "delivery": delivery})
-
 
 class EffectState(StrEnum):
     PENDING = "pending"

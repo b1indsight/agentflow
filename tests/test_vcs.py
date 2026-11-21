@@ -83,7 +83,7 @@ async def test_declared_backend_must_match_repository_metadata(tmp_path: Path) -
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(shutil.which("jj") is None, reason="jj is not installed")
-@pytest.mark.parametrize("branch", ["flow/jj", "feat/remove-login", "feat/remove-login-round-2"])
+@pytest.mark.parametrize("branch", ["flow/jj", "feat/remove-login"])
 async def test_jj_outcome_is_verified_from_a_colocated_repository(tmp_path: Path, branch: str) -> None:
     repo, _ = _git_fixture(tmp_path)
     env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}

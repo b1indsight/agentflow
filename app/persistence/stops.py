@@ -105,6 +105,7 @@ class StopStore(Repository):
         with self._db.connection() as conn:
             return conn.cursor(row_factory=class_row(StopIntent)).execute(
                 "SELECT * FROM execution_stops WHERE worker_id=%s AND state!='confirmed'"
+                " AND EXISTS (SELECT 1 FROM flows WHERE id=execution_stops.flow_id AND NOT history_only)"
                 " ORDER BY requested_at,request_id", (worker_id,),
             ).fetchall()
 

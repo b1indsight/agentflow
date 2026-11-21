@@ -272,7 +272,7 @@ async def test_closed_pr_http_observation_replaces_awaiting_review_in_console(st
     assert not store.jobs.list_jobs(flow.id)
 
 
-async def test_reopen_does_not_refreeze_feedback_from_an_abandoned_round(
+async def test_reopening_closed_pr_leaves_cancelled_feedback_inactive(
     store, lifecycle_flow, lifecycle_resources
 ):
     flow, clock = lifecycle_flow
@@ -352,7 +352,7 @@ async def test_reopen_never_reactivates_blocked_or_archived_flow(
 
 
 @pytest.mark.parametrize("action", ["closed", "reopened", "synchronize"])
-async def test_close_webhook_ends_round_while_other_lifecycle_events_are_hints(
+async def test_close_webhook_archives_flow_while_other_lifecycle_events_are_hints(
     store, lifecycle_flow, action
 ):
     flow, _ = lifecycle_flow
@@ -382,8 +382,7 @@ async def test_close_webhook_ends_round_while_other_lifecycle_events_are_hints(
     )
 
 
-@pytest.mark.parametrize("legacy_archive_only", [False, True])
-def test_late_pr_merge_records_only_its_original_attempt(store, lifecycle_flow, legacy_archive_only):
+def test_late_pr_merge_records_only_its_original_attempt(store, lifecycle_flow):
     # A's PR was merged before abandonment, but GitHub delivered that event after B opened PR 29.
     flow, clock = lifecycle_flow
     service = ControlService(database=store.database)
@@ -393,14 +392,6 @@ def test_late_pr_merge_records_only_its_original_attempt(store, lifecycle_flow, 
     assert current is not None and current.pr_number is None
     current.pr_number, current.state = 29, DeliveryState.OPEN
     store.deliveries.update_delivery(current)
-    if legacy_archive_only:
-        # An upgraded overwritten delivery has an archive naming PR 17, but no recoverable branch.
-        with store.connection() as connection:
-            connection.execute(
-                "UPDATE attempts SET delivery_branch=NULL,delivery_base_branch=NULL,delivery_state=NULL,"
-                "delivery_pr_number=NULL,delivery_head_sha=NULL,delivery_version=NULL,"
-                "delivery_created_at=NULL,delivery_updated_at=NULL WHERE id=%s", (flow.required_attempt_id,),
-            )
     payload = {
         "action": "closed", "repository": {"full_name": flow.repo},
         "installation": {"id": flow.installation_id},
@@ -412,10 +403,7 @@ def test_late_pr_merge_records_only_its_original_attempt(store, lifecycle_flow, 
     for receipt in ("merge", "redelivered"):
         router.dispatch("pull_request", receipt, payload)
     original = store.deliveries.get_attempt_delivery(flow.required_attempt_id)
-    if legacy_archive_only:
-        assert original is None
-    else:
-        assert original.state is DeliveryState.MERGED and original.pr_number == 17
+    assert original.state is DeliveryState.MERGED and original.pr_number == 17
     facts = [item.kind for item in ActivityStore(store.database).history(flow.id, flow.required_attempt_id)]
     assert facts.count("merge") == facts.count("archive_correction") == 1
     assert store.flows.get_flow(flow.id) == resumed
@@ -445,7 +433,7 @@ async def test_close_during_capability_preparation_never_dispatches(store, pendi
     assert store.flows.get_flow_execution(flow.id).released_at is None
 
 
-async def test_inflight_revision_is_acknowledged_without_reopening_abandoned_round(
+async def test_inflight_revision_is_acknowledged_without_reopening_closed_delivery(
     store, pending_revision, monkeypatch
 ):
     flow, job, task, github, subject = pending_revision

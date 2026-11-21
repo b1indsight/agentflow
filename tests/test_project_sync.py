@@ -357,6 +357,22 @@ async def test_same_issue_new_flow_takes_over_existing_card(store, projection):
     assert remote.calls.count("add") == 1
 
 
+async def test_project_sweep_waits_for_writable_owner_after_cutover(store, projection):
+    # Even a saved, due projection cannot contact GitHub on the historical owner's behalf.
+    old, clock, _, remote, sync = projection
+    ControlService(database=store.database).cancel(old)
+    await converge(sync)
+    before, calls = state(store), list(remote.calls)
+    with store.connection() as c:
+        c.execute("UPDATE flows SET history_only=true,is_issue_owner=false WHERE id=%s", (old.id,))
+    clock.now += timedelta(seconds=31)
+    await sync.sweep()
+    assert state(store) == before and remote.calls == calls
+    new = store.flows.create_flow(old.repo, old.issue_number, 42)
+    await converge(sync)
+    assert state(store).flow_id == new.id and remote.calls.count("add") == 1
+
+
 async def test_resuming_older_flow_selects_owner_even_after_both_flows_are_archived(
     store, projection
 ):

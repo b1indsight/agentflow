@@ -105,7 +105,7 @@ class InferenceNoticeStore(Repository):
                 " FROM console_activity WHERE flow_id=%s AND version<=%s"
                 " AND source='flow' AND kind='inference_exhausted' ORDER BY key,version DESC)"
                 " SELECT current.*,b.state AS batch_state,b.decision IS NOT NULL AS has_decision,"
-                " coalesce(f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
+                " coalesce(NOT f.history_only AND f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
                 " AND a.delivery_state='open' AND a.id=b.attempt_id,FALSE) AS live"
                 " FROM current JOIN flows f ON f.id=current.flow_id"
                 " JOIN attempts a ON a.id=f.current_attempt_id"

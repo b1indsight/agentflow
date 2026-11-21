@@ -8,10 +8,9 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from app.github.console import Observation
-from app.persistence.activity import ActivityStore
+from app.controler.workflow.service import ControlService
 from app.persistence.database import Database
-from app.persistence.results import ResultStore
+from app.persistence.flows import FlowStore
 from scripts.migrate_flow_attempts import migrate
 
 
@@ -27,8 +26,8 @@ def legacy(postgresql_url):
     with psycopg.connect(postgresql_url, row_factory=dict_row) as c:
         c.execute("""
             DROP VIEW console_facts;
-            DROP TABLE flow_attempt_legacy_map;
             DROP TABLE flowtool_schema_version;
+            ALTER TABLE flows DROP history_only,DROP continued_from_flow_id;
             DROP TRIGGER preserve_job_owner ON jobs;
             DROP TRIGGER require_selected_attempt ON flows;
             ALTER TABLE flows ADD current_round_no integer NOT NULL DEFAULT 1;
@@ -52,34 +51,48 @@ def legacy(postgresql_url):
             ALTER TABLE jobs DISABLE TRIGGER console_fact_changed;
             ALTER TABLE attempts DISABLE TRIGGER console_fact_changed;
             INSERT INTO flows(id,repo,issue_number,state,current_round_no,created_at,updated_at,
-                delivery_branch,delivery_state,delivery_created_at,delivery_updated_at,delivery_version)
-              VALUES(7,'o/r',1,'queued',2,'2026-01-01','2026-01-03','existing-branch','none',now(),now(),3);
+                delivery_branch,delivery_state,delivery_created_at,delivery_updated_at,delivery_version,archived_at,archive_reason)
+              VALUES(7,'o/r',1,'archived',2,'2026-01-01','2026-01-05','existing-branch','none',now(),now(),3,'2026-01-05','abandoned');
             INSERT INTO attempts(id,flow_id,round_no,created_at,updated_at,codex_session_id)
               VALUES(42,7,1,'2026-01-02','2026-01-02','old-session'),(20,7,2,'2026-01-04','2026-01-04',null);
             UPDATE flows SET current_attempt_id=20 WHERE id=7;
-            INSERT INTO flows(id,repo,issue_number,state,created_at,updated_at) VALUES(9,'o/r',2,'queued','2026-01-01','2026-01-01');
-            INSERT INTO console_flows(flow_id,facts,activity_version) VALUES(7,'{}',5),(9,'{}',1);
+            INSERT INTO flows(id,repo,issue_number,state,is_issue_owner,title,created_at,updated_at,archived_at,archive_reason)
+              VALUES(9,'o/r',2,'archived',true,'original title','2026-01-01','2026-01-01','2026-01-01','abandoned');
+            INSERT INTO console_flows(flow_id,facts,activity_version) VALUES(7,'{}',7),(9,'{}',2);
             INSERT INTO console_activity(flow_id,round_no,version,key,source,kind,occurred_at,updated_at,
                       author,title,body,metadata,digest)
               SELECT 9,1,1,'snapshot','flow','snapshot',now(),now(),'a','t','',
                 jsonb_build_object('current_round_no',1,'repo',repo,'issue_number',issue_number,
-                  'task_digest',null,'state',state,'created_at',created_at,'updated_at',updated_at),'original'
+                  'task_digest',null,'state',state,'title',title,'created_at',created_at,'updated_at',updated_at,
+                  'archive_reason',archive_reason,'archived_at',archived_at),'original'
               FROM flows WHERE id=9;
             INSERT INTO console_activity(flow_id,round_no,version,key,source,kind,occurred_at,updated_at,
+                       author,title,body,metadata,digest,awaiting_agent)
+              VALUES(9,1,2,'original-note','agent_task','message',now(),now(),'owner','t','keep this text','{}','digest',true);
+            INSERT INTO console_activity(flow_id,round_no,version,key,source,kind,occurred_at,updated_at,
                        author,title,body,metadata,digest,parent_key)
-              SELECT 7,r,v,k,src,kind,ts::timestamptz,ts::timestamptz,'a','t','',m::jsonb,'original',parent
+              SELECT 7,r,v,k,src,kind,ts::timestamptz,ts::timestamptz,'a','t','original body',m::jsonb,'original',parent
               FROM (VALUES
                 (1,1,'origin','flow','created','2026-01-01','{"repo":"o/r","issue_number":1,"task_digest":null}',null),
                 (1,2,'finish','flow','finalization_requested','2026-01-02','{"archive_reason":"abandoned"}',null),
                 (1,3,'archive','flow','archive','2026-01-02','{"repo":"o/r","archive_reason":"abandoned","pr_number":17}',null),
                 (2,4,'reopen','flow','round_resumed','2026-01-03','{"state":"queued"}',null),
-                (null,5,'shared','github','comment','2026-01-03','{}','archive')
+                (null,5,'shared','github','comment','2026-01-03','{"origin":{"id":345}}','archive'),
+                (2,6,'finish2','flow','finalization_requested','2026-01-05','{"archive_reason":"abandoned"}',null),
+                (2,7,'archive2','flow','archive','2026-01-05','{"archive_reason":"abandoned"}',null)
               ) t(r,v,k,src,kind,ts,m,parent);
             INSERT INTO jobs(id,flow_id,kind,state,round_no,created_at,updated_at)
               VALUES(10,7,'archive','done',1,'2026-01-02','2026-01-02'),
-                    (11,7,'initial','queued',2,'2026-01-03','2026-01-03');
+                    (11,7,'initial','failed',2,'2026-01-03','2026-01-03');
             INSERT INTO jobs(kind,state,inference,created_at,updated_at)
-              VALUES ('inference','queued','{}',now(),now());
+              VALUES ('inference','failed','{}',now(),now());
+            INSERT INTO console_sync(flow_id,source,pending,dirty,claim_token,claim_until,status,limitations,reason)
+              VALUES(9,'worker',true,true,'stale',now(),'syncing','["old gap"]','unreachable'),
+                    (9,'worker:old',false,false,NULL,NULL,'partial','["old gap"]','unreachable');
+            INSERT INTO reconcile_checks(flow_id,source,next_at) VALUES(9,'pull_request',now());
+            INSERT INTO project_projections(repo,issue_number,project_id,flow_id,config_key,desired_status,next_at)
+              VALUES('o/r',2,'project',9,'v','blocked',now());
+            INSERT INTO review_buffers VALUES(9,now());
             ALTER TABLE flows ENABLE TRIGGER console_fact_changed;
             ALTER TABLE jobs ENABLE TRIGGER console_fact_changed;
             ALTER TABLE attempts ENABLE TRIGGER console_fact_changed;
@@ -101,7 +114,7 @@ def legacy(postgresql_url):
         receipt = {"version": 2, "source": "control", "terminal": notice}
         c.execute("ALTER TABLE jobs DISABLE TRIGGER console_fact_changed")
         c.execute(
-            "UPDATE jobs SET result_payload=%s,result_digest=%s WHERE id=10",
+            "UPDATE jobs SET result_payload=%s,result_digest=%s,result_received_at=now(),result_applied_at=now() WHERE id=10",
             (Jsonb(receipt), digest),
         )
         c.execute("ALTER TABLE jobs ENABLE TRIGGER console_fact_changed")
@@ -115,7 +128,7 @@ def legacy(postgresql_url):
                         "flow_id": 7,
                         "attempt_id": 42,
                         "digest": digest,
-                        "state": "done",
+                        "state": "original opaque plan field; no live decoder accepts this",
                         "archive_notice": notice,
                         "delivery": {"flow_id": 7, "branch": "old-pr-branch", "pr_number": 17},
                     }
@@ -133,6 +146,8 @@ def test_upgrade_preserves_boundaries_and_receipts(legacy):
     finally:
         db.close()
     with psycopg.connect(legacy, row_factory=dict_row) as c:
+        history_query = "SELECT flow_id,version,key,kind,body,metadata,digest FROM console_activity ORDER BY flow_id,version"
+        history = c.execute(history_query).fetchall()
         original = c.execute(
             "SELECT result_payload::text,result_digest,plan::text FROM jobs"
             " JOIN result_applications ON jobs.id=job_id"
@@ -142,28 +157,33 @@ def test_upgrade_preserves_boundaries_and_receipts(legacy):
     assert [r["attempt_ids"] for r in report["rounds"]] == [[42], [20], []]
     assert migrate(legacy, apply=True)["applied"]
     assert migrate(legacy, apply=True)["status"] == "current"
-    db = Database(legacy)
-    try:
-        plan = ResultStore(db).get_plan(10)
-        assert plan is not None and plan.delivery is not None
-        assert plan.delivery.attempt_id == plan.attempt_id == 42
-    finally:
-        db.close()
     with psycopg.connect(legacy, row_factory=dict_row) as c:
         attempts = c.execute(
             "SELECT a.*,f.current_attempt_id FROM attempts a JOIN flows f ON f.id=a.flow_id"
             " WHERE a.flow_id=7 ORDER BY a.created_at"
         ).fetchall()
         first, second = attempts
-        assert first["id"] == 42 and first["created_at"].day == 1 and not first["delivery_branch"]
-        assert second["created_at"].day == 3 and second["id"] == second["current_attempt_id"]
+        assert first["id"] == 42 and first["created_at"].day == 2 and not first["delivery_branch"]
+        assert second["created_at"].day == 4 and second["id"] == second["current_attempt_id"]
         assert second["delivery_branch"] == "existing-branch"
-        assert [
-            r["attempt_id"]
-            for r in c.execute(
-                "SELECT attempt_id FROM flow_attempt_legacy_map WHERE flow_id=7 ORDER BY round_no"
-            )
-        ] == [42, 20]
+        assert c.execute("SELECT to_regclass('flow_attempt_legacy_map') AS m").fetchone() == {
+            "m": None
+        }
+        assert c.execute(history_query).fetchall() == history
+        assert not c.execute(
+            "SELECT id FROM flows WHERE NOT history_only OR is_issue_owner"
+        ).fetchall()
+        assert c.execute("SELECT state,title FROM flows WHERE id=9").fetchone() == {
+            "state": "archived",
+            "title": "original title",
+        }
+        assert not c.execute("""SELECT flow_id FROM console_sync WHERE pending OR dirty OR claim_token IS NOT NULL
+            OR claim_until IS NOT NULL UNION ALL SELECT flow_id FROM project_projections UNION ALL SELECT
+            flow_id FROM review_buffers WHERE due_at IS NOT NULL UNION ALL SELECT flow_id FROM reconcile_checks
+            UNION ALL SELECT flow_id FROM console_activity WHERE awaiting_agent""").fetchall()
+        assert c.execute(
+            "SELECT status,limitations,reason FROM console_sync WHERE source='worker:old'"
+        ).fetchone() == {"status": "partial", "limitations": ["old gap"], "reason": "unreachable"}
         assert (
             c.execute(
                 "SELECT result_payload::text,result_digest,plan::text FROM jobs"
@@ -188,6 +208,9 @@ def test_upgrade_preserves_boundaries_and_receipts(legacy):
 @pytest.mark.parametrize(
     ("change", "evidence"),
     [
+        ("""ALTER TABLE flows DISABLE TRIGGER console_fact_changed;
+            UPDATE flows SET state='blocked',archived_at=NULL WHERE id=9;
+            ALTER TABLE flows ENABLE TRIGGER console_fact_changed""", "flow 9: not archived (blocked)"),
         (
             (
                 "ALTER TABLE attempts DISABLE TRIGGER console_fact_changed;"
@@ -202,7 +225,7 @@ def test_upgrade_preserves_boundaries_and_receipts(legacy):
                 "UPDATE jobs SET result_digest='mismatch' WHERE id=10;"
                 "ALTER TABLE jobs ENABLE TRIGGER console_fact_changed"
             ),
-            "job 10 receipt/plan",
+            "result application 10",
         ),
     ],
 )
@@ -234,96 +257,73 @@ def test_interrupted_cutover_rolls_back_data_and_ddl(legacy):
     assert migrate(legacy, apply=True)["applied"]
 
 
-def test_first_rescan_recognizes_original_observation_hashes(legacy):
-    # Frozen from ActivityStore.append at 007a86ab on PostgreSQL. The timestamp offset
-    # and NUL below cannot be reconstructed from timestamptz and escaped display text.
-    timestamp = "2026-01-01T18:11:01.123456-07:00"
-    common = {"occurred_at": timestamp, "updated_at": timestamp, "author": "user"}
-    thread = Observation.model_validate(
-        {
-            **common,
-            "key": "gh:thread",
-            "kind": "thread",
-            "source": "pr.review_threads",
-            "attempt_id": 20,
-            "metadata": {"resolved": False},
-        }
-    )
-    comment = Observation.model_validate(
-        {
-            **common,
-            "key": "shared:issue",
-            "kind": "comment",
-            "source": "issue.comments",
-            "body": "x\0y",
-        }
-    )
-    worker = Observation.model_validate(
-        {
-            **common,
-            "key": "worker:20:0:m",
-            "kind": "message",
-            "source": "worker",
-            "attempt_id": 20,
-            "metadata": {"attempt_id": 20, "record_id": "m"},
-        }
-    )
-    metadata_only = worker.model_copy(
-        update={
-            "key": "worker:20:0:meta-only",
-            "metadata": {"attempt_id": 20, "record_id": "meta-only"},
-        }
-    )
-    originals = [
-        (thread, "1fc9d9895d54e3fa9bf101a61d62cae7cd593562afeac11940a2eb9ed605ec76"),
-        (comment, "88b9105a0c7cae5649496f043e2cde6fe74eb6615f596a6d1cd3a599c58f1c2c"),
-        (worker, "de33f8b94e9917f8ec7d1c5135a68113a523d6da1e142d939f039e417fe627a7"),
-        (metadata_only, "93c50629e7fabcf9f48cdaaa1a7a8cf39d9ca3a6c11f4f9398f5c3c130da5606"),
-    ]
+@pytest.mark.ledger_unverified  # The failed cutover deliberately leaves the round schema in place.
+def test_preflight_rechecks_unsafe_work_under_lock(legacy):
+    assert not migrate(legacy)["conflicts"]
     with psycopg.connect(legacy) as c:
-        for version, (item, digest) in enumerate(originals, 6):
-            c.execute(
-                "INSERT INTO console_activity(flow_id,round_no,key,kind,source,version,occurred_at,"
-                "updated_at,author,title,body,metadata,digest) VALUES(7,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (
-                    2 if item in (thread, worker) else None,
-                    item.key,
-                    item.kind,
-                    item.source,
-                    version,
-                    timestamp,
-                    timestamp,
-                    item.author,
-                    item.title,
-                    item.body.replace("\0", "\\u0000"),
-                    Jsonb(
-                        {"unsupported_characters_escaped": True}
-                        if item is comment
-                        else item.metadata
-                    ),
-                    digest,
-                ),
-            )
-        c.execute("UPDATE console_flows SET activity_version=9 WHERE flow_id=7")
-    assert migrate(legacy, apply=True)["applied"]
-    db = Database(legacy)
+        c.execute("LOCK result_effects IN ROW EXCLUSIVE MODE")
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            migrate(legacy, apply=True)
+    # The read-only report does not authorize writes: new work appeared before cutover.
+    with psycopg.connect(legacy) as c:
+        c.execute("""ALTER TABLE jobs DISABLE TRIGGER console_fact_changed;
+            UPDATE jobs SET state='queued' WHERE id=11;
+            ALTER TABLE jobs ENABLE TRIGGER console_fact_changed;
+            ALTER TABLE flow_executions DISABLE TRIGGER console_fact_changed;
+            INSERT INTO flow_executions VALUES(7,'w',repeat('a',32),1,'o/r',now(),NULL,NULL);
+            ALTER TABLE flow_executions ENABLE TRIGGER console_fact_changed;
+            INSERT INTO execution_stops(request_id,flow_id,job_id,worker_id,workspace,generation,
+                assignment_token,binding_at,requested_at) VALUES('stop',7,11,'w',repeat('a',32),1,'t',now(),now());
+            ALTER TABLE result_effects DISABLE TRIGGER console_fact_changed;
+            INSERT INTO result_effects(job_id,effect_key,position,payload,state,dispatched_at,next_attempt_at)
+              VALUES(10,'send',1,'{}','failed',now(),now());
+            ALTER TABLE result_effects ENABLE TRIGGER console_fact_changed""")
+    report = migrate(legacy, apply=True)
+    assert not report["applied"] and set(report["conflicts"]) == {
+        "binding 7: not settled",
+        "job 11: not settled",
+        "stop stop: not settled",
+        "effect 10:send: not settled",
+    }
+    with psycopg.connect(legacy) as c:
+        assert c.execute("SELECT is_issue_owner FROM flows WHERE id=9").fetchone() == (True,)
+        assert c.execute(
+            "SELECT claim_token FROM console_sync WHERE source='worker'"
+        ).fetchone() == ("stale",)
+
+
+def test_v2_direct_task_cutover(postgresql_url):
+    db = Database(postgresql_url)
     try:
-        activity = ActivityStore(db)
-        for item, _ in originals:
-            assert not activity.append(7, item)
-        # Literal escape is a genuine edit; an older comment version is still a duplicate.
-        assert activity.append(7, comment.model_copy(update={"body": r"x\u0000y"}))
-        assert not activity.append(7, comment)
-        # In contrast, thread/check resolution compares only with the latest version.
-        assert activity.append(7, thread.model_copy(update={"metadata": {"resolved": True}}))
-        assert activity.append(7, thread)
-        assert not activity.append(7, thread)
+        db.init_db()
+        a = FlowStore(db).create_flow("o/r", None, None, task_content="original\ndirect task")
+        ControlService(database=db).cancel(a)
         with db.connection() as c:
-            assert [
-                (r["attempt_id"], r["digest"])
-                for r in c.execute(
-                    "SELECT attempt_id,digest FROM console_activity WHERE flow_id=7 AND version BETWEEN 6 AND 9 ORDER BY version"
-                )
-            ] == [(item.attempt_id, digest) for item, digest in originals]
+            c.execute("""DROP VIEW console_facts;
+                ALTER TABLE flows DROP history_only,DROP continued_from_flow_id;
+                CREATE VIEW console_facts AS SELECT id,repo FROM flows;
+                CREATE TABLE flow_attempt_legacy_map(flow_id bigint,round_no integer,attempt_id bigint UNIQUE,
+                    PRIMARY KEY(flow_id,round_no),FOREIGN KEY(flow_id,attempt_id) REFERENCES attempts(flow_id,id));
+                DROP TABLE flowtool_schema_version;
+                CREATE TABLE flowtool_schema_version(version integer PRIMARY KEY CHECK(version=2));
+                INSERT INTO flowtool_schema_version VALUES(2);
+                INSERT INTO flow_attempt_legacy_map SELECT id,1,current_attempt_id FROM flows""")
+            # Do not mistake a partial/manual v3 upgrade for an unmarked historical cohort.
+            c.execute("ALTER TABLE flows ADD continued_from_flow_id bigint")
+        with pytest.raises(ValueError, match="partial"):
+            migrate(postgresql_url, apply=True)
+        with db.connection() as c:
+            c.execute("ALTER TABLE flows DROP continued_from_flow_id")
+        with pytest.raises(ValueError, match="offline"):
+            db.init_db()
+        assert migrate(postgresql_url)["status"] == "v2"
+        assert migrate(postgresql_url, apply=True)["applied"]
+        archived = FlowStore(db).get_flow(a.id)
+        assert archived and archived.history_only and archived.state == "archived"
+        assert (
+            archived.task_content == a.task_content
+            and archived.current_attempt_id == a.current_attempt_id
+        )
+        assert not migrate(postgresql_url, apply=True)["applied"]
     finally:
         db.close()

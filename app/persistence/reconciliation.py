@@ -13,7 +13,7 @@ from app.github import FeedbackSource
 ReconcileSource = FeedbackSource | Literal["threads"]
 # PR status checks share reconcile_checks with the feedback sources under this source name.
 PR_SOURCE = "pull_request"
-PR_RECONCILE_ELIGIBLE = "a.delivery_pr_number IS NOT NULL AND a.delivery_state<>'merged'"
+PR_RECONCILE_ELIGIBLE = "NOT f.history_only AND a.delivery_pr_number IS NOT NULL AND a.delivery_state<>'merged'"
 _FEEDBACK_RECONCILE_ELIGIBLE = (
     "f.state IN ('queued','running','review') AND f.archive_reason IS NULL"
     " AND a.delivery_state='open' AND a.delivery_pr_number IS NOT NULL"

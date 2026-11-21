@@ -39,10 +39,6 @@ _ATTEMPT_FACTS = frozenset({"archive", "merge", "archive_correction", "attempt_s
 _NON_LEDGER_SQL = "('state','baseline','inference_exhausted')"
 
 
-def _observation_digest(content: dict[str, object]) -> str:
-    return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
 class ActivityCursor(Cursor):
     flow: int
     snapshot: int
@@ -145,8 +141,7 @@ class ActivityStore(Repository):
             if kind in _ATTEMPT_FACTS:
                 previous = ActivityStore(tx).flow_event(flow_id, attempt_id, kind)
                 if previous is not None:
-                    # Migration preserves the original key and display text. Identity is
-                    # (flow, attempt, kind); compare the business evidence, not presentation.
+                    # Compare immutable business evidence, not its presentation.
                     if previous.occurred_at != occurred_at or previous.metadata != metadata:
                         raise ValueError("conflicting immutable Flow activity")
                     return False
@@ -176,25 +171,6 @@ class ActivityStore(Repository):
 
     def archived(self, flow_id: int, attempt_id: int) -> Observation | None:
         return self.flow_event(flow_id, attempt_id, "archive")
-
-    def legacy_attempt(self, flow_id: int, round_no: int) -> int | None:
-        """Resolve an immutable v2 merge receipt using only its offline migration evidence."""
-        with self._db.connection() as connection:
-            row = connection.execute(
-                "SELECT attempt_id FROM flow_attempt_legacy_map WHERE flow_id=%s AND round_no=%s",
-                (flow_id, round_no),
-            ).fetchone()
-        return row["attempt_id"] if row else None
-
-    def archived_pr(self, repo: str, pr_number: int) -> tuple[int, int] | None:
-        with self._db.connection() as connection:
-            row = connection.execute(
-                "SELECT flow_id,attempt_id FROM console_activity"
-                " WHERE source='flow' AND kind='archive'"
-                " AND lower(metadata->>'repo')=lower(%s) AND (metadata->>'pr_number')::integer=%s",
-                (repo, pr_number),
-            ).fetchone()
-        return (row["flow_id"], row["attempt_id"]) if row else None
 
     def history(self, flow_id: int, attempt_id: int) -> list[ActivityItem]:
         """Read the ordered internal audit for an Attempt, without hiding earlier facts."""
@@ -241,16 +217,19 @@ class ActivityStore(Repository):
         item = escaped
         with self._db.transaction() as tx, tx.connection() as connection:
             row = connection.execute(
-                "SELECT activity_version FROM console_flows WHERE flow_id=%s FOR UPDATE", (flow_id,)
+                "SELECT c.activity_version,f.history_only FROM console_flows c"
+                " JOIN flows f ON f.id=c.flow_id WHERE c.flow_id=%s FOR UPDATE OF c", (flow_id,)
             ).fetchone()
             if row is None:
                 raise ConsoleFailure("flow_not_found", 404)
+            if row["history_only"]:
+                if item.source == "flow":
+                    raise ValueError("flow_read_only")
+                return False
             previous = connection.execute(
-                "SELECT a.parent_key,a.digest,a.attempt_id,m.round_no AS legacy_round FROM console_activity a"
-                " LEFT JOIN flow_attempt_legacy_map m ON m.flow_id=a.flow_id"
-                " AND m.attempt_id=COALESCE(a.attempt_id,%s) WHERE a.flow_id=%s"
-                " AND a.key=%s ORDER BY a.version DESC LIMIT 1",
-                (item.attempt_id, flow_id, item.key),
+                "SELECT parent_key,digest,attempt_id FROM console_activity"
+                " WHERE flow_id=%s AND key=%s ORDER BY version DESC LIMIT 1",
+                (flow_id, item.key),
             ).fetchone()
             if previous and previous["attempt_id"] is not None:
                 if item.attempt_id is not None and item.attempt_id != previous["attempt_id"]:
@@ -260,34 +239,16 @@ class ActivityStore(Repository):
             if previous and previous["parent_key"] and item.parent_key is None:
                 item = item.model_copy(update={"parent_key": previous["parent_key"]})
                 content["parent_key"] = previous["parent_key"]
-            digest = _observation_digest(content)
-            matches = [digest]
-            if (
-                previous
-                and item.source != "flow"
-                and (item.attempt_id is None or previous["legacy_round"] is not None)
-            ):
-                # Hash the incoming, unescaped source using its proven historical identity.
-                # Neither original timestamp offsets nor NULs can be recovered from PostgreSQL.
-                legacy = {k: v for k, v in content.items() if k != "attempt_id"}
-                matches.append(
-                    _observation_digest({**legacy, "round_no": previous["legacy_round"]})
-                )
-                if (
-                    item.source == "worker"
-                    and item.attempt_id is not None
-                    and item.metadata.get("attempt_id") == item.attempt_id
-                ):
-                    # Some rows had only the Worker's original metadata for attribution.
-                    matches.append(_observation_digest({**legacy, "round_no": None}))
+            encoded = json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
+            digest = hashlib.sha256(encoded).hexdigest()
             # Thread resolution and optional check enrichment have no remote revision clock.
             # Keep A→B→A transitions; repeated reads of the current A are still idempotent.
             duplicate = (
-                (previous and previous["digest"] in matches)
+                (previous and previous["digest"] == digest)
                 if item.kind in ("thread", "check")
                 else connection.execute(
-                    "SELECT 1 FROM console_activity WHERE flow_id=%s AND key=%s AND digest=ANY(%s)",
-                    (flow_id, item.key, matches),
+                    "SELECT 1 FROM console_activity WHERE flow_id=%s AND key=%s AND digest=%s",
+                    (flow_id, item.key, digest),
                 ).fetchone()
             )
             if duplicate:

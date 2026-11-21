@@ -30,7 +30,7 @@ from app.domain.recovery_policy import (
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.inference import InferenceStore
-from app.persistence.jobs import CURRENT_WORKSPACE_SQL, JobStore
+from app.persistence.jobs import CURRENT_WORKSPACE_SQL, WRITABLE_JOB_SQL, JobStore
 from app.persistence.records import required
 from app.persistence.repository import Repository
 from app.persistence.results import RESOURCE_JOB_SQL
@@ -49,7 +49,7 @@ _ASSIGNMENT_FLOW = (
 # The state and delivery terms are the set form of Flow.accepts and
 # FlowDelivery.supersedes (app/domain/models.py); change them together.
 _ELIGIBLE_JOB = (
-    " AND j.kind<>'inference' AND j.attempt_id=f.current_attempt_id"
+    " AND NOT f.history_only AND j.kind<>'inference' AND j.attempt_id=f.current_attempt_id"
     " AND ((j.kind='archive' AND f.state='finalizing') OR (j.kind<>'archive'"
     " AND f.state IN ('queued','running','review') AND f.archive_reason IS NULL))"
     " AND (j.prepare_next_at IS NULL OR j.prepare_next_at<=%s)"
@@ -120,7 +120,7 @@ class AssignmentStore(Repository):
             if caller is None:
                 return None
             pending = connection.cursor(row_factory=class_row(Job)).execute(
-                "SELECT * FROM jobs WHERE state='queued' AND kind='inference' ORDER BY created_at,id",
+                f"SELECT * FROM jobs WHERE state='queued' AND kind='inference' AND {WRITABLE_JOB_SQL} ORDER BY created_at,id",
             ).fetchall()
         inference = InferenceStore(self._db)
         for job in pending:
@@ -721,7 +721,7 @@ class AssignmentStore(Repository):
             # Worker -> Flow -> Job, also for recovery. Never wait for a Flow
             # after locking its job while a result writer holds the opposite order.
             locked_flows = connection.cursor(row_factory=class_row(Flow)).execute(
-                "SELECT * FROM flows WHERE id IN (SELECT flow_id FROM jobs WHERE state IN ('queued','running')"
+                "SELECT * FROM flows WHERE NOT history_only AND id IN (SELECT flow_id FROM jobs WHERE state IN ('queued','running')"
                 " UNION SELECT flow_id FROM flow_executions WHERE released_at IS NULL) ORDER BY id FOR NO KEY UPDATE"
             ).fetchall()
             flows = {flow.id: flow for flow in locked_flows}
@@ -737,7 +737,8 @@ class AssignmentStore(Repository):
                 " EXISTS (SELECT 1 FROM execution_stops s WHERE s.flow_id=j.flow_id"
                 " AND s.state!='confirmed') AS has_pending_stop"
                 " FROM jobs j JOIN flows f ON f.id=j.flow_id JOIN attempts a ON a.id=j.attempt_id"
-                " WHERE j.kind<>'inference' AND j.state='running' AND (j.lease_expires_at<=%s OR j.recovery_deadline<=%s)"
+                " WHERE NOT f.history_only AND j.kind<>'inference' AND j.state='running'"
+                " AND (j.lease_expires_at<=%s OR j.recovery_deadline<=%s)"
                 " ORDER BY j.id FOR UPDATE OF j",
                 (now, now),
             ).fetchall()

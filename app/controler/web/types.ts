@@ -20,6 +20,8 @@ export type ModelCatalog = Record<
 >;
 export interface FlowSummary {
   id: number;
+  history_only: boolean;
+  continued_from_flow_id: number | null;
   repo: string;
   issue_number: number | null;
   issue_url: string | null;
@@ -50,6 +52,7 @@ export interface SourceStatus {
   limitations: string[];
 }
 export interface FlowDetail extends FlowSummary {
+  installation_id: number | null;
   reason: string;
   next_condition: string;
   sources: SourceStatus[];

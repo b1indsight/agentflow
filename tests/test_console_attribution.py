@@ -1,4 +1,4 @@
-"""Round ownership survives delayed observations and resumed Flows on PostgreSQL."""
+"""Attempt ownership survives delayed observations and resumed Flows on PostgreSQL."""
 
 from datetime import timedelta
 
@@ -102,7 +102,7 @@ def test_stale_pr_claim_cannot_publish_or_create_children_after_resume(store):
         ).fetchone() is None
 
 
-@pytest.mark.parametrize("new_flow", [False, True], ids=["resumed-round", "new-issue-owner"])
+@pytest.mark.parametrize("new_flow", [False, True], ids=["new-attempt", "new-issue-owner"])
 def test_old_pr_webhooks_find_original_owner_but_issue_content_stays_shared(store, new_flow):
     flow = store.flows.create_flow("owner/repo", 7, 42)
     attach_pr(store, flow, 17)
