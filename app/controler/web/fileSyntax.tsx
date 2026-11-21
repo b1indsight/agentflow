@@ -6,6 +6,7 @@ import { parser as js } from "@lezer/javascript";
 import { parser as json } from "@lezer/json";
 import { parser as markdown } from "@lezer/markdown";
 import { parser as python } from "@lezer/python";
+import { parser as rust } from "@lezer/rust";
 import { parser as xml } from "@lezer/xml";
 import { parser as yaml } from "@lezer/yaml";
 
@@ -24,6 +25,7 @@ const parsers = new Map(
     md: markdown,
     markdown,
     py: python,
+    rs: rust,
     xml,
     svg: xml,
     yaml,
