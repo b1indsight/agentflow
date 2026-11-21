@@ -84,3 +84,9 @@ Ruff、Mypy（156 文件）及 sdist/wheel 构建通过。
 - **实现顺序：** 先让 `ConsoleStore.flows` 接受独立于 `q` 的可信仓库条件，用于行查询、计数、分页上界和游标作用域；保持 Web 的无范围调用不变。再在已有 Worker 连接上增加只读请求/结果，每次校验当前连接、有效的首次编码 assignment、所属 Flow 和停止状态。最后注册 MCP 工具。不把数据库或 Web 控制台凭据交给 Worker，不复用 `open_pr` 的推送检查、交付锁、持久化回执或重放队列。
 - **取舍：** Worker 侧过滤或拼接用户查询都不能充当服务端授权；直接使用看板查询可避免两份语法漂移。游标仅用于定位，每页都重新施加授权条件。不新增服务、依赖、数据库表或索引。
 - **验收：** 两仓包含同名、同阶段的任务，以小页翻到末尾；核对所有行、计数及分页上界只来自授权仓库。覆盖空查询、异仓 `repo:`、跨仓游标、无效 assignment、停止状态。通过真实 MCP `tools/list` / `tools/call` 检查搜索可重复且不影响随后交付，并回归 Web 搜索及修订阶段行为。临时去掉仓库谓词时，双仓用例应失败。
+
+### 4. Worker MCP 仓库搜索实现
+
+`search_flows` 复用当前连接的临时请求/响应，断线失败，不重放。Control 在同一只读快照中验证当前连接、已启动且未停止的首次编码任务并读取其仓库的看板。每一页都重新验证。返回摘要不含任务正文、日志或凭据。Codex 的工具允许列表同步加入搜索；修订阶段仍不提供这两个工具。新固定消息需两端同步升级到 wire29，不改持久化格式。
+
+本地 PostgreSQL 验证：运行 `uv run pytest tests/test_flow_search.py tests/test_remote_e2e.py tests/test_worker_tools.py tests/test_worker_runtime.py`（配置独立测试库）。两个仓库使用相同 Issue 编号，脚本化的 Codex / Amp Agent 经真实 MCP HTTP、双向协议与 Control 查询，只读到当前仓库的任务，随后完成原有交付。单独移除仓库限制后计数从 2 变为 4；改用 READ COMMITTED 后暴露了撤销任务时才发布的另一条记录。恢复谓词和共享快照后隔离回归通过。未使用线上数据、真实模型或远端 GitHub 交付验证。

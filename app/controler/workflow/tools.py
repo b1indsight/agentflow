@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import asyncio
 
+from app.contracts.console import ConsoleFailure
 from app.contracts.protocol import (
+    FlowSearchCall,
+    FlowSearchItem,
+    FlowSearchPage,
+    FlowSearchResult,
     FlowToolErrorKind,
     FlowToolRequest,
     FlowToolResponse,
@@ -14,10 +19,12 @@ from app.domain.delivery_models import DeliveryReceipt, OpenedDelivery, Prepared
 from app.domain.models import DeliveryState, FlowDelivery, JobKind
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
 from app.persistence.assignments import AssignmentStore
+from app.persistence.console import ConsoleStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.flows import FlowStore
 from app.persistence.jobs import JobStore
+from app.persistence.stops import StopStore
 
 
 class FlowToolRejected(RuntimeError):
@@ -43,6 +50,33 @@ class FlowToolService:
         self.assignments = AssignmentStore(database)
         self.github = github
         self._locks: dict[int, asyncio.Lock] = {}
+
+    def search(self, request: FlowSearchCall, *, worker_id: str, connection_epoch: str) -> FlowSearchResult:
+        """Resolve scope from the live, started initial job in the same snapshot as its page."""
+        args = request.arguments
+        header = result_header(request.message_id)
+        with self.database.read_snapshot() as tx:
+            job = JobStore(tx).get_job(args.job_id)
+            flow = (
+                FlowStore(tx).get_flow(job.required_flow_id)
+                if job is not None and job.kind is JobKind.INITIAL else None
+            )
+            if (
+                job is None or job.started_at is None or job.result_received_at is not None
+                or flow is None or not flow.accepts(JobKind.INITIAL) or flow.current_attempt_id != job.attempt_id
+                or not AssignmentStore(tx).assignment_active(job.id, worker_id, args.assignment_token, connection_epoch)
+                or StopStore(tx).has_pending(flow.id)
+            ):
+                return FlowSearchResult(**header, method=request.method, error="inactive initial assignment")
+            try:
+                page = ConsoleStore(tx).flows(repo_scope=flow.repo, q=request.query.q,
+                                              limit=request.query.limit, cursor=request.query.cursor)
+            except ConsoleFailure as exc:
+                return FlowSearchResult(**header, method=request.method, error=exc.code)
+        return FlowSearchResult(**header, method=request.method, page=FlowSearchPage(
+            items=[FlowSearchItem.model_validate(item, from_attributes=True) for item in page.items],
+            counts=page.counts, has_more=page.has_more, next_cursor=page.next_cursor,
+        ))
 
     async def execute(
         self,

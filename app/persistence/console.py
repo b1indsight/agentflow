@@ -204,13 +204,19 @@ class ConsoleStore(Repository):
     """Own console display state without changing execution or making network calls."""
 
     def flows(
-        self, *, q: str = "", phase: Phase | None = None, cursor: str | None = None, limit: int = 50
+        self, *, q: str = "", phase: Phase | None = None, cursor: str | None = None, limit: int = 50,
+        repo_scope: str | None = None,
     ) -> FlowPage:
+        """Intersect board filters with a trusted repository, independently of user input."""
         where, values = _filters(q)
-        scope = _scope("flows", q, phase)
-        with self._db.transaction() as tx, tx.connection() as connection:
-            # Counts and page see the same committed local view; later pages remain live.
-            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        repo_where = "TRUE"
+        repo_values: tuple[str, ...] = ()
+        if repo_scope is not None:
+            repo_where, repo_values = "lower(facts->>'repo')=%s", (repo_scope.lower(),)
+            where = f"{where} AND {repo_where}"
+            values.extend(repo_values)
+        scope = _scope("flows", q, phase, *repo_values)
+        with self._db.read_snapshot() as tx, tx.connection() as connection:
             counts = {key: 0 for key in PHASES}
             for row in connection.execute(
                 f"SELECT facts->>'phase' AS phase,count(*) AS total FROM console_flows WHERE {where} GROUP BY 1",
@@ -218,7 +224,7 @@ class ConsoleStore(Repository):
             ).fetchall():
                 counts[row["phase"]] = row["total"]
             ceiling = connection.execute(
-                "SELECT coalesce(max(flow_id),0) AS n FROM console_flows"
+                f"SELECT coalesce(max(flow_id),0) AS n FROM console_flows WHERE {repo_where}", repo_values,
             ).fetchone()
             assert ceiling is not None
             position = (

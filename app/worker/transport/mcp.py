@@ -17,11 +17,14 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import SecretStr
 
+from app.contracts.protocol import FlowSearchPage, FlowSearchQuery
 from app.domain.delivery_models import DeliveryReceipt
 from app.worker.execution.vcs import VcsExecutionContext, VcsOutcome, verify_pushed_outcome
 
 
 class FlowToolCaller(Protocol):
+    async def search_flows(self, query: FlowSearchQuery) -> FlowSearchPage: ...
+
     async def call_tool(
         self, name: str, arguments: dict[str, object], *,
         call_id: str | None = None, vcs_outcome: VcsOutcome,
@@ -36,7 +39,7 @@ class _EmbeddedServer(uvicorn.Server):
 
 
 class WorkerMCP:
-    """Serve open_pr through one execution and its corrections; revoke access on exit."""
+    """Serve assignment-scoped tools through one execution and revoke access on exit."""
 
     def __init__(self, caller: FlowToolCaller, vcs_context: VcsExecutionContext) -> None:
         self.caller = caller
@@ -131,11 +134,31 @@ class WorkerMCP:
                     "properties": {"title": {"type": "string"}, "body": {"type": "string"}},
                     "required": ["title", "body"], "additionalProperties": False,
                 },
+            }, {
+                "name": "search_flows",
+                "description": (
+                    "Search task summaries in this assignment's repository. Combine title or ID text "
+                    "with repo:, is:active|archived, status:queued|running|review|blocked|archived, "
+                    "issue:<number>, or pr:<number>. Empty q lists tasks. To continue, pass the "
+                    "same q and the returned next_cursor as cursor."
+                ),
+                "annotations": {"readOnlyHint": True},
+                "inputSchema": FlowSearchQuery.model_json_schema(),
             }]}
         params = request.get("params")
-        if method != "tools/call" or not isinstance(params, dict) or params.get("name") != "open_pr":
+        if method != "tools/call" or not isinstance(params, dict):
             raise ValueError("unknown MCP method or tool")
         arguments = params.get("arguments")
+        if params.get("name") == "search_flows":
+            query = FlowSearchQuery.model_validate(arguments)
+            try:
+                page = await self.caller.search_flows(query)
+            except (RuntimeError, ConnectionError, TimeoutError) as exc:
+                return {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
+            return {"content": [{"type": "text", "text": page.model_dump_json()}],
+                    "structuredContent": page.model_dump(mode="json")}
+        if params.get("name") != "open_pr":
+            raise ValueError("unknown MCP method or tool")
         if (not isinstance(arguments, dict) or set(arguments) != {"title", "body"}
                 or any(not isinstance(value, str) for value in arguments.values())):
             raise ValueError("open_pr requires title and body strings")

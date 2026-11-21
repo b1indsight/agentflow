@@ -19,6 +19,12 @@ async def test_worker_mcp_http_open_pr_and_lifecycle(tmp_path, monkeypatch):
         return outcome
 
     class Caller:
+        async def search_flows(self, query):
+            from app.contracts.protocol import FlowSearchPage
+
+            assert query.q == "status:blocked 登录" and query.limit == 1
+            return FlowSearchPage(items=[], counts={"blocked": 0}, has_more=False, next_cursor=None)
+
         async def call_tool(self, name, arguments, *, call_id, vcs_outcome):
             assert name == "flow.open_pr" and vcs_outcome == outcome and call_id
             deliveries.append(call_id)
@@ -42,7 +48,15 @@ async def test_worker_mcp_http_open_pr_and_lifecycle(tmp_path, monkeypatch):
         })
         assert notified.status_code == 202 and not notified.content
         listed = (await client.post(server.url, headers=headers, json=request)).json()
-        assert [item["name"] for item in listed["result"]["tools"]] == ["open_pr"]
+        assert {item["name"] for item in listed["result"]["tools"]} == {"open_pr", "search_flows"}
+        for _ in range(2):
+            search = (await client.post(server.url, headers=headers, json={
+                "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {
+                    "name": "search_flows", "arguments": {"q": "status:blocked 登录", "limit": 1},
+                },
+            })).json()
+            assert search["result"]["structuredContent"]["counts"] == {"blocked": 0}
+        assert server.last_result is None
         called = (await client.post(server.url, headers=headers, json={
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "open_pr", "arguments": {"title": "Implement", "body": "Done"}},

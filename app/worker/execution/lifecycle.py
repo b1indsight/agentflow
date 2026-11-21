@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -12,12 +12,16 @@ from loguru import logger
 
 from app.contracts.protocol import (
     AssignmentArguments,
+    ExecutionIdentity,
     ExecutionResult,
     ExecutionStopped,
+    FlowSearchPage,
+    FlowSearchQuery,
     FlowToolArguments,
     FlowToolErrorKind,
     FlowToolRequest,
     FlowToolResponse,
+    InitialTask,
     RecoveryDecision,
     RecoveryDescriptor,
     ResultAcceptance,
@@ -67,12 +71,16 @@ class WorkerExecution:
     replacing it; cancelling its observers never cancels the execution or an authorized stop.
     """
 
-    def __init__(self, *, worker_id: str, executor: WorkerExecutor, state: ExecutionState,
-                 on_change: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self, *, worker_id: str, executor: WorkerExecutor, state: ExecutionState,
+        on_change: Callable[[], None] | None = None,
+        search: Callable[[ExecutionIdentity, FlowSearchQuery], Awaitable[FlowSearchPage]] | None = None,
+    ) -> None:
         self.worker_id = worker_id
         self.executor = executor
         self.state = state
         self._on_change = on_change
+        self._search = search
         self._execution: asyncio.Task[ExecutionResult] | None = None
         self._cancel_requested = False
         self._tool_calls: deque[PendingToolCall] = deque()
@@ -267,6 +275,21 @@ class WorkerExecution:
         ):
             raise WorkerProtocolError("result acknowledgement does not match terminal journal")
         self.state.acknowledge(accepted.job_id, JobState(accepted.state))
+
+    async def search_flows(self, query: FlowSearchQuery) -> FlowSearchPage:
+        """Read through the live initial assignment, without queuing work for recovery."""
+        assignment = self.lease()
+        if assignment is None or not isinstance(assignment.task, InitialTask):
+            raise WorkerProtocolError("Flow search requires an active initial assignment")
+        if self._search is None:
+            raise WorkerProtocolError("Flow search unavailable")
+        identity = ExecutionIdentity(
+            job_id=assignment.job_id, assignment_token=assignment.assignment_token,
+        )
+        page = await self._search(identity, query)
+        if self.lease() is not assignment:
+            raise WorkerProtocolError("Flow search assignment ended")
+        return page
 
     async def call_tool(
         self,

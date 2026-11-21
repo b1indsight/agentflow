@@ -583,7 +583,7 @@ wire v18 的可关联 payload 校验失败整批拒收；合法兄弟项也不�
 Assignment 拒绝只在 SQL 预启动围栏成立后写 control-source Failed，应用提交后才退出派发等待；
 与 stop 竞争时保留 binding/intent，缺 journal 不能伪造停止证据。双端协调升级，journal5/inbox1 不变。
 
-WorkerMCP 随首次编码启动与关闭，复用现有 HTTP 依赖，仅暴露 open_pr；无 STDIO 桥接进程。
+WorkerMCP 随首次编码启动与关闭，提供交付工具 `open_pr` 和只读工具 `search_flows`。搜索使用看板语法，Control 按有效任务确定仓库；每页的任务、阶段计数和游标都限于该仓库。查询走当前连接，不进入交付回执队列。
 修订恢复覆盖为禁用的 flow MCP 配置，避免重新连接旧任务端口。MCP 服务不接管 worker 信号。
 
 

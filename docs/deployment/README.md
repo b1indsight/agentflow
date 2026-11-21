@@ -65,7 +65,7 @@ Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_M
 进程内创建，跨连接重试保留，请求使用独立临时子目录；退出清除，不创建编码 workspace 或 journal。
 断线重试可能与旧计算重叠并重复计费，不保证模型调用恰好一次。
 
-serve 和 worker 需协调升级到 wire28，以支持显式修订重试恢复原会话；升级前先 drain、收敛在途执行及回执。数据库初始化为已有会话记录添加待投递标记，旧记录默认不重新投递。journal5 与执行结果 inbox1 不变；Control 本地归档通知保留 inbox2，无旧 wire fallback。wire27 引入的设置页模型目录仍可用，无需升级原生 CLI。
+serve 和 worker 需协调升级到 wire29，以支持首次编码任务通过 MCP 搜索本仓库的 Flow；升级前先 drain、收敛在途执行及回执。wire28 的显式修订重试恢复原会话仍然可用。数据库初始化为已有会话记录添加待投递标记，旧记录默认不重新投递。journal5 与执行结果 inbox1 不变；Control 本地归档通知保留 inbox2，无旧 wire fallback。wire27 引入的设置页模型目录仍可用，无需升级原生 CLI。
 wire26 独立登记 worker 的 Codex / Amp 类型，并随 assignment 下发全局编码模型和推理强度默认值；
 升级前 drain 并收敛在途执行和未决回执，再成组更新两端。启动时幂等新增 `runtime_settings`
 配置表和 nullable `workers.coding_agent` 列；旧 worker 类型待重新注册后补齐，不从 inference 猜测。
