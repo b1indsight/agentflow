@@ -198,7 +198,7 @@ FlowStore.transition(flow, event)          调用方已持有 lock_workflow
 
 - 调度、对账、API 和 CLI 继续读 `flows`；
 - 控制台卡片继续读 `console_flows.facts`，时间线继续排除 `source='flow'` 的行；
-- `flowtool flow history` 按 Attempt列出 `source='flow'` 的行，包括事实、状态快照和通知。
+- `flowtool flow history <id>` 按版本顺序列出该 Flow 的事件摘要，包括重新开工前后的事实、状态快照和通知；不输出内部执行编号或原始快照 JSON。
 
 ## 11. 不变量
 

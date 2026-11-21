@@ -8,7 +8,7 @@
 
 **只迁移全部 Flow 均已归档的旧库。** 预检和 `--apply` 都检查这个条件。发现未归档记录时报告 Flow ID 和状态并停止，不跳过记录，也不替用户归档。迁移保留原链接、归档结论和任务正文，释放 Issue 所有权。旧详情只供查阅；切换后创建的 Flow 可正常运行，归档后仍可重新开工。
 
-支持已有六态账本、合表和多工作区的未标记轮号库，以及有标记的 v2 Attempt 库。空库直接初始化为 v3。旧库不能通过启动服务来升级；未知或混合结构需人工核对。先在旧版本核对账本、按[冷备与恢复](backup-restore.md)恢复独立 PostgreSQL 副本。以下从**新版本源码根目录**运行，service 名指向副本，不要让副本连接生产 Worker 或 GitHub：
+只支持从已有六态账本、合表和多工作区的未标记轮号库迁移。空库直接初始化为 v3。旧库不能通过启动服务来升级；未知或混合结构需人工核对。先在旧版本核对账本、按[冷备与恢复](backup-restore.md)恢复独立 PostgreSQL 副本。以下从**新版本源码根目录**运行，service 名指向副本，不要让副本连接生产 Worker 或 GitHub：
 
 ```sh
 uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_copy' > preflight.json
@@ -16,9 +16,9 @@ uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_
 uv run python -m scripts.migrate_flow_attempts --database-url 'service=restored_copy' --apply
 ```
 
-第一条只读。检查 `status`（`legacy` 或 `v2`）、**全部** `conflicts` 及轮号库的 `rounds[].disposition`。预检拒绝未完成的 Job（含独立推理）、未应用的收件、未释放的绑定/Worker 占位、未确认停止、未结清的工具调用或副作用、未处理 webhook、未定的 Projects 远端新增、仍在处理的评审批次。不要删队列、伪造停止回执或覆写结果让检查通过。回到旧版本按报出的身份结清；无法证明真实进程已退出或远端写入已对账时，停止升级。
+第一条只读。检查 `status`（待迁移库应为 `legacy`）和全部 `conflicts`。预检拒绝未完成的 Job（含独立推理）、未应用的收件、未释放的绑定/Worker 占位、未确认停止、未结清的工具调用或副作用、未处理 webhook、未定的 Projects 远端新增、仍在处理的评审批次。不要删队列、伪造停止回执或覆写结果让检查通过。回到旧版本按报出的身份结清；无法证明真实进程已退出或远端写入已对账时，停止升级。
 
-`--apply` 在独占锁内重做检查，同一事务内完成身份回填、历史标记、队列退役和版本提交。原轮号与已存在 Attempt 必须有唯一对应；未曾准备执行的轮次，只按可证实的创建/重开边界补齐身份。保留原有 Attempt 的 ID、时间戳及会话；不猜测被覆盖的分支或 head。只在事务内使用临时轮号映射；v2 的旧映射表在同一事务内移除。历史收件、计划和 effects 作为原始证据保留，不解码旧计划、不改写 JSON、不重新签名，也不再派发或重试。
+`--apply` 在独占锁内重做检查，同一事务内完成身份回填、历史标记、队列退役和版本提交。按同一 Flow 内的旧轮号关联已有 Attempt，保留其 ID、时间戳和会话。归档卡片、作业或活动引用的轮号缺少 Attempt 时，只用 Flow 创建时间（首轮）或唯一的重开记录补建；归属冲突或缺少所需时间则停止。迁移不重放旧状态机。历史收件、计划和 effects 原样保留，不再派发或重试。
 
 在恢复入口前，二次执行应返回 `status=current, applied=false`。对比备份：Flow ID、选择的 Attempt、归档结论、活动版本/key/父引用/元数据、作业收件和 digest 应对应；无归属的共享活动仍无归属。核实 `SELECT count(*) FROM flows WHERE NOT history_only OR is_issue_owner` 为零，旧 Console 同步不再 pending、无 claim，旧 Projects/对账不再排队，来源限制、覆盖缺口和已采集正文仍可查看。**不要用重新采集旧内容验证切换**。在隔离副本上打开原链接，确认归档记录可读且不可重新开工。
 

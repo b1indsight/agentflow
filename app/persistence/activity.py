@@ -172,15 +172,15 @@ class ActivityStore(Repository):
     def archived(self, flow_id: int, attempt_id: int) -> Observation | None:
         return self.flow_event(flow_id, attempt_id, "archive")
 
-    def history(self, flow_id: int, attempt_id: int) -> list[ActivityItem]:
-        """Read the ordered internal audit for an Attempt, without hiding earlier facts."""
+    def history(self, flow_id: int, attempt_id: int | None = None) -> list[ActivityItem]:
+        """Read the Flow audit in version order, optionally scoped to one execution."""
         with self._db.connection() as connection:
             rows = connection.execute(
                 "SELECT key,version,attempt_id,source,kind,occurred_at,updated_at,observed_at,author,"
                 "title,body,length(body) AS body_length,url,parent_key,deleted,metadata,"
-                "FALSE AS prior FROM console_activity WHERE flow_id=%s AND attempt_id=%s"
-                " AND source='flow' ORDER BY version",
-                (flow_id, attempt_id),
+                "FALSE AS prior FROM console_activity WHERE flow_id=%s AND source='flow'"
+                + (" AND attempt_id=%s" if attempt_id is not None else "") + " ORDER BY version",
+                (flow_id, attempt_id) if attempt_id is not None else (flow_id,),
             ).fetchall()
         return [ActivityItem.model_validate(row) for row in rows]
 

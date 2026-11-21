@@ -40,7 +40,7 @@ FlowTool 把 GitHub Issue 或一段任务描述交给 Codex 或 Amp。Worker 编
 ```bash
 uv run flowtool flows --active
 uv run flowtool flow show 42
-uv run flowtool flow history 42 --attempt 71  # 使用 show 显示的 Attempt ID
+uv run flowtool flow history 42
 ```
 
 ## 文档

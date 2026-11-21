@@ -146,7 +146,7 @@ class ControlService:
             if fresh is not None and fresh.history_only:
                 raise FlowReadOnly()
             if fresh is None or fresh.current_attempt_id != expected_attempt_id:
-                raise ValueError("Flow Attempt is no longer current")
+                raise ValueError("Flow execution is no longer current")
             if fresh.state is FlowState.ARCHIVED:
                 return
             delivery = deliveries_tx.get_delivery(fresh.id)
@@ -189,7 +189,7 @@ class ControlService:
             if fresh is not None and fresh.history_only:
                 raise FlowReadOnly()
             if fresh is None or fresh.current_attempt_id != expected_attempt_id:
-                raise ValueError("Flow Attempt is no longer current")
+                raise ValueError("Flow execution is no longer current")
             active = flows.get_active_flow(fresh.repo, fresh.issue_number)
             if active is not None and active.id != fresh.id:
                 raise ValueError(f"flow {active.id} is already active for this Issue")
@@ -197,7 +197,7 @@ class ControlService:
                 fresh.state is not FlowState.ARCHIVED
                 or ActivityStore(tx).archived(fresh.id, expected_attempt_id) is None
             ):
-                raise ValueError("only an archived Attempt can be resumed")
+                raise ValueError("only an archived Flow can be resumed")
             binding = self.flows.using(tx).get_flow_execution(fresh.id)
             if binding is not None and binding.released_at is None:
                 raise ValueError("archived execution is not released")

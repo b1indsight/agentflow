@@ -199,24 +199,21 @@ def test_real_archive_filters_and_rebuild_preserve_business_outcome(store, reaso
     assert console.detail(flow.id) == detail
 
 
-def test_cli_attempt_history_checks_ownership_not_numeric_range(store, monkeypatch):
-    # A smaller global ID can belong to another Flow, not a previous execution of this one.
-    foreign = store.flows.create_flow("octo/repo", 8, 1)
+def test_cli_flow_history_spans_restarts_without_internal_ids(store, monkeypatch):
+    store.flows.create_flow("octo/repo", 8, 1)
     flow = store.flows.create_flow("octo/repo", 7, 1)
     monkeypatch.setenv("FLOWTOOL_DATABASE_URL", store.database.database_url)
     monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker":"test-token"}')
     runner = CliRunner()
-    old = str(flow.required_attempt_id)
-    assert runner.invoke(cli.app, ["flow", "finish", str(flow.id), "succeeded", "--summary", "调查完成",
-                                   "--expected-attempt", old]).exit_code == 0
-    assert runner.invoke(cli.app, ["flow", "resume", str(flow.id), "--expected-attempt", old]).exit_code == 0
-    history = ["flow", "history", str(flow.id), "--attempt"]
-    result = runner.invoke(cli.app, [*history, old])
-    assert result.exit_code == 0
+    for command, *args in [("finish", "succeeded", "--summary", "调查完成"), ("resume",), ("show",), ("history",)]:
+        result = runner.invoke(cli.app, ["flow", command, str(flow.id), *args])
+        assert result.exit_code == 0, result.output
+        assert "attempt" not in result.output.lower()
     rows = [json.loads(line) for line in result.stdout.splitlines()]
-    assert all(row["attempt_id"] == flow.required_attempt_id for row in rows)
-    assert any(row["kind"] == "archive" for row in rows)
-    assert runner.invoke(cli.app, [*history, str(foreign.required_attempt_id)]).exit_code == 1
+    titles = [row["title"] for row in rows]
+    assert titles.count("Flow 创建") == 1
+    assert titles.index("Flow 归档") < titles.index("重新开工")
+    assert next(row for row in rows if row["title"] == "Flow 归档")["archive_summary"] == "调查完成"
 
 
 def test_resume_starts_new_attempt_without_overwriting_archive_or_conversation(store):
