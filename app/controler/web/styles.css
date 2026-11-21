@@ -2082,6 +2082,18 @@ pre code {
 .numbered-code .code-line {
   display: contents;
 }
+.numbered-code .syntax-keyword {
+  color: #704487;
+}
+.numbered-code .syntax-string {
+  color: #24634e;
+}
+.numbered-code .syntax-value {
+  color: var(--accent-hover);
+}
+.numbered-code .syntax-comment {
+  color: #606f7c;
+}
 .code-line-number {
   min-width: 3ch;
   padding: 0 12px 0 16px;

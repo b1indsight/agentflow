@@ -3,6 +3,7 @@ import { Download, RefreshCw } from "lucide-react";
 import { ApiError } from "./api";
 import { Button } from "./components/ui/button";
 import { readFile } from "./files";
+import { parseSource, sourceLines } from "./fileSyntax";
 import { CODE_LINES, textEnd, WindowList } from "./windowing";
 
 type Preview =
@@ -78,7 +79,14 @@ function failureMessage(error: Error) {
 }
 
 /** Reveal source in bounded steps; virtualize groups of physical lines so a wrapped line keeps one gutter. */
-function FileSource({ text }: { text: string }) {
+function FileSource({
+  text,
+  filename,
+}: {
+  text: string;
+  filename: string | null;
+}) {
+  const tree = useMemo(() => parseSource(filename, text), [filename, text]);
   const [end, setEnd] = useState(() => textEnd(text, 0, true));
   const sentinel = useRef<HTMLDivElement>(null);
   const starts = useMemo(() => {
@@ -110,14 +118,16 @@ function FileSource({ text }: { text: string }) {
         estimate={CODE_LINES * 23}
       >
         {(i) => {
-          const part = text.slice(
+          const lines = sourceLines(
+            text,
+            tree,
             starts[i],
             Math.min(end, starts[i + 1] ?? end),
           );
           return (
             <pre>
               <code>
-                {(part.match(/[^\n]*\n|[^\n]+$/g) ?? [""]).map((line, j) => (
+                {lines.map((line, j) => (
                   <span className="code-line" key={j}>
                     <span
                       className="code-line-number"
@@ -140,7 +150,7 @@ function FileSource({ text }: { text: string }) {
 }
 
 /** Only the active document is read; switching or retrying aborts and fences previous reads/decodes. */
-export function FileViewer({
+export default function FileViewer({
   linkId,
   filename,
 }: {
@@ -229,7 +239,7 @@ export function FileViewer({
           (state.preview.kind === "text" ? (
             <>
               {state.size === 0 && <p>空文件</p>}
-              <FileSource text={state.preview.text} />
+              <FileSource text={state.preview.text} filename={filename} />
             </>
           ) : state.preview.kind === "image" ? (
             <img

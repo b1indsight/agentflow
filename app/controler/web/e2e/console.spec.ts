@@ -6571,6 +6571,12 @@ for (const width of [1440, 390]) {
     await expect(numbers.first()).toHaveAttribute("data-line-number", "1");
     await expect(numbers.last()).toHaveAttribute("data-line-number", "200");
     expect(await preview.textContent()).toBe(first);
+    await expect(preview.locator(".syntax-keyword").first()).toHaveText(
+      "const",
+    );
+    await expect(preview.locator(".syntax-string").first()).toHaveText(
+      '"带行号的只读代码预览"',
+    );
     expect(
       await numbers
         .first()

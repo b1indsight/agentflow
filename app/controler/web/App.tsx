@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   type ReactNode,
   useCallback,
   useEffect,
@@ -46,7 +48,6 @@ import {
 } from "./activity";
 import { ConversationSources, SourceList } from "./ConversationSources";
 import { CreateFlow } from "./CreateFlow";
-import { FileViewer } from "./FileViewer";
 import { AgentTaskInput } from "./AgentTaskInput";
 import type { WorkerFile } from "./files";
 import { InferenceNotices } from "./InferenceNotices";
@@ -59,6 +60,8 @@ import type { FlowDetail, FlowSummary, JobSummary, Phase } from "./types";
 import { useConversation } from "./useConversation";
 import { SavedDetails, WindowList } from "./windowing";
 import { focusableControls } from "./focus";
+
+const FileViewer = lazy(() => import("./FileViewer"));
 
 type Column = {
   items: FlowSummary[];
@@ -874,11 +877,13 @@ function DetailPanel({
           <TabsContent value={selectedTab} asChild>
             <section className={`content${activeFile ? " file-content" : ""}`}>
               {activeFile ? (
-                <FileViewer
-                  key={activeFile.id}
-                  linkId={activeFile.id}
-                  filename={activeFile.name}
-                />
+                <Suspense fallback={<p role="status">正在加载文件查看器…</p>}>
+                  <FileViewer
+                    key={activeFile.id}
+                    linkId={activeFile.id}
+                    filename={activeFile.name}
+                  />
+                </Suspense>
               ) : (
                 (
                   {
