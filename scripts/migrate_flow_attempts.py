@@ -7,6 +7,7 @@ import psycopg
 from psycopg import Connection, sql
 from psycopg.rows import dict_row
 
+from app.contracts.receipts import decode_result_inbox
 from app.persistence.database import (
     FLOW_TABLES,
     mark_flow_schema_current,
@@ -77,9 +78,27 @@ def flow_schema_version(connection: Connection[Row]) -> str:
 
 def _unsafe(c: Connection[Row]) -> list[str]:
     """Never discard execution, source receipts or an uncertain remote write to make a cutover pass."""
+    # Old terminals have no source field. Verify their origin and binding without rewriting them.
+    legacy_workers = []
+    for job in c.execute("""SELECT id,assignment_token,result_digest,result_payload FROM jobs
+        WHERE started_at IS NOT NULL AND result_applied_at IS NOT NULL
+          AND jsonb_typeof(result_payload)='object' AND NOT result_payload ? 'version'
+          AND result_payload->>'protocol_version' IN ('14','15')"""):
+        try:
+            receipt = decode_result_inbox(
+                job["result_payload"],
+                job_id=job["id"],
+                assignment_token=job["assignment_token"],
+                result_digest=job["result_digest"],
+            )
+        except ValueError:
+            continue  # Leave the job subject to the normal stop/settlement checks below.
+        if receipt.source == "worker":
+            legacy_workers.append(job["id"])
     return [
         f"{r['source']} {r['id']}: not settled"
-        for r in c.execute("""
+        for r in c.execute(
+            """
         SELECT 'job' AS source,j.id::text AS id FROM jobs j WHERE state NOT IN ('done','failed')
           OR kind NOT IN ('initial','revision','archive','inference')
           OR ((result_payload IS NOT NULL OR result_digest IS NOT NULL OR result_received_at IS NOT NULL
@@ -87,7 +106,8 @@ def _unsafe(c: Connection[Row]) -> list[str]:
                OR result_received_at IS NULL OR result_applied_at IS NULL))
           OR (kind<>'inference' AND (started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL
               OR (kind='archive' AND payload->'archive' IS NOT NULL)) AND (result_received_at IS NULL
-              OR (started_at IS NOT NULL AND result_payload->>'source' IS DISTINCT FROM 'worker'))
+              OR (started_at IS NOT NULL AND result_payload->>'source' IS DISTINCT FROM 'worker'
+                  AND j.id <> ALL(%s::bigint[])))
               AND NOT EXISTS (SELECT 1 FROM execution_stops s WHERE s.job_id=j.id
                   AND s.flow_id=j.flow_id AND s.assignment_token=j.assignment_token AND s.state='confirmed'))
         UNION ALL SELECT 'result application',j.id::text FROM result_applications r JOIN jobs j ON j.id=r.job_id
@@ -106,7 +126,9 @@ def _unsafe(c: Connection[Row]) -> list[str]:
         UNION ALL SELECT 'project add',id::text FROM project_projections WHERE add_started
         UNION ALL SELECT 'review batch',id::text FROM review_batches WHERE state IN ('ready','processing')
         ORDER BY source,id
-    """)
+    """,
+            (legacy_workers,),
+        )
     ]
 
 
