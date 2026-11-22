@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, m
 from app.contracts.protocol import ProvisionError
 from app.domain.models import WorkspaceInventory
 from app.worker.execution.git_identity import configure_git_identity
+from app.worker.execution.skills import clear_skill_links
 from app.worker.execution.vcs import (
     VcsVerificationError,
     _required_stdout,
@@ -118,6 +119,7 @@ class RepositoryWorkspaces:
         self.root = root.absolute()
         self.worker_id = worker_id
         self.limit = limit
+        self.skill_checkout: asyncio.Task[Path] | None = None
         self.manifest_path = self.root / "workspace-pool.json"
         self._repository_locks: dict[str, asyncio.Lock] = {}
         self._release_locks: dict[str, asyncio.Lock] = {}
@@ -304,6 +306,9 @@ class RepositoryWorkspaces:
         return self._managed(Path("workspaces", *validate_repository(binding.repository),
                                   binding.slot_id))
 
+    def skill_receipt(self, binding: WorkspaceBinding) -> Path:
+        return self.root / f"skill-links-{binding.slot_id}.json"
+
     def _owned(self, manifest: WorkspaceManifest, binding: WorkspaceBinding) -> WorkspaceSlot:
         for slot in manifest.slots:
             if slot.slot_id == binding.slot_id and slot.binding == binding:
@@ -378,6 +383,7 @@ class RepositoryWorkspaces:
             self._write(manifest)
             path = self._materialize(slot)
             self._write(manifest)
+            clear_skill_links(path, self.skill_receipt(binding))
             await self._prepare(binding, slot.kind, path, seed, revision)
             self._verify_slot(self._owned(self._load(), binding))
             return binding

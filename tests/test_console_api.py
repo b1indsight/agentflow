@@ -55,6 +55,7 @@ def console_runtime(store):
         shutdown=issuer.auth.close,
         console=ConsoleSynchronizer(SimpleNamespace(), SimpleNamespace(), database=store._db),
         conversations=SimpleNamespace(read=AsyncMock()),
+        worker_sessions=set(),
         gateway=SimpleNamespace(wake_all=Mock()),
     )
 

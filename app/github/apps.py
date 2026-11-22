@@ -6,12 +6,12 @@ import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr
 
 from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
 from app.github.pagination import Batch
 from app.github.projects import Project, ProjectConfig
-from app.github.repositories import Repository
+from app.github.repositories import Repository, _permissions, split_repo
 
 if TYPE_CHECKING:
     from githubkit import AppAuthStrategy, AppInstallationAuthStrategy, GitHub
@@ -71,6 +71,22 @@ class GitHubApp(BaseModel):
 
     def installation(self, installation_id: int) -> Installation:
         return Installation(self, installation_id)
+
+    async def repository_read_token(self, repository: str) -> SecretStr:
+        """Issue a credential for cloning just this repository's contents."""
+        owner, name = split_repo(repository)
+        client = self._client(auto_retry=False)
+        with translate_errors("repository_read_token"):
+            grant = (await client.rest.apps.async_get_repo_installation(owner, name)).parsed_data
+            token = (await client.rest.apps.async_create_installation_access_token(
+                grant.id, repositories=[name], permissions={"contents": "read"},
+            )).parsed_data
+            if ([item.full_name for item in token.repositories or []] != [repository]
+                    or _permissions(token.permissions) not in (
+                        {"contents": "read"}, {"contents": "read", "metadata": "read"},
+                    )):
+                raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "repository_read_token")
+            return SecretStr(token.token)
 
     async def fetch_installations(self, *, page: int = 1) -> Batch[Installation]:
         """Read one inventory page, excluding suspended installations without losing pagination."""

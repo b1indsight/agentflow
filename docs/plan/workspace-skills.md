@@ -1,6 +1,6 @@
 # Worker skill 仓库与 Flow 初始化
 
-阶段：待确认。范围是 worker 同步和首次编码前的选择，不改设置页面。
+阶段：已实现。范围是 worker 同步和首次编码前的选择，不改设置页面。
 
 ## 行为
 
@@ -24,3 +24,7 @@
 用本地 Git 仓库验证首次同步、在线换仓、断线重连与清空设置；更新过程中已运行 Flow 的链接仍可读。用返回固定名单的 agent 检查首次编码时工作目录中的实际链接，包括全常开、选空、未知名称和同名项目文件。检查 `git status`、提交内容和槽位复用后的目录，确认不提交链接、不残留上一 Flow 的选择。最后运行 pytest、Ruff 和 mypy。
 
 ## 变更记录
+
+1. 实现同时支持独立仓库的顶层 `<name>/SKILL.md` 和项目布局 `.agents/skills/<name>/SKILL.md`（后者优先）。worker 注册和设置成功保存后同步；后台 clone 不占用协议接收循环，INITIAL 等待对应的 checkout。读取凭据或 clone 失败会阻止使用该版本的首次编码，不影响其他 Flow 的修订。
+2. 使用仓库提交号固定符号链接的目标。本地 Git 与 PostgreSQL 集成测试覆盖同步、刷新和清空；将版本目录替换为反复覆盖的 `current` 后，同一测试读到 `new` 而非旧任务应得的 `base`。移除始终开启的链接步骤后，选择调用看不到 `style`。两项对照均在内存中替换实现后执行 `pytest -q tests/test_workspace_skills.py`，未改测试预期。
+3. worker 为链接生成仅列出本次名称的 `.agents/skills/.gitignore`，已有同名忽略文件时不覆盖并报告冲突。槽位复用依照工作区外的安装记录清理。历史 checkout 保留在推理目录，本次未实现自动回收。
