@@ -30,11 +30,11 @@ class LabelSynchronizer:
         self._confirmed: dict[tuple[int, str], float] = {}
         self.definitions = (
             LabelDefinition(name=settings.trigger_label, color="5319e7",
-                            description="Start a FlowTool task"),
+                            description="Start an AgentFlow task"),
             LabelDefinition(name=settings.in_review_label, color="fbca04",
-                            description="FlowTool delivery awaiting review"),
+                            description="AgentFlow delivery awaiting review"),
             LabelDefinition(name=settings.done_label, color="0e8a16",
-                            description="FlowTool task merged and archived"),
+                            description="AgentFlow task merged and archived"),
         )
 
     async def run(self) -> None:

@@ -1,15 +1,15 @@
 [Unit]
-Description=Flowtool control plane (single instance)
+Description=AgentFlow control plane (single instance)
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-User=flowtool-control
-Group=flowtool-control
-WorkingDirectory=/var/lib/flowtool/control
-EnvironmentFile=/etc/flowtool/serve.env
-ExecStart=/opt/flowtool/.venv/bin/flowtool serve
+User=agentflow-control
+Group=agentflow-control
+WorkingDirectory=/var/lib/agentflow/control
+EnvironmentFile=/etc/agentflow/serve.env
+ExecStart=/opt/agentflow/.venv/bin/agentflow serve
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=60
@@ -19,7 +19,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/flowtool/control
+ReadWritePaths=/var/lib/agentflow/control
 
 [Install]
 WantedBy=multi-user.target

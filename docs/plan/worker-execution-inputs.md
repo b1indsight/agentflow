@@ -117,7 +117,7 @@ push_token 仍为 SecretStr，调用参数、环境构造、返回值和日志�
   配置遗漏；没有执行真实 Codex 或连接保存的 broker，不能据此声称真实恢复已验证。
 - **恢复后验证**：`uv run pytest tests/test_codex_driver.py tests/test_vcs.py -q --tb=short`：
   32 passed（包括新增的 VCS token 隔离回归）。
-- **全量验证**：`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run pytest -q --tb=short`：
+- **全量验证**：`AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres uv run pytest -q --tb=short`：
   843 passed、0 skipped，59.42 秒；全量收集之后新增的一个 VCS 回归由上述 focused run 验证。
   一条既有 Starlette/httpx 弃用警告。
 - **检查与构建**：`uv run ruff check app tests`、`uv run mypy app tests`（160 source files）、

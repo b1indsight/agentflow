@@ -95,5 +95,5 @@ GitHub 不会自动重投失败 delivery；本 feature 不补收从未到达本�
 2026-09-22 二次返修：用户授权补完新增发现。并发回归将第一条接收事务停在 insert 后、
 commit 前；另一真实连接接收同仓库不同 delivery，通过 pg_locks 确认其等待 advisory lock，
 此时不能 claim，提交后按 first→second 消费。没有依靠固定 sleep 推测线程是否开始。
-消融命令：`FLOWTOOL_TEST_DATABASE_URL=... uv run pytest tests/test_webhook_inbox.py -q -k distinct_receipt`。
+消融命令：`AGENTFLOW_TEST_DATABASE_URL=... uv run pytest tests/test_webhook_inbox.py -q -k distinct_receipt`。
 临时移除 receive 的 advisory lock 后稳定失败（后接收先提交），恢复后通过；保留该回归。

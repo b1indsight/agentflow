@@ -116,7 +116,7 @@ Projects 写入边界的问题。通过继承或 Mixin 保留全部旧方法可�
 - **行为验证：** 复用 Store、workflow transactions、fair assignment、preparation retry、stop/cancel/drain、result recovery、archive recovery、review/feedback/thread、Projects、webhook inbox 和可观测性回归。重点核对同一事务跨对象回滚、并发领取与 issue 去重、过期 epoch 拒绝、已接收结果不被恢复覆盖、取消/合并后的派发与停止、未知远端写入保留证据。
 - **新增测试：** 只在既有覆盖不足时补最小回归；注入时钟覆盖实际创建/更新时间。事务视图或锁绑定若存在缺口，使用真实 PostgreSQL 与行为场景验证，不测试属性数量、接口计数或简单转发。
 - **结构对照：** 比较迁移前后完整 schema、复杂跨表操作的 SQL、默认时钟下的持久模型/JSON 合同；迁移各入口和方法接收对象后，确认目录边界与 wheel 包含全部实现。
-- **完整检查：** 使用 `FLOWTOOL_TEST_DATABASE_URL` 运行 PostgreSQL 全量 `uv run pytest`，不得以数据库跳过代替验证；运行 `uv run ruff check app tests`、`uv run mypy app tests`、`uv build --no-sources` 及差异检查。依据：[CI](../../.github/workflows/ci.yml)、[数据库 fixture](../../tests/conftest.py#L58)。
+- **完整检查：** 使用 `AGENTFLOW_TEST_DATABASE_URL` 运行 PostgreSQL 全量 `uv run pytest`，不得以数据库跳过代替验证；运行 `uv run ruff check app tests`、`uv run mypy app tests`、`uv build --no-sources` 及差异检查。依据：[CI](../../.github/workflows/ci.yml)、[数据库 fixture](../../tests/conftest.py#L58)。
 - **消融适用性：** 本次删除职责混杂并收紧边界，没有新增调度、恢复或锁机制需要独立消融；不为纯移动虚构性能实验。实现后、自动审查前检查每个新增对象和辅助是否有实际调用与独立职责，撤去无收益的间接层并重跑受影响检查。若发现必须新增运行机制，先记录方案变更再确定相应行为对照。
 
 ### 未决问题与后续
@@ -156,7 +156,7 @@ Mock 提供分组 API，不增加生产兼容入口；模拟 Job 集合使用 `j
 `uv run --no-sync ruff check app tests scripts/smoke/recovery.py`、`uv run --no-sync mypy app tests`
 （177 个源文件）、`uv build --no-sources` 及差异检查通过。全量命令为
 `uv run --no-sync --env-file .cache/2026-10-13/persistence-test.env pytest -q --tb=short`，该本地
-env 文件提供 `FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres`；
+env 文件提供 `AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres`；
 fixture 仍为每项集成测试创建独立 schema。wheel 包含全部 16 个 persistence 模块，独立
 `.venv/bin/python -I` 从 wheel 成功导入 15 个实现模块（不计包说明入口），无旧路径模块。
 七段 schema 的完整文本与执行顺序一致；53 个迁移操作和 87 个既有操作在统一接收对象、

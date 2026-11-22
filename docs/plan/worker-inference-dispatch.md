@@ -104,9 +104,9 @@ request，不能重新生成 session_id。`decide` 使用调用预算与本地 t
   配置模型 key。现有 `judge_timeout_seconds` 作为远程请求预算。
 - `WorkerSettings` 增加 `judge_model: str = ""`、`judge_api_key: SecretStr | None = None`、
   `judge_api_base: str | None = None`、`judge_timeout_seconds: float = 60.0`；timeout 必须有限且正数。
-  使用既有 `FLOWTOOL_` 前缀，不读取当前目录 `.env`。
+  使用既有 `AGENTFLOW_` 前缀，不读取当前目录 `.env`。
 - key 留在实际执行侧，不放入任务、回复、数据库、journal 或日志。保持 coding agent 对
-  `FLOWTOOL_*` 的环境过滤，但明确这不构成同 OS 身份下的强隔离。[S6]
+  `AGENTFLOW_*` 的环境过滤，但明确这不构成同 OS 身份下的强隔离。[S6]
 
 #### Wire contract
 
@@ -809,7 +809,7 @@ serve/worker 需一起升级 wire18，journal5/inbox1 不变；部署和回退�
 真实 Codex/Amp 适配器与受控 CLI 子进程；所有 GitHub effects 使用替身。未调用真实付费 provider，
 未写入真实 GitHub，未部署。原生 CLI 的真实账号登录、额度和工具行为未作线上 smoke 验收。
 
-已运行以下检查（在独立工作区执行；数据库通过 `FLOWTOOL_TEST_DATABASE_URL` 指定）：
+已运行以下检查（在独立工作区执行；数据库通过 `AGENTFLOW_TEST_DATABASE_URL` 指定）：
 
 - `uv run pytest -q`：全量后端回归；新增路由、通知、原生进程、双端并发/断线以及既有 history/
   review 恢复场景一并验证。自动配置路由覆盖空白、半配、仅 base、错误 model 和完整配置。
@@ -1102,7 +1102,7 @@ Claude Opus 5.5 的只读计划咨询已完成，初始化和响应模型一致�
 
 **实际验证：** 在独立工作区使用专用 PostgreSQL，完成以下检查；不沿用旧发布版本的结论。
 
-- `FLOWTOOL_TEST_DATABASE_URL=… uv run pytest -q` 全量通过、无跳过，包括实际双端 Session 与
+- `AGENTFLOW_TEST_DATABASE_URL=… uv run pytest -q` 全量通过、无跳过，包括实际双端 Session 与
   PostgreSQL 的 mini 优先/忙时转派、无 repo 推理、编码并发和取消、心跳/静默断线、持久结果恢复、
   三次上限、READY 新一轮、永久 WAIT、通知补写、schema 重复升级及编码 stop/history 回归。
 - `uv run ruff check app tests`、`uv run mypy app tests` 通过。

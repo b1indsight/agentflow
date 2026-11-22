@@ -61,7 +61,7 @@ link = await runtime.register_file(Path("/path/to/report.txt"))
 
 已执行真实 PostgreSQL 下的 `tests/test_file_links.py`、`tests/test_file_proxy.py` 和 `tests/test_conversation_api.py`：覆盖空文件、二进制、大小边界、并发重复登记、忙碌与空闲 worker、两端对象重建、owner 鉴权、路径不出现在消息/响应元数据、替换/删除/不可读/FIFO、跨 worker 和旧 epoch 回复、超时、断线、并发限制、慢登记不阻塞执行消息、HTTP 断开清理。消息传输采用内存队列，HTTP 使用 ASGITransport；不将这些结果等同于真实公网部署验证。
 
-全量 PostgreSQL pytest、Ruff、Mypy、`uv build --no-sources` 和 `flowtool --help` 均通过。前端 `npm run format:check`、`npm test` 和 `npm run build` 通过；Playwright 默认端口 5174 被现有进程占用，使用临时配置仅切换到 55178 后全套通过，未停止原进程或修改仓库测试配置。
+全量 PostgreSQL pytest、Ruff、Mypy、`uv build --no-sources` 和 `agentflow --help` 均通过。前端 `npm run format:check`、`npm test` 和 `npm run build` 通过；Playwright 默认端口 5174 被现有进程占用，使用临时配置仅切换到 55178 后全套通过，未停止原进程或修改仓库测试配置。
 
 ### 002 — 真实传输和简化对照
 
@@ -192,7 +192,7 @@ link = await runtime.register_file(Path("/path/to/report.txt"))
 
 **执行验证。** 已执行真实 PostgreSQL 下的全量 Python 测试、Ruff、应用与测试的 Mypy、sdist/wheel 构建、wheel 内容核查与 CLI help。专项覆盖真实双端 Session、旧历史两页归档、先缺失后刷新补链及逐字节读取、原生缓存与 cursor、部分失败/超时、长度预算、并发上限、断线回收及重连。消息传输使用内存队列；没有将其当作公网 WebSocket 或部署验证。前端单测、类型、格式和生产构建通过，完整浏览器回归及键盘 Tabs 重复执行通过；实测点击、Enter、单 tab 复用、阅读位置、脚注/外链控制、安全源码、四种实际位图解码、空文件、伪装图片、二进制、离线重试、超限/鉴权与迟到响应。浏览器使用 API 拦截，没有验证生产 Access 或线上 Worker。生产构建仍有非阻断的 chunk 大小提示。
 
-复现命令：在仓库根执行 `FLOWTOOL_TEST_DATABASE_URL=<本机测试库> uv run pytest -q`、`uv run ruff check app tests`、`uv run mypy app tests`；在 `app/controler/web` 执行 `npm test`、`npm run typecheck`、`npm run format:check`、`npm run build`，以及 `CI=1 PLAYWRIGHT_PORT=<空闲端口> npm run test:e2e -- --workers=1`。桌面和手机的源码、图片、二进制和离线截图已实际查看，位置为 `.amp/in/artifacts/worker-file-{text,image,binary,error}-{1440,390}.png`；无页面或详情区横向溢出由浏览器断言验证，脚本不执行由 DOM/运行状态断言验证。
+复现命令：在仓库根执行 `AGENTFLOW_TEST_DATABASE_URL=<本机测试库> uv run pytest -q`、`uv run ruff check app tests`、`uv run mypy app tests`；在 `app/controler/web` 执行 `npm test`、`npm run typecheck`、`npm run format:check`、`npm run build`，以及 `CI=1 PLAYWRIGHT_PORT=<空闲端口> npm run test:e2e -- --workers=1`。桌面和手机的源码、图片、二进制和离线截图已实际查看，位置为 `.amp/in/artifacts/worker-file-{text,image,binary,error}-{1440,390}.png`；无页面或详情区横向溢出由浏览器断言验证，脚本不执行由 DOM/运行状态断言验证。
 
 打包另按既有文档运行 `uv run python scripts/build_console.py` 后再执行 `uv build --no-sources`；仅运行 `npm run build` 不会复制资源至 Python 包目录。最终 wheel 已核查包含新的 `file-viewer`、`/api/files/` 前端代码及 `history_links.py`。测试、浏览器、Mypy、构建及简化对照日志均保存在 `.amp/in/artifacts/worker-file-links-*.log`。
 

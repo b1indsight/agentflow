@@ -396,7 +396,7 @@ Projects 保留自身 Issue 归属选择与远端投影逻辑；只抽取真正�
 - **Decision / rationale:** 将已确认 demo 整理为 `app/controler/web/` 原生静态模块，
   仍无框架、CDN 或运行时构建步骤。示例事实集中到 `fixtures.js`，
   不用直接嵌入 HTML 的活动数据，也不添加对未实现接口的请求或隐式 mock 回退。
-  本地可用普通静态 HTTP 服务预览；`flowtool serve` 尚未挂载控制台。
+  本地可用普通静态 HTTP 服务预览；`agentflow serve` 尚未挂载控制台。
 - **Implemented changes:** 保留看板、独立详情、侧栏分隔/折叠、精简概览、执行记录及混合会话；
   新增 URL 筛选恢复，详情筛选只更新导航和提示，保留会话 DOM、工具展开与阅读状态。
   会话通过可取消的异步 fixture 分页读取，末尾刷新追加/无新增；切 Flow/页签取消旧读取。
@@ -1052,7 +1052,7 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
 ### [030] 2026-10-17 — 自动化验证与机制消融
 
 - **Validation results:**
-  - `FLOWTOOL_TEST_DATABASE_URL=postgresql://127.0.0.1/flowtool_test uv run pytest -q`：
+  - `AGENTFLOW_TEST_DATABASE_URL=postgresql://127.0.0.1/agentflow_test uv run pytest -q`：
     781 passed；有一条 Starlette TestClient/httpx 依赖弃用提示，未修改或抑制上游依赖告警。
   - `uv run ruff check .`、新增 Python 文件 `ruff format --check`、`uv run mypy app tests`：
     通过，mypy 检查 193 个文件。`git diff --check` 通过。
@@ -1072,7 +1072,7 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
      持久续读位置丢失。
   3. `ActivityStore.page` 的 `if snapshot is None:` 改为无条件取最新版本，归档快照测试失败，
      旧阅读视图被删除版本替换。
-  命令为 `CONSOLE_ABLATION=<mode> PYTHONPATH=.amp/in FLOWTOOL_TEST_DATABASE_URL=...`
+  命令为 `CONSOLE_ABLATION=<mode> PYTHONPATH=.amp/in AGENTFLOW_TEST_DATABASE_URL=...`
   `uv run pytest -q -p console_ablation <test>`，mode 分别 dedupe/checkpoint/snapshot；
   test 为 `tests/test_console_archive.py::test_archive_versions_snapshots_and_prior_interactions`，
   checkpoint 使用 `tests/test_console_sync.py::test_worker_is_actively_queried_and_eof_checkpoint_survives_refresh`。
@@ -1098,7 +1098,7 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   修改仍可比较、授权、分页、旧比较对稳定和超预算明确失败。wheel/sdist 已重新构建。
   已检查桌面收起、桌面展开及手机展开截图，使用 API DTO 测试数据。
 - **Ablation:** 临时进程内把比较输入改为旧的 2000 字符展示预览，同一 HTTP 回归因遗漏尾部修改
-  而失败（1 failed）；完整实现通过。命令：`PYTHONPATH=.amp/in FLOWTOOL_TEST_DATABASE_URL=...`
+  而失败（1 failed）；完整实现通过。命令：`PYTHONPATH=.amp/in AGENTFLOW_TEST_DATABASE_URL=...`
   `uv run pytest -q -p edited_diff_ablation tests/test_console_api.py::test_edited_hint_and_diff_compare_full_immutable_content_not_preview`。
   插件和日志仅保留在 `.amp/in/`；本轮改动仍在本地，未推送，不绕过此前超时的发布审查门禁。
 
@@ -1164,7 +1164,7 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   快照更新后线程回复需要重新打开，避免混合两个快照的游标/正文。界面样式保持不变。
 - **Validation / ablation:** 修复前用同一组针对性测试复现 PostgreSQL 死锁、NUL 入库错误、
   缺口误报 available、失败批次遗留兄弟任务，以及线程旧游标/缓存重试无效的两项浏览器故障。
-  修复后 `FLOWTOOL_TEST_DATABASE_URL=postgresql://127.0.0.1/flowtool_test uv run pytest -q`
+  修复后 `AGENTFLOW_TEST_DATABASE_URL=postgresql://127.0.0.1/agentflow_test uv run pytest -q`
   全量 786 passed，仍有一条上游 Starlette/httpx 弃用提示；Ruff、Mypy（193 个文件）通过。
   前端格式检查、2 项单测、类型/构建与 7 项 Playwright 测试通过；本轮是交互修复，以 DOM 和
   实际请求的 cursor/snapshot 断言验收。`python3 scripts/build_console.py && uv build` 通过。
@@ -1323,7 +1323,7 @@ Webhook 未覆盖的交互/字段需在明确触发的核对中补齐，不能�
   older_result / closed 两场景上分别得到 1 failed / 1 passed：前者漏报旧任务的 GitHub 写入
   阻塞，后者用写入错误遮住必须重开/对账的交付限制，故保留两项规则。复现插件文本为
   `.amp/in/artifacts/console-diagnostics-probe.txt`；临时恢复为 `.amp/in/console_diagnostics_probe.py`，
-  以 `PYTHONPATH=.amp/in FLOWTOOL_TEST_DATABASE_URL=postgresql://127.0.0.1/flowtool_test`
+  以 `PYTHONPATH=.amp/in AGENTFLOW_TEST_DATABASE_URL=postgresql://127.0.0.1/agentflow_test`
   和 `DIAGNOSTICS_ABLATION=without_blocker_priority` 或 `without_closed_guard` 执行
   `uv run pytest -q -p console_diagnostics_probe tests/test_console_api.py -k 'older_result or closed'`。
   日志为 `console-diagnostics-<模式>.log`；临时插件已删除。

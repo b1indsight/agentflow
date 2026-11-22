@@ -28,9 +28,9 @@
 只在 serve 的私有 env 文件设置三项，替换示例值：
 
 ```dotenv
-FLOWTOOL_ACCESS_ISSUER=https://YOUR-TEAM.cloudflareaccess.com
-FLOWTOOL_ACCESS_AUDIENCE=YOUR_APPLICATION_AUD_TAG
-FLOWTOOL_ACCESS_OWNER_EMAIL=you@example.com
+AGENTFLOW_ACCESS_ISSUER=https://YOUR-TEAM.cloudflareaccess.com
+AGENTFLOW_ACCESS_AUDIENCE=YOUR_APPLICATION_AUD_TAG
+AGENTFLOW_ACCESS_OWNER_EMAIL=you@example.com
 ```
 
 issuer 必须是 HTTPS team domain，不带端口、路径或末尾斜杠；audience 使用该 Access 应用的
@@ -38,7 +38,7 @@ AUD tag。这三项不是密钥，但要保护其修改权限。原生 env 文�
 目录的 serve.env；Kubernetes 放 serve 专用 env Secret。均不提供给 Worker。
 
 三项均为空时用户 API 返回 503；只配置部分或配置格式错误时 serve 启动失败。
-旧 `FLOWTOOL_CONTROL_API_TOKEN` 已删除，旧 Bearer Token 不再授权用户 API。
+旧 `AGENTFLOW_CONTROL_API_TOKEN` 已删除，旧 Bearer Token 不再授权用户 API。
 Control 不需要 Cloudflare 管理 API Token、OAuth Secret、MFA 密钥或 JWT 签名私钥。
 
 ## 3. 管理域名和源站边界

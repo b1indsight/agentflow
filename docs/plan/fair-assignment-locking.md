@@ -68,7 +68,7 @@ recovery decisions 回归 **43 passed**；Ruff、Mypy（138 源文件）通过�
 
 ### 2026-09-30：全套验证
 
-`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run --no-sync pytest -q --tb=short`
+`AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres uv run --no-sync pytest -q --tb=short`
 完成 **807 passed，0 skipped**（约 57 秒）；唯一警告为 Starlette TestClient 的 httpx 弃用提示。
 Ruff、Mypy（138 源文件）、`uv build` 与 `git diff --check` 通过。
 

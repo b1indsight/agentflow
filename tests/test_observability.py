@@ -114,8 +114,8 @@ def test_metrics_default_off_and_bearer_protected():
         assert client.get('/metrics', headers={'Authorization': 'Bearer worker-token'}).status_code == 401
         response = client.get('/metrics', headers={'Authorization': 'Bearer monitor-only'})
         assert response.status_code == 200
-        assert 'flowtool_metrics_snapshot_ready 0' in response.text
-        assert 'flowtool_inbox' not in response.text
+        assert 'agentflow_metrics_snapshot_ready 0' in response.text
+        assert 'agentflow_inbox' not in response.text
         context.settings.metrics_token = None
         assert client.get('/metrics', headers={'Authorization': 'Bearer monitor-only'}).status_code == 404
 
@@ -126,15 +126,15 @@ def test_persistent_backlog_and_empty_age(store, postgresql_url):
     metrics = Metrics()
     metrics.accept(snapshot)
     text = metrics.render().decode()
-    assert 'flowtool_inbox{state="pending"} 1.0' in text
-    assert 'flowtool_jobs{kind="initial",state="queued"} 0.0' in text
-    assert 'flowtool_oldest_age_seconds{queue="jobs"} 0.0' in text
+    assert 'agentflow_inbox{state="pending"} 1.0' in text
+    assert 'agentflow_jobs{kind="initial",state="queued"} 0.0' in text
+    assert 'agentflow_oldest_age_seconds{queue="jobs"} 0.0' in text
     assert 'sensitive-delivery-id' not in text and 'aaaaaa' not in text
     # DB failure must retain backlog and expose staleness, not replace it with zero.
     metrics.failed()
     text = metrics.render().decode()
-    assert 'flowtool_inbox{state="pending"} 1.0' in text
-    assert 'flowtool_metrics_snapshot_errors_total 1.0' in text
+    assert 'agentflow_inbox{state="pending"} 1.0' in text
+    assert 'agentflow_metrics_snapshot_errors_total 1.0' in text
 
 
 async def test_snapshot_runs_off_event_loop_and_scrape_never_reads_database(monkeypatch):
@@ -152,7 +152,7 @@ async def test_snapshot_runs_off_event_loop_and_scrape_never_reads_database(monk
     task = asyncio.create_task(metrics.run('unused', 15))
     try:
         while not started.is_set(): await asyncio.sleep(0.001)
-        for _ in range(3): assert b'flowtool_metrics_snapshot_ready 0' in metrics.render()
+        for _ in range(3): assert b'agentflow_metrics_snapshot_ready 0' in metrics.render()
         assert not calls
     finally:
         release.set()
@@ -175,8 +175,8 @@ def test_repeated_snapshots_do_not_count_execution_receipt_twice(store, postgres
     for _ in range(2):
         metrics.accept(read_snapshot(postgresql_url))
         rendered = metrics.render().decode()
-        assert 'flowtool_execution_receipts{kind="initial"} 1.0' in rendered
-        assert 'flowtool_execution_elapsed_seconds{kind="initial"} 3.0' in rendered
+        assert 'agentflow_execution_receipts{kind="initial"} 1.0' in rendered
+        assert 'agentflow_execution_elapsed_seconds{kind="initial"} 3.0' in rendered
     assert 'private/repository' not in rendered
 
 
@@ -188,7 +188,7 @@ def test_snapshot_query_timeout_preserves_previous_facts(store, postgresql_url, 
     with pytest.raises(psycopg.errors.QueryCanceled): read_snapshot(postgresql_url)
     metrics.failed()
     assert metrics.snapshot is previous
-    assert b'flowtool_metrics_snapshot_errors_total 1.0' in metrics.render()
+    assert b'agentflow_metrics_snapshot_errors_total 1.0' in metrics.render()
 
 
 def test_standard_logging_preserves_level_and_origin_without_payload():

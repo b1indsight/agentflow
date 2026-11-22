@@ -147,7 +147,7 @@
   首次全量运行因临时数据库误建为 SQL_ASCII 而失败，改为 UTF8 后重新完整通过，未修改产品代码规避错误。
   检查命令为 `python -m pytest -q`、`ruff check .`、`mypy app tests`、`uv build --out-dir <临时目录>`
   和 `git diff --check`；在隔离 workspace 使用已安装依赖的 Python，并设置 `PYTHONPATH="$PWD"`。
-  测试数据库由 `FLOWTOOL_TEST_DATABASE_URL` 指向独立实例，不连接运行中的数据库。
+  测试数据库由 `AGENTFLOW_TEST_DATABASE_URL` 指向独立实例，不连接运行中的数据库。
 - **传输验证：** 临时脚本以真实 localhost WebSocket 连接运行实际 `WorkerClient`，对端模拟当前 Server。
   成功/失败结果及附带停止回执分别完成注册恢复、结果/停止回执重放和 ACK；发送的消息通过当前网络解析器。
   ACK 前文件字节不变，ACK 后保存 v15，身份、摘要及 workspace 绑定不变；执行器禁止重新运行编码。

@@ -1,10 +1,10 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: flowtool-serve
+  name: agentflow-serve
 spec:
   selector:
-    flowtool-role: serve
+    agentflow-role: serve
   ports:
   - name: http
     port: 8000
@@ -14,17 +14,17 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: flowtool-serve-headless
+  name: agentflow-serve-headless
 spec:
   clusterIP: None
   selector:
-    flowtool-role: serve
+    agentflow-role: serve
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: flowtool-worker-1-headless
+  name: agentflow-worker-1-headless
 spec:
   clusterIP: None
   selector:
-    flowtool-role: worker-1
+    agentflow-role: worker-1

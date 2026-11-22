@@ -222,7 +222,7 @@ def delivered_pr_number(flow: Flow, *, deliveries: DeliveryStore) -> int: ...
 
 ### [002] — 2026-11-16 — 同场景对照与简化比较
 
-- **设置：** 隔离 PostgreSQL 17，`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55485/postgres`；使用项目既有虚拟环境和 pytest。临时插件观察公共 `prepare`、`retry` 和实际持久化计划，比较 task、异常类型/消息、retry 拒绝码、完整有序 plan/effects 及 Flow/delivery/attempt/binding/job 最终状态。
+- **设置：** 隔离 PostgreSQL 17，`AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55485/postgres`；使用项目既有虚拟环境和 pytest。临时插件观察公共 `prepare`、`retry` 和实际持久化计划，比较 task、异常类型/消息、retry 拒绝码、完整有序 plan/effects 及 Flow/delivery/attempt/binding/job 最终状态。
 - **原始基线：** 从规划基线提交导出干净副本，重跑相同输入，与先前基线记录一致。只归一化 ISO 时间和 UUID；每次先校验原始 plan/inbox digest 对应关系，再用归一化 payload 的 SHA256 比较摘要，保留任务身份、轮次及关联。
 - **比较 A：** 实际运行“仅迁结果”副本和“完整迁移”版本，相同场景输出均与原始基线一致。仅迁结果时 `prepare` 仍有三类任务和 PR 资源构造，完整迁移后只有公共前置和直接分派，因此保留完整迁移以满足职责归组要求，不把减少入口行数当作行为证明。
 - **比较 B：** 在内存把 INITIAL 的三个方法展开成显式传参的模块函数，保留算法并运行相同场景，输出同样一致。入口仍需五项依赖，命名入队/等待两个调用分别额外传四项/七项共享依赖；具体类只在入口绑定一次，保留该类。变体不写回应用源码，不引入运行时选项。

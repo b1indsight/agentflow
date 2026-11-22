@@ -2,7 +2,7 @@
 
 > 状态：已实现（自动化验证），真实部署待验收 · 设计 2026-11-15，实现 2026-11-17。
 >
-> `flows` 的每次业务列变化都在同一事务内追加一条 Flow 事实；`flowtool flow verify` 重放事实并与
+> `flows` 的每次业务列变化都在同一事务内追加一条 Flow 事实；`agentflow flow verify` 重放事实并与
 > `flows` 比较。实施过程、取舍和验证见 [feature record](../plan/flow-activity-ledger.md)。
 
 ## 1. 目标与范围
@@ -98,7 +98,7 @@ PR #171 已把 Flow 状态写入收拢到 `FlowStore.transition(flow, FlowEvent)
 | `kind` | 事实种类，决定如何改变 `flows` 行 |
 | `occurred_at` | 业务时间：即该次写入的 `updated_at`；`archive` 的该值同时是 `archived_at` |
 | `observed_at` | 数据库写入时间 |
-| `author` | 固定为 `FlowTool` |
+| `author` | 固定为 `AgentFlow` |
 | `title` | 供 CLI 阅读的固定中文标题，不参与重放 |
 | `body` | 空。任务原文只在详情中读取，不进入活动正文；起点事实用 `task_digest` 记录它的 SHA-256 |
 | `metadata` | 该种类的结构化字段，见[第 6 节](#6-事实目录) |
@@ -181,7 +181,7 @@ FlowStore.transition(flow, event)          调用方已持有 lock_workflow
 `repo`、`issue_number`、`task_content`、`installation_id`、`title`、`state`、`current_attempt_id`、
 `archive_reason`、`archive_summary`、`archived_at`、`created_at`、`updated_at`。
 
-`flowtool flow verify [FLOW_ID]` 不带参数时检查所有新版 Flow，遇到差异以非零状态退出，不自动修复。迁移时已核对旧库账本并保留原始事件格式；命令会逐条说明跳过的只读 Flow，不把它们计入重放成功数。测试夹具对新版 Flow 运行同一校验。
+`agentflow flow verify [FLOW_ID]` 不带参数时检查所有新版 Flow，遇到差异以非零状态退出，不自动修复。迁移时已核对旧库账本并保留原始事件格式；命令会逐条说明跳过的只读 Flow，不把它们计入重放成功数。测试夹具对新版 Flow 运行同一校验。
 
 ## 9. 存量数据
 
@@ -198,7 +198,7 @@ FlowStore.transition(flow, event)          调用方已持有 lock_workflow
 
 - 调度、对账、API 和 CLI 继续读 `flows`；
 - 控制台卡片继续读 `console_flows.facts`，时间线继续排除 `source='flow'` 的行；
-- `flowtool flow history <id>` 按版本顺序列出该 Flow 的事件摘要，包括重新开工前后的事实、状态快照和通知；不输出内部执行编号或原始快照 JSON。
+- `agentflow flow history <id>` 按版本顺序列出该 Flow 的事件摘要，包括重新开工前后的事实、状态快照和通知；不输出内部执行编号或原始快照 JSON。
 
 ## 11. 不变量
 

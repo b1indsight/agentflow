@@ -8,7 +8,7 @@ COPY app/controler/web/ ./
 RUN npm run build
 
 FROM ${PYTHON_IMAGE} AS build
-WORKDIR /opt/flowtool
+WORKDIR /opt/agentflow
 RUN pip install --no-cache-dir uv==0.11.3
 COPY pyproject.toml uv.lock README.md ./
 COPY app ./app
@@ -18,13 +18,13 @@ RUN uv sync --locked --no-dev --no-editable
 FROM ${PYTHON_IMAGE} AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 10001 --create-home --home-dir /home/flowtool flowtool \
-    && mkdir -p /var/lib/flowtool /home/flowtool/.codex \
-    && chown -R 10001:10001 /var/lib/flowtool /home/flowtool
-COPY --from=build /opt/flowtool/.venv /opt/flowtool/.venv
-ENV PATH="/opt/flowtool/.venv/bin:$PATH" HOME=/home/flowtool PYTHONUNBUFFERED=1
-WORKDIR /opt/flowtool
-ENTRYPOINT ["/usr/bin/tini", "--", "flowtool"]
+    && useradd --uid 10001 --create-home --home-dir /home/agentflow agentflow \
+    && mkdir -p /var/lib/agentflow /home/agentflow/.codex \
+    && chown -R 10001:10001 /var/lib/agentflow /home/agentflow
+COPY --from=build /opt/agentflow/.venv /opt/agentflow/.venv
+ENV PATH="/opt/agentflow/.venv/bin:$PATH" HOME=/home/agentflow PYTHONUNBUFFERED=1
+WORKDIR /opt/agentflow
+ENTRYPOINT ["/usr/bin/tini", "--", "agentflow"]
 
 FROM runtime AS serve
 USER 10001:10001
@@ -55,8 +55,8 @@ RUN test "$(dpkg --print-architecture)" = amd64 \
     && echo "${AMP_SHA256}  /tmp/amp" | sha256sum -c - \
     && install -m 0755 /tmp/amp /usr/local/bin/amp \
     && rm -f /tmp/amp /tmp/amp.gz \
-    && mkdir -p /home/flowtool/.amp \
-    && chown -R 10001:10001 /home/flowtool/.amp
+    && mkdir -p /home/agentflow/.amp \
+    && chown -R 10001:10001 /home/agentflow/.amp
 USER 10001:10001
-ENV FLOWTOOL_WORKER_ROOT=/var/lib/flowtool FLOWTOOL_EXECUTION_ISOLATION=container
+ENV AGENTFLOW_WORKER_ROOT=/var/lib/agentflow AGENTFLOW_EXECUTION_ISOLATION=container
 CMD ["worker"]

@@ -61,7 +61,7 @@ coordinator、gateway、事务、归档插件和并发恢复回归覆盖。无�
 
 ### 2026-09-30：完整验证与复杂度检查
 
-- `FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run --no-sync pytest -q --tb=short`
+- `AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres uv run --no-sync pytest -q --tb=short`
   完成：**804 passed，0 skipped**。保留的一条警告来自 Starlette TestClient 的 httpx 弃用提示。
 - `uv run --no-sync ruff check app tests`、`uv run --no-sync mypy app tests`（138 源文件）、
   `uv build`、`git diff --check` 均通过。

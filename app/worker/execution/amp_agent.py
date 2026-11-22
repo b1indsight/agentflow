@@ -108,7 +108,7 @@ def amp_environment(
     if context is not None:
         environment.update(git_credential_environment(context.github.token if context.github else None))
         if context.mcp_token is not None:
-            environment["FLOWTOOL_MCP_TOKEN"] = context.mcp_token.get_secret_value()
+            environment["AGENTFLOW_MCP_TOKEN"] = context.mcp_token.get_secret_value()
     return environment
 
 
@@ -408,19 +408,19 @@ class AmpCodingAgent(CodingAgent):
             if not thread_id.startswith("T-"):
                 raise ValueError("resume requires an explicit Amp thread ID")
         if not self.trusted_host:
-            raise RuntimeError("Amp trusted-host execution requires FLOWTOOL_TRUSTED_HOST_EXECUTION=true")
+            raise RuntimeError("Amp trusted-host execution requires AGENTFLOW_TRUSTED_HOST_EXECUTION=true")
         url = context.mcp_url if context else None
         token = context.mcp_token if context else None
         if (url is None) != (token is None):
             raise ValueError("worker MCP requires an endpoint and scoped token together")
         # Port zero replaces any saved/user flow endpoint without exposing an old
         # broker or its token; it preserves the existing no-broker behavior.
-        mcp = {"flow": ({"url": url, "headers": {"Authorization": "Bearer ${FLOWTOOL_MCP_TOKEN}"}}
+        mcp = {"flow": ({"url": url, "headers": {"Authorization": "Bearer ${AGENTFLOW_MCP_TOKEN}"}}
                         if url is not None else {"url": "http://127.0.0.1:0/mcp"})}
         if output_schema is not None:
             prompt += ("\n\nReturn exactly one JSON value matching this JSON Schema as your final answer. "
                        "Do not wrap it in Markdown or add explanatory text.\n" + output_schema.read_text())
-        with tempfile.TemporaryDirectory(prefix="flowtool-amp-") as directory:
+        with tempfile.TemporaryDirectory(prefix="agentflow-amp-") as directory:
             run_directory = Path(directory)
             environment = amp_environment(context=context)
             if context and context.github:
@@ -443,7 +443,7 @@ class AmpCodingAgent(CodingAgent):
             # No SessionUnavailable fallback: the observed CLI stderr alone has not
             # proven that every missing-thread rejection precedes all execution.
             secrets = [value for key, value in environment.items()
-                       if key in {"AMP_API_KEY", "FLOWTOOL_MCP_TOKEN", "FLOWTOOL_PUSH_TOKEN", "GH_TOKEN"} and value]
+                       if key in {"AMP_API_KEY", "AGENTFLOW_MCP_TOKEN", "AGENTFLOW_PUSH_TOKEN", "GH_TOKEN"} and value]
             result.last_message = redact_amp_text(result.last_message, secrets)
             if result.failure_detail:
                 result.failure_detail = redact_amp_text(result.failure_detail, secrets)[-4000:]
@@ -629,7 +629,7 @@ class AmpHistory:
         unsupported = False
         secrets = tuple(os.environ.get(key, "") for key in (
             "AMP_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
-            "FLOWTOOL_WORKER_TOKEN", "FLOWTOOL_PUSH_TOKEN", "FLOWTOOL_MCP_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
+            "AGENTFLOW_WORKER_TOKEN", "AGENTFLOW_PUSH_TOKEN", "AGENTFLOW_MCP_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
         ))
         for block_index, block in enumerate(blocks):
             if not isinstance(block, dict):

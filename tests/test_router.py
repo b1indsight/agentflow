@@ -26,7 +26,7 @@ def router(store: Store, monkeypatch) -> EventRouter:
     return EventRouter(
         service,
         settings,
-        bot_login="flowtool-bot[bot]",
+        bot_login="agentflow-bot[bot]",
         database=store.database,
     )
 
@@ -65,7 +65,7 @@ async def test_allowed_label_creates_one_flow_and_job(
 async def test_bot_and_non_allowlisted_users_do_not_trigger(
     router: EventRouter, store: Store,
 ) -> None:
-    router.dispatch("issues", "bot-delivery", issue_event(action="labeled", sender="Flowtool-bot[bot]"))
+    router.dispatch("issues", "bot-delivery", issue_event(action="labeled", sender="AgentFlow-bot[bot]"))
     router.dispatch("issues", "outsider-delivery", issue_event(action="labeled", sender="mallory"))
 
     assert store.flows.get_active_flow("owner/repo", 7) is None
@@ -136,7 +136,7 @@ def test_late_pr_events_cannot_reach_history_or_replacement(router, store):
     assert store.flows.get_flow(current.id).state is FlowState.ARCHIVED
 
 
-@pytest.mark.parametrize("author", ["reviewer", "Flowtool-bot[bot]"])
+@pytest.mark.parametrize("author", ["reviewer", "AgentFlow-bot[bot]"])
 @pytest.mark.asyncio
 async def test_review_comment_is_stored_for_current_attempt(
     router: EventRouter, store: Store, monkeypatch, author: str,

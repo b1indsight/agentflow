@@ -10,7 +10,7 @@ from loguru import logger
 
 from app.plugins import builtin, hookspecs
 
-PROJECT = "flowtool"
+PROJECT = "agentflow"
 
 
 def emit_hook(plugins: pluggy.PluginManager, hook: str, **kwargs: object) -> None:
@@ -25,6 +25,6 @@ def get_plugin_manager() -> pluggy.PluginManager:
     pm = pluggy.PluginManager(PROJECT)
     pm.add_hookspecs(hookspecs.FlowHooks)   # specs 定义在 FlowHooks 类上，须传类而非模块
     pm.register(builtin.post_merge_summary)
-    # 外部插件经 entry-point "flowtool" 加载（后于 builtin，覆盖优先）
+    # 外部插件经 entry-point "agentflow" 加载（后于 builtin，覆盖优先）
     pm.load_setuptools_entrypoints(PROJECT)
     return pm

@@ -147,4 +147,4 @@ adapter 或依赖变更，再在同一 PR 完成审批，不能退回共享个�
   矛盾讨论、注入式文本的语义准确率。本 feature 尚未全面语义验收；需部署时指定真实模型与受控快照集。
 - 验证结果：Ruff、Mypy、完整 pytest **264 passed / 0 skipped**（真实 PostgreSQL）和
   `uv build --no-sources` 通过。保留既有 Starlette TestClient/httpx 弃用告警。
-  当前环境未配置 `FLOWTOOL_JUDGE_MODEL` / `FLOWTOOL_JUDGE_API_KEY`；未调用真实付费 provider。
+  当前环境未配置 `AGENTFLOW_JUDGE_MODEL` / `AGENTFLOW_JUDGE_API_KEY`；未调用真实付费 provider。

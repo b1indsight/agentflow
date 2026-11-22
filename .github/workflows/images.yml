@@ -31,7 +31,7 @@ jobs:
           target: serve
           platforms: linux/amd64
           load: true
-          tags: flowtool-serve:test
+          tags: agentflow-serve:test
           cache-from: type=gha,scope=serve
           cache-to: type=gha,mode=max,scope=serve
       - name: Build worker
@@ -41,7 +41,7 @@ jobs:
           target: worker
           platforms: linux/amd64
           load: true
-          tags: flowtool-worker:test
+          tags: agentflow-worker:test
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
       - name: Verify role boundaries, TLS, persistence and reconnect
@@ -95,11 +95,11 @@ jobs:
           provenance: mode=max
       - name: Pull and verify exact candidate digests
         env:
-          FLOWTOOL_SMOKE_SERVE_IMAGE: ${{ steps.image.outputs.prefix }}-serve@${{ steps.serve.outputs.digest }}
-          FLOWTOOL_SMOKE_WORKER_IMAGE: ${{ steps.image.outputs.prefix }}-worker@${{ steps.worker.outputs.digest }}
+          AGENTFLOW_SMOKE_SERVE_IMAGE: ${{ steps.image.outputs.prefix }}-serve@${{ steps.serve.outputs.digest }}
+          AGENTFLOW_SMOKE_WORKER_IMAGE: ${{ steps.image.outputs.prefix }}-worker@${{ steps.worker.outputs.digest }}
         run: |
-          docker pull "$FLOWTOOL_SMOKE_SERVE_IMAGE"
-          docker pull "$FLOWTOOL_SMOKE_WORKER_IMAGE"
+          docker pull "$AGENTFLOW_SMOKE_SERVE_IMAGE"
+          docker pull "$AGENTFLOW_SMOKE_WORKER_IMAGE"
           bash scripts/smoke/docker.sh
       - name: Tag verified manifests without rebuilding
         env:

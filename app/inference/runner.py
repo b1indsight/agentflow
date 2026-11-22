@@ -75,7 +75,7 @@ async def run(task: InferenceTask) -> InferenceOutput | InferenceFailure:
                                        dotenv_settings, file_secret_settings):
             return (init_settings,)
 
-    model = os.environ["FLOWTOOL_JUDGE_MODEL"]
+    model = os.environ["AGENTFLOW_JUDGE_MODEL"]
     messages = [message.model_dump() for message in task.messages]
     if task.output_schema is not None:
         schema = json.dumps(task.output_schema, ensure_ascii=False, separators=(",", ":"))
@@ -83,8 +83,8 @@ async def run(task: InferenceTask) -> InferenceOutput | InferenceFailure:
             "Return exactly one JSON value matching this schema, without Markdown:\n" + schema})
     try:
         settings = ExplicitSettings(
-            model=model, api_key=os.environ["FLOWTOOL_JUDGE_API_KEY"],
-            api_base=os.environ.get("FLOWTOOL_JUDGE_API_BASE"), fallback_models=[],
+            model=model, api_key=os.environ["AGENTFLOW_JUDGE_API_KEY"],
+            api_base=os.environ.get("AGENTFLOW_JUDGE_API_BASE"), fallback_models=[],
             max_tokens=16_000, client_args={"max_retries": 0},
         )
         response = await ModelRunner(settings, hooks=None).completion_response(

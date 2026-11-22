@@ -856,7 +856,7 @@ workspace 内，已有 VCS 检测会错误读到父 jj remote；改用 pytest �
 | 预启动拒绝；SQL 中已经 Started | 删除 started_at 围栏 | 已启动 assignment 被错误接受为拒绝；保留事务围栏 |
 | 独立 history 拒收；畸形回复后立即 EOF | 将 prepare 推迟到异步回包任务 | 查询错误被断线覆盖；保留同步 owner 校验与 Future 收尾 |
 
-**复现方式：**常规基线运行 `FLOWTOOL_TEST_DATABASE_URL=<本地测试库> python -m pytest -q`；
+**复现方式：**常规基线运行 `AGENTFLOW_TEST_DATABASE_URL=<本地测试库> python -m pytest -q`；
 消融逐进程执行 `python -m pytest --noconftest -p tests.conftest -q -x <case>`，分别在模块加载后
 用上表变体替换对应分支，再以相同 case 比较。永久 case 为
 `test_communication_session.py::test_control_payload_waits_for_owner_before_query_dispatch`、
@@ -1035,7 +1035,7 @@ Dispatcher，外部执行/仓储使用测试替身，不声称真实 GitHub 或�
 `test_session_events.py::test_reply_reaches_its_owner_without_a_method_route` 和
 `test_worker_handler.py::test_duplicate_prior_job_result_does_not_retire_current_assignment`；
 变体通过 inspect 读取方法、只删除表中分支，在子进程内重新编译替换该方法，再运行同一用例。
-完整测试使用 `FLOWTOOL_TEST_DATABASE_URL=<本地测试库> python -m pytest -q`。
+完整测试使用 `AGENTFLOW_TEST_DATABASE_URL=<本地测试库> python -m pytest -q`。
 日志位于 `.amp/in/artifacts/request-reply-{before,red,focused,full,boundaries,lint,mypy,format}.log`
 及 `request-reply-ablation-{baseline,method_dispatch,current_only}.log`。
 全量仍有既有的 Starlette 弃用及 subprocess transport 回收警告，后者来源未确认。
@@ -1320,7 +1320,7 @@ Session 关闭未完成的实际写入，Broker 仍要求 send 成功后才返�
 
 临时场景验证 driver 自等守卫、迟到回复、pre-Started history 不刷新接收期限，以及拒收紧跟 EOF
 仍按 FIFO 顺序处理。类级图用 Chromium 检查交互、源码符号、360/720px 溢出和连线，并检查渲染截图。
-可复现命令为 `FLOWTOOL_TEST_DATABASE_URL=postgresql://127.0.0.1:55617/agentflow_test .amp/in/venv312/bin/python -m pytest -q`、
+可复现命令为 `AGENTFLOW_TEST_DATABASE_URL=postgresql://127.0.0.1:55617/agentflow_test .amp/in/venv312/bin/python -m pytest -q`、
 `.amp/in/venv312/bin/ruff check app tests` 与 `.amp/in/venv312/bin/mypy app tests`；查询生命周期入口为
 `tests/test_conversation_proxy.py`，FIFO 入口为 `tests/test_conversation_worker.py` 与 `tests/test_communication_session.py`。
 

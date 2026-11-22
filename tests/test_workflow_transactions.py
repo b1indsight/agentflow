@@ -144,8 +144,8 @@ def test_admin_cli_creates_only_valid_task_inputs(store, monkeypatch, source):
     from app import cli
     from app.github import Installation, Repository
 
-    monkeypatch.setenv("FLOWTOOL_DATABASE_URL", store.database.database_url)
-    monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker":"test-token"}')
+    monkeypatch.setenv("AGENTFLOW_DATABASE_URL", store.database.database_url)
+    monkeypatch.setenv("AGENTFLOW_WORKER_TOKENS", '{"worker":"test-token"}')
     monkeypatch.setattr(cli.github, "GitHubApp", lambda settings: RecordingGitHub())
 
     async def refetch(repo):

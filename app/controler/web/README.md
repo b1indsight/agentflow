@@ -1,6 +1,6 @@
 # Web 控制台
 
-当前由 `flowtool serve` 在 `/console/` 提供，使用真实同源 `/api/`，**没有生产示例数据或 mock 回退**。
+当前由 `agentflow serve` 在 `/console/` 提供，使用真实同源 `/api/`，**没有生产示例数据或 mock 回退**。
 提供顶栏「新建 Flow」、详情底部「继续工作」、Flow「归档」、已归档 Flow「重新开工」及受阻 Flow 的安全重试。
 页面、静态资源和 API 均要求 Cloudflare Access 的单 owner 身份；数据库、GitHub 与 Worker
 读取由 control 负责。真实 Access 登录/MFA、GitHub App 全来源回填和目标部署仍待验收。
@@ -15,13 +15,13 @@ shadcn 的 Button / Input 源码放在 `components/ui/`，按需引入；不使�
 
 ```sh
 python scripts/build_console.py
-uv run flowtool serve
+uv run agentflow serve
 ```
 
 脚本执行锁定 npm 安装与生产构建，并将 `dist/` 复制到 `app/controler/console_static/`。
 随后 `uv build --no-sources` 制作的 wheel/sdist 会包含资源；Docker 使用独立 Node 构建阶段，
 运行 serve 不需要 Node。未构建资源时 `/console/` 返回明确的资源不可用错误，不回退到样例。
-配置 `FLOWTOOL_ACCESS_ISSUER`、`FLOWTOOL_ACCESS_AUDIENCE` 和 `FLOWTOOL_ACCESS_OWNER_EMAIL`；
+配置 `AGENTFLOW_ACCESS_ISSUER`、`AGENTFLOW_ACCESS_AUDIENCE` 和 `AGENTFLOW_ACCESS_OWNER_EMAIL`；
 Tunnel/Access 将 `/console*` 与 `/api/*` 路由至同一服务并应用相同 owner 策略。
 配置缺失会拒绝访问，详见 [Access 部署](../../../docs/deployment/access.md)。
 

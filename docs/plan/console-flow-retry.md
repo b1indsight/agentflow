@@ -8,7 +8,7 @@
 ### 动机与目标
 
 用户处理完受阻原因后，希望在页面上继续原 Flow，无需到控制端运行
-`flowtool flow retry <id>`。在详情概览增加「重试」入口，调用现有业务服务，
+`agentflow flow retry <id>`。在详情概览增加「重试」入口，调用现有业务服务，
 明确区分请求已受理、未执行和被拒绝；保留取消停止确认、结果对账和归档绑定限制。
 
 当前控制台只有展示归档写入口；此前计划明确延后执行状态写操作，本记录新增重试范围，
@@ -146,7 +146,7 @@
   「重试」失败。补齐实现后通过。浏览器使用测试路由，后端使用专用本地 PostgreSQL 实例及
   每例独立 schema；没有执行真实 Flow、GitHub 写入或生产数据库操作。
 - **最终检查：** `ruff check .` 通过；`mypy app` 的 111 个源文件通过；使用
-  `FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool_test@127.0.0.1:55439/flowtool_retry_test`
+  `AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow_test@127.0.0.1:55439/agentflow_retry_test`
   运行 `python -m pytest -q`，860 项通过、无跳过（其中 console API 41 项）。
   前端 `npm run typecheck`、`test`（4 项）、`format:check`、`build` 通过；
   `npm run test:e2e` 的 23 项通过。保留一条已有 Starlette 弃用提示及构建大分包提示，

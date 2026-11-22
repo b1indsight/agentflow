@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FlowTool 架构状态 · 2026-10-15 / E2E 与部署待验收</title>
+<title>AgentFlow 架构状态 · 2026-10-15 / E2E 与部署待验收</title>
 <style>
   :root {
     --bg:#eaeef3; --surface:#ffffff; --surface-2:#f4f7fb;
@@ -237,7 +237,7 @@
     <div class="brand">
       <div class="mark">🏗️</div>
       <div>
-        <h1>FlowTool</h1>
+        <h1>AgentFlow</h1>
         <p class="tagline">目标闭环 · GitHub issue 打 <code>flow</code> 标 → codex 编码 → PR → 审核回喂 → 人工合并 → 归档</p>
       </div>
     </div>
@@ -271,7 +271,7 @@
     </article>
     <article class="node" data-status="done">
       <div class="node__top"><span class="node__name">config</span><span class="pill">M0 已验</span></div>
-      <p class="node__role">pydantic-settings · env 前缀 FLOWTOOL_ · allowlist / 路径展开</p>
+      <p class="node__role">pydantic-settings · env 前缀 AGENTFLOW_ · allowlist / 路径展开</p>
       <code class="node__file">app/controler/config.py · app/worker/config.py</code>
     </article>
     <article class="node" data-status="done">
@@ -582,7 +582,7 @@
     <h3>✓ M0 验收结果（2026-08-26）</h3>
     <ul>
       <li><b>自动化</b> —— 19 项覆盖配置/契约、SQLite、HMAC/路由、worker/恢复及 heartbeat 清理/重试；pytest、Ruff、Mypy 全绿。</li>
-      <li><b>运行时</b> —— <code>uv sync --locked</code>、CLI、真实 <code>flowtool serve</code> 与 <code>GET /healthz</code> 200 已验证。</li>
+      <li><b>运行时</b> —— <code>uv sync --locked</code>、CLI、真实 <code>agentflow serve</code> 与 <code>GET /healthz</code> 200 已验证。</li>
       <li><b>M1/M2 已实现并合并、E2E 待验收</b> —— F1–F4 完整自动化 377 passed / 0 skipped（2026-09-07）；GitHub/Codex 使用替身，bub 连接假 provider。</li>
       <li><b>最新完整回归记录</b> —— 2026-10-15 持久层简化：735 passed、无跳过；这是既有实施记录，见 <a href="../plan/persistence-simplification.md">验证与对照</a>。</li>
       <li><b>剩余工作</b> —— 真实 GitHub App/Codex/bub、镜像发布、目标集群与恢复演练待执行，见 <a href="README.md#当前实现状态">当前状态表</a> 和 <a href="../verification/m5-live-e2e.md">真实验收清单</a>。</li>
@@ -590,7 +590,7 @@
   </div>
 
   <footer>
-    <span>FlowTool · 实现与验收分列 · 文档核对 2026-10-15</span>
+    <span>AgentFlow · 实现与验收分列 · 文档核对 2026-10-15</span>
     <span>docs/architecture/ · docs/plan/</span>
   </footer>
 

@@ -27,9 +27,9 @@ SOURCE = Path(__file__).resolve().parents[1]
 
 
 def write_record(site):
-    metadata = site / "flowtool-0.0.1.dist-info"
+    metadata = site / "agentflow-0.0.1.dist-info"
     paths = [*sorted((site / "app").rglob("*")), *sorted(metadata.iterdir())]
-    paths.append(site.parents[2] / "bin" / "flowtool")
+    paths.append(site.parents[2] / "bin" / "agentflow")
     with (metadata / "RECORD").open("w", newline="") as handle:
         writer = csv.writer(handle)
         for path in paths:
@@ -38,7 +38,7 @@ def write_record(site):
             body = path.read_bytes()
             digest = base64.urlsafe_b64encode(hashlib.sha256(body).digest()).decode().rstrip("=")
             writer.writerow([os.path.relpath(path, site), f"sha256={digest}", len(body)])
-        writer.writerow(["flowtool-0.0.1.dist-info/RECORD", "", ""])
+        writer.writerow(["agentflow-0.0.1.dist-info/RECORD", "", ""])
 
 
 @pytest.fixture
@@ -51,18 +51,18 @@ def installation(tmp_path):
         "import sys; sys.dont_write_bytecode = True\n" + sysconfig.get_path("purelib") + "\n"
     )
     for path in Path(sysconfig.get_path("purelib")).glob("*.dist-info"):
-        if not path.name.startswith("flowtool-"):
+        if not path.name.startswith("agentflow-"):
             shutil.copytree(path, site / path.name)
     shutil.copytree(SOURCE / "app", site / "app", ignore=shutil.ignore_patterns("__pycache__"))
     (site / "app" / "__init__.py").write_text(f'INSTALLED_BODY = "{OLD_SHA}"\n')
-    metadata = site / "flowtool-0.0.1.dist-info"
+    metadata = site / "agentflow-0.0.1.dist-info"
     metadata.mkdir()
     (metadata / "METADATA").write_text(
-        importlib.metadata.distribution("flowtool").read_text("METADATA")
+        importlib.metadata.distribution("agentflow").read_text("METADATA")
     )
-    (metadata / "WHEEL").write_text(importlib.metadata.distribution("flowtool").read_text("WHEEL"))
+    (metadata / "WHEEL").write_text(importlib.metadata.distribution("agentflow").read_text("WHEEL"))
     (metadata / "INSTALLER").write_text("uv\n")
-    (metadata / "entry_points.txt").write_text("[console_scripts]\nflowtool = app.cli:app\n")
+    (metadata / "entry_points.txt").write_text("[console_scripts]\nagentflow = app.cli:app\n")
     (metadata / "direct_url.json").write_text(
         json.dumps(
             {
@@ -71,7 +71,7 @@ def installation(tmp_path):
             }
         )
     )
-    entry = prefix / "bin" / "flowtool"
+    entry = prefix / "bin" / "agentflow"
     entry.write_text(f"#!{prefix}/bin/python\nfrom app.cli import app\napp()\n")
     entry.chmod(0o755)
     write_record(site)
@@ -106,12 +106,12 @@ import httpx
 
 prefix = Path({str(prefix)!r})
 site = Path({str(site)!r})
-metadata = site / "flowtool-0.0.1.dist-info"
+metadata = site / "agentflow-0.0.1.dist-info"
 fault = {fault!r}
 {inspect.getsource(write_record)}
 if fault == "dependencies":
     path = metadata / "METADATA"
-    path.write_text(path.read_text().replace("\\n\\n", "\\nRequires-Dist: flowtool-test-absent-dependency==1\\n\\n", 1))
+    path.write_text(path.read_text().replace("\\n\\n", "\\nRequires-Dist: agentflow-test-absent-dependency==1\\n\\n", 1))
     write_record(site)
 def publication():
     return {SHA!r}
@@ -133,11 +133,11 @@ def run(command, **kwargs):
     with (prefix.parent / "commands.jsonl").open("a") as handle:
         handle.write(json.dumps(command) + "\\n")
     assert command[command.index("--python") + 1] == str(prefix / "bin" / "python")
-    assert not any(key.startswith(("UV_", "PIP_", "FLOWTOOL_")) for key in kwargs["env"])
+    assert not any(key.startswith(("UV_", "PIP_", "AGENTFLOW_")) for key in kwargs["env"])
     if "check" in command:
         return real_run([{shutil.which("uv")!r}, *command[1:]], **kwargs)
     if "install" in command:
-        assert command[-1] == "flowtool @ git+https://github.com/b1indsight/agentflow@{SHA}"
+        assert command[-1] == "agentflow @ git+https://github.com/b1indsight/agentflow@{SHA}"
         if fault == "install":
             return subprocess.CompletedProcess(command, 1, "", "secret install diagnostic")
         if fault == "interrupted":
@@ -155,7 +155,7 @@ from app.cli import app
 app()
 '''
     environment = {
-        key: value for key, value in os.environ.items() if not key.startswith("FLOWTOOL_")
+        key: value for key, value in os.environ.items() if not key.startswith("AGENTFLOW_")
     }
     environment["PATH"] = str(prefix.parent) + os.pathsep + environment["PATH"]
     environment["UV_NO_DEPS"] = "true"
@@ -177,7 +177,7 @@ app()
 
 def set_revision(installation, revision):
     _, site = installation
-    path = site / "flowtool-0.0.1.dist-info" / "direct_url.json"
+    path = site / "agentflow-0.0.1.dist-info" / "direct_url.json"
     provenance = json.loads(path.read_text())
     provenance["vcs_info"]["commit_id"] = revision
     path.write_text(json.dumps(provenance))
@@ -258,7 +258,7 @@ def test_current_but_broken_dependencies_are_not_reported_current(installation):
 @pytest.mark.parametrize("fault", ["missing", "repository", "permissions", "modified"])
 def test_unknown_provenance_or_unsupported_ownership_fails_before_install(installation, fault):
     prefix, site = installation
-    metadata = site / "flowtool-0.0.1.dist-info"
+    metadata = site / "agentflow-0.0.1.dist-info"
     path = metadata / "direct_url.json"
     provenance = json.loads(path.read_text())
     if fault == "missing":

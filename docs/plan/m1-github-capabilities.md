@@ -110,7 +110,7 @@ branch protection 和 allowlist，而不是不可实现的“对执行进程绝�
 - Issues: read/write；
 - Pull requests: read/write。
 
-`FLOWTOOL_ALLOWLIST` 只决定谁能触发。新增独立 reviewers 配置，空列表表示不请求 reviewer；不得把所有
+`AGENTFLOW_ALLOWLIST` 只决定谁能触发。新增独立 reviewers 配置，空列表表示不请求 reviewer；不得把所有
 可触发用户自动变成 reviewer。状态 label 名称也使用显式配置或稳定默认值。
 
 ## 5. 错误与幂等语义

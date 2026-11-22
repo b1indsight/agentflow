@@ -514,7 +514,7 @@ FIFO；显式 close 丢弃它。server 重叠替换在 await 旧连接关闭之�
 复现入口（在独立 workspace 内，使用已有测试解释器和隔离 PostgreSQL 环境）：
 
 ```bash
-FLOWTOOL_TEST_DATABASE_URL="$(cat ../shared-session-test-database-url)" \
+AGENTFLOW_TEST_DATABASE_URL="$(cat ../shared-session-test-database-url)" \
   ../../../.venv/bin/python ../shared-session-ablation.py
 ```
 

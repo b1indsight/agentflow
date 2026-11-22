@@ -109,7 +109,7 @@ async def test_bot_lookup_retries_without_claiming_receipts(
         if attempts == 1:
             worker.wakeup.set()
             raise GitHubError(kind, "get_app", retry_after=retry_after)
-        return response(SimpleNamespace(id=123, slug="flowtool-bot"))
+        return response(SimpleNamespace(id=123, slug="agentflow-bot"))
 
     app_client(monkeypatch, lambda **kwargs: SimpleNamespace(
         rest=SimpleNamespace(apps=SimpleNamespace(async_get_authenticated=get_app)),
@@ -137,7 +137,7 @@ async def test_bot_lookup_retries_without_claiming_receipts(
         assert attempts == 1 and receipt.state == "pending" and receipt.attempts == 0
         assert store.flows.get_active_flow("owner/repo", 7) is None
     else:
-        assert attempts == 2 and worker.github.bot_login == "flowtool-bot[bot]"
+        assert attempts == 2 and worker.github.bot_login == "agentflow-bot[bot]"
         assert store.webhooks.list()[0].state == "done"
         assert store.flows.get_active_flow("owner/repo", 7) is not None
 

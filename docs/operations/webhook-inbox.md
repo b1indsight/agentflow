@@ -1,7 +1,7 @@
 # Webhook 持久接收
 
 验签及请求体校验通过后，`/webhook` 在 PostgreSQL inbox 提交成功才返回 202。
-默认请求体上限 25 MiB，可通过 `FLOWTOOL_WEBHOOK_MAX_BODY_BYTES`（1–100 MiB）调整。
+默认请求体上限 25 MiB，可通过 `AGENTFLOW_WEBHOOK_MAX_BODY_BYTES`（1–100 MiB）调整。
 相同 delivery/type/body 重投不重置进度；同 ID 不同内容返回 409，数据库写失败返回 503。
 413 表示超过读取上限，400 表示缺少身份或非法 JSON。隧道配置仍只公开 `/webhook`。
 
@@ -13,8 +13,8 @@
 在 control 配置环境运行：
 
 ```bash
-uv run flowtool inbox status --limit 50
-uv run flowtool inbox retry DELIVERY_ID
+uv run agentflow inbox status --limit 50
+uv run agentflow inbox retry DELIVERY_ID
 ```
 
 status 仅显示身份、状态、次数、下次时间和错误类别，不输出事件正文。

@@ -361,7 +361,7 @@ async def test_close_webhook_archives_flow_while_other_lifecycle_events_are_hint
             database=store.database,
         ),
         SimpleNamespace(),
-        bot_login="flowtool[bot]",
+        bot_login="agentflow[bot]",
         database=store.database,
     )
     payload = {
@@ -398,7 +398,7 @@ def test_late_pr_merge_records_only_its_original_attempt(store, lifecycle_flow):
         "pull_request": {"number": 17, "merged": True, "merged_at": (clock.now - timedelta(seconds=3)).isoformat(),
                          "merge_commit_sha": "a" * 40},
     }
-    router = EventRouter(service, SimpleNamespace(), bot_login="flowtool[bot]", database=store.database)
+    router = EventRouter(service, SimpleNamespace(), bot_login="agentflow[bot]", database=store.database)
     jobs = store.jobs.list_jobs(flow.id)
     for receipt in ("merge", "redelivered"):
         router.dispatch("pull_request", receipt, payload)

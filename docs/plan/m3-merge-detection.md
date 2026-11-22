@@ -81,7 +81,7 @@ F1 保留当前健康 worker 上的 ARCHIVE 执行路径，不升级 wire protoc
 - 健康 worker 的既有 archive 路径可继续；不把这项回归冒充 F2 的清理可靠性验收。
 
 复用 router/service/coordinator/result recovery 测试，数据库原子性使用真实 PostgreSQL。
-实现完成运行 Ruff、Mypy、完整 pytest（设置 `FLOWTOOL_TEST_DATABASE_URL`，数据库用例不跳过）
+实现完成运行 Ruff、Mypy、完整 pytest（设置 `AGENTFLOW_TEST_DATABASE_URL`，数据库用例不跳过）
 和 `uv build --no-sources`。规划阶段仅检查文档；实施记录见下节。
 
 ## 6. 实施记录（2026-09-08）

@@ -64,12 +64,12 @@ class BubInference:
         assert self.api_key is not None
         env = {
             "PATH": os.defpath, "LANG": "C.UTF-8",
-            "FLOWTOOL_JUDGE_MODEL": self.model,
-            "FLOWTOOL_JUDGE_API_KEY": self.api_key.get_secret_value(),
+            "AGENTFLOW_JUDGE_MODEL": self.model,
+            "AGENTFLOW_JUDGE_API_KEY": self.api_key.get_secret_value(),
         }
         if self.api_base:
-            env["FLOWTOOL_JUDGE_API_BASE"] = self.api_base
-        with TemporaryDirectory(prefix="flowtool-inference-", dir=self.root) as directory:
+            env["AGENTFLOW_JUDGE_API_BASE"] = self.api_base
+        with TemporaryDirectory(prefix="agentflow-inference-", dir=self.root) as directory:
             env["BUB_HOME"] = directory
             proc = None
             try:

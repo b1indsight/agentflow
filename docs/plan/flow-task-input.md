@@ -48,7 +48,7 @@ Content-Type: application/json
 
 这里的 installation 值仅为示例。成功返回 201 和 `FlowDetail`，其中 `issue_number`、`issue_url` 为 null。同仓库可创建多个互不相关的直接任务；每次成功 POST 都创建新 Flow，不按相同正文去重，也不自动重试结果不明的创建请求。
 
-拟议 CLI 用法为 `flowtool flow create REPO --installation-id N --title TITLE --body-file PATH`；`--body-file -` 从 stdin 读取。Issue 输入使用 `--issue-number N`，不得同时提供内容选项。只有标题时正文允许为空；标题必须包含非空白字符。
+拟议 CLI 用法为 `agentflow flow create REPO --installation-id N --title TITLE --body-file PATH`；`--body-file -` 从 stdin 读取。Issue 输入使用 `--issue-number N`，不得同时提供内容选项。只有标题时正文允许为空；标题必须包含非空白字符。
 
 错误处理：输入形状/范围不合法返回 422；已有同 Issue 的活跃 Flow 返回 409；无 owner 身份、跨源或非 JSON 请求沿用现有拒绝方式。GitHub 目标校验失败时返回经过现有错误分类处理的安全诊断，不创建 Flow 或 INITIAL 任务。
 
@@ -258,7 +258,7 @@ ConsoleSync 的 SyncClaim、来源枚举和读取作用域支持可空 Issue。�
 
 **测试先行：** 协议、事务/API、直接审核和前端创建回归先暴露不支持的输入/入口，再实施；端到端测试继续复用既有 fixture、真实 PostgreSQL 与 Git/jj 本地目录，不建立平行测试框架。
 
-**执行验证：** 数据库均为本线程临时 PostgreSQL 55473，测试逐例使用独立 schema。完整 `FLOWTOOL_TEST_DATABASE_URL=… uv run pytest -q --tb=short`、`uv run ruff check app tests scripts/migrate_flow_states.py`、`uv run mypy app tests` 通过。随后补强 256 码点标题/恰好 32 KiB 多字节正文的 API 正边界并重跑 `tests/test_console_api.py` 通过；超限/NUL/空白负边界保留。前端 `npm run format:check`、`npm test`、`npm run build`、完整 `npm run test:e2e -- --workers=2`，以及 `uv run python scripts/build_console.py`、`uv build --no-sources` 均通过。保留现有 Starlette/httpx 弃用告警和 Vite bundle 大小提示。
+**执行验证：** 数据库均为本线程临时 PostgreSQL 55473，测试逐例使用独立 schema。完整 `AGENTFLOW_TEST_DATABASE_URL=… uv run pytest -q --tb=short`、`uv run ruff check app tests scripts/migrate_flow_states.py`、`uv run mypy app tests` 通过。随后补强 256 码点标题/恰好 32 KiB 多字节正文的 API 正边界并重跑 `tests/test_console_api.py` 通过；超限/NUL/空白负边界保留。前端 `npm run format:check`、`npm test`、`npm run build`、完整 `npm run test:e2e -- --workers=2`，以及 `uv run python scripts/build_console.py`、`uv build --no-sources` 均通过。保留现有 Starlette/httpx 弃用告警和 Vite bundle 大小提示。
 
 **跨进程调度：** 一次性脚本启动真实 Uvicorn/ASGI、鉴权 HTTP 与 WebSocket；先注册空闲 peer，再由独立 CLI 进程和 owner POST 各创建一个直接任务。两个 INITIAL 均通过现有 worker poll 派发，非对称标题/正文逐字匹配，包括 CLI 文件的 CRLF；未调用 gateway 伪通知或真实 GitHub 写入。脚本与测试 schema 随后清理。日志：`.amp/in/flow-input-live-check.log`。
 
@@ -304,7 +304,7 @@ ConsoleSync 的 SyncClaim、来源枚举和读取作用域支持可空 Issue。�
 
 ### 2026-11-12：纯文本任务的组合验证与简化对照
 
-**执行验证：** 使用本线程临时 PostgreSQL 55475、逐例隔离 schema，完整 `FLOWTOOL_TEST_DATABASE_URL=… pytest -q` 通过；`ruff check app tests scripts/migrate_flow_states.py scripts/smoke/recovery.py`、`mypy app tests`、前端格式/类型/单元/生产构建、`python scripts/build_console.py` 与 `uv build --no-sources` 通过。完整回归补齐了新增标题 inference 的旧固定任务列表断言，并让通用推理替身明确处理标题调用，未禁用真实标题路径。日志位于本线程 `.amp/in/task-text-{all-tests-final,static-final,package-build}.log`。
+**执行验证：** 使用本线程临时 PostgreSQL 55475、逐例隔离 schema，完整 `AGENTFLOW_TEST_DATABASE_URL=… pytest -q` 通过；`ruff check app tests scripts/migrate_flow_states.py scripts/smoke/recovery.py`、`mypy app tests`、前端格式/类型/单元/生产构建、`python scripts/build_console.py` 与 `uv build --no-sources` 通过。完整回归补齐了新增标题 inference 的旧固定任务列表断言，并让通用推理替身明确处理标题调用，未禁用真实标题路径。日志位于本线程 `.amp/in/task-text-{all-tests-final,static-final,package-build}.log`。
 
 **停止与资源释放：** 工作区并发测试曾直接将 Flow 改为 finalizing 并请求 stop，绕过业务入口的 `cancel_jobs`，使新增 queued inference 留存。改为调用已有 `ControlService.finish`，在没有推理 Worker 时仍能取消标题任务、确认原编码停止，并以更高 generation 将工作区交给下个 Flow。结果恢复、推理清理和并发派发的组合回归通过；没有因此放宽归档条件或改动生产停止实现。
 
@@ -360,7 +360,7 @@ ConsoleSync 的 SyncClaim、来源枚举和读取作用域支持可空 Issue。�
 
 **回归与验证边界：** 修改前的新回归在“命名尚未完成，准备不得结束”的断言失败，证据为 `.amp/in/artifacts/branch-naming-red.log`。当前针对性测试使用隔离 PostgreSQL，覆盖一次推理产出两项、重复准备、严格 JSON 与危险 slug、超时及显式 retry、停止/attempt 变化后的迟到结果、原子回滚/恢复、同仓库并发重名及跨仓库对照、实际历史分支回填、命名前归档后 resume 和既有语义分支的轮次恢复。远端通路运行真实 Worker/Controller 双端通信、inference 消息、Git 和本地 bare remote；已有同名 ref 时断言未启动 agent、未签发 push capability、ref 未变化。外部模型回答和 GitHub 服务可控模拟，未进行付费模型命名质量评测，也未写真实 GitHub。原协议测试从命名完成后的状态开始，不再假设无 inference 能力也能直接启动新任务。
 
-**消融与取舍：** 在独立测试进程中临时替换运行时机制，不改产品源码；各变体都复用相同测试输入。去除 `_await_naming` 的等待、立即返回 DONE 时，`test_initial_waits_for_title_and_branch_from_one_inference` 检出准备过早结束；移除 `_apply_inference` 外层事务、让仓储分别提交时，原子重放测试在标题写入故障后检出已错误提交的推理完成标记；只在一次性测试 schema 删除 `ux_flows_branch_name` 时，并发同名测试检出两个相同分支。三个变体均按预期失败，恢复正常机制后对应测试通过，因此保留有界等待、外层事务和唯一索引。命令入口为 `BRANCH_NAMING_ABLATION=<waiting|atomicity|uniqueness> pytest -p branch_naming_ablation <对应测试>`；临时插件通过 pytest hook 分别替换上述方法或删除测试索引，运行后移除。证据保存在 `.amp/in/artifacts/branch-naming-ablation-{waiting,atomicity,uniqueness}.log`；正常对照为 `FLOWTOOL_TEST_DATABASE_URL=<隔离库> .venv/bin/pytest -q tests/test_coordinator.py tests/test_remote_e2e.py tests/test_flow_states.py tests/test_store.py`。
+**消融与取舍：** 在独立测试进程中临时替换运行时机制，不改产品源码；各变体都复用相同测试输入。去除 `_await_naming` 的等待、立即返回 DONE 时，`test_initial_waits_for_title_and_branch_from_one_inference` 检出准备过早结束；移除 `_apply_inference` 外层事务、让仓储分别提交时，原子重放测试在标题写入故障后检出已错误提交的推理完成标记；只在一次性测试 schema 删除 `ux_flows_branch_name` 时，并发同名测试检出两个相同分支。三个变体均按预期失败，恢复正常机制后对应测试通过，因此保留有界等待、外层事务和唯一索引。命令入口为 `BRANCH_NAMING_ABLATION=<waiting|atomicity|uniqueness> pytest -p branch_naming_ablation <对应测试>`；临时插件通过 pytest hook 分别替换上述方法或删除测试索引，运行后移除。证据保存在 `.amp/in/artifacts/branch-naming-ablation-{waiting,atomicity,uniqueness}.log`；正常对照为 `AGENTFLOW_TEST_DATABASE_URL=<隔离库> .venv/bin/pytest -q tests/test_coordinator.py tests/test_remote_e2e.py tests/test_flow_states.py tests/test_store.py`。
 
 **交付状态与验证结论：** 当前为本地未提交改动；未推送、开 PR、部署或迁移运行中服务。全量 PostgreSQL pytest 复验通过，仅现有 jj 元数据保留场景因环境条件跳过，并保留既有 Starlette 弃用告警；全量运行后补充的停止命名、首次交付前 resume 和真实 bare remote 冲突场景已针对性补跑通过。Ruff（`app tests scripts`）、Mypy（`app tests`）、`git diff --check` 与 `uv build --no-sources` 的 sdist/wheel 构建均通过。完整证据为 `.amp/in/artifacts/branch-naming-suite-final.log`、`branch-naming-final-targeted.log`、`branch-naming-{ruff,mypy,build}.log`。临时消融插件和构建产物已移除；隔离 PostgreSQL 完成验证后关闭并清理。没有 UI 外观代码变更。
 

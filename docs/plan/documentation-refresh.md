@@ -115,7 +115,7 @@ docs/plan/
 
 - 运行 `uv run pytest`，以实际收集/通过数量校验文档中的测试统计；
 - 运行 `uv run ruff check app tests` 与 `uv run mypy app tests`，确认文档仍引用真实的验收基线；
-- 运行 `uv run flowtool --help`，核对 README 中的 CLI 入口和命令名；
+- 运行 `uv run agentflow --help`，核对 README 中的 CLI 入口和命令名；
 - 检查所有本地 Markdown 链接、HTML 文档链接和标题引用均可解析；
 - 用 HTML 解析检查确认 `diagram.html` 结构有效，并核对状态节点计数与页面统计一致；
 - 搜索 `docs/ARCHITECTURE.md`、`docs/architecture.html`、`docs/M0-PLAN.md`、
@@ -162,7 +162,7 @@ docs/plan/
 - `uv run pytest`：19 项通过；
 - `uv run ruff check app tests`：通过；
 - `uv run mypy app tests`：27 个 source files 无问题；
-- `uv run flowtool --help` 与 `uv run flowtool flow --help`：通过；
+- `uv run agentflow --help` 与 `uv run agentflow flow --help`：通过；
 - 所有本地 Markdown 链接目标存在；HTML tag 嵌套平衡；可视化节点计数与 9/6/3 页面统计一致；
 - `git diff --check` 通过，除本计划中的历史迁移描述外没有旧文档路径或旧测试数量残留。
 

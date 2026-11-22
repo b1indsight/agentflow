@@ -28,7 +28,7 @@
 
 `GET /api/flows/{flow_id}/conversation?after=0&limit=100`
 
-- 使用独立的 `FLOWTOOL_CONTROL_API_TOKEN` Bearer 认证；未配置时端点禁用并返回 503，
+- 使用独立的 `AGENTFLOW_CONTROL_API_TOKEN` Bearer 认证；未配置时端点禁用并返回 503，
   错误或缺失凭据返回 401。该 token 只属于 control，不复用 worker/GitHub 凭据。
 - 返回 `flow_id`、`items`、`next_cursor`、`has_more` 和各执行轮次的记录状态。
   `items` 包含稳定 `id`、`attempt_id`、`job_id`、`invocation_id`、可空 `session_id`、
@@ -197,7 +197,7 @@ call_id、来源 session 和游标。新增模块分别归属 contracts、contro
 验证证据：
 
 - 测试先行：历史读取、RPC 和 HTTP 首次运行分别因缺失实现/404 失败，再实现至通过。
-- `FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run pytest -q --tb=short`：
+- `AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres uv run pytest -q --tb=short`：
   **836 passed**，包括现有执行、恢复、归档回归，只有既有 Starlette TestClient 弃用告警。
 - 会话专项 **23 passed**，包括 HTTP→control→真实 WorkerClient→历史文件的忙碌/空闲查询、
   PostgreSQL 元数据与释放后的绑定、HTTP 断开、连接替换、超时、并发限额、跨 flow 游标、
@@ -363,7 +363,7 @@ wire 使用的 `HistoryPage` / `HistoryItem`。删除 `SessionRef` 与 `HistoryC
 `.cache/2026-10-09/single-session-ablation-file-identity.log`，不提交。
 
 **最终验证：** 恢复消融后执行
-`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:56473/postgres uv run pytest -q --tb=short`，
+`AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:56473/postgres uv run pytest -q --tb=short`，
 完整 PostgreSQL 回归 **835 passed**（57.14 秒，0 skipped），仅既有 Starlette TestClient
 弃用告警。Ruff、Mypy（160 个源文件）、sdist/wheel 构建及 `git diff --check` 通过。
 同步更新查询架构、协议版本说明和 CHANGELOG；协议 v13、单 session HTTP 分页及旧游标

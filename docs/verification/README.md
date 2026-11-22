@@ -7,10 +7,10 @@ uv sync --locked --dev
 uv run ruff check app tests
 uv run mypy app tests
 docker compose up -d postgres
-FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool:flowtool@127.0.0.1:5432/flowtool uv run pytest
+AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow:agentflow@127.0.0.1:5432/agentflow uv run pytest
 ```
 
-未设置 `FLOWTOOL_TEST_DATABASE_URL` 时，数据库用例会跳过。本地 pytest 默认运行全量；[CI](../../.github/workflows/ci.yml) 分片运行 pytest，用 testmon 缓存选择受影响的测试。缓存失效或手动触发时运行全量；包边界和已安装 Worker CLI 的检查不依赖 testmon 选例。
+未设置 `AGENTFLOW_TEST_DATABASE_URL` 时，数据库用例会跳过。本地 pytest 默认运行全量；[CI](../../.github/workflows/ci.yml) 分片运行 pytest，用 testmon 缓存选择受影响的测试。缓存失效或手动触发时运行全量；包边界和已安装 Worker CLI 的检查不依赖 testmon 选例。
 
 ## 构建带控制台的发行包
 
@@ -19,7 +19,7 @@ FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool:flowtool@127.0.0.1:5432/flowtoo
 ```bash
 uv run python scripts/build_console.py
 uv build --no-sources
-uv run flowtool --help
+uv run agentflow --help
 ```
 
 前端单测、开发服务器和生产预览见[控制台开发](../../app/controler/web/README.md)。

@@ -20,7 +20,7 @@
 
 明确不在本次范围内：
 
-- 拆分 `flowtool serve` 与 worker 进程，或引入远程 worker、消息队列、`JobDispatch` adapter；
+- 拆分 `agentflow serve` 与 worker 进程，或引入远程 worker、消息队列、`JobDispatch` adapter；
 - worker affinity、分布式 lease/fencing、多 worker 调度和 Codex session 跨机器接管；
 - 新建聊天消息表、修改 prompt/session 语义，或持久化 Codex 原始 JSONL；
 - 把整个 Store 调用链改成 async、引入 ORM/Alembic，或增加新的业务 API；
@@ -34,7 +34,7 @@
   并在明确的事务边界内提交或回滚。
 - 保留同步 `Store` 接口和当前调用方。远程数据库 I/O 的全面 async 化属于独立性能改造，不与本次
   后端替换捆绑。
-- 将 `FLOWTOOL_DB_PATH` 替换为 `FLOWTOOL_DATABASE_URL`。URL 可包含 `sslmode` 等 PostgreSQL 参数，
+- 将 `AGENTFLOW_DB_PATH` 替换为 `AGENTFLOW_DATABASE_URL`。URL 可包含 `sslmode` 等 PostgreSQL 参数，
   但不得写入日志；远程部署文档要求 TLS 和最小权限数据库账号。
 - `Store.init_db()` 继续负责 M0 初始 schema 的幂等创建，暂不建设通用迁移框架。schema 后续第一次需要
   演进时再单独引入版本化迁移，避免现在同时维护两套未被使用的机制。
@@ -85,7 +85,7 @@
 5. 错误数据库 URL 或不可连接数据库会在启动时明确失败，而不是回退到本地 SQLite；
 6. `uv run pytest`、`uv run ruff check app tests`、`uv run mypy app tests` 和
    `uv build --no-sources` 全部通过；
-7. 使用 Compose PostgreSQL 启动真实 `flowtool serve`，`GET /healthz` 返回 200，并能正常关闭；
+7. 使用 Compose PostgreSQL 启动真实 `agentflow serve`，`GET /healthz` 返回 200，并能正常关闭；
 8. 草稿 PR 上 Ruff、Mypy、pytest 与 Build 四项 CI checks 全部通过。
 
 测试不访问 GitHub、Codex 或 bub，也不使用真实服务凭据。并发测试只验证 PostgreSQL claim 的互斥，
@@ -96,7 +96,7 @@
 实施时预计同步：
 
 - `README.md`：当前能力、快速开始、验证基线和 SQLite 表述；
-- `env.example`：移除 `FLOWTOOL_DB_PATH`，增加 PostgreSQL URL 示例；
+- `env.example`：移除 `AGENTFLOW_DB_PATH`，增加 PostgreSQL URL 示例；
 - `docs/architecture/overview.md`、`components.md`、`workflows.md`、`decisions.md`、`roadmap.md`：
   把当前持久层改为 PostgreSQL，同时继续明确控制面/worker 尚未拆分；
 - `docs/architecture/README.md` 与 `diagram.html`：同步组件状态、节点文字和测试统计；
@@ -108,7 +108,7 @@ SQLite 的事实，不改写历史，只在当前事实文档和本计划中记�
 
 ## 6. 风险与回退
 
-- **破坏性配置切换**：`FLOWTOOL_DB_PATH` 不再生效；启动时缺少/错误 URL 必须明确报错，文档给出迁移边界。
+- **破坏性配置切换**：`AGENTFLOW_DB_PATH` 不再生效；启动时缺少/错误 URL 必须明确报错，文档给出迁移边界。
 - **同步网络 I/O**：本次沿用同步 Store 以控制范围；若实际延迟影响事件循环，再以数据为依据单独 async 化。
 - **连接与事务泄漏**：所有方法通过 pool context 管理连接，并由失败路径测试验证回滚后连接可继续使用。
 - **测试环境成本**：真实 PostgreSQL 增加一项本地依赖；Compose 和 CI service 提供一致、可重复的入口。
@@ -119,17 +119,17 @@ SQLite 的事实，不改写历史，只在当前事实文档和本计划中记�
 
 ## 7. 实施结果
 
-- PostgreSQL 已成为唯一运行时持久层；配置改为 `FLOWTOOL_DATABASE_URL`，Store 使用同步 Psycopg 3
+- PostgreSQL 已成为唯一运行时持久层；配置改为 `AGENTFLOW_DATABASE_URL`，Store 使用同步 Psycopg 3
   连接池，并用 PostgreSQL 原生 schema、JSONB、带时区时间和 identity 主键承载原有六张表。
 - job claim 使用单条 `FOR UPDATE SKIP LOCKED` CTE 更新；delivery 去重使用
   `INSERT ... ON CONFLICT DO NOTHING RETURNING` 原子占有。两个独立 Store 的共享可见性、并发 claim
   和 delivery 去重均有集成测试。
 - 增加 `compose.yaml`、PostgreSQL 环境变量示例和 CI service。GitHub Actions run
   [33150010124](https://github.com/b1indsight/agentflow/actions/runs/33150010124) 在 PostgreSQL 17.11 上
-  通过 23 项 pytest（3.01 秒、无警告），随后启动真实 `flowtool serve`，`/healthz` 返回 200；Ruff、Mypy 和
+  通过 23 项 pytest（3.01 秒、无警告），随后启动真实 `agentflow serve`，`/healthz` 返回 200；Ruff、Mypy 和
   Build checks 同时通过。
 - 按用户要求，本机没有启动或连接 PostgreSQL。本机 pytest 收集 23 项，其中 6 项非数据库测试通过，
-  17 项依赖 `FLOWTOOL_TEST_DATABASE_URL` 的集成测试按预期跳过；本机 Ruff、Mypy、构建、锁文件、CLI
+  17 项依赖 `AGENTFLOW_TEST_DATABASE_URL` 的集成测试按预期跳过；本机 Ruff、Mypy、构建、锁文件、CLI
   和文档格式检查通过。真实数据库验收由上述 CI 完成。
 - 与计划相比没有扩大架构范围：控制面/worker 仍未拆分，Store 仍为同步接口，daemon 仍在启动时以
   schema owner 身份幂等初始化表，且没有引入迁移框架、worker lease/fencing 或 SQLite 数据导入工具。

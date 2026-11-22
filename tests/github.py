@@ -57,7 +57,7 @@ class RecordingGitHub(GitHubApp):
 
     def __init__(self) -> None:
         BaseModel.__init__(self, app_id=1)
-        self._bot_login = "flowtool[bot]"
+        self._bot_login = "agentflow[bot]"
         self._sdk = GitHub(AppAuthStrategy(1, "unused-test-key"))
 
 

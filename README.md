@@ -1,6 +1,6 @@
-# FlowTool（代号，未定名）
+# AgentFlow
 
-FlowTool 把 GitHub Issue 或一段任务描述交给 Codex 或 Amp。Worker 编码并推送分支，服务端核验后创建 PR。你在 GitHub 审核，Worker 根据反馈修订；人工合并后，Flow 自动归档。看板、执行记录和时间线在 Web 控制台查看。
+AgentFlow 把 GitHub Issue 或一段任务描述交给 Codex 或 Amp。Worker 编码并推送分支，服务端核验后创建 PR。你在 GitHub 审核，Worker 根据反馈修订；人工合并后，Flow 自动归档。看板、执行记录和时间线在 Web 控制台查看。
 
 ## 快速开始
 
@@ -21,10 +21,10 @@ FlowTool 把 GitHub Issue 或一段任务描述交给 Codex 或 Amp。Worker 编
 
    ```bash
    uv run python scripts/build_console.py
-   FLOWTOOL_HOST=127.0.0.1 uv run flowtool serve
+   AGENTFLOW_HOST=127.0.0.1 uv run agentflow serve
    ```
 
-3. **连接编码 Worker。** 按[部署指南](docs/deployment/README.md)在专用账号、容器或 VM 中配置 Git、gh、Codex 或 Amp 及其认证，通过进程环境设置 Worker ID、token 和服务端 WebSocket 地址，再运行 `flowtool worker`。回到服务端执行 `uv run flowtool workers` 检查注册状态。**已连接只说明通信正常**；开启编码权限前，确保 Worker 读不到服务端 `.env`、数据库凭据或 GitHub App 私钥。
+3. **连接编码 Worker。** 按[部署指南](docs/deployment/README.md)在专用账号、容器或 VM 中配置 Git、gh、Codex 或 Amp 及其认证，通过进程环境设置 Worker ID、token 和服务端 WebSocket 地址，再运行 `agentflow worker`。回到服务端执行 `uv run agentflow workers` 检查注册状态。**已连接只说明通信正常**；开启编码权限前，确保 Worker 读不到服务端 `.env`、数据库凭据或 GitHub App 私钥。
 
 ## 创建第一个 Flow
 
@@ -38,9 +38,9 @@ FlowTool 把 GitHub Issue 或一段任务描述交给 Codex 或 Amp。Worker 编
 在能访问数据库的服务端，也可用 CLI 查看进度（将 `42` 换成实际 Flow ID）：
 
 ```bash
-uv run flowtool flows --active
-uv run flowtool flow show 42
-uv run flowtool flow history 42
+uv run agentflow flows --active
+uv run agentflow flow show 42
+uv run agentflow flow history 42
 ```
 
 ## 文档

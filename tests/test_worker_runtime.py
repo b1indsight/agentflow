@@ -93,9 +93,9 @@ async def test_runtime_shares_configured_agent_for_coding_and_history(
     # Sharing must include history requests and multiple Flows, without changing coding authorization.
     monkeypatch.setattr("app.worker.runtime.configure_logging", lambda *args: None)
     if backend is None:
-        monkeypatch.delenv("FLOWTOOL_CODING_AGENT", raising=False)
+        monkeypatch.delenv("AGENTFLOW_CODING_AGENT", raising=False)
     else:
-        monkeypatch.setenv("FLOWTOOL_CODING_AGENT", backend)
+        monkeypatch.setenv("AGENTFLOW_CODING_AGENT", backend)
     settings = WorkerSettings(worker_id="worker", worker_token=SecretStr("secret"),
                               worker_root=tmp_path, serve_ws_url="wss://control.example/connect",
                               codex_run_timeout_seconds=23, amp_run_timeout_seconds=47,

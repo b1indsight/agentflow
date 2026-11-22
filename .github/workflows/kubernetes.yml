@@ -28,7 +28,7 @@ jobs:
         run: |
           tls_dir="$PWD/.cache/$(date +%F)/k8s/tls"
           mkdir -p "$tls_dir"
-          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=flowtool-serve.flowtool.svc -keyout "$tls_dir/tls.key" -out "$tls_dir/tls.crt" >/dev/null 2>&1
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=agentflow-serve.agentflow.svc -keyout "$tls_dir/tls.key" -out "$tls_dir/tls.crt" >/dev/null 2>&1
           chmod 755 "$tls_dir"
           chmod 444 "$tls_dir/"*
           docker run --rm --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --network none --tmpfs /tmp:rw,nosuid,size=16m --entrypoint nginx -v "$PWD/deploy/k8s/base/nginx.conf:/etc/nginx/nginx.conf:ro" -v "$tls_dir:/run/secrets/tls:ro" nginx:stable-alpine@sha256:ef8676b33d681f272ba429b27658bdd7e640963279714c96bddf1dc76307f7b6 -t

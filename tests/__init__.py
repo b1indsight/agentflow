@@ -1,1 +1,1 @@
-"""Shared deterministic fixtures for FlowTool's unit and integration tests."""
+"""Shared deterministic fixtures for AgentFlow's unit and integration tests."""

@@ -153,7 +153,7 @@ PostgreSQL 测试和安装；保留集成用例，并在交付时明确实际执
 
 ### 审查后小补丁：GitHub 网络超时
 
-按用户“先配置个超时”的要求，新增 `FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS`，默认 30 秒，
+按用户“先配置个超时”的要求，新增 `AGENTFLOW_GITHUB_REQUEST_TIMEOUT_SECONDS`，默认 30 秒，
 覆盖 App/installation 两种客户端的连接、读写和连接池等待，拒绝非正值及 NaN/Infinity。
 测试先复现客户端各阶段超时均为 None，再验证默认值、环境变量覆盖、无效值拒绝和现有超时错误映射。
 本补丁不拆分租约清理与恢复循环，不为锁等待或整批恢复设置总时限；相关耦合及其他审查发现仍待后续处理。

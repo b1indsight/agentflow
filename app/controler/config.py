@@ -19,7 +19,7 @@ class ServerSettings(BaseSettings):
     log_format: Literal["text", "json"] = "text"
 
     model_config = SettingsConfigDict(
-        env_prefix="FLOWTOOL_",
+        env_prefix="AGENTFLOW_",
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
@@ -33,7 +33,7 @@ class ServerSettings(BaseSettings):
 
     webhook_max_body_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
     github_app_id: int = 0
-    github_private_key_path: Path = Path("./flowtool-app.private-key.pem")
+    github_private_key_path: Path = Path("./agentflow-app.private-key.pem")
     github_webhook_secret: str = ""
     github_request_timeout_seconds: float = Field(default=30.0, gt=0, allow_inf_nan=False)
 
@@ -145,7 +145,7 @@ class ServerSettings(BaseSettings):
     @classmethod
     def _require_database_url(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("FLOWTOOL_DATABASE_URL is required")
+            raise ValueError("AGENTFLOW_DATABASE_URL is required")
         return value
 
     @field_validator("worker_tokens")
@@ -154,17 +154,17 @@ class ServerSettings(BaseSettings):
         cls, value: dict[str, SecretStr]
     ) -> dict[str, SecretStr]:
         if not value:
-            raise ValueError("FLOWTOOL_WORKER_TOKENS must configure at least one worker")
+            raise ValueError("AGENTFLOW_WORKER_TOKENS must configure at least one worker")
         tokens: list[str] = []
         for worker_id, token in value.items():
             if not worker_id.strip():
-                raise ValueError("worker ids in FLOWTOOL_WORKER_TOKENS cannot be empty")
+                raise ValueError("worker ids in AGENTFLOW_WORKER_TOKENS cannot be empty")
             secret = token.get_secret_value()
             if not secret.strip():
-                raise ValueError("worker tokens in FLOWTOOL_WORKER_TOKENS cannot be empty")
+                raise ValueError("worker tokens in AGENTFLOW_WORKER_TOKENS cannot be empty")
             tokens.append(secret)
         if len(tokens) != len(set(tokens)):
-            raise ValueError("worker tokens in FLOWTOOL_WORKER_TOKENS must be unique")
+            raise ValueError("worker tokens in AGENTFLOW_WORKER_TOKENS must be unique")
         return value
 
     @field_validator("github_private_key_path", mode="after")

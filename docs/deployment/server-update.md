@@ -15,7 +15,7 @@ Server 更新器在部署主机独立监听端口，接收仓库的 `workflow_ru
 
 1. main push 触发 [Images](../../.github/workflows/images.yml) 构建、smoke 和 SHA 标签晋升。
    仓库 Webhook 将工作流完成事件推送到更新器 `POST /webhook`，不修改工作流增加 curl。
-2. 用独立的非空 `FLOWTOOL_UPDATE_WEBHOOK_SECRET` 验证原始请求的 HMAC-SHA256。
+2. 用独立的非空 `AGENTFLOW_UPDATE_WEBHOOK_SECRET` 验证原始请求的 HMAC-SHA256。
    只接收 `b1indsight/agentflow`、`.github/workflows/images.yml`、main/push、completed/success。
    请求体上限 64 KiB，读取限时 10 秒；合法 ping 返回 200，无关事件返回 204。
 3. 按 `(run_id, attempt)` 去重并持久化到本地 JSON，成功后返回 202；同身份 SHA 冲突返回 409，
@@ -37,7 +37,7 @@ Server 更新器在部署主机独立监听端口，接收仓库的 `workflow_ru
 
 Server 更新不设置全局 pause/resume，不等待通信 activity、Worker 更新、任务完成或通信队列清空。
 新实例启动后业务路径直接按既有规则恢复；断线 Worker 和绑定继续适用普通 recovery grace，
-没有维护豁免或额外 deadline 延长。Worker 正式安装包通过 `flowtool worker --update`
+没有维护豁免或额外 deadline 延长。Worker 正式安装包通过 `agentflow worker --update`
 原地自更新并退出，由操作者停机和重启；不发送暂停接单协议，见 [Worker 更新](worker-update.md)。
 
 前端随 serve 镜像一起更新，不增加独立前端部署。前端、Controller、Console DTO、
@@ -63,7 +63,7 @@ Server 更新不设置全局 pause/resume，不等待通信 activity、Worker �
 
 以下由操作者在目标主机执行，本轮没有配置真实服务。准备既有 Python 3.12+ 环境中的
 FastAPI、Pydantic、uvicorn，以及有目标集群权限的 kubectl；wheel 只打包 app，须另行复制脚本。
-更新器不导入业务 Server、不读取 `FLOWTOOL_DATABASE_URL`、不直连 PostgreSQL。
+更新器不导入业务 Server、不读取 `AGENTFLOW_DATABASE_URL`、不直连 PostgreSQL。
 首次删列快照通过 `kubectl exec` 在旧 Pod 内只读取得，候选 Pod 的 PostgreSQL 仅供隔离试跑。
 
 消费者停止且没有进行中的部署时，复制同版三个文件；不能在部署中逐个覆盖。
@@ -86,7 +86,7 @@ chmod 700 "$STATE_DIR"
 "$PYTHON" "$TOOL_DIR/update-agentflow-server.py" "${TARGET[@]}" \
   --image ghcr.io/b1indsight/agentflow-serve@sha256:DIGEST
 
-# 从私密主机配置注入非空 FLOWTOOL_UPDATE_WEBHOOK_SECRET，不在命令或日志中展示。
+# 从私密主机配置注入非空 AGENTFLOW_UPDATE_WEBHOOK_SECRET，不在命令或日志中展示。
 "$PYTHON" "$TOOL_DIR/image_event.py" listen "${TARGET[@]}" --host 127.0.0.1 --port 9001
 ```
 

@@ -36,8 +36,8 @@ def _git_fixture(tmp_path: Path) -> tuple[Path, Path]:
     seed = tmp_path / "seed"
     _git("init", "--bare", str(remote), cwd=tmp_path)
     _git("init", "-b", "main", str(seed), cwd=tmp_path)
-    _git("config", "user.name", "FlowTool Test", cwd=seed)
-    _git("config", "user.email", "flowtool@example.test", cwd=seed)
+    _git("config", "user.name", "AgentFlow Test", cwd=seed)
+    _git("config", "user.email", "agentflow@example.test", cwd=seed)
     (seed / "README.md").write_text("base\n")
     _git("add", "README.md", cwd=seed)
     _git("commit", "-m", "base", cwd=seed)
@@ -86,7 +86,7 @@ async def test_declared_backend_must_match_repository_metadata(tmp_path: Path) -
 @pytest.mark.parametrize("branch", ["flow/jj", "feat/remove-login"])
 async def test_jj_outcome_is_verified_from_a_colocated_repository(tmp_path: Path, branch: str) -> None:
     repo, _ = _git_fixture(tmp_path)
-    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    env = os.environ | {"JJ_USER": "AgentFlow Test", "JJ_EMAIL": "agentflow@example.test"}
     await _jj("git", "init", "--colocate", cwd=repo, env=env)
     context = await prepare_vcs_context(repo, branch)
     (repo / "README.md").write_text("changed by jj\n")
@@ -107,8 +107,8 @@ async def test_remote_verification_uses_only_current_push_token(monkeypatch, tmp
     # Agent-local Git config and inherited worker/MCP credentials must not affect
     # verification of the fixed remote URL after a revision.
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("FLOWTOOL_WORKER_TOKEN", "worker-secret")
-    monkeypatch.setenv("FLOWTOOL_MCP_TOKEN", "mcp-secret")
+    monkeypatch.setenv("AGENTFLOW_WORKER_TOKEN", "worker-secret")
+    monkeypatch.setenv("AGENTFLOW_MCP_TOKEN", "mcp-secret")
 
     async def run(*args, cwd, stage, environment):
         assert args == (
@@ -117,9 +117,9 @@ async def test_remote_verification_uses_only_current_push_token(monkeypatch, tmp
         )
         assert cwd != tmp_path and cwd.is_dir()
         assert stage == "push"
-        assert environment["FLOWTOOL_PUSH_TOKEN"] == "fresh-push-secret"
-        assert "FLOWTOOL_WORKER_TOKEN" not in environment
-        assert "FLOWTOOL_MCP_TOKEN" not in environment
+        assert environment["AGENTFLOW_PUSH_TOKEN"] == "fresh-push-secret"
+        assert "AGENTFLOW_WORKER_TOKEN" not in environment
+        assert "AGENTFLOW_MCP_TOKEN" not in environment
         assert environment["GIT_CONFIG_GLOBAL"] == os.devnull
         return 0, "abc refs/heads/flow/1\n", ""
 

@@ -109,7 +109,7 @@ def verify_bundle(path: Path) -> dict:
 
 def drill(work: Path, postgres_bin: Path, revision: str) -> dict:
     """Create a synthetic active assignment, cold-copy, restore and prove blocking."""
-    base = os.environ.get('FLOWTOOL_TEST_DATABASE_URL', '')
+    base = os.environ.get('AGENTFLOW_TEST_DATABASE_URL', '')
     requested = conninfo_to_dict(base)
     if (
         requested.get("host") not in {"127.0.0.1", "::1", "localhost"}

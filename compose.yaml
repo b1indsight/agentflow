@@ -2,18 +2,18 @@ services:
   postgres:
     image: postgres:17-alpine
     environment:
-      POSTGRES_DB: flowtool
-      POSTGRES_USER: flowtool
-      POSTGRES_PASSWORD: flowtool
+      POSTGRES_DB: agentflow
+      POSTGRES_USER: agentflow
+      POSTGRES_PASSWORD: agentflow
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U flowtool -d flowtool"]
+      test: ["CMD-SHELL", "pg_isready -U agentflow -d agentflow"]
       interval: 2s
       timeout: 3s
       retries: 15
     volumes:
-      - flowtool-postgres:/var/lib/postgresql/data
+      - agentflow-postgres:/var/lib/postgresql/data
 
 volumes:
-  flowtool-postgres:
+  agentflow-postgres:

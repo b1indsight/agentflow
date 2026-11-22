@@ -128,7 +128,7 @@ failed 的归档、手动取消归档、批量归档以及 cancel/retry Web 管�
 - **Decision / consequences:** 使用控制台持久元信息，避免加入业务状态机或仅在浏览器保存。
   未增加依赖或修改任务协议；现有 archive job、重试条件、stop、binding、delivery 和远端写入路径保持原样。
 - **Backend evidence:** 新增 3 项合同检查在实现前全部失败（接口缺失/归档命令缺失）；
-  实现后相关 49 项检查通过。完整 `FLOWTOOL_TEST_DATABASE_URL=postgresql://localhost/flowtool_test uv run pytest -q`
+  实现后相关 49 项检查通过。完整 `AGENTFLOW_TEST_DATABASE_URL=postgresql://localhost/agentflow_test uv run pytest -q`
   得到 849 passed、0 skipped；Ruff 和 Mypy 全量通过（195 个 Python 源文件）。
   首次完整运行使用 Unix socket URL，3 项既有 recovery-bundle 检查因缺少 TCP peer 失败；
   确认这些检查要求 loopback IP 后改用本地 TCP 连接，6 项 recovery-bundle 检查和完整测试均通过，未改无关代码。
@@ -166,7 +166,7 @@ failed 的归档、手动取消归档、批量归档以及 cancel/retry Web 管�
   得到 839 passed、0 skipped，194 个 Python 源文件类型检查通过；与 [001] 的 849 项差异来自未带入的其他任务测试。
   前端类型检查、2 项测试、生产构建、格式检查与 16 项 Playwright 浏览器回归全部通过。
   命令分别为 `ruff check app tests`、`mypy app tests`、
-  `FLOWTOOL_TEST_DATABASE_URL=postgresql://localhost/flowtool_test python -m pytest -q`，
+  `AGENTFLOW_TEST_DATABASE_URL=postgresql://localhost/agentflow_test python -m pytest -q`，
   以及控制台目录中的 `npm run typecheck`、`npm test`、`npm run build`、
   `npm run format:check`、`npm run test:e2e`。
 - **Outcome / pending:** 发布范围仅为独立功能分支；没有创建 PR、修改 main、部署或升级目标数据库。

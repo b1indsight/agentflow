@@ -37,7 +37,7 @@ initial、revision、archive 及原有对话查询。保留四类判定、置信
 
 1. **适配器与配置归属。** 将 `worker/judge.py`、`worker/judge_runner.py` 移到 control，
    保留 domain 的 Judge 接口及决策模型。由 `ControlRuntime` 构造适配器，
-   `ServeSettings` 接收现有 `FLOWTOOL_JUDGE_*` 配置，删除 WorkerSettings 中对应字段。
+   `ServeSettings` 接收现有 `AGENTFLOW_JUDGE_*` 配置，删除 WorkerSettings 中对应字段。
    保留隔离子进程、最小环境、无工具调用、超时与失败转 wait 的契约；不得把 control 的
    DB/GitHub 凭据传给 Judge 子进程。worker 的 Codex 环境继续排除 Judge 密钥。
 2. **本地 triage 调度。** 在 control 中增加专用 triage 运行循环，由 runtime 管理启动和退出。
@@ -170,7 +170,7 @@ worker 槽和 binding deadline 更新。Judge 子进程与配置迁到 control�
 
 ### 2026-10-08 · 4. 最终验证
 
-- `FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run pytest -q --tb=short`：
+- `AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres uv run pytest -q --tb=short`：
   **845 passed**，1 条既有 Starlette/httpx 弃用警告。覆盖 PostgreSQL 事务、远程恢复、PR 生命周期、
   本地 triage 恢复、协议拒绝和配置/导入边界。
 - `uv run ruff check app tests`、`uv run mypy app tests`：通过（159 个源文件）。

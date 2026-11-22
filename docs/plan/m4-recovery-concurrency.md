@@ -61,8 +61,8 @@
 - 固定数量的 TaskGroup 消费有界结果页，保留实时结果/恢复共用的 job lock；重复 sweep 串行领取。
 - 每轮扫描冻结最高结果 ID，分页推进后回绕；持续到达的新结果不会无限推迟旧 pending 结果。
   游标仅影响本进程扫描公平性，重启重新从持久 inbox 读取，不改变结果提交和 ACK 语义。
-- 增加 `FLOWTOOL_RESULT_RECOVERY_CONCURRENCY`（默认 4，上限 64）与
-  `FLOWTOOL_RESULT_RECOVERY_BATCH_SIZE`（默认 64，上限 1000），下限均为 1。
+- 增加 `AGENTFLOW_RESULT_RECOVERY_CONCURRENCY`（默认 4，上限 64）与
+  `AGENTFLOW_RESULT_RECOVERY_BATCH_SIZE`（默认 64，上限 1000），下限均为 1。
 - 新增测试先复现 10 项失败；另以持续新结果测试复现旧结果不能及时回绕，再补有限扫描边界。
   覆盖慢请求、pool 上限、取消回收、同 job 排他、分页与数据库边界。
 - 聚焦回归 48 passed；实际 PostgreSQL 完整回归 523 passed / 0 skipped；Ruff、Mypy、

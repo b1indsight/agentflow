@@ -104,7 +104,7 @@ GraphQL connection 校验；不扩展到 webhook 生命周期或整个工作流�
 ### 2026-09-30：验证和隔离消融
 
 - 修复前 adapter 基线：64 项通过；最终 adapter 回归：67 项通过。
-- `FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run --no-sync pytest -q --tb=short`：
+- `AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres uv run --no-sync pytest -q --tb=short`：
   **816 项通过**（58.85 秒），一项既有 Starlette 测试客户端弃用警告。
 - 最后合并同一单线程 query 常量后，重跑全部 67 项相关 adapter 测试、Ruff、Mypy 与构建。
 - `uv run --no-sync ruff check app tests`、`uv run --no-sync mypy app tests`、
@@ -177,7 +177,7 @@ GraphQL connection 校验；不扩展到 webhook 生命周期或整个工作流�
 
 ### 2026-09-30：标签行为消融
 
-复现命令：`FLOWTOOL_TEST_DATABASE_URL=<test-db> uv run --no-sync python
+复现命令：`AGENTFLOW_TEST_DATABASE_URL=<test-db> uv run --no-sync python
 .cache/2026-09-30/label-contract-ablation.py`。脚本仅在独立 Python 进程中将增量调用替换为
 旧式全量 set_labels，源码不变；对新/旧两种 effect 使用同一条标签保留与重放测试。
 

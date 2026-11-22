@@ -138,7 +138,7 @@ CI PostgreSQL 17 演练改用 PGPORT 与私有 PGPASSFILE，验证真实密码�
 2026-09-22 二次返修：用户授权补完新增 LOW。两项连接配置测试先建立 fixture 连接取得
 实际端口，再改 PGPORT；移除 URL port 时允许该字段原本不存在。修复前 PGPORT-only
 环境分别报 KeyError 和误连端口 1；修复后 9 项恢复测试在以下两种输入均通过：
-`PGPORT=55419 FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1/postgres`
+`PGPORT=55419 AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1/postgres`
 及显式 `:55419` 的 URL。未引入新运行机制，属于测试前置参数修正，消融由上述失败/通过
 对照覆盖；未增加额外抽象。实际生产脚本不变。
 最终 PGPORT-only 全量回归 808 项通过、0 skipped；Ruff、Mypy 130 文件、构建通过。

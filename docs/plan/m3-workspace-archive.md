@@ -259,7 +259,7 @@ PostgreSQL 验证冻结身份/围栏拒绝，真实 worker/control 往返验证�
 
 [`test_modern_merge_stops_original_worker_before_reusing_only_its_generation`](../../tests/test_archive_worker_recovery.py) 使用真实 Worker/control 会话与 Git checkout：合并提交时执行仍运行，随后停止并还原 tracked 文件、删除 untracked 输出；扣住停止 ACK 时 binding/claim 保留；送达 ACK 与精确 inventory 后，下一 Flow 直接取得同位置 generation+1。过程中没有推进测试时钟或调用 recovery sweep，相邻 checkout、job、binding、inventory 与 journal 字节保持不变，本地通知仍可处于 pending。该证据验证无固定宽限等待；没有测量生产清理耗时。
 
-其他回归覆盖事务回滚、并发重复 merge、离线/释放绑定、权限失败、重启与丢 ACK、历史 ARCHIVE、错误 token/epoch/generation、迟到结果及新轮次隔离。完整检查的复现入口如下；`FLOWTOOL_TEST_DATABASE_URL` 必须指向可销毁的测试 PostgreSQL：
+其他回归覆盖事务回滚、并发重复 merge、离线/释放绑定、权限失败、重启与丢 ACK、历史 ARCHIVE、错误 token/epoch/generation、迟到结果及新轮次隔离。完整检查的复现入口如下；`AGENTFLOW_TEST_DATABASE_URL` 必须指向可销毁的测试 PostgreSQL：
 
 ```bash
 python -m pytest -q --tb=short

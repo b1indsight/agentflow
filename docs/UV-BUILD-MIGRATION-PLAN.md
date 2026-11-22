@@ -5,18 +5,18 @@
 
 ## 1. 背景与目标
 
-FlowTool 已使用 uv 管理依赖、虚拟环境和常用开发命令，但构建后端仍为 Hatchling。项目当前是
+AgentFlow 已使用 uv 管理依赖、虚拟环境和常用开发命令，但构建后端仍为 Hatchling。项目当前是
 纯 Python 单包应用，没有原生扩展、动态版本、构建脚本或复杂的包文件筛选；因此改用 uv 原生的
 `uv_build` 可以统一工具链，同时保持标准 PEP 517 wheel/sdist 输出。
 
 迁移目标：
 
 - 使用 `uv_build` 构建当前顶层 `app` 包；
-- 保持发布名 `flowtool` 和 `flowtool = "app.cli:app"` 命令入口不变；
+- 保持发布名 `agentflow` 和 `agentflow = "app.cli:app"` 命令入口不变；
 - 保持现有 `uv sync`、`uv run`、测试和静态检查工作流不变；
 - 通过实际构建、产物检查和隔离安装证明 wheel/sdist 可用。
 
-本次不包含：把 `app/` 重命名为 `flowtool/`、迁移到 `src/` 布局、发布 PyPI、生成单文件可执行程序，
+本次不包含：把 `app/` 重命名为 `agentflow/`、迁移到 `src/` 布局、发布 PyPI、生成单文件可执行程序，
 或引入 Rust。若以后部分模块 RIIR，`uv` 仍可作为构建前端，但届时应另行把后端切换为 Maturin。
 
 ## 2. 技术方案
@@ -27,8 +27,8 @@ FlowTool 已使用 uv 管理依赖、虚拟环境和常用开发命令，但构�
    uv 0.11 系列兼容的 `uv_build>=0.11.3,<0.12`。上界避免 uv 的次版本破坏构建可复现性。
 2. 删除 Hatchling 专用的 `[tool.hatch.build.targets.wheel]`。
 3. 新增 `[tool.uv.build-backend]`，显式设置 `module-name = "app"` 和 `module-root = ""`。
-   这是必需的，因为发布名是 `flowtool`，而 Python 包位于仓库根目录的 `app/`，不符合
-   `uv_build` 默认的 `src/flowtool/` 自动发现布局。
+   这是必需的，因为发布名是 `agentflow`，而 Python 包位于仓库根目录的 `app/`，不符合
+   `uv_build` 默认的 `src/agentflow/` 自动发现布局。
 4. 重新检查 `uv.lock`。构建依赖通常不进入项目运行依赖解析；仅当 uv 判定锁文件元数据确实变化时
    才更新它，不制造无意义的锁文件改动。
 
@@ -52,9 +52,9 @@ FlowTool 已使用 uv 管理依赖、虚拟环境和常用开发命令，但构�
 
 1. 在临时输出目录执行 `uv build --no-sources`，同时构建 sdist 和 wheel，证明标准发布元数据独立于
    本地 source override。
-2. 检查 wheel 至少包含完整 `app` 包、`flowtool-*.dist-info` 元数据和 `flowtool` console-script 入口，
+2. 检查 wheel 至少包含完整 `app` 包、`agentflow-*.dist-info` 元数据和 `agentflow` console-script 入口，
    且不包含仓库测试、缓存或本地配置。
-3. 从构建出的 wheel 创建临时隔离环境并安装，运行 `flowtool --help`，证明入口不依赖源码 checkout。
+3. 从构建出的 wheel 创建临时隔离环境并安装，运行 `agentflow --help`，证明入口不依赖源码 checkout。
 4. 执行 `uv lock --check` 与 `uv sync --locked`，证明依赖锁仍一致。
 5. 执行现有完整门禁：`uv run pytest`、`uv run ruff check app tests`、`uv run mypy app tests`。
 
@@ -74,7 +74,7 @@ FlowTool 已使用 uv 管理依赖、虚拟环境和常用开发命令，但构�
 ## 6. 风险与回退
 
 - **包发现错误**：发布名与模块名不同，若漏配模块路径可能得到空 wheel；通过显式模块配置和产物检查防止。
-- **CLI 入口遗漏**：构建成功不代表 console script 正确；通过隔离安装后的 `flowtool --help` 防止。
+- **CLI 入口遗漏**：构建成功不代表 console script 正确；通过隔离安装后的 `agentflow --help` 防止。
 - **版本漂移**：`uv_build` 跟随 uv 的版本策略；使用有上界的 0.11 版本范围，后续升级作为独立变更验证。
 - **未来 Rust 扩展**：`uv_build` 只支持纯 Python；首次引入 PyO3 模块时改用 Maturin，而不是在本次提前增加复杂度。
 
@@ -89,8 +89,8 @@ FlowTool 已使用 uv 管理依赖、虚拟环境和常用开发命令，但构�
 验证结果：
 
 - `uv build --no-sources` 成功生成 sdist 和 `py3-none-any` wheel；
-- wheel 保留全部 20 个 Python 模块、项目元数据和 `flowtool = app.cli:app` console-script；
-- wheel 在临时 Python 3.12 环境安装后，可从源码 checkout 外运行 `flowtool --help`；
+- wheel 保留全部 20 个 Python 模块、项目元数据和 `agentflow = app.cli:app` console-script；
+- wheel 在临时 Python 3.12 环境安装后，可从源码 checkout 外运行 `agentflow --help`；
 - sdist 只包含构建所需元数据、README 和 `app` 源码，不再包含旧 Hatchling 产物意外带入的
   `.jj` 内部数据、开发 skill、测试、锁文件和环境配置示例；
 - `uv sync --locked`、19 个 pytest 测试、Ruff 和 Mypy 全部通过。

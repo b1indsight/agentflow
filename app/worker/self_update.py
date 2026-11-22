@@ -99,9 +99,9 @@ def installed_package() -> InstalledPackage:
     _owned(prefix, prefix)
     site = Path(sysconfig.get_path("purelib"))
     _owned(site, prefix)
-    distribution = metadata.distribution("flowtool")
+    distribution = metadata.distribution("agentflow")
     if Path(str(distribution.locate_file(""))).resolve() != site.resolve():
-        raise UpdateError("flowtool metadata is not in this interpreter's site-packages")
+        raise UpdateError("agentflow metadata is not in this interpreter's site-packages")
     if (distribution.read_text("INSTALLER") or "").strip() != "uv":
         raise UpdateError("only uv-owned installations are supported")
     provenance = json.loads(distribution.read_text("direct_url.json") or "null")
@@ -164,13 +164,13 @@ def installed_package() -> InstalledPackage:
     points = [
         point
         for point in distribution.entry_points
-        if point.group == "console_scripts" and point.name == "flowtool"
+        if point.group == "console_scripts" and point.name == "agentflow"
     ]
-    entrypoint = prefix / "bin" / "flowtool"
+    entrypoint = prefix / "bin" / "agentflow"
     if len(points) != 1 or points[0].value != "app.cli:app" or entrypoint not in recorded:
-        raise UpdateError("unsupported flowtool console entry point")
+        raise UpdateError("unsupported agentflow console entry point")
     if entrypoint.read_text().partition("\n")[0] != f"#!{sys.executable}":
-        raise UpdateError("flowtool entry point does not use this virtual environment's Python")
+        raise UpdateError("agentflow entry point does not use this virtual environment's Python")
     return InstalledPackage(sha=vcs["commit_id"], package_path=site / "app")
 
 
@@ -209,7 +209,7 @@ def _run(command: list[str], lock_descriptor: int, *, timeout: int = 60) -> str:
     environment = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("UV_", "PIP_", "FLOWTOOL_"))
+        if not key.startswith(("UV_", "PIP_", "AGENTFLOW_", "FLOWTOOL_"))
         and key not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"}
     }
     result = subprocess.run(
@@ -259,8 +259,8 @@ def update_worker() -> dict[str, str]:
                         "--link-mode",
                         "copy",
                         "--reinstall-package",
-                        "flowtool",
-                        f"flowtool @ git+{_SOURCE}@{target}",
+                        "agentflow",
+                        f"agentflow @ git+{_SOURCE}@{target}",
                     ],
                     lock_descriptor,
                     timeout=600,
@@ -290,7 +290,7 @@ def update_worker() -> dict[str, str]:
                 [
                     sys.executable,
                     "-I",
-                    str(Path(sys.prefix) / "bin" / "flowtool"),
+                    str(Path(sys.prefix) / "bin" / "agentflow"),
                     "worker",
                     "--help",
                 ],

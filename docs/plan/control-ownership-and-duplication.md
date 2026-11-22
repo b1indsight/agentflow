@@ -144,7 +144,7 @@
 重现命令（在本工作区，使用仓库已有 Python 环境及本地 PostgreSQL）：
 
 ```sh
-FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres \
+AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres \
   uv run --project /Users/b1indsight/personal_work/agentflow --no-sync python \
   .cache/2026-10-10/control-ownership-ablation.py
 ```

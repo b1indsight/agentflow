@@ -91,8 +91,8 @@ CI 不访问 GitHub App、Codex 或 bub，不使用真实凭据，也不启动�
   v10.0.1 的完整 commit SHA；
 - `uv sync --locked --dev`、Ruff 和 Mypy 通过；
 - pytest 在本地 Python 3.13.12 环境收集并通过 19 项测试；
-- `uv build --no-sources` 在临时目录生成 `flowtool-0.0.1.tar.gz` 与
-  `flowtool-0.0.1-py3-none-any.whl`，工作树没有构建产物。
+- `uv build --no-sources` 在临时目录生成 `agentflow-0.0.1.tar.gz` 与
+  `agentflow-0.0.1-py3-none-any.whl`，工作树没有构建产物。
 
 草稿 PR 的首次真实运行（Actions run `33061311196`）在 GitHub 托管的 Python 3.12 runner 上通过
 全部四项 checks：Build 11 秒、Ruff 14 秒、pytest 20 秒、Mypy 44 秒。workflow 的 concurrency key

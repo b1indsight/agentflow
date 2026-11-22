@@ -35,7 +35,7 @@ Runtime 统一初始化工具、effects、结果应用和 conversation broker；
 
 目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。ASGI Python 入口为
 `app.controler.api`，本地 bub 推理子进程入口为 `app.inference.runner`；
-CLI 命令为 `flowtool serve` / `flowtool worker`，真实验收入口为 `app.live_smoke`。
+CLI 命令为 `agentflow serve` / `agentflow worker`，真实验收入口为 `app.live_smoke`。
 
 ## 4.1 Webhook Ingress（FastAPI + uvicorn）
 
@@ -232,7 +232,7 @@ worker socket 与 executor 解耦，root 内 `journals/flow-<id>.json` 分别保
 按 session ID 选择来源，与编码后端配置、当前 assignment 及 trusted-host 编码开关无关。
 worker 生命周期的只读实例保留分页、缓存与并发预算；每 Flow 编码及独立 inference 实例仍各自创建。
 
-`WorkerRuntime` 默认装配 Codex；`FLOWTOOL_CODING_AGENT=amp` 装配本地 Amp CLI，采用各自的
+`WorkerRuntime` 默认装配 Codex；`AGENTFLOW_CODING_AGENT=amp` 装配本地 Amp CLI，采用各自的
 stdout/stderr 空闲超时，不再设置整轮 revision deadline。INITIAL/REVISION 的业务 Schema、VCS 核验、
 交付回执和 ARCHIVE 的 workspace 释放由共用 executor 负责。
 
@@ -286,7 +286,7 @@ Codex 选择通过原生 `--model` 与 `-c model_reasoning_effort="..."` 传入�
 
 编码行为：
 
-- start 仅在显式 `FLOWTOOL_TRUSTED_HOST_EXECUTION=true` 时使用
+- start 仅在显式 `AGENTFLOW_TRUSTED_HOST_EXECUTION=true` 时使用
   `codex exec <prompt> --json -C <flow-repo> -s danger-full-access`；
 - start/resume 都要求 trusted-host 开关；worker 还必须声明专用 account/container/VM 隔离，且不得继承
   control-plane 环境变量；
@@ -421,7 +421,7 @@ PostgreSQL 中的全部表按职责分为五类：Flow 事实账本、`flows` �
 
 - `flows` 的账本列只经 `FlowStore` 写入；每次状态转换同事务追加一条以 `FlowEvent` 命名的事实，
   创建、归档、归档后合并与标题也各有事实；
-- 领域层的纯函数 `replay_flow` 复用 `decide_flow_state` 重放事实，`flowtool flow verify` 比较重放结果与当前行；
+- 领域层的纯函数 `replay_flow` 复用 `decide_flow_state` 重放事实，`agentflow flow verify` 比较重放结果与当前行；
 - 存量 Flow 在启动时补一条 `snapshot` 作为重放起点；
 - Job、交付、反馈、Worker 等表不由账本重建；租约、游标等协调数据不进入账本。
 

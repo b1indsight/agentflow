@@ -49,7 +49,7 @@ app/
 | `observability.py` | `telemetry/logging.py` 与 `telemetry/metrics.py` | 日志配置无数据库依赖；指标采样只由 control 使用 |
 
 各包 `__init__.py` 保持轻量，不集中重导出所有实现，不保留成套旧路径转发模块。
-内部 Python 导入路径随迁移更新；现有 `flowtool` 命令、`app.cli:app`、
+内部 Python 导入路径随迁移更新；现有 `agentflow` 命令、`app.cli:app`、
 `app.control.api`、`python -m app.live_smoke` 保持可用。
 Judge 内部子进程入口同步改为 `app.worker.judge_runner`，同时更新测试和启动引用。
 
@@ -121,7 +121,7 @@ README、组件职责、目录树和架构 HTML 同步使用当前路径；历�
 
 ### 2026-09-30 · 3. 验证与边界消融
 
-- PostgreSQL 全量回归：`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run pytest -q --tb=short`
+- PostgreSQL 全量回归：`AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres uv run pytest -q --tb=short`
   最终 **813 passed**。首轮发现线程测试的两项参数情形仍使用旧包导入，修正后重跑全量通过。
 - `uv run ruff check app tests`、`uv run mypy app tests`（144 个文件）、`uv build --no-sources`
   与 `git diff --check` 均通过；仅保留既有 Starlette/httpx 弃用告警及 Mypy 提示。

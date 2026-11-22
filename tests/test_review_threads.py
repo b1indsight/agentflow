@@ -115,12 +115,12 @@ async def test_reply_uses_root_rest_endpoint_and_exact_app_marker(tmp_path, monk
 
     async def graphql(query, variables):
         return {"node": thread(comments=[comment(1), comment(2, body="MARK", reply_to=1),
-            comment(3, author="flowtool-bot[bot]", bot=True, body="prefix MARK", reply_to=1),
-            comment(5, author="flowtool[bot]", bot=True, body="MARK", reply_to=1),
-            comment(4, author="Flowtool-bot[bot]", bot=True, body="note\nMARK", reply_to=1)])}
+            comment(3, author="agentflow-bot[bot]", bot=True, body="prefix MARK", reply_to=1),
+            comment(5, author="agentflow[bot]", bot=True, body="MARK", reply_to=1),
+            comment(4, author="AgentFlow-bot[bot]", bot=True, body="note\nMARK", reply_to=1)])}
 
     app = GitHubApp(settings(tmp_path))
-    get_app = AsyncEndpoint(response(SimpleNamespace(id=123, slug="flowtool-bot")))
+    get_app = AsyncEndpoint(response(SimpleNamespace(id=123, slug="agentflow-bot")))
     app_client(monkeypatch, lambda **kwargs: SimpleNamespace(
         rest=SimpleNamespace(apps=SimpleNamespace(async_get_authenticated=get_app)),
     ))

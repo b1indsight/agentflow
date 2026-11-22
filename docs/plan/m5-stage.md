@@ -46,7 +46,7 @@ F4 若超预算，拆镜像与发布、Compose；F6 可拆取消与 drain；F7 �
 
 - 同一版本的应用配置和 schema，serve/worker 独立认证与数据目录；运行凭据不烘焙进镜像。
 - Cloudflare 固定域名和仅 `/webhook` 路由在三种方式中一致，仅 origin 地址变化。
-- 不新增 `flowtool tunnel`、应用内 Cloudflare adapter 或 Cloudflare 配置依赖；安装、认证、
+- 不新增 `agentflow tunnel`、应用内 Cloudflare adapter 或 Cloudflare 配置依赖；安装、认证、
   DNS、配置校验与运行直接使用官方工具，当前配置示例和说明归属 `docs/deployment/`，Docker/K8s 阶段再增加部署清单。
 - 应用可在未安装 cloudflared 时正常启动；Cloudflare 凭据只交给隧道进程。
 - 同机 worker 可使用显式配置的 loopback WS；跨主机/Pod 使用经验证的内部连接方案，

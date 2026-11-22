@@ -189,7 +189,7 @@ async def test_child_output_and_exit_contract(monkeypatch, tmp_path):
         assert Path(kwargs["cwd"]).parent == provider.root
         assert Path(kwargs["cwd"]).is_dir()
         assert set(kwargs["env"]) == {
-            "PATH", "LANG", "FLOWTOOL_JUDGE_MODEL", "FLOWTOOL_JUDGE_API_KEY", "BUB_HOME",
+            "PATH", "LANG", "AGENTFLOW_JUDGE_MODEL", "AGENTFLOW_JUDGE_API_KEY", "BUB_HOME",
         }
         return child
 

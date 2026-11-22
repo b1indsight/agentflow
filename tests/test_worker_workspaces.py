@@ -420,15 +420,15 @@ async def test_bootstrap_clones_atomically_with_current_token_and_task_baseline(
     async def local_remote(*args, **kwargs):
         if "clone" in args:
             assert "https://github.com/owner/repo.git" in args
-            assert kwargs["environment"]["FLOWTOOL_PUSH_TOKEN"] == "push-token"
+            assert kwargs["environment"]["AGENTFLOW_PUSH_TOKEN"] == "push-token"
             assert "push-token" not in " ".join(args)
             clones.append(args)
             args = tuple(str(remote) if arg == "https://github.com/owner/repo.git" else arg
                          for arg in args)
         elif "fetch" in args and "environment" in kwargs:
-            assert kwargs["environment"]["FLOWTOOL_PUSH_TOKEN"] == "push-token"
+            assert kwargs["environment"]["AGENTFLOW_PUSH_TOKEN"] == "push-token"
             assert "push-token" not in " ".join(args)
-            assert "+refs/heads/trunk:refs/flowtool/base" in args
+            assert "+refs/heads/trunk:refs/agentflow/base" in args
             refreshes.append(args)
         return await original(*args, **kwargs)
 
@@ -602,7 +602,7 @@ async def test_next_initial_cleans_stopped_jj_edits_when_reusing_directory(tmp_p
     # Non-colocated jj has no .git checkout; Git reset alone cannot clean its working copy.
     root, remote = managed_seed(tmp_path)
     seed = root / "repos/owner/repo"
-    environment = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    environment = os.environ | {"JJ_USER": "AgentFlow Test", "JJ_EMAIL": "agentflow@example.test"}
     if colocated:
         await _jj("git", "init", "--colocate", cwd=seed, env=environment)
     else:

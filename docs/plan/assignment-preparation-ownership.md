@@ -116,7 +116,7 @@ coordinator 和 Assignment，保留 transport 的生命周期所有权。
 
 ### 2026-10-10 — 最终验证
 
-- 恢复消融变体后，`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres
+- 恢复消融变体后，`AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres
   uv run pytest -q --tb=short`：**851 passed**，无跳过；覆盖准备重试、gateway、恢复并发、
   cancel/drain、PR lifecycle、coordinator 与事务回归。仅有既有 Starlette/httpx 弃用警告。
 - `uv run ruff check app tests`、`uv run mypy app tests`（160 files）、`uv build`、

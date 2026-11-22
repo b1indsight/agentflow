@@ -70,7 +70,7 @@ F3 真实闭环仍未完成。普通 PR CI 不使用外部模型密钥或自动�
 
 ## 实施记录
 
-工具放在 `app/live_smoke.py`，通过 `uv run python -m app.live_smoke` 使用，不新增 flowtool
+工具放在 `app/live_smoke.py`，通过 `uv run python -m app.live_smoke` 使用，不新增 agentflow
 部署命令。默认只读，显式 allow-write + exact repo allowlist 才创建一个测试 Issue；本地持久
 unknown 意图和锁防止响应丢失后盲目重建。人工 review/merge、扩展故障矩阵按
 [真实验收文档](../verification/m5-live-e2e.md) 操作，未提供真实环境时不宣称 F3 完成。
@@ -92,5 +92,5 @@ unknown 意图和锁防止响应丢失后盲目重建。人工 review/merge、�
 真实 CLI 测试用 TCP 握手确认 gh 已启动并持有会话后，只向父进程发 SIGTERM；验证退出码
 143、观察器管道关闭、gh 的 TCP 连接关闭，以及同一 run 状态锁可重新获得。
 对照旧版默认信号行为：该测试在 5 秒 communicate 超时；保留清理机制后通过。
-命令：`FLOWTOOL_TEST_DATABASE_URL=... uv run pytest tests/test_live_smoke.py -q`，16 项通过。
+命令：`AGENTFLOW_TEST_DATABASE_URL=... uv run pytest tests/test_live_smoke.py -q`，16 项通过。
 不新增生产功能；SIGKILL/主机断电无法由用户态 handler 清理，仍非此入口的保证。

@@ -1,11 +1,11 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: flowtool-cloudflare
+  name: agentflow-cloudflare
 spec:
   podSelector:
     matchLabels:
-      flowtool-role: cloudflare
+      agentflow-role: cloudflare
   policyTypes:
   - Ingress
   - Egress
@@ -26,7 +26,7 @@ spec:
   - to:
     - podSelector:
         matchLabels:
-          flowtool-role: serve
+          agentflow-role: serve
     ports:
     - protocol: TCP
       port: 8000

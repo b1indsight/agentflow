@@ -8,7 +8,7 @@
 ## 1. 交付与范围
 
 发布 serve/worker 两种角色镜像，提供 Compose 完整示例及可选 cloudflared profile。
-使用现有 `flowtool serve` / `flowtool worker`；不加部署 CLI、不在应用封装 Cloudflare。
+使用现有 `agentflow serve` / `agentflow worker`；不加部署 CLI、不在应用封装 Cloudflare。
 worker 容器为长期固定 identity/root 的部署单元，不创建每 Flow 容器，不挂载 Docker socket。
 
 首版支持 Linux amd64；arm64 为追加平台，仅在工具链可取得并有实际 smoke 后宣称支持。

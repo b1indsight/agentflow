@@ -1,9 +1,9 @@
-# FlowTool 架构文档
+# AgentFlow 架构文档
 
 > 状态：M0 已验收；M1–M4 功能及 M5 部署、接收、运维实现已落地，真实 E2E 与部署验收待完成。
 > 初始日期：2026-08-02 · M0 验收：2026-08-26 · 文档核对：2026-10-15（最新 main，含 PR #82）。
 
-本目录是 FlowTool 架构的唯一入口。代码、测试、配置示例和已执行的运行验证是“当前实现”的事实
+本目录是 AgentFlow 架构的唯一入口。代码、测试、配置示例和已执行的运行验证是“当前实现”的事实
 来源；目标流程不会因为已经写入设计文档就被视为可用。
 
 ## 如何阅读
@@ -30,7 +30,7 @@
 |---|---|---|
 | 配置与领域契约 | 已验证（自动化） | serve/worker 独立配置、协议消息、分页 inventory、answer/revise 任务、纯文本输入与可空 Issue、逐 Flow journal、交付基线与反馈批次身份有覆盖；当前版本和兼容范围见[升级说明](../operations/upgrade.md) |
 | PostgreSQL 持久层 | 已验证（自动化） | Runtime 管理共享 Database，服务自行创建具体仓储；显式事务与共用锁保护 flow/attempt/job、binding、结果回执与反馈批次；聚合 Store 用于 CLI、live smoke 和测试 |
-| Flow 事实账本 | 已验证（自动化） | `flows` 的每次账本列变化同事务追加一条不可变 Flow 事实；存量 Flow 启动时补快照；`flowtool flow verify` 重放比较，测试夹具对每个 PostgreSQL 用例校验，见 [Flow 事实账本与状态表](flow-ledger.md) |
+| Flow 事实账本 | 已验证（自动化） | `flows` 的每次账本列变化同事务追加一条不可变 Flow 事实；存量 Flow 启动时补快照；`agentflow flow verify` 重放比较，测试夹具对每个 PostgreSQL 用例校验，见 [Flow 事实账本与状态表](flow-ledger.md) |
 | Webhook Ingress | 已验证（自动化） | HMAC 验签后、202 前持久化 inbox；后台消费者在每条 receipt 事务内创建服务/路由，提交后通知；失败退避、重放和请求体限制有覆盖 |
 | Event Router | 已验证（M2 F1 自动化） | 反馈 delivery/版本/deadline 原子写入，持久 settle、强信号授权、显式 action、同 Flow 冻结批次串行和重启恢复已覆盖 |
 | 合并与清理 | 已实现、有自动化覆盖 | 确认当前 PR 已合并即成功归档；原 Worker 的停止与工作区释放、GitHub 通知独立收尾。真实闭环待验收，见[端到端流程](workflows.md) |
@@ -88,7 +88,7 @@ M4 F1 已修复同秒旧转换重放：历史中已表示的编辑及不能定�
 - pytest 覆盖协议、角色边界、远程执行闭环与真实 PostgreSQL 持久层场景；
 - 最近完整记录为 2026-10-15 持久层简化后的 **735 passed、无跳过**，Ruff、Mypy 通过；
   这是既有实施记录，不代表本次文档更新重新运行了完整测试，见[验证与对照](../plan/persistence-simplification.md)；
-- PostgreSQL-backed `flowtool serve` 与两个 worker 在 CI 中独立启动，并在 serve 重启后自动重新注册；
+- PostgreSQL-backed `agentflow serve` 与两个 worker 在 CI 中独立启动，并在 serve 重启后自动重新注册；
 - 测试不访问真实 GitHub、Codex 或模型服务；Judge 契约测试运行真实 bub 库连接假模型端点。
 
 真实验收入口和待办见 [M5 E2E 清单](../verification/m5-live-e2e.md)；

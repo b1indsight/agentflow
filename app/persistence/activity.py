@@ -135,7 +135,7 @@ class ActivityStore(Repository):
                 key = f"flow:{flow_id}:fact:{head['activity_version'] + 1}"
             item = Observation(
                 key=key, attempt_id=attempt_id, source="flow", kind=kind,
-                occurred_at=occurred_at, updated_at=occurred_at, author="FlowTool",
+                occurred_at=occurred_at, updated_at=occurred_at, author="AgentFlow",
                 title=_FLOW_FACT_TITLES[kind], metadata=metadata,
             )
             if kind in _ATTEMPT_FACTS:

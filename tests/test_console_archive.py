@@ -202,8 +202,8 @@ def test_real_archive_filters_and_rebuild_preserve_business_outcome(store, reaso
 def test_cli_flow_history_spans_restarts_without_internal_ids(store, monkeypatch):
     store.flows.create_flow("octo/repo", 8, 1)
     flow = store.flows.create_flow("octo/repo", 7, 1)
-    monkeypatch.setenv("FLOWTOOL_DATABASE_URL", store.database.database_url)
-    monkeypatch.setenv("FLOWTOOL_WORKER_TOKENS", '{"worker":"test-token"}')
+    monkeypatch.setenv("AGENTFLOW_DATABASE_URL", store.database.database_url)
+    monkeypatch.setenv("AGENTFLOW_WORKER_TOKENS", '{"worker":"test-token"}')
     runner = CliRunner()
     for command, *args in [("finish", "succeeded", "--summary", "调查完成"), ("resume",), ("show",), ("history",)]:
         result = runner.invoke(cli.app, ["flow", command, str(flow.id), *args])

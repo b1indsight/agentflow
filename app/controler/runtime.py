@@ -204,7 +204,7 @@ class ServerRuntime:
         """Supervise the infer-only peer using the same Session and job driver as remote workers."""
         # The default directory survives connection retries. Each request gets its own
         # child; shutdown joins providers before removing this repository-free root.
-        with TemporaryDirectory(prefix="flowtool-local-bub-") as directory:
+        with TemporaryDirectory(prefix="agentflow-local-bub-") as directory:
             self.local_bub.root = Path(directory)
             try:
                 while True:

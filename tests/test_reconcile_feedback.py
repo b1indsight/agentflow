@@ -220,14 +220,14 @@ async def test_review_edits_and_invalidation_preserve_versions(store, review_flo
 
 
 @pytest.mark.parametrize("field,value", [("is_bot", True), ("body", "/flow stop"),
-                                         ("state", "pending"), ("author", "Flowtool-bot[bot]")])
+                                         ("state", "pending"), ("author", "AgentFlow-bot[bot]")])
 async def test_old_commands_and_bots_never_wake_or_control(
     store, review_flow, field, value, feedback_resources, monkeypatch,
 ):
     flow, clock = review_flow
     github = GitHub(clock)
     github._bot_login = None
-    get_app = AsyncEndpoint(response(SimpleNamespace(id=1, slug="flowtool-bot")))
+    get_app = AsyncEndpoint(response(SimpleNamespace(id=1, slug="agentflow-bot")))
     app_client(monkeypatch, lambda **kwargs: SimpleNamespace(
         rest=SimpleNamespace(apps=SimpleNamespace(async_get_authenticated=get_app)),
     ))
@@ -448,7 +448,7 @@ async def test_resumed_attempt_rejects_old_issue_comments_even_if_first_seen_or_
     else:
         router = EventRouter(service, SimpleNamespace(
             allowlist={"alice"}, settle_seconds=75, submit_grace_seconds=15,
-        ), bot_login="flowtool[bot]", database=store.database)
+        ), bot_login="agentflow[bot]", database=store.database)
         for i, timestamp in enumerate(created):
             router.dispatch("issue_comment", f"round-comment-{i}", {
                 "repository": {"full_name": flow.repo}, "issue": {"number": flow.issue_number},

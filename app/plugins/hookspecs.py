@@ -6,8 +6,8 @@ import pluggy
 
 from app.domain.models import Flow
 
-hookspec = pluggy.HookspecMarker("flowtool")
-hookimpl = pluggy.HookimplMarker("flowtool")
+hookspec = pluggy.HookspecMarker("agentflow")
+hookimpl = pluggy.HookimplMarker("agentflow")
 
 
 class FlowHooks:

@@ -1,6 +1,6 @@
 # 日志与内部指标
 
-serve / worker 设置 `FLOWTOOL_LOG_FORMAT=json` 启用 JSON stdout，默认 text 也执行同样的字段过滤。
+serve / worker 设置 `AGENTFLOW_LOG_FORMAT=json` 启用 JSON stdout，默认 text 也执行同样的字段过滤。
 日志仅保留时间、级别、角色、受控 event/reason_code、代码位置、异常类型和有效的关联 ID。
 不会渲染原始异常值/栈局部变量、消息正文、额外嵌套对象、prompt、HTTP URL、模型输出或 token。
 未标注结构化事件的日志显示 `application_log / unspecified`，通过 source 定位；不要依赖 message
@@ -15,8 +15,8 @@ executor 的 async task 在创建时继承独立上下文；assignment_token 不
 
 ## 启用 scrape
 
-仅 serve 设置独立 `FLOWTOOL_METRICS_TOKEN`（不要复用 worker token），可选
-`FLOWTOOL_METRICS_INTERVAL_SECONDS=15`，范围 5–300 秒。缺少或空 token 时 `/metrics` 返回 404，
+仅 serve 设置独立 `AGENTFLOW_METRICS_TOKEN`（不要复用 worker token），可选
+`AGENTFLOW_METRICS_INTERVAL_SECONDS=15`，范围 5–300 秒。缺少或空 token 时 `/metrics` 返回 404，
 缺少/错误的 `Authorization: Bearer <metrics token>` 返回 401。后台采集只在配置 token 后启动。
 不在 URL query 放凭据；监控通过私有网络直连 serve:8000，公网 tunnel 仍只放行 webhook。
 
@@ -24,12 +24,12 @@ Prometheus scrape 使用 secret 文件（在监控进程中挂载）：
 
 ```yaml
 scrape_configs:
-  - job_name: flowtool
+  - job_name: agentflow
     scrape_interval: 15s
     metrics_path: /metrics
     authorization:
       type: Bearer
-      credentials_file: /run/secrets/flowtool_metrics_token
+      credentials_file: /run/secrets/agentflow_metrics_token
     static_configs:
       - targets: ['serve:8000']
 ```
@@ -39,7 +39,7 @@ scrape_configs:
 
 ## 指标契约
 
-全部以 `flowtool_` 为前缀；以下省略此前缀。ID、repo、URL、异常文本不进入 label。
+全部以 `agentflow_` 为前缀；以下省略此前缀。ID、repo、URL、异常文本不进入 label。
 
 | 指标 | 类型 / 标签 | 口径 |
 | --- | --- | --- |
@@ -78,7 +78,7 @@ resolver 约束。单次一个采集，不重叠。聚合是同一个数据库 s
 大数据库可能持续超过 SQL 预算：此时应评估索引/数据保留或采集架构，不通过取消查询预算绕过。
 这不是单 serve 的容量扩展方案，不要启动多个 Uvicorn worker。
 
-典型排查：inbox blocked 用 `flowtool inbox status`；recovery_pending/effects uncertain 查对应
+典型排查：inbox blocked 用 `agentflow inbox status`；recovery_pending/effects uncertain 查对应
 job 和 effect 的恢复状态；workers offline 加 active binding 表示仍有执行现场，不表示可以释放；
 archive failed 或 projects blocked 分别检查收尾和投影，不能用重建 worker 替代事实核对。
 具体告警、保留和备份部署由 F8 提供。

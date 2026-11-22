@@ -169,8 +169,8 @@ sweeper 使用 Store 的条件更新批量处理：
 - result received 未 applied：唤醒 coordinator recovery，不重新运行 worker task；
 - DONE/FAILED：拒绝旧 lease 更新并清理 worker current job 展示。
 
-`flowtool workers` 增加 epoch、RECOVERING、lease/recovery remaining 和 disconnect reason；
-`flowtool flow show` 显示等待哪个 worker、是否已有 terminal result。日志包含 worker/job/flow/epoch 的结构化字段，
+`agentflow workers` 增加 epoch、RECOVERING、lease/recovery remaining 和 disconnect reason；
+`agentflow flow show` 显示等待哪个 worker、是否已有 terminal result。日志包含 worker/job/flow/epoch 的结构化字段，
 但绝不包含 token、credential 或完整敏感 payload。
 
 ## 7. 实施顺序

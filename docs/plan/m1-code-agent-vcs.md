@@ -15,7 +15,7 @@
 
 本 feature 固定以下 ownership：
 
-1. Flow 是 repo、base、目标 branch 和交付身份的持久 owner；FlowTool 把这些约束投影给本次 attempt；
+1. Flow 是 repo、base、目标 branch 和交付身份的持久 owner；AgentFlow 把这些约束投影给本次 attempt；
 2. CodeAgent 自己读取 VCS 状态，决定命令顺序、纳入提交的文件和 commit message，并执行 commit/push；
 3. worker 不在 CodeAgent 退出后代替它 staging、commit 或 push，只读取结果做验证；
 4. GitHub PR、评论、label 和 reviewer 永远由 control plane 执行；CodeAgent 不直连 GitHub API，后续只
@@ -54,7 +54,7 @@
 
 ## 3. Ownership 与执行契约
 
-### 3.1 FlowTool 提供约束
+### 3.1 AgentFlow 提供约束
 
 worker 为每个 Flow execution 构造不可歧义的执行上下文：
 
@@ -242,7 +242,7 @@ worker。
 - INITIAL VCS 失败通过结构化 stage/detail 回传 control plane 并进入失败消息，不再只留下 exit 65；
 - worker wire protocol 升到 v3，让 repo-bearing task 显式携带 stable `flow_id`；
 - Codex start 改为显式 trusted-host `danger-full-access`，并以最小环境启动，不向子进程继承
-  `FLOWTOOL_*`、`GH_TOKEN` 或 `GITHUB_TOKEN`；
+  `AGENTFLOW_*`、`GH_TOKEN` 或 `GITHUB_TOKEN`；
 - 自动化覆盖 Git-only、colocated jj、backend mismatch、无新 commit、repo 复用/分离和启动参数；
 - 真实 smoke 使用 `codex-cli 0.152.1`、一次性 Git repo 和本地 bare remote，Codex 自主生成 commit
   `2972371a533dc069754edf31e33886229b7a4e77` 并推送 `flow/codex-smoke`，本地与远端 SHA 一致；
@@ -327,7 +327,7 @@ worker。
 - `repeat-delivery`：移除成功回执保护后，重复 HTTP 调用再次到达控制面，回归用例失败。
 - `concurrency`：受控调度下，两次并发 dispatch 在有锁/无锁时分别执行一次/两次交付，保留交付锁。
 
-相关证据为 `initial-correction-before.log`、`initial-correction-ancestry-before.log`、`initial-correction-after.log` 和各 ablation 日志。全仓验证使用独立临时 PostgreSQL，命令为 `FLOWTOOL_TEST_DATABASE_URL=<isolated local PostgreSQL> .venv/bin/python -m pytest -q`，另运行 `.venv/bin/ruff check app tests`、`.venv/bin/mypy app tests` 与 `git diff --check`；最终结果见本线程[编码校验反馈](https://ampcode.com/artifacts/d89bcac2-580f-438e-b8f3-c0e84659bed0)。受控 Agent 验证不代表真实模型修复成功率，本次没有运行真实模型提示词对照。
+相关证据为 `initial-correction-before.log`、`initial-correction-ancestry-before.log`、`initial-correction-after.log` 和各 ablation 日志。全仓验证使用独立临时 PostgreSQL，命令为 `AGENTFLOW_TEST_DATABASE_URL=<isolated local PostgreSQL> .venv/bin/python -m pytest -q`，另运行 `.venv/bin/ruff check app tests`、`.venv/bin/mypy app tests` 与 `git diff --check`；最终结果见本线程[编码校验反馈](https://ampcode.com/artifacts/d89bcac2-580f-438e-b8f3-c0e84659bed0)。受控 Agent 验证不代表真实模型修复成功率，本次没有运行真实模型提示词对照。
 
 ### 交付状态
 

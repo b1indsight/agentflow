@@ -34,7 +34,7 @@ Feature 2 完成后支持“多 worker 正常运行”，但仍沿用 Feature 1 
 - PostgreSQL 中可查询的 worker 元数据和 job/flow 关联；
 - assignment token 加 worker identity 的 fencing，防止串线和重复完成；
 - 两个及以上 worker 的并发、隔离、离线和公平性测试；
-- `flowtool workers` 展示命令与同机双 worker CI smoke。
+- `agentflow workers` 展示命令与同机双 worker CI smoke。
 
 ### 2.2 本次不包含
 
@@ -66,7 +66,7 @@ WorkerGateway
 serve 配置由 Feature 1 的单 identity 改为：
 
 ```text
-FLOWTOOL_WORKER_TOKENS={"worker-a":"secret-a","worker-b":"secret-b"}
+AGENTFLOW_WORKER_TOKENS={"worker-a":"secret-a","worker-b":"secret-b"}
 ```
 
 明文 secret 只在运行配置中，数据库仅保存 worker id 和非敏感元数据。配置解析拒绝空 id、空 token 和
@@ -74,14 +74,14 @@ FLOWTOOL_WORKER_TOKENS={"worker-a":"secret-a","worker-b":"secret-b"}
 
 ### 3.2 单机多 worker
 
-多个 worker 进程/容器可共用同一 `FLOWTOOL_SERVE_WS_URL`，无需监听各自端口。每个实例必须配置：
+多个 worker 进程/容器可共用同一 `AGENTFLOW_SERVE_WS_URL`，无需监听各自端口。每个实例必须配置：
 
-- 唯一 `FLOWTOOL_WORKER_ID` 和对应 token；
-- 独立 `FLOWTOOL_WORKER_ROOT`；默认按 worker id 派生；
+- 唯一 `AGENTFLOW_WORKER_ID` 和对应 token；
+- 独立 `AGENTFLOW_WORKER_ROOT`；默认按 worker id 派生；
 - 独立 root 内的 repo/workspace、agent session state、临时文件和生命周期锁。
 
 worker runtime 在连接 serve 前取得 root 独占锁，并写入 worker id 元数据。第二个进程无法取得同一 root
-时 fail fast，避免同机 session/workspace 交叉。FlowTool 不自建资源配额；systemd 或容器运行时负责
+时 fail fast，避免同机 session/workspace 交叉。AgentFlow 不自建资源配额；systemd 或容器运行时负责
 CPU、内存、磁盘和网络限制。
 
 ## 4. 调度与 Attempt Affinity
@@ -130,7 +130,7 @@ Feature 1 已有的 `attempts.worker_id` 成为实际 affinity；jobs 的 `assig
 identity/token 同时匹配。worker disconnect 时 Store 更新 OFFLINE/最后错误；在线状态的最终事实仍由
 当前 registry 决定，持久值用于重启后的“最后已知”展示。
 
-`ControlService.list_workers()` 聚合 worker、job、flow 和 attempt，供 `flowtool workers` 输出：
+`ControlService.list_workers()` 聚合 worker、job、flow 和 attempt，供 `agentflow workers` 输出：
 
 ```text
 WORKER     STATUS   JOB   FLOW   LAST_SEEN
@@ -164,7 +164,7 @@ worker-c   OFFLINE  -     -      4m
    - 实现事务化 eligible claim 与事件唤醒。
 4. **单机隔离与展示**
    - 两个不同 root 可同时启动，同 root 第二个实例 fail fast；
-   - 增加 `flowtool workers` 并验证 ONLINE/BUSY/OFFLINE/current flow。
+   - 增加 `agentflow workers` 并验证 ONLINE/BUSY/OFFLINE/current flow。
 5. **端到端与文档**
    - 同一 runner 启动 serve 和两个 fake-executor worker，并行完成两个 flow；
    - 更新 CI、README、env example、架构/流程/风险文档及本计划实施结果。
@@ -177,7 +177,7 @@ worker-c   OFFLINE  -     -      4m
 - 同一 attempt 的所有后续 task 只发给首次 started 的 worker；
 - affinity worker 离线不导致其他 worker 接管，也不影响其他 flow；
 - 同机不同 root 的 workspace/session 无交叉，同 root 误配置 fail fast；
-- `flowtool workers` 准确显示多个 worker 及当前 job/flow；
+- `agentflow workers` 准确显示多个 worker 及当前 job/flow；
 - 现有单 worker协议和状态机测试继续通过。
 
 验证命令沿用 Feature 1：pytest、Ruff、Mypy、lock check、build、CLI help 和 `git diff --check`。CI smoke
@@ -198,10 +198,10 @@ flow/job/attempt 数据。
 
 ## 10. 实施结果
 
-- `FLOWTOOL_WORKER_TOKENS` 提供独立 identity/token 鉴权，registry 允许不同 identity 并发连接并拒绝重复连接；
+- `AGENTFLOW_WORKER_TOKENS` 提供独立 identity/token 鉴权，registry 允许不同 identity 并发连接并拒绝重复连接；
 - PostgreSQL `workers` 表记录 presence、当前 job、心跳和公平性时间，claim 同时实施单槽、FIFO 与 affinity；
 - `Started` 以 job/worker/token fence 原子绑定 `attempt.worker_id`，后续任务仅对该 worker eligible；
-- worker 默认 root 按 identity 派生，root lock 同时记录 identity；`flowtool workers` 聚合展示 job/flow；
+- worker 默认 root 按 identity 派生，root lock 同时记录 identity；`agentflow workers` 聚合展示 job/flow；
 - 单元测试覆盖 registry、配置、root 隔离与展示，PostgreSQL/ASGI 测试覆盖 claim、fencing 和 affinity；
   CI smoke 在同一 runner 启动两个 worker，并验证终止一个后另一个仍存活。
 

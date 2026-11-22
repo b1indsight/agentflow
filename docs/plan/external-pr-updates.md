@@ -139,7 +139,7 @@
 ### 2026-11-13：完成本地验收
 
 - **实际覆盖：** 真实 Git/colocated jj、bare remote 与独立协作者 clone 验证外部快进及历史改写后，Agent 确实读取新文件；覆盖实际基线的新提交/no-op、fetch 竞争、脏文件与未发布提交拒绝、ignored 路径保留、凭据环境隔离、jj 旁支和 session fallback 的精确本地复核。PostgreSQL 验证任务准备、Judge context 重建、结果重放、answer、reopen 与历史 JSON/digest 兼容。
-- **最终检查：** 在最终源码上执行 `FLOWTOOL_TEST_DATABASE_URL=<隔离 UTF8 PostgreSQL> uv run pytest -q`，完整套件通过；`uv run ruff check app tests`、`uv run mypy app tests`、`uv build --no-sources` 与 `git diff origin/main --check` 均通过。简化对比的反例及同组正向回归已完成；详细日志和执行边界见[验收记录](https://ampcode.com/artifacts/838a2830-cbdb-437d-8822-aacbfd9316bc)。
+- **最终检查：** 在最终源码上执行 `AGENTFLOW_TEST_DATABASE_URL=<隔离 UTF8 PostgreSQL> uv run pytest -q`，完整套件通过；`uv run ruff check app tests`、`uv run mypy app tests`、`uv build --no-sources` 与 `git diff origin/main --check` 均通过。简化对比的反例及同组正向回归已完成；详细日志和执行边界见[验收记录](https://ampcode.com/artifacts/838a2830-cbdb-437d-8822-aacbfd9316bc)。
 - **验证边界：** 没有进行真实 GitHub/HTTPS 或 CodingAgent provider smoke，没有操作生产 Kubernetes、部署、数据库或真实 PR 分支。此次无 UI 改动；既有 Starlette/httpx 弃用警告不影响检查结果。
 - **交付边界：** 实现、相关文档与 changelog 使用原 draft PR 提交评审；代码推送须先通过 review gate，不合并或部署。wire24 两端协调升级、先收敛在途任务和回执，以及不自动恢复旧 BLOCKED Flow 的边界保持不变。
 

@@ -108,7 +108,7 @@
 - **观察结果：** 新答复在两侧均只入队一个 REVISION 且不直接评论，after 不再具有旧直接答复入口；人工构造的旧 failure effect 从 skipped 变为 succeeded，并只向 GitHub 替身记录评论；普通文本结果仍成功保存，但 after 不再写标题；结构化命名两侧都正常写入标题。演示旧 key 的差异不表示迁移任何实际记录。
 - **执行证据：** 在临时本地 PostgreSQL 上执行 `uv run pytest -q -s scripts/smoke/control_legacy_demo.py` 全部通过。故意额外清掉结构化标题时，同一 DEMO 正确断言失败；移除该故障后重跑通过。Ruff 和差异空白检查通过；`git diff --exit-code -- app tests` 确认产品与正式回归文件未改。测试日志保存在本地 `.amp/in/artifacts/control-legacy-demo.log` 与 `control-legacy-demo-negative-control.log`，不加入版本控制。
 - **环境与限制：** 本机 PostgreSQL 最初因 locale 初始化失败，设置 `LC_ALL=C` 后运行成功。GitHub 使用既有记录替身，未连接真实 worker 或模型，因此这是组件集成演示，不能作为完整功能或生产端到端验收。临时数据库及进程已清理；业务源代码、schema 和完整回归仍待后续实施验证。
-- **复现：** 将 `FLOWTOOL_TEST_DATABASE_URL` 指向可丢弃的本地测试 PostgreSQL 后运行上述 pytest 命令；fixture 自动创建和删除各场景的随机 schema。DEMO 依赖当前源码片段，源码结构变化后会明确失败并要求更新，不静默略过。
+- **复现：** 将 `AGENTFLOW_TEST_DATABASE_URL` 指向可丢弃的本地测试 PostgreSQL 后运行上述 pytest 命令；fixture 自动创建和删除各场景的随机 schema。DEMO 依赖当前源码片段，源码结构变化后会明确失败并要求更新，不静默略过。
 
 ### 003 — 2026-11-15 — 正式删除旧执行链并保留真实前后对比
 

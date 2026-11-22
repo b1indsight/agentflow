@@ -1,13 +1,21 @@
-# 部署 FlowTool 与 Cloudflare Tunnel
+# 部署 AgentFlow 与 Cloudflare Tunnel
 
 容器部署见 [Docker / Compose](docker.md) 和 [Kubernetes](kubernetes.md)。
 常驻服务、告警与维护见 [运维手册](../operations/runbook.md)。
 用户 API 的 GitHub 登录、单账号限制和 MFA 见 [Cloudflare Access](access.md)；
 本文默认仍仅公开 Webhook，不将整个 serve 暴露到公网。
 
-本文使用现有 `flowtool serve`、`flowtool worker` 和官方 `cloudflared`，说明直接运行进程的
+本文使用现有 `agentflow serve`、`agentflow worker` 和官方 `cloudflared`，说明直接运行进程的
 部署步骤。示例基于同一主机、不同 OS 账号的首次联调；容器方式使用上面的专门文档。
 `/healthz` 表示 HTTP 进程可响应，`/readyz` 还检查启动状态与数据库；不提供部署管理命令。
+
+### 从 flowtool 升级
+
+- 将服务、脚本和私有环境文件中的命令改为 `agentflow`，配置键从 `FLOWTOOL_` 改为 `AGENTFLOW_`。保留已有数据库连接串、worker ID、token 和密钥路径的**值**。外部插件要改用 `agentflow` 入口组和 hook 标记；监控查询改用 `agentflow_` 指标。
+- 先排空并停止旧 worker 和服务，禁用旧 systemd 单元或容器的自动重启。使用新虚拟环境安装 `agentflow`；两个发行包都提供 `app`，不要在同一环境叠装，也不要用旧 `worker --update` 跨越这次更名。
+- Compose 的项目名会影响卷名。升级时显式指定旧项目名，或在 override 中用 `external: true` 和 `name` 指向原卷；根目录开发用 Compose 的 PostgreSQL 卷键也已更名。沿用原数据库名和角色，同步调整 `pg_isready` 健康检查。不要执行 `down -v`。
+- 为已有 worker 显式保留原 `AGENTFLOW_WORKER_ROOT`、HOME 和绝对挂载路径，核对新服务账号对 checkout、journal 和凭据的权限。Kubernetes 的新 namespace／StatefulSet 不会接管旧 PVC；先准备并验证原数据的挂载或恢复、Secret 和新服务 DNS 的 TLS 证书，再启动新实例。
+- 确认 `/readyz` 正常、控制台可见原有 Flow、原 worker ID 已重新上线后再撤掉旧配置。回退时先停新实例，再恢复旧程序、配置和原挂载；同一数据库或 worker root 不要同时运行两套实例。
 
 ## 1. 准备运行环境
 
@@ -28,16 +36,16 @@ chmod 600 .env
 
 | 配置 | 内容 |
 |---|---|
-| `FLOWTOOL_DATABASE_URL` | 实际 PostgreSQL 连接串 |
-| `FLOWTOOL_GITHUB_APP_ID` | App ID |
-| `FLOWTOOL_GITHUB_PRIVATE_KEY_PATH` | control 账号可读的私钥路径 |
-| `FLOWTOOL_GITHUB_WEBHOOK_SECRET` | 与 GitHub App 设置相同的随机 secret |
-| `FLOWTOOL_ALLOWLIST` / `FLOWTOOL_REVIEWERS` | 可触发用户 / 请求 review 的用户 |
-| `FLOWTOOL_WORKER_TOKENS` | 例如 `{"worker-1":"替换为随机token"}`，与 worker 一致 |
-| `FLOWTOOL_HOST` / `FLOWTOOL_PORT` | 本文使用 `127.0.0.1` / `8000` |
+| `AGENTFLOW_DATABASE_URL` | 实际 PostgreSQL 连接串 |
+| `AGENTFLOW_GITHUB_APP_ID` | App ID |
+| `AGENTFLOW_GITHUB_PRIVATE_KEY_PATH` | control 账号可读的私钥路径 |
+| `AGENTFLOW_GITHUB_WEBHOOK_SECRET` | 与 GitHub App 设置相同的随机 secret |
+| `AGENTFLOW_ALLOWLIST` / `AGENTFLOW_REVIEWERS` | 可触发用户 / 请求 review 的用户 |
+| `AGENTFLOW_WORKER_TOKENS` | 例如 `{"worker-1":"替换为随机token"}`，与 worker 一致 |
+| `AGENTFLOW_HOST` / `AGENTFLOW_PORT` | 本文使用 `127.0.0.1` / `8000` |
 
 Bot login 自动取自当前 App 的 `slug[bot]`，无需手工配置；旧 `.env` 中的
-`FLOWTOOL_BOT_LOGIN` 已不再读取，可以删除。解析成功后在当前进程共享，重启后重新查询。
+`AGENTFLOW_BOT_LOGIN` 已不再读取，可以删除。解析成功后在当前进程共享，重启后重新查询。
 
 无需提前创建 `flow`、`flow:in-review`、`flow:done`：serve 首轮后台扫描会在 App 已授权的
 非归档仓库补齐缺失定义。修改名称时同步修改对应配置；已有标签的名称、颜色和描述保留。
@@ -45,14 +53,14 @@ Bot login 自动取自当前 App 的 `slug[bot]`，无需手工配置；旧 `.en
 新安装与新增授权仓库每 300 秒发现，扫描耗时和限流会延后处理；退避不跨重启保存。
 App 需有 Issues write 权限，程序不会自动申请权限或扩大仓库授权；有权限仍需等首轮完成后再添加
 触发标签。`/readyz` 只验证本地启动与数据库，不代表仓库标签已建好。
-Judge 配置只提供给 control，在 serve 的 `.env` 配置 `FLOWTOOL_JUDGE_MODEL`、
-`FLOWTOOL_JUDGE_API_KEY`，可选 `FLOWTOOL_JUDGE_API_BASE` 和 `FLOWTOOL_JUDGE_TIMEOUT_SECONDS`。
+Judge 配置只提供给 control，在 serve 的 `.env` 配置 `AGENTFLOW_JUDGE_MODEL`、
+`AGENTFLOW_JUDGE_API_KEY`，可选 `AGENTFLOW_JUDGE_API_BASE` 和 `AGENTFLOW_JUDGE_TIMEOUT_SECONDS`。
 
 完整配置且依赖预检通过时，control 自动管理一个仅提供 infer 的 bub mini worker，无需额外部署。
 其就绪、推理槽空闲且能力匹配时优先领取；未配置、半配、忙或其他条件不满足时选普通 worker。
 若只希望使用 Codex/Amp，清空 control 的 model/key/base 三项。预检失败只记录安全分类，不注册 bub。
-总预算沿用 `FLOWTOOL_JUDGE_TIMEOUT_SECONDS`（默认 60 秒），包含排队、最多 3 次授权派发、通信与退避，
-截止和次数持久化；清理可有有界余量，但超过预算的答案不再接纳。worker 无需 bub key，使用 `FLOWTOOL_CODING_AGENT=codex|amp`
+总预算沿用 `AGENTFLOW_JUDGE_TIMEOUT_SECONDS`（默认 60 秒），包含排队、最多 3 次授权派发、通信与退避，
+截止和次数持久化；清理可有有界余量，但超过预算的答案不再接纳。worker 无需 bub key，使用 `AGENTFLOW_CODING_AGENT=codex|amp`
 及对应专用账号的原生认证、trusted-host 和隔离配置。能力登记只检查本机可执行文件和目录，
 不证明 provider 登录、额度或外部服务可用。
 
@@ -101,36 +109,36 @@ serve 启动时初始化/更新 schema，数据库账号需拥有应用 schema�
 在 control 账号的应用目录启动 serve，保留该终端：
 
 ```bash
-FLOWTOOL_HOST=127.0.0.1 uv run flowtool serve
+AGENTFLOW_HOST=127.0.0.1 uv run agentflow serve
 ```
 
 另一个 control 终端验证：
 
 ```bash
 curl --fail http://127.0.0.1:8000/healthz
-uv run flowtool workers
+uv run agentflow workers
 ```
 
 预期 health 返回 `{"status":"ok"}`；此时 worker 列表可能为空。
 
 为 worker 使用专用 OS 账号及独立应用检出目录，执行 `uv sync --locked`。确保该账号不能读取
 control 的 `.env`、App 私钥和隧道凭据。仅换终端或更换 repo 目录不等同于账号隔离。
-在 worker 账号下，将下列配置填入自己创建的私有文件（例如 `~/.config/flowtool/worker.env`），
+在 worker 账号下，将下列配置填入自己创建的私有文件（例如 `~/.config/agentflow/worker.env`），
 文件仅包含 shell 变量赋值，权限设置为 `600`；替换 token、模型和 API key 占位符：
 
 ```bash
-FLOWTOOL_WORKER_ID=worker-1
-FLOWTOOL_WORKER_TOKEN='替换为serve登记的token'
-FLOWTOOL_SERVE_WS_URL=ws://127.0.0.1:8000/internal/workers/connect
-FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true
-FLOWTOOL_WORKER_ROOT=~/.flowtool/workers/worker-1
-FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2
-FLOWTOOL_TRUSTED_HOST_EXECUTION=true
-FLOWTOOL_EXECUTION_ISOLATION=dedicated-account
+AGENTFLOW_WORKER_ID=worker-1
+AGENTFLOW_WORKER_TOKEN='替换为serve登记的token'
+AGENTFLOW_SERVE_WS_URL=ws://127.0.0.1:8000/internal/workers/connect
+AGENTFLOW_ALLOW_INSECURE_WORKER_WS=true
+AGENTFLOW_WORKER_ROOT=~/.agentflow/workers/worker-1
+AGENTFLOW_WORKER_REPO_WORKSPACE_LIMIT=2
+AGENTFLOW_TRUSTED_HOST_EXECUTION=true
+AGENTFLOW_EXECUTION_ISOLATION=dedicated-account
 # 默认 codex；仅在该空闲 worker 明确采用 Amp 时改为 amp。
-FLOWTOOL_CODING_AGENT=codex
-FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200
-FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS=1200
+AGENTFLOW_CODING_AGENT=codex
+AGENTFLOW_AMP_RUN_TIMEOUT_SECONDS=1200
+AGENTFLOW_CODEX_RUN_TIMEOUT_SECONDS=1200
 ```
 
 两个 `*_RUN_TIMEOUT_SECONDS` 均为编码的**空闲**秒数，默认 1200，必须为正有限值。
@@ -192,18 +200,18 @@ worker 容器是长期运行的，不会在每次取消后销毁；需要更强�
 
 ```bash
 set -a
-. "$HOME/.config/flowtool/worker.env"
+. "$HOME/.config/agentflow/worker.env"
 set +a
-uv run flowtool worker
+uv run agentflow worker
 ```
 
 worker 不自动读取 `.env`，上述加载仅针对 worker 私有文件。回到 control 终端运行
-`uv run flowtool workers`，确认 `worker-1` 在线。保留 worker root、journal 和会话数据，
+`uv run agentflow workers`，确认 `worker-1` 在线。保留 worker root、journal 和会话数据，
 不要为重启临时更换 identity/root。启动注册成功尚不代表真实编码闭环已通过。
 
-只做本机连接验证时，保留 ID、token、loopback WS 地址及明文 WS 开关，不启用 `FLOWTOOL_TRUSTED_HOST_EXECUTION`。需要调整断线重连时，在 Worker 环境设置 `FLOWTOOL_RECONNECT_MIN_BACKOFF`、`FLOWTOOL_RECONNECT_MAX_BACKOFF` 和 `FLOWTOOL_RECONNECT_JITTER`；服务端的心跳、租约与恢复宽限期则在 [control 配置](../../env.example)中设置。
+只做本机连接验证时，保留 ID、token、loopback WS 地址及明文 WS 开关，不启用 `AGENTFLOW_TRUSTED_HOST_EXECUTION`。需要调整断线重连时，在 Worker 环境设置 `AGENTFLOW_RECONNECT_MIN_BACKOFF`、`AGENTFLOW_RECONNECT_MAX_BACKOFF` 和 `AGENTFLOW_RECONNECT_JITTER`；服务端的心跳、租约与恢复宽限期则在 [control 配置](../../env.example)中设置。
 
-正式 uv Git 安装的 Worker 使用原安装入口 `flowtool worker --update`，自动查询最新版、
+正式 uv Git 安装的 Worker 使用原安装入口 `agentflow worker --update`，自动查询最新版、
 原地更新并核验后退出。操作者先停共享安装的全部 Worker，成功后按原方式重启；
 源码检出不执行此命令。安装合同与恢复边界见 [Worker 更新](worker-update.md)。
 Compose 和 Kubernetes Worker 继续使用各自部署方式换镜像，没有后台更新或专用服务模板。
@@ -221,7 +229,7 @@ worker 身份可访问的位置。Amp 不再提供替代用户配置的 `--setti
 `AMP_SETTINGS_FILE` 和 `.amp/settings.json[c]`；Codex 保留原有 HOME/CODEX_HOME 配置入口。
 恢复原生配置也会恢复其中的工具和插件策略，不能再依赖旧 worker 的固定工具白名单。
 
-两个后端继承自定义环境变量（如 `EXAMPLE_MCP_TOKEN`），但先清除 `FLOWTOOL_*`、`GH_*`、
+两个后端继承自定义环境变量（如 `EXAMPLE_MCP_TOKEN`），但先清除 `AGENTFLOW_*`、`GH_*`、
 `GITHUB_*`、`GIT_*`、`SSH_*`，仅保留 Git 作者/提交者的 NAME、EMAIL；清除
 `AMP_CURRENT_THREAD_ID`、`AMP_THREAD_ID`、`CODEX_THREAD_ID`、`CLAUDECODE` 等父会话状态。
 随后注入本轮 assignment 的 Git/gh/MCP 能力；这些保留名称不能用作自定义 MCP 凭据。
@@ -265,7 +273,7 @@ INITIAL 使用当前 endpoint 和 token 引用；无当前 broker 的 REVISION/f
   root 身份、结果和停止证据不因目录层级改变。迁移后不能直接降级到只识别旧路径的程序。
   不要编辑、删除清单后让程序重新接管现有目录。准备中断、未知内容和损坏清单需要人工核查；
   没有实际 checkout 的失败 clone 可安全重试，已执行或未知状态不会自动重放。
-- `FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT` 默认 2、最小 1，启动时读取；完整副本、临时
+- `AGENTFLOW_WORKER_REPO_WORKSPACE_LIMIT` 默认 2、最小 1，启动时读取；完整副本、临时
   worktree、准备/清理中和隔离位置共同计数，seed 不计入，各仓库独立计数。降低上限不会删除
   既有位置；原 Flow 可继续，数量回落前不扩容。完整副本归档返回 `released` 并保留目录和
   ignored 依赖/构建缓存；worktree 返回 `removed`，经 Git 注销后删除。`flow show` 会注明目录保留。
@@ -307,10 +315,10 @@ serve/worker 使用同一 commit 或对应镜像升级；更新器不检查或�
 ```bash
 cloudflared --version
 cloudflared tunnel login
-cloudflared tunnel create flowtool
+cloudflared tunnel create agentflow
 ```
 
-记录输出的隧道 UUID 和 credentials JSON 路径。创建独立文件 `~/.cloudflared/flowtool.yml`，
+记录输出的隧道 UUID 和 credentials JSON 路径。创建独立文件 `~/.cloudflared/agentflow.yml`，
 替换以下 UUID、绝对路径和域名；凭据由 cloudflared 使用，不交给 worker：
 
 ```yaml
@@ -326,11 +334,11 @@ ingress:
 直接使用官方命令创建 DNS、校验配置并运行，域名同样替换为自己的：
 
 ```bash
-cloudflared tunnel route dns flowtool hooks.example.com
-cloudflared tunnel --config "$HOME/.cloudflared/flowtool.yml" ingress validate
-cloudflared tunnel --config "$HOME/.cloudflared/flowtool.yml" ingress rule https://hooks.example.com/webhook
-cloudflared tunnel --config "$HOME/.cloudflared/flowtool.yml" ingress rule https://hooks.example.com/internal/workers/connect
-cloudflared tunnel --config "$HOME/.cloudflared/flowtool.yml" run flowtool
+cloudflared tunnel route dns agentflow hooks.example.com
+cloudflared tunnel --config "$HOME/.cloudflared/agentflow.yml" ingress validate
+cloudflared tunnel --config "$HOME/.cloudflared/agentflow.yml" ingress rule https://hooks.example.com/webhook
+cloudflared tunnel --config "$HOME/.cloudflared/agentflow.yml" ingress rule https://hooks.example.com/internal/workers/connect
+cloudflared tunnel --config "$HOME/.cloudflared/agentflow.yml" run agentflow
 ```
 
 两个路由检查应分别匹配 webhook 规则和 404 兜底。官方支持 hostname/path 匹配和末尾兜底，
@@ -355,8 +363,8 @@ curl -i https://hooks.example.com/docs
 [Webhook inbox 运维](../operations/webhook-inbox.md)。隧道不存储离线事件，未到达系统的
 事件仍需在 GitHub 核查并按需重新投递。
 
-用 allowlist 账号在测试仓库触发 Flow，通过 `uv run flowtool flows --active` 和
-`uv run flowtool flow show <FLOW_ID>` 查看进度，再验证 PR、review 和归档。
+用 allowlist 账号在测试仓库触发 Flow，通过 `uv run agentflow flows --active` 和
+`uv run agentflow flow show <FLOW_ID>` 查看进度，再验证 PR、review 和归档。
 记录实际应用/cloudflared 版本、delivery ID、PR 和验收时间；不要将凭据写入验收记录。
 
 ## 5. 排障与停止
@@ -368,7 +376,7 @@ curl -i https://hooks.example.com/docs
 | webhook 返回 401 | GitHub App 与 serve 的 webhook secret 是否一致 |
 | webhook 返回 404 | hostname、精确 `/webhook` 路径和配置匹配顺序 |
 | worker 不在线 | identity/token、连接地址，以及是否错误继承了 control secret |
-| 仓库缺少 FlowTool 标签 | App 授权范围、Issues write 权限、是否暂停/归档；日志 `repository labels pending` / `inventory deferred` 的 kind、status、request ID；修复后等待重试 |
+| 仓库缺少 AgentFlow 标签 | App 授权范围、Issues write 权限、是否暂停/归档；日志 `repository labels pending` / `inventory deferred` 的 kind、status、request ID；修复后等待重试 |
 | delivery 成功但没有 Flow | allowlist、触发事件/标签、App 安装仓库及 serve 日志 |
 | CodingAgent/Judge 失败 | worker 的工具链、独立认证、模型配置及 Flow 错误记录 |
 

@@ -497,7 +497,7 @@ async def test_recovery_applies_unassigned_control_failure_without_rewriting_inb
     assert persisted.result_digest == accepted.result_digest == terminal_digest(terminal)
     assert persisted.last_error == "preparation failed"
     [failure] = ActivityStore(store.database).page(flow.id).items
-    assert failure.author == "FlowTool" and terminal.error not in failure.body
+    assert failure.author == "AgentFlow" and terminal.error not in failure.body
     assert github.comments == []
     assert store.results.list_effects(job.id) == []
     assert store.flows.get_flow(flow.id).state is FlowState.BLOCKED

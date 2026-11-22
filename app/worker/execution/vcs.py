@@ -160,19 +160,19 @@ async def ensure_seed(
             "-c", "protocol.ext.allow=never", "--git-dir", source_git,
             "fetch", "--no-tags", "--no-recurse-submodules", "--no-auto-maintenance",
             "--no-write-fetch-head", "--refmap=", "--", url,
-            f"+refs/heads/{base_branch}:refs/flowtool/base",
+            f"+refs/heads/{base_branch}:refs/agentflow/base",
             cwd=seed, stage="bootstrap", environment=environment,
         )
         if code:
             raise VcsVerificationError("bootstrap", f"repository fetch failed with exit {code}")
         return await _required_stdout(
             "bootstrap", "git", "--git-dir", source_git, "rev-parse", "--verify",
-            "refs/flowtool/base^{commit}", cwd=seed,
+            "refs/agentflow/base^{commit}", cwd=seed,
         )
     temporary = Path(tempfile.mkdtemp(prefix=f"{seed.name}.clone-", dir=seed.parent))
     try:
         # Clone outside any checkout. Local Git configuration must not rewrite the fixed URL.
-        with tempfile.TemporaryDirectory(prefix="flowtool-clone-cwd-") as directory:
+        with tempfile.TemporaryDirectory(prefix="agentflow-clone-cwd-") as directory:
             code, _, _ = await _run(
                 "git", "-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false",
                 "-c", "protocol.ext.allow=never", "clone", "--no-hardlinks",
@@ -238,7 +238,7 @@ async def align_repository(repo: Path, seed: Path, revision: str) -> None:
         target_git = await _required_stdout("workspace", "jj", "git", "root", cwd=repo)
         # A fetched object alone is not indexed by jj; a private remote ref makes import see it.
         await _required_stdout("workspace", "git", "--git-dir", target_git, "fetch", "--no-tags",
-                               source_git, f"+{revision}:refs/remotes/flowtool-seed/baseline", cwd=repo)
+                               source_git, f"+{revision}:refs/remotes/agentflow-seed/baseline", cwd=repo)
         await _required_stdout("workspace", "jj", "git", "import", cwd=repo)
         current = set((await _required_stdout(
             "workspace", "jj", "file", "list", "-T", r'"\x00" ++ path ++ "\x00"', cwd=repo,
@@ -492,7 +492,7 @@ async def _fetch_revision(context: VcsExecutionContext, push_token: SecretStr | 
     assert context.git_remote_url is not None
     environment = _vcs_environment()
     environment.update(git_credential_environment(push_token))
-    with tempfile.TemporaryDirectory(prefix="flowtool-revision-fetch-") as directory:
+    with tempfile.TemporaryDirectory(prefix="agentflow-revision-fetch-") as directory:
         temporary = Path(directory)
         # Borrow local objects and refs for negotiation without inheriting local Git config.
         await _required_stdout(
@@ -685,7 +685,7 @@ async def _remote_sha(
     remote: str, branch: str, push_token: SecretStr | None = None,
 ) -> str:
     # Run outside the agent-controlled repository so local config cannot rewrite the fixed URL.
-    with tempfile.TemporaryDirectory(prefix="flowtool-vcs-verify-") as directory:
+    with tempfile.TemporaryDirectory(prefix="agentflow-vcs-verify-") as directory:
         environment = _vcs_environment()
         environment.update(git_credential_environment(push_token))
         code, output, _ = await _run(

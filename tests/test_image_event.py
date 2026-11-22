@@ -27,7 +27,7 @@ def events(tmp_path, monkeypatch):
     spec.loader.exec_module(module)
     module.initialize(tmp_path / "target")
     queue = module.Queue(tmp_path / "target")
-    monkeypatch.delenv("FLOWTOOL_DATABASE_URL", raising=False)
+    monkeypatch.delenv("AGENTFLOW_DATABASE_URL", raising=False)
     return module, queue
 
 

@@ -5,31 +5,31 @@
 
 ## Flow 卡住时先看什么
 
-在能访问数据库的 control 环境运行 `flowtool flow show <id>`。分别检查准备错误、PR 与反馈来源的上次成功和下次检查时间、执行绑定及未完成的 GitHub 回写。内部执行错误留在详情和日志中，不会作为 GitHub 评论发布。
+在能访问数据库的 control 环境运行 `agentflow flow show <id>`。分别检查准备错误、PR 与反馈来源的上次成功和下次检查时间、执行绑定及未完成的 GitHub 回写。内部执行错误留在详情和日志中，不会作为 GitHub 评论发布。
 
 | 阶段 | 默认行为与配置 |
 |---|---|
-| 派发前读取 GitHub | 临时错误遵守 Retry-After，保留原 Worker 绑定。`FLOWTOOL_PREPARE_MAX_FAILURES` 默认 5，`FLOWTOOL_PREPARE_RETRY_WINDOW_SECONDS` 默认 900；重启不重置预算。这不覆盖凭据签发或 Worker 执行。 |
-| 查询已追踪 PR | `FLOWTOOL_RECONCILE_INTERVAL_SECONDS` 默认 300；`FLOWTOOL_RECONCILE_BATCH_SIZE` 默认 64；`FLOWTOOL_RECONCILE_CONCURRENCY` 默认 4。补查不会补建漏失的 Issue 触发。 |
-| 已接收结果等待确认 | `FLOWTOOL_RESULT_RECOVERY_CONCURRENCY` 默认 4（1–64），`FLOWTOOL_RESULT_RECOVERY_BATCH_SIZE` 默认 64（1–1000）。结果恢复与租约回收分别进行。 |
+| 派发前读取 GitHub | 临时错误遵守 Retry-After，保留原 Worker 绑定。`AGENTFLOW_PREPARE_MAX_FAILURES` 默认 5，`AGENTFLOW_PREPARE_RETRY_WINDOW_SECONDS` 默认 900；重启不重置预算。这不覆盖凭据签发或 Worker 执行。 |
+| 查询已追踪 PR | `AGENTFLOW_RECONCILE_INTERVAL_SECONDS` 默认 300；`AGENTFLOW_RECONCILE_BATCH_SIZE` 默认 64；`AGENTFLOW_RECONCILE_CONCURRENCY` 默认 4。补查不会补建漏失的 Issue 触发。 |
+| 已接收结果等待确认 | `AGENTFLOW_RESULT_RECOVERY_CONCURRENCY` 默认 4（1–64），`AGENTFLOW_RESULT_RECOVERY_BATCH_SIZE` 默认 64（1–1000）。结果恢复与租约回收分别进行。 |
 
-修复明确的失败后可运行 `flowtool flow retry <id>`。若修订已推送、只是通知被明确拒绝，只重试失败的通知，不重新编码；发送结果不明时先查远端回执，不盲目重发。已归档的 Flow 用 `flowtool flow resume <id>` 重新开工；无 PR 的调查可用 `flowtool flow finish <id> succeeded --summary '调查结论'` 结束。用 `flowtool flow history <id>` 查看同一 Flow 归档和重新开工前后的记录。
+修复明确的失败后可运行 `agentflow flow retry <id>`。若修订已推送、只是通知被明确拒绝，只重试失败的通知，不重新编码；发送结果不明时先查远端回执，不盲目重发。已归档的 Flow 用 `agentflow flow resume <id>` 重新开工；无 PR 的调查可用 `agentflow flow finish <id> succeeded --summary '调查结论'` 结束。用 `agentflow flow history <id>` 查看同一 Flow 归档和重新开工前后的记录。
 
 ## Linux systemd（手动更新）
 
-先按直接进程文档安装固定 commit 的 `/opt/flowtool/.venv`，worker 另外安装同镜像版本的
+先按直接进程文档安装固定 commit 的 `/opt/agentflow/.venv`，worker 另外安装同镜像版本的
 Git、jj、Codex 并确保 service PATH 可见；模型认证使用 `CODEX_API_KEY` 或预置受限 HOME。
-两个非登录系统账号 `flowtool-control` / `flowtool-worker` 分别拥有 control 与 worker-1 数据目录。
-`/etc/flowtool/{serve,worker-1}.env` 由 root 拥有、0600，systemd 读取后传给对应进程。
+两个非登录系统账号 `agentflow-control` / `agentflow-worker` 分别拥有 control 与 worker-1 数据目录。
+`/etc/agentflow/{serve,worker-1}.env` 由 root 拥有、0600，systemd 读取后传给对应进程。
 App 私钥仅 control 可读；worker env 不得放 DB URL、App key 或 tunnel 凭据。
 
 ```sh
-sudo install -d -o flowtool-control -g flowtool-control -m 0700 /var/lib/flowtool/control
-sudo install -d -o flowtool-worker -g flowtool-worker -m 0700 /var/lib/flowtool/worker-1/root /var/lib/flowtool/worker-1/home
-sudo install -m 0644 deploy/systemd/flowtool-serve.service deploy/systemd/flowtool-worker.service /etc/systemd/system/
+sudo install -d -o agentflow-control -g agentflow-control -m 0700 /var/lib/agentflow/control
+sudo install -d -o agentflow-worker -g agentflow-worker -m 0700 /var/lib/agentflow/worker-1/root /var/lib/agentflow/worker-1/home
+sudo install -m 0644 deploy/systemd/agentflow-serve.service deploy/systemd/agentflow-worker.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now flowtool-serve flowtool-worker
-sudo journalctl -u flowtool-serve -u flowtool-worker --since '10 minutes ago'
+sudo systemctl enable --now agentflow-serve agentflow-worker
+sudo journalctl -u agentflow-serve -u agentflow-worker --since '10 minutes ago'
 ```
 
 账号、依赖和私密 env 应先创建，命令不生成凭据。工作目录必须存在；只启动一个 serve unit。
@@ -41,7 +41,7 @@ systemd 实际主机验收尚未执行。
 
 ## Worker 显式自更新
 
-正式 uv Git 安装在原入口执行 `flowtool worker --update`，自动查询并更新当前包及依赖，
+正式 uv Git 安装在原入口执行 `agentflow worker --update`，自动查询并更新当前包及依赖，
 通过新进程版本、CLI 和依赖核验后退出。人工完成既有任务和确认、正常停止共享安装的全部 Worker，
 更新成功后使用原启动方式重启；源码检出不执行此更新命令。
 保持原登录用户、HOME、ID、root、journal 和认证；若使用系统服务，先人工停止并禁用自动重启。
@@ -63,17 +63,17 @@ failed 可重投或 retry，running/停旧后的 incomplete 直接按原镜像�
 ## 日常与故障操作
 
 先保存时间、部署 commit/digest、delivery/Flow/job/worker ID、停止/恢复边界，避免记录 token/正文。
-用 `flowtool workers`、`flowtool inbox status` 及 [日志指标](observability.md) 确认状态；
-用 `flowtool --help` 查看现有 flow 查询命令。不要直接改数据库状态或清 journal 解锁。
+用 `agentflow workers`、`agentflow inbox status` 及 [日志指标](observability.md) 确认状态；
+用 `agentflow --help` 查看现有 flow 查询命令。不要直接改数据库状态或清 journal 解锁。
 
-没有控制台时，在 control 环境用 `flowtool flow create OWNER/REPO --installation-id N --content-file PATH` 提交任务；`--content-file -` 从标准输入读取，也可改用 `--content TEXT`。已有 Issue 则改用 `--issue-number N`，不要同时提供内容。可选组织 Projects 的状态与重试命令见 [GitHub App 接入](../architecture/github-app.md)。
+没有控制台时，在 control 环境用 `agentflow flow create OWNER/REPO --installation-id N --content-file PATH` 提交任务；`--content-file -` 从标准输入读取，也可改用 `--content TEXT`。已有 Issue 则改用 `--issue-number N`，不要同时提供内容。可选组织 Projects 的状态与重试命令见 [GitHub App 接入](../architecture/github-app.md)。
 
 | 场景 | 操作与继续条件 |
 | --- | --- |
 | worker 短断连 | 保留原进程/root，等待相同身份恢复与结果 ACK；不能并起相同 ID |
 | worker 旧进程未知 | drain 并隔离旧机器/Pod；持有 binding，直到有可验证停止证明 |
 | DB 暂停/连接失败 | 停新入口并恢复 DB；确认快照新鲜、inbox 和结果恢复后再接入 |
-| 重复 webhook | 查相同 delivery；仅已确认可重试的 blocked 使用 `flowtool inbox retry DELIVERY` |
+| 重复 webhook | 查相同 delivery；仅已确认可重试的 blocked 使用 `agentflow inbox retry DELIVERY` |
 | ACK 丢失 | 保留 terminal journal，让相同身份重连重放；不重新执行模型来补 ACK |
 | SIGTERM/SIGKILL | 检查进程/cgroup、journal、未应用结果和 stop 状态；重启不等于释放成功 |
 | 归档失败 | 查 merge、cleanup 证明及最新 archive job；保留绑定和 root，勿删除卷 |
@@ -85,7 +85,7 @@ failed 可重投或 retry，running/停旧后的 incomplete 直接按原镜像�
 <a id="alerts"></a>
 ## 告警
 
-Prometheus 加载 `deploy/monitoring/alerts.yml`，job 名必须为 `flowtool` 和 `flowtool-backup`。
+Prometheus 加载 `deploy/monitoring/alerts.yml`，job 名必须为 `agentflow` 和 `agentflow-backup`。
 服务 scrape 使用独立 bearer 文件、私有网络，参见观测文档；Alertmanager 接收方由部署者配置。
 告警没有自动发通知，也没有自动执行 retry/cancel/释放 binding。
 
@@ -97,9 +97,9 @@ Prometheus 加载 `deploy/monitoring/alerts.yml`，job 名必须为 `flowtool` �
 draining worker、容量不足和长期 busy 需结合 queued 年龄人工检查。
 
 备份管理方通过内部 textfile exporter 提供两个 gauge（成功时间为 UTC Unix 秒）：
-`flowtool_backup_last_success_timestamp_seconds`、`flowtool_backup_last_run_success`（0/1）。
+`agentflow_backup_last_success_timestamp_seconds`、`agentflow_backup_last_run_success`（0/1）。
 仅完整生产备份验证成功后原子更新成功时间；失败只设 last_run_success=0，保留旧成功时间。
-fixture 脚本不会发布这些值。exporter job 设为 `flowtool-backup`；未接入会产生 Missing 告警。
+fixture 脚本不会发布这些值。exporter job 设为 `agentflow-backup`；未接入会产生 Missing 告警。
 缺数据不能解释为零积压；先排查 Unavailable/SnapshotStale/BackupMissing，再看业务数值。
 当前示例按一个部署编写；多部署需加入 deployment 标签并改按部署检测缺失。
 

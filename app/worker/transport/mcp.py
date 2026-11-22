@@ -120,7 +120,7 @@ class WorkerMCP:
             return {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "flowtool", "version": "0.0.1"},
+                "serverInfo": {"name": "agentflow", "version": "0.0.1"},
                 "instructions": "Call open_pr only after committing and pushing the Flow branch.",
             }
         if method == "ping":

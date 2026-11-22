@@ -467,7 +467,7 @@ Issue 读取使用非空契约，测试只为 PR 查找保留空结果，创建�
 确认公开入口不加载 SDK、认证、control 或 persistence。此整理只移动定义与导入并删除旧基类，没有增加运行时机制。
 
 验证使用本地 PostgreSQL，运行命令为
-`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres .cache/2026-10-11/github-resource-venv/bin/python -m pytest -q --tb=short`。
+`AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres .cache/2026-10-11/github-resource-venv/bin/python -m pytest -q --tb=short`。
 最终全量结果为 **887 passed**；独立环境的 `ruff check app tests`、
 `mypy app tests`（166 个文件）及 `uv build --no-sources` 均通过。
 独立环境直接安装本工作区，保证 Judge 的隔离子进程也加载此次实现。

@@ -244,7 +244,7 @@ PR 创建需要的权限见 [GitHub Pull requests 权限表](https://docs.github
 #### Git push 如何使用 bot 认证
 
 当前 [`git_credential_environment`](../../app/worker/execution/credentials.py) 为 Git 注入
-`x-access-token` 用户名和从 `$FLOWTOOL_PUSH_TOKEN` 读取密码的 helper；
+`x-access-token` 用户名和从 `$AGENTFLOW_PUSH_TOKEN` 读取密码的 helper；
 [`CodexAgent`](../../app/worker/execution/codex.py) 将其加入 start/resume 子进程的环境。
 因此 `git push` 不需要通过 gh，也不依赖 `gh auth login`；仅设置 `GH_TOKEN` 不会替代 Git helper。
 自动 clone 使用不含凭据的 `https://github.com/<owner>/<repo>.git`，agent 向任务规定的 remote 和
@@ -464,7 +464,7 @@ Flow 独占一个可复用执行位置，同一 Flow 的重试、修订仍绑定
   新 Flow 时才可能需要溢出。测试可显式构造全占用，不能把它当作生产已支持同 worker 并发。
 - 建议先限定每个 worker root 内复用，避免跨 OS 身份共享可写目录和凭据隔离风险。
   若要求同一主机多个 worker 共用副本，需明确增加独立共享目录、跨进程锁及所有权边界；
-  不能让多个 worker 共用现有 `FLOWTOOL_WORKER_ROOT` 绕过 root 锁。
+  不能让多个 worker 共用现有 `AGENTFLOW_WORKER_ROOT` 绕过 root 锁。
 
 #### Git/jj、模块与实施顺序
 
@@ -503,7 +503,7 @@ Flow 独占一个可复用执行位置，同一 Flow 的重试、修订仍绑定
   这不证明尚未实现的池或容量限制有效。
 - **已执行基线：** 初次未配置测试数据库时 26 passed、10 skipped；按现有本地 PostgreSQL
   测试配置重新运行
-  `FLOWTOOL_TEST_DATABASE_URL=postgresql://localhost/flowtool_test .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_vcs.py tests/test_worker_executor.py tests/test_workspace_archive.py tests/test_archive_worker_recovery.py tests/test_worker_session.py`，
+  `AGENTFLOW_TEST_DATABASE_URL=postgresql://localhost/agentflow_test .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_vcs.py tests/test_worker_executor.py tests/test_workspace_archive.py tests/test_archive_worker_recovery.py tests/test_worker_session.py`，
   **36 passed in 6.73s、无跳过**。
   [本线程测试记录](https://ampcode.com/threads/T-01a15a9b-ba3f-763b-a7e1-37e4d1a4eefd)，
   本地日志为 `.amp/in/artifacts/worker-workspace-pool-baseline-postgres.log`。新功能测试待实施。
@@ -533,11 +533,11 @@ Flow 独占一个可复用执行位置，同一 Flow 的重试、修订仍绑定
 
 #### 配置与容量合同
 
-- **隔离范围：** 每个 `FLOWTOOL_WORKER_ROOT` 独立保存执行位置及清单，按仓库分别计数；
+- **隔离范围：** 每个 `AGENTFLOW_WORKER_ROOT` 独立保存执行位置及清单，按仓库分别计数；
   不新增跨 worker 共享池，不改变 Flow 生命周期独占 worker 的调度合同。
-- **配置项（拟新增）：** `FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT=2`，
+- **配置项（拟新增）：** `AGENTFLOW_WORKER_REPO_WORKSPACE_LIMIT=2`，
   对应 `WorkerSettings.worker_repo_workspace_limit`，类型为整数、默认 `2`、最小 `1`。
-  沿用现有 `FLOWTOOL_` 进程环境加载方式；非法值在启动时拒绝，不静默回退默认值。
+  沿用现有 `AGENTFLOW_` 进程环境加载方式；非法值在启动时拒绝，不静默回退默认值。
   一个 worker 上所有仓库使用这个上限值，但各仓库独立计数，不增加逐仓库配置映射。
 - **计数：** 完整副本、临时 worktree，以及准备中、已占用、清理中或隔离的位置都计入；
   只作为模板、不供 Flow 编码的 seed 不计入执行位置数量。
@@ -592,14 +592,14 @@ Flow 独占一个可复用执行位置，同一 Flow 的重试、修订仍绑定
 
 #### 自查补充与验证
 
-- jj 对齐通过私有 `refs/remotes/flowtool-seed/baseline` 导入已提交对象；单独 Git fetch
+- jj 对齐通过私有 `refs/remotes/agentflow-seed/baseline` 导入已提交对象；单独 Git fetch
   不会让 jj 索引看见新提交。真实 colocated/non-colocated fixture 均验证更新后的 seed 基线。
   路径清单改为 NUL 分隔，检查目标及其祖先，拒绝覆盖含引号/换行的缓存和 symlink/file 祖先。
 - 不接管在 `absent` 位置重新出现的目录。文件复制/清理即使收到重复取消，也等线程结束后
   才传播取消、回收本轮内容和释放 root 锁。补充公共分配/释放合同回归。
 - 交付快照基于当时 `main@origin`，只包含本功能；共享工作区的 Amp history/protocol v15、
   UI、标签和 server-update 改动不带入。此快照使用 protocol v14、journal v4。
-- 在隔离快照执行 `FLOWTOOL_TEST_DATABASE_URL=<本机 PostgreSQL URL> python -m pytest -q
+- 在隔离快照执行 `AGENTFLOW_TEST_DATABASE_URL=<本机 PostgreSQL URL> python -m pytest -q
   -p no:cacheprovider`：**895 passed，0 skipped，90.72 秒**。覆盖真实 Git clone/push/远端 SHA、
   bot gh start/resume、revision fallback、容量/温热复用、Git/jj 缓存保护，以及完整副本保留与
   worktree 移除的 8 种归档/重启/结果/ACK 窗口。仅有既存 Starlette TestClient 弃用警告。
@@ -889,7 +889,7 @@ installation token 做 GitHub clone/push/PR 写入验收。PR 保持 draft；独
 - 按 #180 的修订要求，本条取代初始计划中“已有 seed 不 fetch”和“新任务仅对齐本地基线”
   的限制；每次新分配完整副本或临时 worktree 前，使用当前 assignment 凭据 fetch
   任务 remote 的 `base_branch`，并固定本次取得的提交。首次原子 clone 不额外重复 fetch。
-- 已有 seed 仅更新 Git 对象库的私有 `refs/flowtool/base`，不移动 checkout、本地分支、
+- 已有 seed 仅更新 Git 对象库的私有 `refs/agentflow/base`，不移动 checkout、本地分支、
   remote-tracking refs 或 jj bookmarks；Git 与 colocated/non-colocated jj 完整副本均可使用
   远端快照。复用工作区继续保留 ignored 缓存，缓存冲突和脏状态仍明确拒绝。
 - fetch 在登记新 allocation 前完成；远端不可达或分支缺失时不回退旧提交，也不隔离干净

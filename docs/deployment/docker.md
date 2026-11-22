@@ -8,18 +8,18 @@
 在仓库根目录执行，Docker Engine 和 Compose v2 需已安装：
 
 ```sh
-export FLOWTOOL_DEPLOY_DIR="$HOME/flowtool-deploy"
-mkdir -p "$FLOWTOOL_DEPLOY_DIR/secrets"
-chmod 700 "$FLOWTOOL_DEPLOY_DIR" "$FLOWTOOL_DEPLOY_DIR/secrets"
-cp deploy/docker/serve.env.example "$FLOWTOOL_DEPLOY_DIR/serve.env"
-cp deploy/docker/worker.env.example "$FLOWTOOL_DEPLOY_DIR/worker.env"
-chmod 600 "$FLOWTOOL_DEPLOY_DIR/"*.env
+export AGENTFLOW_DEPLOY_DIR="$HOME/agentflow-deploy"
+mkdir -p "$AGENTFLOW_DEPLOY_DIR/secrets"
+chmod 700 "$AGENTFLOW_DEPLOY_DIR" "$AGENTFLOW_DEPLOY_DIR/secrets"
+cp deploy/docker/serve.env.example "$AGENTFLOW_DEPLOY_DIR/serve.env"
+cp deploy/docker/worker.env.example "$AGENTFLOW_DEPLOY_DIR/worker.env"
+chmod 600 "$AGENTFLOW_DEPLOY_DIR/"*.env
 ```
 
 编辑两个文件的占位值。serve 配置 GitHub App、Webhook secret、数据库、允许用户和 worker
 身份/token 映射；worker 只配置自身 token 和模型凭据。两侧的 worker token 必须相同。
 GitHub App 私钥放 `secrets/app.pem`。不要挂载个人 HOME 或 Docker socket。
-`FLOWTOOL_TRUSTED_HOST_EXECUTION=true` 允许模型在这一 worker 容器内执行命令；仅接受可信仓库。
+`AGENTFLOW_TRUSTED_HOST_EXECUTION=true` 允许模型在这一 worker 容器内执行命令；仅接受可信仓库。
 模型配置和权限参见[原生部署](README.md)。
 
 使用内置开发 PostgreSQL 时，将随机数据库密码写入 `secrets/db-password`，并同步到 serve.env
@@ -30,14 +30,14 @@ GitHub App 私钥放 `secrets/app.pem`。不要挂载个人 HOME 或 Docker sock
 ```sh
 openssl req -x509 -newkey rsa:3072 -nodes -days 90 \
   -subj /CN=worker-gateway -addext subjectAltName=DNS:worker-gateway \
-  -keyout "$FLOWTOOL_DEPLOY_DIR/secrets/tls.key" \
-  -out "$FLOWTOOL_DEPLOY_DIR/secrets/tls.crt"
+  -keyout "$AGENTFLOW_DEPLOY_DIR/secrets/tls.key" \
+  -out "$AGENTFLOW_DEPLOY_DIR/secrets/tls.crt"
 docker compose -f deploy/docker/compose.yaml build --pull
 # 保留公共根证书，否则 GitHub/模型 API TLS 验证会失败。
-docker run --rm --entrypoint cat flowtool-worker:local /etc/ssl/certs/ca-certificates.crt \
-  > "$FLOWTOOL_DEPLOY_DIR/secrets/ca-bundle.pem"
-cat "$FLOWTOOL_DEPLOY_DIR/secrets/tls.crt" >> "$FLOWTOOL_DEPLOY_DIR/secrets/ca-bundle.pem"
-chmod 444 "$FLOWTOOL_DEPLOY_DIR/secrets/"*
+docker run --rm --entrypoint cat agentflow-worker:local /etc/ssl/certs/ca-certificates.crt \
+  > "$AGENTFLOW_DEPLOY_DIR/secrets/ca-bundle.pem"
+cat "$AGENTFLOW_DEPLOY_DIR/secrets/tls.crt" >> "$AGENTFLOW_DEPLOY_DIR/secrets/ca-bundle.pem"
+chmod 444 "$AGENTFLOW_DEPLOY_DIR/secrets/"*
 ```
 
 Compose 文件挂载的 secret 必须可被容器 UID 10001 读取，私有父目录限制宿主用户访问。
@@ -50,7 +50,7 @@ Compose 文件挂载的 secret 必须可被容器 UID 10001 读取，私有父�
 docker compose -f deploy/docker/compose.yaml --profile database config --quiet
 docker compose -f deploy/docker/compose.yaml --profile database up -d
 # 仅在容器内部访问控制面；默认不向宿主发布任何端口。
-docker compose -f deploy/docker/compose.yaml exec serve flowtool workers
+docker compose -f deploy/docker/compose.yaml exec serve agentflow workers
 docker compose -f deploy/docker/compose.yaml exec serve python -c \
   "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/healthz').status)"
 ```
@@ -88,7 +88,7 @@ main 发布使用 `sha-<完整提交 SHA>`，不更新 `latest`，也不会自�
 例如 main 更新后的 serve 镜像为 `ghcr.io/b1indsight/agentflow-serve:sha-<main 提交的完整 SHA>`；
 实际部署仍应使用该成功发布 job 的镜像 digest。
 
-使用 job summary 里的真实 digest 设置 `FLOWTOOL_SERVE_IMAGE`、`FLOWTOOL_WORKER_IMAGE`，
+使用 job summary 里的真实 digest 设置 `AGENTFLOW_SERVE_IMAGE`、`AGENTFLOW_WORKER_IMAGE`，
 然后 `docker compose ... pull` 和 `up -d --no-build`。当前文档不宣称包已发布。
 Python 基础镜像固定 digest，依赖锁在 uv.lock；Codex CLI 0.153.4、jj 0.45.1 固定版本，jj 校验
 SHA256。Debian 安全包仍从当前仓库安装，因此源代码相同不等于镜像逐字节相同，部署以 digest 为准。
@@ -104,10 +104,10 @@ Amp 仅在 worker target 安装，固定为 `0.0.1794672034-g01d6fa`，不使用
 
 ### 可选 Amp worker
 
-`FLOWTOOL_CODING_AGENT` 未设置或为 `codex` 时保持 Codex。要让一个**空闲且已 drain** 的
-worker 使用 Amp，在其 worker.env 中设置 `FLOWTOOL_CODING_AGENT=amp`；
-`FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200` 是 Amp 连续无新 stdout/stderr 输出的空闲上限，
-Codex 对应 `FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS`，同样默认 1200；两者必须为正有限值。
+`AGENTFLOW_CODING_AGENT` 未设置或为 `codex` 时保持 Codex。要让一个**空闲且已 drain** 的
+worker 使用 Amp，在其 worker.env 中设置 `AGENTFLOW_CODING_AGENT=amp`；
+`AGENTFLOW_AMP_RUN_TIMEOUT_SECONDS=1200` 是 Amp 连续无新 stdout/stderr 输出的空闲上限，
+Codex 对应 `AGENTFLOW_CODEX_RUN_TIMEOUT_SECONDS`，同样默认 1200；两者必须为正有限值。
 持续输出不会因累计运行时长而终止；静默工具仍可能超时，worker 心跳和历史查询不续期。
 活动定义、独立请求时限与凭据到期限制见[本机部署说明](README.md)。不要为活动或执行状态未知的
 Flow 切换后端，也不要把未知续跑当作可安全重跑的任务。Amp 新会话默认以 `--mode low`

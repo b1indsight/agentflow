@@ -353,7 +353,7 @@ journal 恢复规则，不能把没有执行 Task 的普通 started 编码任务
 实现期检查顺序与命令（在本独立 workspace、隔离依赖/测试库运行）：
 
 - 定向运行公共通信、Gateway、worker、conversation、stop、runtime/边界测试；保留真实业务断言。
-- 使用隔离 UTF8 PostgreSQL、loopback TCP，设置 `FLOWTOOL_TEST_DATABASE_URL` 后运行
+- 使用隔离 UTF8 PostgreSQL、loopback TCP，设置 `AGENTFLOW_TEST_DATABASE_URL` 后运行
   `uv run pytest -q`；数据库用例必须实际执行，skipped 不能当验收通过。
 - `uv run ruff check app tests`、`uv run mypy app tests`；对变更文件检查格式，与父版本区分
   既有整文件排版差异，不借本批重排全仓。
@@ -900,7 +900,7 @@ CLI 的既有设置，也不扩大到强制退出或任意慢业务的保证。�
 以上本地产物均位于本 thread 根目录 `.amp/in/artifacts/unified-gateway/`。
 
 **复现临时探针：** 将 `live-close-probe.txt` 复制为 scratch 下的 `test_gateway_live_close.py`，
-从本 workspace 使用隔离 venv 和有效 `FLOWTOOL_TEST_DATABASE_URL` 执行：
+从本 workspace 使用隔离 venv 和有效 `AGENTFLOW_TEST_DATABASE_URL` 执行：
 
 ```bash
 PYTHONPATH="$PWD" uv run --no-sync pytest -q -s -c pyproject.toml -p tests.conftest \
