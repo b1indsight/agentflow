@@ -68,7 +68,7 @@ Worker 会话中的编码结果展示摘要和按原序排列的待澄清问题�
 - `/console/#board`：五列看板、组合查询、服务端分页和各阶段全集计数，PR 优先编号。
 - `/console/#flow/<id>/conversation`：GitHub + Agent 时间线、工具摘要、Review 线程、下滑加载和末尾刷新。
 - `/console/#flow/<id>/overview`、`/jobs`：概览、来源同步状态、当前动作/下一条件与执行记录。
-- `/console/#settings`：Codex / Amp 默认模型与推理强度，顶栏可进入；刷新只读取设置。
+- `/console/#settings`：Codex / Amp 默认模型、推理强度和 Skill 仓库，从顶栏可进入；刷新不会保存修改。
 - `/console/#flow/<id>/file-<文件ID>`：当前 Flow 内按文件名打开的编辑器页签，可切换和关闭；刷新或离开 Flow 后回到会话重新选择。
 - `/console/?q=repo%3Aagentflow+is%3Aactive+pr%3A95#board`：可分享、刷新后恢复的组合查询。
 
@@ -80,6 +80,9 @@ API 错误显式显示，已有内容不会被示例数据替换；Worker 离线
 计数使用服务端完整结果，列表复用各阶段的分页；加载失败会提示重试，不显示为空。
 点击条目保留当前详情页签，手机点击后关闭任务导航；刷新当前视图同时更新 Inbox。
 Inbox 可折叠，原有阶段分组保留；它只提供导航，不自动重试、归档或修改 GitHub。
+
+在「设置 → Skill 仓库」从当前授权项目中选择一个仓库，点击「保存仓库」即可生效，无需重启。选择「不指定」可取消。此选择独立于模型设置，不会下载或安装 skill。
+已有数据库升级前应执行 `ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS skill_repository TEXT;`，新数据库由初始化流程建列。
 
 「设置」按 Codex / Amp 后端分别保存本服务器全局默认值，仅用于新建编码会话。
 正在运行或恢复的已有会话不被强制换模型，独立 inference / Judge 不受影响。
@@ -101,8 +104,10 @@ Amp 未指定模型、未知模型或没有可选强度时，禁用空强度框�
 切换模型保留兼容强度，否则预选 `mid`；若支持其他强度但没有 `medium`，需选择可用档位后才能保存。
 非空 Amp 强度要求明确模型。服务端负责最终格式和组合校验，不自动保存。
 
-设置通过同源 `GET /api/settings` 读取 `{codex_model, amp_model, codex_effort, amp_effort, revision}`，不使用会话响应缓存。
-显式保存以 `PUT /api/settings` 同时提交四项（包括 `null`）和 `expected_revision`；成功响应须回显四项，版本恰好加一。
+可写设置统一使用 `GET / PUT /api/settings/values/{key}`，当前支持 `coding-models` 和 `skill-repository`。新增设置只需在控制台 API 的 `setting_values` 注册表中加入 key 及其带类型的读写函数。所有写入共用同源 JSON 检查；每项独立校验请求、处理并发并保存。旧模型设置路径 `/api/settings` 保留兼容。
+
+模型设置通过 `GET /api/settings/values/coding-models` 读取 `{codex_model, amp_model, codex_effort, amp_effort, revision}`，不使用会话响应缓存。
+显式保存以 `PUT` 向同一路径提交四项（包括 `null`）和 `expected_revision`；成功响应须回显四项，版本恰好加一。
 读取、校验和权限失败保留草稿；409 冲突须先重新读取，再对照服务器当前设置显式保存或选择「使用服务器设置」。
 网络、5xx 或不完整的成功响应视为保存结果未知，锁定重发；「回读核对」仅发 GET，并保留草稿供比较，
 失败时不解除锁定，也不会自动重发 PUT。离开设置时取消读取；迟到响应不能覆盖新页面或读取期间编辑的草稿。

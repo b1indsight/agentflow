@@ -5,7 +5,7 @@ import base64
 from functools import partial
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Query, Request
+from fastapi import APIRouter, Depends, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.catalog import CatalogGroup
@@ -27,6 +27,7 @@ from app.contracts.console import (
     ResumeRequest,
     RetryRequest,
     UpdateSettingsRequest,
+    UpdateSkillRepositoryRequest,
 )
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.catalog import read_catalog
@@ -37,7 +38,7 @@ from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.flows import FlowStore
 from app.persistence.inference_notices import InferenceNoticeStore
-from app.persistence.settings import SettingsConflict, SettingsStore
+from app.persistence.settings import SettingsConflict, SettingsStore, TextSetting
 
 router = APIRouter(prefix="/api")
 FlowId = Annotated[int, Path(gt=0)]
@@ -156,7 +157,7 @@ def _require_same_origin_json(request: Request) -> None:
         raise ConsoleFailure("json_required", 415)
 
 
-@router.get("/settings", response_model=CodingModelSettings)
+@router.get("/settings", include_in_schema=False)
 async def settings(request: Request) -> CodingModelSettings:
     runtime: ServerRuntime = request.app.state.runtime
     return await runtime.console.db(SettingsStore(runtime.database).get)
@@ -168,9 +169,35 @@ async def model_catalog(request: Request) -> dict[str, CatalogGroup]:
     return await read_catalog(runtime.gateway, runtime.worker_sessions)
 
 
-@router.put("/settings", response_model=CodingModelSettings)
+async def skill_repository(request: Request) -> str | None:
+    runtime: ServerRuntime = request.app.state.runtime
+    return await runtime.console.db(partial(SettingsStore(runtime.database).get_value, TextSetting.SKILL_REPOSITORY))
+
+
+async def update_skill_repository(request: Request, body: UpdateSkillRepositoryRequest) -> str | None:
+    runtime: ServerRuntime = request.app.state.runtime
+    repo = None
+    if body.target is not None:
+        target = runtime.github.installation(body.target.installation_id).repository(body.target.repo)
+        try:
+            await target.verify_installation()
+            repository = await target.refetch()
+        except GitHubError as error:
+            raise _github_failure(error) from error
+        if repository.archived:
+            raise ConsoleFailure("repository_archived", 422)
+        repo = repository.full_name
+    try:
+        await runtime.console.db(partial(
+            SettingsStore(runtime.database).set_value, TextSetting.SKILL_REPOSITORY, repo, expected=body.expected_repository,
+        ))
+    except SettingsConflict as error:
+        raise ConsoleFailure("settings_conflict") from error
+    return repo
+
+
+@router.put("/settings", include_in_schema=False, dependencies=[Depends(_require_same_origin_json)])
 async def update_settings(request: Request, body: UpdateSettingsRequest) -> CodingModelSettings:
-    _require_same_origin_json(request)
     runtime: ServerRuntime = request.app.state.runtime
     try:
         return await runtime.console.db(partial(
@@ -180,6 +207,17 @@ async def update_settings(request: Request, body: UpdateSettingsRequest) -> Codi
         ))
     except SettingsConflict as error:
         raise ConsoleFailure("settings_conflict") from error
+
+
+# Register concrete paths so FastAPI validates and documents each setting's own payload.
+setting_values = APIRouter(prefix="/settings/values", tags=["settings"])
+for key, read, write in (
+    ("coding-models", settings, update_settings),
+    ("skill-repository", skill_repository, update_skill_repository),
+):
+    setting_values.add_api_route(f"/{key}", read, methods=["GET"])
+    setting_values.add_api_route(f"/{key}", write, methods=["PUT"], dependencies=[Depends(_require_same_origin_json)])
+router.include_router(setting_values)
 
 
 @router.post("/flows", response_model=FlowDetail, status_code=201)

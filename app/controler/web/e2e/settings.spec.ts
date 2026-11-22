@@ -75,6 +75,7 @@ const flow: FlowDetail = {
 async function server(page: Page, initial = defaults) {
   const state = {
     saved: { ...initial },
+    skillRepository: null as string | null,
     puts: [] as Record<string, unknown>[],
     reads: [] as string[],
     get: null as ((route: Route) => Promise<void>) | null,
@@ -83,12 +84,33 @@ async function server(page: Page, initial = defaults) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    if (url.pathname === "/api/settings/values/skill-repository") {
+      if (request.method() === "PUT") {
+        const body = request.postDataJSON();
+        expect(body.expected_repository).toBe(state.skillRepository);
+        state.skillRepository = body.target?.repo ?? null;
+      } else state.reads.push(url.pathname);
+      return route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify(state.skillRepository),
+      });
+    }
+    if (url.pathname === "/api/flow-targets") {
+      state.reads.push(url.pathname);
+      return route.fulfill({
+        json: {
+          items: [{ repo: "owner/skills", installation_id: 42 }],
+          next_cursor: null,
+          has_more: false,
+        },
+      });
+    }
     if (url.pathname === "/api/settings/model-catalog") {
       expect(request.method()).toBe("GET");
       state.reads.push(url.pathname);
       return route.fulfill({ json: catalog });
     }
-    if (url.pathname === "/api/settings") {
+    if (url.pathname === "/api/settings/values/coding-models") {
       if (request.method() === "PUT") {
         const body = request.postDataJSON();
         state.puts.push(body);
@@ -148,6 +170,40 @@ const ampEffort = (page: Page) =>
   page.getByRole("combobox", { name: "Amp 推理强度" });
 const save = (page: Page) =>
   page.getByRole("button", { name: "保存设置", exact: true });
+
+for (const width of [1440, 390]) {
+  test(`skill repository can be saved, reloaded and cleared at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 950 });
+    const state = await server(page);
+    await page.goto("/console/#settings");
+    const choice = page.getByLabel("Skill 仓库", { exact: true });
+    const submit = page.getByRole("button", { name: "保存仓库" });
+    await expect(choice).toBeEnabled();
+    await expect(submit).toBeDisabled();
+    await page.screenshot({ path: `${artifactRoot}/skill-empty-${width}.png` });
+    await choice.selectOption("owner/skills");
+    await submit.click();
+    await expect(page.getByText("Skill 仓库设置已保存。")).toBeVisible();
+    // A saved repository may no longer appear in the installation inventory.
+    await page.route("**/api/flow-targets", (route) =>
+      route.fulfill({
+        json: { items: [], next_cursor: null, has_more: false },
+      }),
+    );
+    await page.reload();
+    await expect(choice).toHaveValue("owner/skills");
+    await page.screenshot({
+      path: `${artifactRoot}/skill-selected-${width}.png`,
+    });
+    await choice.selectOption("");
+    await submit.click();
+    await expect(page.getByText("Skill 仓库设置已保存。")).toBeVisible();
+    expect(state.skillRepository).toBeNull();
+    expect(state.puts).toHaveLength(0);
+  });
+}
 
 test("an empty discovery is distinct from a failed provider and keeps saved defaults", async ({
   page,
@@ -855,7 +911,12 @@ for (const width of [1440, 390]) {
     const state = await server(page);
     await page.goto("/console/?q=repo%3Aagentflow#settings");
     await expect(codex(page)).toBeEnabled();
-    const settingsPaths = ["/api/settings", "/api/settings/model-catalog"];
+    const settingsPaths = [
+      "/api/flow-targets",
+      "/api/settings/model-catalog",
+      "/api/settings/values/coding-models",
+      "/api/settings/values/skill-repository",
+    ];
     expect([...new Set(state.reads)].sort()).toEqual(settingsPaths);
     // Development StrictMode may abort a first mount read; count only the explicit refresh delta.
     const initialReads = state.reads.length;

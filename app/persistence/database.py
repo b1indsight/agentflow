@@ -92,6 +92,8 @@ def require_current_schema(connection: Connection[Row], relations: dict[str, str
             "SELECT version FROM flowtool_schema_version"
         ).fetchall() == [{"version": 3}]:
             require_worker_key(connection)
+            if ("runtime_settings", "skill_repository") not in columns:
+                raise ValueError("upgrade offline: ALTER TABLE runtime_settings ADD COLUMN skill_repository TEXT")
             return
     raise ValueError(
         "expected Flow schema v3; inspect the database offline with scripts.migrate_flow_attempts"

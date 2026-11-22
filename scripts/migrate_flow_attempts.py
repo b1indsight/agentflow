@@ -202,6 +202,7 @@ def _freeze(c: Connection[Row]) -> None:
     c.execute("UPDATE flows SET history_only=true,is_issue_owner=false")
     # A public link names a worker file, not a Flow. Retire old capabilities as one registry.
     c.execute("ALTER TABLE worker_file_links RENAME TO historical_worker_file_links")
+    c.execute("ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS skill_repository TEXT")
     for schema in SCHEMAS:
         c.execute(schema)
     # Keep coverage, timestamps, gaps, cursors and source content. Stopping a scan does not

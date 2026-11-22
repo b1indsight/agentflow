@@ -82,9 +82,10 @@ def test_settings_are_owner_only_durable_and_reject_stale_tabs(console_runtime, 
         assert client.put("/api/settings", json=payload, headers={
             **headers, "Origin": "https://other.test",
         }).status_code == 403
-        # Two stale tabs must not both succeed, even when their writes arrive together.
+        # An older console and a new console must still share the same revision fence.
         with ThreadPoolExecutor(2) as executor:
-            responses = list(executor.map(lambda _: client.put("/api/settings", json=payload, headers=headers), range(2)))
+            responses = list(executor.map(lambda path: client.put(path, json=payload, headers=headers),
+                                          ["/api/settings", "/api/settings/values/coding-models"]))
         assert sorted(response.status_code for response in responses) == [200, 409]
         conflict = next(response for response in responses if response.status_code == 409)
         assert conflict.json() == {"detail": "settings_conflict"}
@@ -108,6 +109,30 @@ def test_settings_are_owner_only_durable_and_reject_stale_tabs(console_runtime, 
             "codex_model": None, "amp_model": None,
             "codex_effort": None, "amp_effort": None, "revision": 2,
         }
+
+
+def test_skill_repository_can_be_selected_and_cleared_without_changing_models(console_runtime, recording_resources, monkeypatch):
+    console_runtime.github = RecordingGitHub()
+    sdk = Mock()
+    sdk.rest.apps.async_get_repo_installation = AsyncMock(return_value=SimpleNamespace(
+        parsed_data=SimpleNamespace(id=42, suspended_at=None),
+    ))
+    monkeypatch.setattr(RecordingGitHub, "_client", lambda *args, **kwargs: sdk)
+    path = "/api/settings/values/skill-repository"
+    with TestClient(create_app(console_runtime)) as client:
+        headers = console_runtime.issuer.headers()
+        assert client.get(path).status_code == 401
+        assert client.get(path, headers=headers).json() is None
+        body = {"target": {"repo": "owner/skills", "installation_id": 42}, "expected_repository": None}
+        assert client.put(path, json=body, headers={**headers, "Origin": "https://other.test"}).status_code == 403
+        wrong_grant = {**body, "target": {"repo": "owner/skills", "installation_id": 7}}
+        assert client.put(path, json=wrong_grant, headers=headers).status_code == 403
+        assert client.put(path, json=body, headers=headers).json() == "owner/skills"
+        assert client.get(path, headers=headers).json() == "owner/skills"
+        assert client.put(path, json={**body, "target": None}, headers=headers).status_code == 409
+        assert client.put(path, json={"target": None, "expected_repository": "owner/skills"}, headers=headers).json() is None
+        assert client.get(path, headers=headers).json() is None
+        assert client.get("/api/settings/values/coding-models", headers=headers).json()["revision"] == 0
 
 
 @pytest.mark.parametrize("changes", [

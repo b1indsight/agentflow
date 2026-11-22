@@ -76,6 +76,11 @@ class FlowTargetPage(ConsoleModel):
     has_more: bool
 
 
+class UpdateSkillRepositoryRequest(ConsoleModel):
+    target: FlowTarget | None
+    expected_repository: str | None = Field(max_length=256)
+
+
 class CreateFlowRequest(FlowTarget):
     """Manual intake accepts exactly one live Issue or bounded direct task."""
 
