@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 会话消息与评审回复先显示预览，进入可视区后自动补齐；跨批次的 Markdown 连续显示，正文中的 diff 沿用评审代码块的行号与增删高亮。
+
 - Worker 注册及保存 skill 仓库设置时，在推理 workspace 内同步仓库。首次编码前自动链接 `always_on: true` 的 skill，再让 agent 根据描述选择其余 skill。serve 与 worker 需一起升级至 wire30，无数据库迁移。
 
 - 首次编码的 Worker Agent 可用只读 MCP 工具 `search_flows` 搜索当前仓库的看板任务。serve 和 worker 需同时升级到 wire29，无数据库迁移。

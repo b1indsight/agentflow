@@ -3182,7 +3182,7 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
     });
   });
   await page.goto("/#flow/42/conversation");
-  await expect(page.getByText("后文", { exact: true })).toBeVisible();
+  await expect(page.getByText("😀后文", { exact: true })).toBeVisible();
   await expect(page.getByText("线程回复正文", { exact: true })).toBeVisible();
   // Both continuations and replies load on mount; StrictMode can abort an initial read.
   const initialBodyReads = bodyReads;
@@ -3190,7 +3190,7 @@ test("thread replies and body continuation use the pinned snapshot and Unicode o
   // Tab changes unmount the activity row, just as virtual-window eviction does.
   await page.getByRole("tab", { name: "概览" }).click();
   await page.getByRole("tab", { name: "会话" }).click();
-  await expect(page.getByText("后文", { exact: true })).toBeVisible();
+  await expect(page.getByText("😀后文", { exact: true })).toBeVisible();
   await expect(page.getByText("线程回复正文", { exact: true })).toBeVisible();
   expect(bodyReads).toBe(initialBodyReads);
   expect(replyReads).toBe(initialReplyReads);
@@ -3447,11 +3447,11 @@ test("cached later-page errors retain a working retry after changing tabs", asyn
   await expect(retry).toHaveCount(0);
 });
 
-test("body scrolling appends Unicode content and retries without replacing earlier text", async ({
+test("visible bodies append Unicode Markdown and retry from the failed offset", async ({
   page,
 }) => {
-  // Real archive previews stop at 2000 code points, before the local 2048-character window.
-  const body = "首".repeat(2000) + "😀".repeat(2500) + "末尾";
+  // The Markdown emphasis crosses the archive preview and a second network boundary.
+  const body = "**" + "首".repeat(1998) + "😀".repeat(16400) + "末尾**";
   const points = Array.from(body);
   const reads: number[] = [];
   let fail = true;
@@ -3498,40 +3498,26 @@ test("body scrolling appends Unicode content and retries without replacing earli
   });
   await page.goto("/#flow/42/conversation");
   const row = page.locator("[data-entry='comment-1']");
-  await expect(row.locator(".message-body")).toHaveText("首".repeat(2000));
-  expect(reads).toEqual([]);
-  const root = page.locator(".detail-body");
-  await root.evaluate((node) => {
-    node.scrollTop = node.scrollHeight;
-  });
   await expect(row.getByRole("alert")).toBeVisible();
-  await expect(row.locator(".message-body")).toHaveText("首".repeat(2000));
+  await expect(row.locator(".message-body")).toHaveText(body.slice(0, 2000));
   await row.getByRole("alert").screenshot({
     path: "../../../.amp/in/artifacts/continuous-body-error.png",
   });
   fail = false;
   await row.getByRole("button", { name: "重试正文读取" }).click();
-  await expect(row.locator(".message-body")).toHaveCount(3);
-  await expect
-    .poll(async () => {
-      await root.evaluate((node) => {
-        node.scrollTop = node.scrollHeight;
-      });
-      return (await row.locator(".message-body").allTextContents()).join("");
-    })
-    .toBe(body);
+  await expect(row.locator(".message-body strong")).toHaveText(
+    body.slice(2, -2),
+  );
   expect(reads.slice(0, 2)).toEqual([2000, 2000]);
-  expect([...new Set(reads)]).toEqual([2000, 4048]);
+  expect([...new Set(reads)]).toEqual([2000, 18384]);
   await expect(row.getByRole("button", { name: /上一段|下一段/ })).toHaveCount(
     0,
   );
   await page.getByRole("tab", { name: "概览" }).click();
   await page.getByRole("tab", { name: "会话" }).click();
-  await expect
-    .poll(async () =>
-      (await row.locator(".message-body").allTextContents()).join(""),
-    )
-    .toBe(body);
+  await expect(row.locator(".message-body strong")).toHaveText(
+    body.slice(2, -2),
+  );
 });
 
 test("file tool previews load continuously on desktop and mobile", async ({
@@ -3627,13 +3613,18 @@ test("file tool previews load continuously on desktop and mobile", async ({
   expect(errors).toEqual([]);
 });
 
-test("long bodies keep a bounded window and reread earlier pages while scrolling back", async ({
+test("visible Markdown grows one review diff across reads without scrolling", async ({
   page,
 }) => {
-  // Crossing 60 pages must not retain every page's text in mounted components.
-  const body = "预览开头\n" + "内容 ".repeat(45000) + "\n文件末尾";
+  // An archive preview can end in the middle of an added line inside a review hunk.
+  const preview =
+    "这个字段什么作用？\n\n```diff\n@@ -8,2 +8,3 @@\n def setup():\n-    enabled = False\n+    enabled = True\n+    ret";
+  const body = preview + "urn enabled\n```\n\n+ **普通列表**";
   const points = Array.from(body);
-  const reads: number[] = [];
+  let resume!: () => void;
+  const delay = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
   await page.route("**/api/flows/42/activity?**", (route) =>
     route.fulfill({
       json: {
@@ -3641,7 +3632,7 @@ test("long bodies keep a bounded window and reread earlier pages while scrolling
           {
             ...activity,
             previous_version: null,
-            body: points.slice(0, 2000).join(""),
+            body: preview,
             body_length: points.length,
           },
         ],
@@ -3654,11 +3645,11 @@ test("long bodies keep a bounded window and reread earlier pages while scrolling
       },
     }),
   );
-  await page.route("**/api/flows/42/activity/content?**", (route) => {
+  await page.route("**/api/flows/42/activity/content?**", async (route) => {
     const url = new URL(route.request().url());
     const offset = Number(url.searchParams.get("offset"));
     const limit = Number(url.searchParams.get("limit"));
-    reads.push(offset);
+    await delay;
     return route.fulfill({
       json: {
         key: activity.key,
@@ -3670,31 +3661,93 @@ test("long bodies keep a bounded window and reread earlier pages while scrolling
     });
   });
   await page.goto("/#flow/42/conversation");
-  const root = page.locator(".detail-body");
-  const pages = page.locator('[data-window-list="正文片段"]');
-  await expect
-    .poll(
-      async () => {
-        await root.evaluate((node) => {
-          node.scrollTop = node.scrollHeight;
-        });
-        return await pages.textContent();
-      },
-      { timeout: 20000, intervals: [20, 50, 100] },
-    )
-    .toContain("文件末尾");
-  expect(
-    await pages.locator(":scope > [data-window-row]").count(),
-  ).toBeLessThanOrEqual(60);
-  await expect(pages).toHaveAttribute("data-window-count", "66");
-  const earlierReads = reads.filter((offset) => offset === 2000).length;
-  await root.evaluate((node) => {
-    node.scrollTop = 0;
+  const message = page.locator("[data-entry='comment-1'] .markdown-body");
+  const inserts = message.locator(".diff-code-insert");
+  await expect(inserts).toHaveText(["enabled = True"]);
+  await message.screenshot({
+    path: "../../../.amp/in/artifacts/review-diff-preview.png",
   });
-  await expect(pages).toContainText("预览开头");
-  await expect
-    .poll(() => reads.filter((offset) => offset === 2000).length)
-    .toBeGreaterThan(earlierReads);
+  resume();
+  await expect(inserts).toHaveText(["enabled = True", "return enabled"]);
+  await expect(message.locator(".diff-code-delete")).toHaveText(
+    "enabled = False",
+  );
+  await expect(message.locator("li")).toHaveText(["普通列表"]);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await message.screenshot({
+      path: `../../../.amp/in/artifacts/review-diff-${width}.png`,
+    });
+  }
+});
+
+test("multi-file diff labels files and keeps oversized lines local to their rows", async ({
+  page,
+}) => {
+  // Generated files can have enormous lines, while short edits can occur far into another file.
+  const body = [
+    "```diff",
+    "diff --git a/src/old.ts b/src/new.ts",
+    "rename from src/old.ts",
+    "rename to src/new.ts",
+    "--- a/src/old.ts",
+    "+++ b/src/new.ts",
+    "@@ -3 +3,2 @@",
+    "-old",
+    "+" + "x".repeat(8193),
+    "+keep this line",
+    "diff --git a/src/config.ts b/src/config.ts",
+    "--- a/src/config.ts",
+    "+++ b/src/config.ts",
+    "@@ -90001 +90001 @@",
+    "-disabled",
+    "+enabled",
+    "```",
+  ].join("\n");
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            ...activity,
+            body,
+            body_length: body.length,
+            previous_version: null,
+          },
+        ],
+        snapshot: 2,
+        total: 1,
+        has_more: false,
+        next_cursor: null,
+        sources: [],
+        changes: {},
+      },
+    }),
+  );
+  await page.goto("/#flow/42/conversation");
+  const message = page.locator("[data-entry='comment-1'] .markdown-body");
+  const files = message.getByLabel("版本差异", { exact: true });
+  await expect(
+    files.nth(0).getByText("src/old.ts → src/new.ts", { exact: true }),
+  ).toBeVisible();
+  await expect(files.nth(0).locator(".diff-code-insert")).toHaveText([
+    "字符太多",
+    "keep this line",
+  ]);
+  await expect(
+    files.nth(1).getByText("src/config.ts", { exact: true }),
+  ).toBeVisible();
+  await expect(files.nth(1).locator(".diff-code-insert")).toHaveText("enabled");
+  await expect(files.nth(1).locator(".diff-gutter-insert").last()).toHaveText(
+    "90001",
+  );
+  await expect(files.nth(1).locator(".diff-code-edit")).toHaveCount(0);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await message.screenshot({
+      path: `../../../.amp/in/artifacts/multi-file-diff-${width}.png`,
+    });
+  }
 });
 
 test("consecutive authors share identity while conversation bodies render safe Markdown", async ({
