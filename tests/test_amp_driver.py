@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 
@@ -11,6 +12,7 @@ from pydantic import SecretStr
 
 from app.domain.models import CodingExecutionContext, GitHubCapability
 from app.worker.execution.amp_agent import AmpCodingAgent, AmpProcessResult, amp_environment
+from app.worker.execution.git_identity import configure_git_identity
 
 THREAD = "T-01a15d70-eb3d-722c-9f6d-563dd65eb0a8"
 
@@ -35,6 +37,9 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
     settings.parent.mkdir()
     native_settings = '{// repository policy\n"amp.mcpPermissions":[]}'
     settings.write_text(native_settings)
+    await asyncio.to_thread(subprocess.run, ["git", "init", "-q"], cwd=tmp_path, check=True)
+    await configure_git_identity(tmp_path, "flowtool[bot]", 7654321)
+    monkeypatch.delenv("AMP_DISABLE_AMP_COAUTHOR_TRAILER", raising=False)
     monkeypatch.setenv("AMP_SETTINGS_FILE", str(tmp_path / "user.jsonc"))
     monkeypatch.setenv("EXAMPLE_MCP_TOKEN", "custom-mcp-token")
     monkeypatch.setenv("FLOWTOOL_MCP_TOKEN", "stale-broker-token")
@@ -60,6 +65,7 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
         assert env["GH_TOKEN"] == env["FLOWTOOL_PUSH_TOKEN"] == "bot-secret"
         assert env["EXAMPLE_MCP_TOKEN"] == "custom-mcp-token"
         assert env["AMP_SETTINGS_FILE"] == str(tmp_path / "user.jsonc")
+        assert env["AMP_DISABLE_AMP_COAUTHOR_TRAILER"] == "1"
         assert "--settings-file" not in args
         servers = json.loads(args[args.index("--mcp-config") + 1])
         assert set(servers) == {"flow"}

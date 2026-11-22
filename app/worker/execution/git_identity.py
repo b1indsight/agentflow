@@ -31,6 +31,17 @@ fi
 '''
 
 
+async def disables_amp_coauthor(path: Path) -> bool:
+    """Read the initialized worktree's policy without inheriting a parent repository."""
+    if not (path / ".git").exists():
+        return False
+    code, value, _ = await _run("git", "config", "--worktree", "--bool", "--get",
+                                "flowtool.ampCoauthor", cwd=path, stage="identity")
+    if code not in (0, 1):
+        raise VcsVerificationError("identity", "cannot read workspace Amp coauthor policy")
+    return value.strip() == "false"
+
+
 async def configure_git_identity(path: Path, bot_login: str, bot_user_id: int) -> None:
     """Initialize this worktree's bot attribution once; later commits check it in the hook.
 
@@ -86,6 +97,7 @@ async def configure_git_identity(path: Path, bot_login: str, bot_user_id: int) -
     if coauthor == bot_identity:
         coauthor = ""
     await git("config", "--worktree", "flowtool.coauthor", coauthor)
+    await git("config", "--worktree", "flowtool.ampCoauthor", "false")
     await git("config", "--worktree", "flowtool.originalHooksPath", original)
     for section in ("user", "author", "committer"):
         await git("config", "--worktree", f"{section}.name", bot_login)
