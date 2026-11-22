@@ -140,7 +140,7 @@
 - 建议首版采用人工重投处理未接收事件，而非增加另一条发布发现链路。GitHub **不会自动重投**
   失败投递；已入队事件可从本地文件继续，未收到的不能靠队列恢复。自动补偿如需加入须明确范围，
   不把它写成用户禁止事项；见 [官方失败投递说明](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries)。
-- 事件接收与消费不读取 `FLOWTOOL_DATABASE_URL`、不直连 PostgreSQL。业务数据库仍在集群内；
+- 事件接收与消费不读取 `AGENTFLOW_DATABASE_URL`、不直连 PostgreSQL。业务数据库仍在集群内；
   首次删列预检沿用 `kubectl exec` 在旧 Server Pod 中取得列快照，再由候选 Pod/临时 PostgreSQL
   试跑并保存结果；已停旧的同镜像续作使用该结果，不要求把数据库暴露给更新器主机。
 - 监听模式后台执行 apply；预检使用 `verify` 加直接调用更新器且不带 `--apply`。
@@ -152,7 +152,7 @@
 ### 目标流程（参数及退出语义为建议）
 
 ```sh
-flowtool worker --update
+agentflow worker --update
 ```
 
 1. **识别已安装版本。** 从正式安装包的可靠来源元数据取得 revision；不比较固定的 `0.0.1`，
@@ -164,7 +164,7 @@ flowtool worker --update
    需强制覆盖或降级等不安全情形明确拒绝，不覆盖用户修改或假报最新。
 4. **核验。** 用新的解释器进程验证实际导入路径、CLI 和目标 revision，确认依赖同步成功，
    全部通过才输出 updated。目标 SHA 相同也须检查安装健康，上次同步失败不能被当成已完成。
-5. **退出。** 建议作为一次性更新命令，完成后退出；普通 `flowtool worker` 仍直接运行。
+5. **退出。** 建议作为一次性更新命令，完成后退出；普通 `agentflow worker` 仍直接运行。
    移除旧 `worker update --sha` 只读入口，避免保留两套更新语义。是否更新后继续启动待确认。
 
 ### 安装与运行安全
@@ -368,7 +368,7 @@ Kubernetes/GitHub/GHCR 仍用边界替身，不声称已完成真实部署。
 
 ### 2026-10-23 — Worker 一次性原地自更新
 
-**实现与决定：** [CLI](../../app/worker/cli.py)采用建议参数 `flowtool worker --update`，
+**实现与决定：** [CLI](../../app/worker/cli.py)采用建议参数 `agentflow worker --update`，
 核验和更新完成即退出；删除 `worker update --sha`，不在更新后启动 Worker。
 首版限定同用户所有的 POSIX 现有虚拟环境、固定仓库的 uv Git 安装，具体合同见
 [Worker 指南](../deployment/worker-update.md)。尚未核实目标主机是否满足此合同，不能据此宣称支持
@@ -395,7 +395,7 @@ Git 包安装；测试环境未修改当前开发安装。普通 Worker 相关�
 在隔离工作区复用机器已有 Python 3.13 环境和 PostgreSQL 17 程序。测试数据库使用独立临时
 数据目录及本机 55404 端口，未安装软件、连接集群数据库或运行真实部署/自更新。
 
-- `PYTHONPATH="$PWD" FLOWTOOL_TEST_DATABASE_URL=隔离测试库 python -m pytest -q`：
+- `PYTHONPATH="$PWD" AGENTFLOW_TEST_DATABASE_URL=隔离测试库 python -m pytest -q`：
   **951 passed**，无跳过；有一条既有 Starlette TestClient 弃用警告。
 - `python -m mypy app scripts/server_update`：117 个源文件通过。
 - Ruff、修改文件格式检查及 `uv lock --check --offline` 通过。

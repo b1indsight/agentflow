@@ -44,9 +44,9 @@
 
 | 角色 | 默认名称 | 颜色（不含 `#`） | 描述 |
 |---|---|---|---|
-| 触发 | `flow` | `5319e7` | `Start a FlowTool task` |
-| 审核 | `flow:in-review` | `fbca04` | `FlowTool delivery awaiting review` |
-| 完成 | `flow:done` | `0e8a16` | `FlowTool task merged and archived` |
+| 触发 | `flow` | `5319e7` | `Start an AgentFlow task` |
+| 审核 | `flow:in-review` | `fbca04` | `AgentFlow delivery awaiting review` |
+| 完成 | `flow:done` | `0e8a16` | `AgentFlow task merged and archived` |
 
 标签身份使用忽略大小写的名称匹配。已有 `Flow` 而配置为 `flow` 时保留原名称；
 触发和取消路由同步按忽略大小写比较，避免保留已有标签后无法触发。
@@ -197,7 +197,7 @@ API 依据：[App installation 枚举](https://docs.github.com/en/rest/apps/apps
   授权移除、维护暂停、停机取消，以及保留 `Flow` 后触发/取消和权限过滤。
   实际 ASGI lifespan 中阻塞标签发现，`/healthz` 与 `/readyz` 均返回 200，退出时取消扫描。
 - **全量与构建：**
-  `FLOWTOOL_TEST_DATABASE_URL=postgresql://127.0.0.1/flowtool_label_test uv run pytest -q`
+  `AGENTFLOW_TEST_DATABASE_URL=postgresql://127.0.0.1/agentflow_label_test uv run pytest -q`
   **907 passed**；Ruff、Mypy（201 文件）、`uv build --no-sources` 和 `git diff --check` 通过。
   首次使用 Unix socket 跑全量时，恢复工具的三项测试因缺少 TCP peer 地址失败；
   改为本机 TCP 后先验证这 6 项恢复测试通过，再全量通过，未改动恢复工具或测试。

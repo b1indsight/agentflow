@@ -91,7 +91,7 @@ control 重启及迟到结果不会覆盖原证据。已合并 PR 的迟到结�
 保持一致。命令均在独立 PostgreSQL（127.0.0.1:55469）执行：
 
 ```sh
-export FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55469/postgres
+export AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55469/postgres
 uv run pytest tests/test_schema.py tests/test_revision_recovery.py -q --tb=short
 uv run pytest tests/test_schema.py tests/test_revision_recovery.py tests/test_result_recovery.py tests/test_workflow_transactions.py tests/test_coordinator.py -q --tb=short
 uv run pytest -q --tb=short

@@ -88,9 +88,9 @@ def _assert_flow_ledgers(url: str) -> None:
 
 @pytest.fixture
 def postgresql_url(request: pytest.FixtureRequest) -> Iterator[str]:
-    base_url = os.getenv("FLOWTOOL_TEST_DATABASE_URL")
+    base_url = os.getenv("AGENTFLOW_TEST_DATABASE_URL")
     if not base_url:
-        pytest.skip("FLOWTOOL_TEST_DATABASE_URL is required for PostgreSQL integration tests")
+        pytest.skip("AGENTFLOW_TEST_DATABASE_URL is required for PostgreSQL integration tests")
 
     schema = f"test_{uuid4().hex}"
     with psycopg.connect(base_url, autocommit=True) as connection:

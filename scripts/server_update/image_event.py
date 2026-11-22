@@ -368,7 +368,7 @@ class Consumer:
 def create_app(queue: Queue, secret: str, consumer: Consumer | None = None) -> FastAPI:
     """Independent signed receiver; HTTP acknowledges disk, never waits for deployment."""
     if not secret.strip():
-        raise Rejected("FLOWTOOL_UPDATE_WEBHOOK_SECRET must be nonempty")
+        raise Rejected("AGENTFLOW_UPDATE_WEBHOOK_SECRET must be nonempty")
     consumer_task: asyncio.Task | None = None
 
     def report_failure(task: asyncio.Task) -> None:
@@ -544,7 +544,7 @@ def main() -> None:
         if not 0 < args.port < 65536:
             parser.error("port must be between 1 and 65535")
         uvicorn.run(
-            create_app(queue, os.getenv("FLOWTOOL_UPDATE_WEBHOOK_SECRET", ""), consumer),
+            create_app(queue, os.getenv("AGENTFLOW_UPDATE_WEBHOOK_SECRET", ""), consumer),
             host=args.host,
             port=args.port,
         )

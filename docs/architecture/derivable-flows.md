@@ -7,7 +7,7 @@
 
 ## 1. 目标与不变量
 
-FlowTool 将 **Flow** 提升为持久、可调度、可派生、可通信、可等待和可验收的第一公民。它借鉴 Codex
+AgentFlow 将 **Flow** 提升为持久、可调度、可派生、可通信、可等待和可验收的第一公民。它借鉴 Codex
 subagent 的 `spawn / send / wait / inspect` 协作方式，但编排状态保存在 control plane。首版先采用
 Flow 全生命周期固定绑定，跨 worker/机器恢复属于后续阶段。
 

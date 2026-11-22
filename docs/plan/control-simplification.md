@@ -97,7 +97,7 @@
 依赖归属适配，没有新增测试矩阵。本次删除层次，没有新增运行机制需要消融。
 PostgreSQL 全量 **728 passed、无跳过**；Ruff、Mypy（165 个源文件）、sdist/wheel 构建与
 差异检查通过。保留既有 Starlette 弃用提示。
-复现：`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run pytest -q --tb=short`；
+复现：`AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres uv run pytest -q --tb=short`；
 静态检查使用 `uv run --no-sync ruff check app tests` 与 `uv run --no-sync mypy app tests`，构建为 `uv build --no-sources`。
 
 ### 2026-10-13 — 逐项复查与日志启动回归修复
@@ -206,7 +206,7 @@ app/
 
 根包迁移包括全部导入与动态 monkeypatch 路径。ASGI Python 入口改为 `app.server.api`，
 Judge 私有进程入口改为 `app.server.review.runner`；这两项替代初版补充方案中的旧路径。
-命令仍为 `flowtool serve` / `flowtool worker`。同步 README、当前架构目录与边界检查，
+命令仍为 `agentflow serve` / `agentflow worker`。同步 README、当前架构目录与边界检查，
 特别是 worker 禁止加载服务端依赖的规则，以及 GitHub 对配置的类型引用。
 沿用前两条的行为、隔离、静态与构建验证，并核对构建产物包含新包及实际启动入口。
 该补充方案尚未实施，根包迁移和职责归组将在同一 bookmark 与 PR #81 中交付。

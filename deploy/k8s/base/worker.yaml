@@ -1,22 +1,22 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: flowtool-worker-1
+  name: agentflow-worker-1
 spec:
-  serviceName: flowtool-worker-1-headless
+  serviceName: agentflow-worker-1-headless
   replicas: 0
   selector:
     matchLabels:
-      flowtool-role: worker-1
+      agentflow-role: worker-1
   updateStrategy:
     type: OnDelete
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: flowtool
-        flowtool-role: worker-1
+        app.kubernetes.io/name: agentflow
+        agentflow-role: worker-1
     spec:
-      serviceAccountName: flowtool
+      serviceAccountName: agentflow
       automountServiceAccountToken: false
       nodeSelector:
         kubernetes.io/os: linux
@@ -31,36 +31,36 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
       - name: worker
-        image: flowtool-worker:replace-me
+        image: agentflow-worker:replace-me
         args:
         - worker
         envFrom:
         - secretRef:
-            name: flowtool-worker-1-env
+            name: agentflow-worker-1-env
         env:
-        - name: FLOWTOOL_WORKER_ID
+        - name: AGENTFLOW_WORKER_ID
           value: worker-1
-        - name: FLOWTOOL_WORKER_ROOT
-          value: /var/lib/flowtool
+        - name: AGENTFLOW_WORKER_ROOT
+          value: /var/lib/agentflow
         - name: HOME
-          value: /home/flowtool
-        - name: FLOWTOOL_WORKER_STATUS_PATH
-          value: /run/flowtool/health.json
-        - name: FLOWTOOL_SERVE_WS_URL
-          value: wss://flowtool-serve.flowtool.svc:8443/internal/workers/connect
-        - name: FLOWTOOL_ALLOW_INSECURE_WORKER_WS
+          value: /home/agentflow
+        - name: AGENTFLOW_WORKER_STATUS_PATH
+          value: /run/agentflow/health.json
+        - name: AGENTFLOW_SERVE_WS_URL
+          value: wss://agentflow-serve.agentflow.svc:8443/internal/workers/connect
+        - name: AGENTFLOW_ALLOW_INSECURE_WORKER_WS
           value: 'false'
-        - name: FLOWTOOL_LOG_FORMAT
+        - name: AGENTFLOW_LOG_FORMAT
           value: json
         # Codex remains the default. Change this worker through an overlay and drain it before
         # switching an idle worker to Amp; do not mix agent backends for an active Flow.
-        - name: FLOWTOOL_CODING_AGENT
+        - name: AGENTFLOW_CODING_AGENT
           value: codex
-        - name: FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS
+        - name: AGENTFLOW_AMP_RUN_TIMEOUT_SECONDS
           value: '1200'
-        - name: FLOWTOOL_EXECUTION_ISOLATION
+        - name: AGENTFLOW_EXECUTION_ISOLATION
           value: container
-        - name: FLOWTOOL_TRUSTED_HOST_EXECUTION
+        - name: AGENTFLOW_TRUSTED_HOST_EXECUTION
           value: 'true'
         - name: SSL_CERT_FILE
           value: /run/secrets/ca/ca-bundle.pem
@@ -79,16 +79,16 @@ spec:
             memory: 8Gi
         volumeMounts:
         - name: data
-          mountPath: /var/lib/flowtool
+          mountPath: /var/lib/agentflow
           subPath: root
         - name: data
-          mountPath: /home/flowtool
+          mountPath: /home/agentflow
           subPath: home
         - name: status
-          mountPath: /run/flowtool
+          mountPath: /run/agentflow
         - name: worker-tmp
           mountPath: /tmp
-        - name: flowtool-worker-ca
+        - name: agentflow-worker-ca
           mountPath: /run/secrets/ca
           readOnly: true
         readinessProbe:
@@ -97,7 +97,7 @@ spec:
             - python
             - -m
             - app.worker.health
-            - /run/flowtool/health.json
+            - /run/agentflow/health.json
           periodSeconds: 5
           timeoutSeconds: 3
         startupProbe:
@@ -106,7 +106,7 @@ spec:
             - python
             - -m
             - app.worker.health
-            - /run/flowtool/health.json
+            - /run/agentflow/health.json
             - --live
           periodSeconds: 5
           failureThreshold: 36
@@ -116,15 +116,15 @@ spec:
             - python
             - -m
             - app.worker.health
-            - /run/flowtool/health.json
+            - /run/agentflow/health.json
             - --live
           periodSeconds: 10
           timeoutSeconds: 3
           failureThreshold: 3
       volumes:
-      - name: flowtool-worker-ca
+      - name: agentflow-worker-ca
         secret:
-          secretName: flowtool-worker-ca
+          secretName: agentflow-worker-ca
           defaultMode: 288
       - name: status
         emptyDir: {}
@@ -132,7 +132,7 @@ spec:
         emptyDir: {}
       initContainers:
       - name: prepare-data
-        image: flowtool-worker:replace-me
+        image: agentflow-worker:replace-me
         command:
         - python
         - -c

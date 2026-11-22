@@ -15,7 +15,7 @@ class WorkerSettings(BaseSettings):
     log_format: Literal["text", "json"] = "text"
 
     model_config = SettingsConfigDict(
-        env_prefix="FLOWTOOL_",
+        env_prefix="AGENTFLOW_",
         env_file=None,
         env_file_encoding="utf-8",
         extra="ignore",
@@ -25,7 +25,7 @@ class WorkerSettings(BaseSettings):
     worker_token: SecretStr
     serve_ws_url: str
     worker_status_path: Path | None = None
-    worker_root: Path = Path("~/.flowtool/workers/{worker_id}")
+    worker_root: Path = Path("~/.agentflow/workers/{worker_id}")
     worker_repo_workspace_limit: int = Field(default=2, ge=1)
     coding_agent: Literal["codex", "amp"] = "codex"
     codex_run_timeout_seconds: float = Field(default=1200.0, gt=0, allow_inf_nan=False)
@@ -50,24 +50,24 @@ class WorkerSettings(BaseSettings):
     @classmethod
     def _require_worker_id(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("FLOWTOOL_WORKER_ID is required")
+            raise ValueError("AGENTFLOW_WORKER_ID is required")
         return value
 
     @field_validator("worker_token")
     @classmethod
     def _require_worker_token(cls, value: SecretStr) -> SecretStr:
         if not value.get_secret_value().strip():
-            raise ValueError("FLOWTOOL_WORKER_TOKEN is required")
+            raise ValueError("AGENTFLOW_WORKER_TOKEN is required")
         return value
 
     @field_validator("worker_root", mode="after")
     @classmethod
     def _expand_worker_root(cls, value: Path, info: ValidationInfo) -> Path:
-        if value == Path("~/.flowtool/workers/{worker_id}"):
+        if value == Path("~/.agentflow/workers/{worker_id}"):
             worker_id = info.data.get("worker_id")
             if worker_id is None:
                 return value
-            value = Path(f"~/.flowtool/workers/{worker_id}")
+            value = Path(f"~/.agentflow/workers/{worker_id}")
         return value.expanduser()
 
     @model_validator(mode="after")
@@ -79,8 +79,8 @@ class WorkerSettings(BaseSettings):
         if self.allow_insecure_worker_ws and self.serve_ws_url.startswith("ws://"):
             return self
         raise ValueError(
-            "FLOWTOOL_SERVE_WS_URL must use wss://; set "
-            "FLOWTOOL_ALLOW_INSECURE_WORKER_WS=true only for development"
+            "AGENTFLOW_SERVE_WS_URL must use wss://; set "
+            "AGENTFLOW_ALLOW_INSECURE_WORKER_WS=true only for development"
         )
 
 if TYPE_CHECKING:

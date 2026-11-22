@@ -3,7 +3,7 @@
 ## 8. 当前目录与里程碑
 
 ```
-flowtool/
+agentflow/
   app/
     domain/           # 领域事实、类型、端口与纯策略（无运行时 I/O）
     contracts/        # 版本化 task/result/message 与冻结结果应用契约

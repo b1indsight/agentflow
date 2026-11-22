@@ -47,7 +47,7 @@
 
 - 编码任务 wire 增加必填身份，建议协议从 22 升到 23，control/worker 配套升级。不做旧协议的个人身份回退。
 - 实施前核对 assignment secret 的 journal/恢复路径，确认是否需要随同更新保存格式；目前不预设数据库迁移。升级前 drain，重启后领取带新身份的任务；实际部署和回滚须另获授权。
-- 硬编码 `flowtool[bot]` 或 App ID 会导致其他部署错误归属；修改个人全局配置会影响 worker 外的操作；两者均不采用。
+- 硬编码 `agentflow[bot]` 或 App ID 会导致其他部署错误归属；修改个人全局配置会影响 worker 外的操作；两者均不采用。
 - 让 worker 查询 bot 会增加 worker 网络职责，仍需传递 login；选择 control 解析身份并随现有 capability 下发。
 - 每次签发增加一次 GitHub 读取及一个准备阶段失败点，初版接受此成本，沿用已有请求超时和错误处理，不增加缓存和后台刷新。
 - 环境覆盖不构成恶意 agent 的安全隔离；显式清除环境、指定其他 `--author` 或保留历史作者的操作不在强制防篡改范围。
@@ -103,7 +103,7 @@
 ### [003] — 2026-11-13 — 实际提交、隔离与较简方案消融
 
 - **验收结果：** 在本机 Git 2.50.1 中验证完整副本及 linked worktree 的真实提交；bot Author/Committer、原账号 coauthor、已有 Amp coauthor、重复准备、显式 `-m` 及编辑器提交都符合预期。原 hooks 继续执行且能拒绝提交，个人全局配置逐字节不变，seed/兄弟身份不变。现有首轮本地 clone/push/MCP 和修订交付测试验证配置接入，answer 测试确认不创建或修改 Git 配置。
-- **命令与环境：** 相关测试使用 `uv run pytest -q tests/test_worker_workspaces.py tests/test_worker_executor.py tests/test_revision_delivery.py tests/test_worker_github_environment.py tests/test_amp_driver.py tests/test_codex_driver.py tests/test_github_client.py tests/test_protocol.py tests/test_worker_session.py`；全量执行 `uv run pytest -q`，使用专属临时 PostgreSQL 17 的 loopback TCP URL 作为 `FLOWTOOL_TEST_DATABASE_URL`。`uv run ruff check app tests`、`uv run mypy app tests` 和 `git diff --check` 通过，恢复 smoke fixture 的新增身份字段已同步并通过编译检查。精确运行结果保存于线程验证记录，不将易变测试数量固化在本文。
+- **命令与环境：** 相关测试使用 `uv run pytest -q tests/test_worker_workspaces.py tests/test_worker_executor.py tests/test_revision_delivery.py tests/test_worker_github_environment.py tests/test_amp_driver.py tests/test_codex_driver.py tests/test_github_client.py tests/test_protocol.py tests/test_worker_session.py`；全量执行 `uv run pytest -q`，使用专属临时 PostgreSQL 17 的 loopback TCP URL 作为 `AGENTFLOW_TEST_DATABASE_URL`。`uv run ruff check app tests`、`uv run mypy app tests` 和 `git diff --check` 通过，恢复 smoke fixture 的新增身份字段已同步并通过编译检查。精确运行结果保存于线程验证记录，不将易变测试数量固化在本文。
 - **测试环境修正：** 首轮完整运行使用 Unix socket，恢复连接测试在校验 loopback IP 时失败；核对 `scripts/smoke/recovery.py:freeze_connection` 后改用临时数据库的 TCP 端点，重新完整运行通过，没有修改该恢复逻辑。临时数据库启动时使用 `LC_ALL=C`，未修改既有数据库服务或账号配置。
 - **消融一：** 在完成同样配置的临时仓库执行 `git config --worktree core.hooksPath /dev/null`，再 `git commit --allow-empty -m Scoped`；作者/提交者仍是 bot，但 coauthor 缺失。保留消息 hook，配置本身不足以满足要求。
 - **消融二：** 删除 worktree 层的 `committer.name` 和 `committer.email`，保留 bot 的 `user.*`；旧的显式 committer 配置重新生效，生成个人 Committer。保留 `author.*`/`committer.*` 的专属覆盖。

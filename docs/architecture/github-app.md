@@ -2,7 +2,7 @@
 
 > 状态：已对齐 githubkit 0.16，并接入 M1 Issue→PR 与 M2 线程回复/resolve 自动化路径；尚未在真实 App 上执行读写 smoke。
 
-GitHub App 提供独立 bot 身份、Webhook 和短期 installation token。FlowTool 不需要代表某个用户执行
+GitHub App 提供独立 bot 身份、Webhook 和短期 installation token。AgentFlow 不需要代表某个用户执行
 操作，因此当前设计不使用 OAuth user token。
 
 ## A.1 认证链
@@ -50,10 +50,10 @@ App JWT ── POST /app/installations/{id}/access_tokens ──► Installation
 依据：[Actions workflow runs API](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository)
 及 [Actions 权限表](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps#repository-permissions-for-actions)。
 
-`FLOWTOOL_ALLOWLIST` 只控制谁能触发 flow；`FLOWTOOL_REVIEWERS` 独立配置 PR reviewer，空列表表示不
-请求 reviewer。`FLOWTOOL_IN_REVIEW_LABEL` 配置 review 状态 label。
+`AGENTFLOW_ALLOWLIST` 只控制谁能触发 flow；`AGENTFLOW_REVIEWERS` 独立配置 PR reviewer，空列表表示不
+请求 reviewer。`AGENTFLOW_IN_REVIEW_LABEL` 配置 review 状态 label。
 
-`FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS` 控制 serve 端 GitHub App 和 installation 客户端的
+`AGENTFLOW_GITHUB_REQUEST_TIMEOUT_SECONDS` 控制 serve 端 GitHub App 和 installation 客户端的
 连接、读取、写入、连接池等待超时，默认均为 **30 秒**；只接受正有限数值，修改后重启 serve 生效。
 这是 HTTPX 各网络阶段的超时，不是包含重试、分页和锁等待在内的整个结果恢复时限。
 超时仍走现有 transient 错误处理；可能已发送的非幂等写入保留待核对，不能直接重发。
@@ -69,8 +69,8 @@ payload 获取，不需要静态写入 `.env`。
 
 serve 的 `LabelSynchronizer` 启动后在后台枚举 App installation 及其已授权仓库，完整分页，
 跳过暂停的 installation 和归档仓库；已有仓库即使没有 Flow 或 Projects 配置也会被发现。
-按当前 `FLOWTOOL_TRIGGER_LABEL`（默认 `flow`）、`FLOWTOOL_IN_REVIEW_LABEL`（默认
-`flow:in-review`）、`FLOWTOOL_DONE_LABEL`（默认 `flow:done`）补齐缺失定义；名称不得重名
+按当前 `AGENTFLOW_TRIGGER_LABEL`（默认 `flow`）、`AGENTFLOW_IN_REVIEW_LABEL`（默认
+`flow:in-review`）、`AGENTFLOW_DONE_LABEL`（默认 `flow:done`）补齐缺失定义；名称不得重名
 （忽略大小写）或为空。已有标签的名称、颜色和描述保留，触发和取消也按忽略大小写匹配。
 新授权发现每 300 秒进行；未建齐或上次失败每 300 秒检查，三个标签均确认存在后每 86400 秒
 复查并补回缺失项。人工预建的同样转每日检查，改配置名称后重新确认。
@@ -155,7 +155,7 @@ GitHub 使用 Webhook secret 对**原始请求体**计算 HMAC-SHA256，并把�
 [Validating webhook deliveries](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)。
 
 本地开发可选用可信隧道把公网 Webhook URL 转发到 `http://localhost:8000/webhook`；隧道本身不属于
-FlowTool，也不替代签名校验。
+AgentFlow，也不替代签名校验。
 
 ## A.5 密钥管理
 
@@ -172,7 +172,7 @@ App 需要额外的**组织级 Projects read/write** 权限，且 installation �
 每个仓库最多配置一个既有 Project；只管理原 Issue 卡片的既有单选 Status 字段。
 个人 Project、PAT、创建看板/字段/选项不在本期范围。
 
-`FLOWTOOL_PROJECTS` 接受 JSON（没有此配置时零 Projects 请求）：
+`AGENTFLOW_PROJECTS` 接受 JSON（没有此配置时零 Projects 请求）：
 
 ```json
 {"owner/repo":{"installation_id":42,"project_id":"PVT_xxx","status_field_id":"PVTSSF_xxx",
@@ -180,7 +180,7 @@ App 需要额外的**组织级 Projects read/write** 权限，且 installation �
 ```
 
 字段和选项按查询所得 ID 绑定；允许多个逻辑状态指向同一个选项，展示名称更改不影响映射。
-修改配置后重启 serve。用 `flowtool project check owner/repo` 只读校验真实 repo installation、
+修改配置后重启 serve。用 `agentflow project check owner/repo` 只读校验真实 repo installation、
 组织 Project 可写性、字段归属和全部选项；命令不创建测试卡片，也不访问数据库。
 
 `Project.list_items_page` 返回 items 和不可见内容标记，调用方必须完成遍历才能确认不存在；
@@ -203,9 +203,9 @@ SUCCEEDED→Done，FAILED/CANCELLED/CLOSED 和明确人工阻塞→Blocked，MER
 未绑定 INITIAL→Todo，有排队/执行任务→In Progress，OPEN 空闲→In Review。
 临时网络退避不会把 Flow 直接改为 Blocked，Projects 故障也不会阻止归档 ACK 和 worker 释放。
 
-用 `flowtool project status owner/repo` 查看最多 100 条（可用 `--limit` 调整），包含 item、
+用 `agentflow project status owner/repo` 查看最多 100 条（可用 `--limit` 调整），包含 item、
 期望/已确认版本、下次运行时间及脱敏错误；修复权限、字段选项或远端条件后运行
-`flowtool project retry owner/repo` 重新核对。它不创建新卡、不解除远端归档，也不清除已知 item。
+`agentflow project retry owner/repo` 重新核对。它不创建新卡、不解除远端归档，也不清除已知 item。
 
 同步独立每 5 秒调度，沿用 reconcile 的批次/并发/轮询间隔设置。每卡一条数据库 session 锁
 跨越远端 I/O，不占用 Flow 行锁；429/暂时错误持久退避并保留 Retry-After。

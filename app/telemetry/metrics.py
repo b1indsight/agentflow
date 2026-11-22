@@ -37,11 +37,11 @@ class Metrics:
         self.snapshot: Snapshot | None = None
         self.updated: float | None = None
         self.started = time.monotonic()
-        self.errors = Counter('flowtool_metrics_snapshot_errors', 'Failed background snapshots', registry=self.registry)
-        self.webhooks = Counter('flowtool_webhook_requests', 'Process HTTP requests, including redelivery',
+        self.errors = Counter('agentflow_metrics_snapshot_errors', 'Failed background snapshots', registry=self.registry)
+        self.webhooks = Counter('agentflow_webhook_requests', 'Process HTTP requests, including redelivery',
                                 ['status'], registry=self.registry)
-        self.replays = Counter("flowtool_result_replay_observations", "Authenticated recovery of an already applied result", registry=self.registry)
-        self.expired = Counter("flowtool_lease_expiry_transitions", "This process changed an expired assignment", ["outcome"], registry=self.registry)
+        self.replays = Counter("agentflow_result_replay_observations", "Authenticated recovery of an already applied result", registry=self.registry)
+        self.expired = Counter("agentflow_lease_expiry_transitions", "This process changed an expired assignment", ["outcome"], registry=self.registry)
         self.registry.register(self)
 
     def request(self, status: int) -> None:
@@ -57,8 +57,8 @@ class Metrics:
 
     def collect(self) -> Iterator[Metric]:
         snapshot = self.snapshot
-        yield GaugeMetricFamily('flowtool_metrics_snapshot_ready', 'Has at least one successful snapshot', value=float(snapshot is not None))
-        yield GaugeMetricFamily('flowtool_metrics_snapshot_age_seconds', 'Seconds since last success or process start',
+        yield GaugeMetricFamily('agentflow_metrics_snapshot_ready', 'Has at least one successful snapshot', value=float(snapshot is not None))
+        yield GaugeMetricFamily('agentflow_metrics_snapshot_age_seconds', 'Seconds since last success or process start',
                                 value=max(0, time.monotonic() - (self.updated if self.updated is not None else self.started)))
         if snapshot is None:
             return
@@ -69,7 +69,7 @@ class Metrics:
                     continue
                 labels = tuple(label if label in choices else 'other' for label, choices in zip(sample.labels, allowed, strict=True))
                 values[labels] += sample.value
-            metric = GaugeMetricFamily(f'flowtool_{family}', f'Persistent snapshot: {family}', labels=names)
+            metric = GaugeMetricFamily(f'agentflow_{family}', f'Persistent snapshot: {family}', labels=names)
             for labels, value in values.items():
                 metric.add_metric(labels, value)
             yield metric

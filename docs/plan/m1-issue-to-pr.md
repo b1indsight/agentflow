@@ -305,12 +305,12 @@ private key、完整 prompt 或完整会话日志。
 常规验证命令：
 
 ```bash
-FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool:flowtool@127.0.0.1:5432/flowtool uv run pytest
+AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow:agentflow@127.0.0.1:5432/agentflow uv run pytest
 uv run ruff check app tests
 uv run mypy app tests
 uv lock --check
 uv build --no-sources
-uv run flowtool --help
+uv run agentflow --help
 git diff --check
 ```
 

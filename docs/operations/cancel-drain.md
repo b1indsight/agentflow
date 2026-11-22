@@ -1,7 +1,7 @@
 # 取消、drain 与停机
 
 取消是持久的停止请求，不能撤销已经推送的 commit、已创建的 PR 或评论。
-`flowtool flow cancel <flow_id>`（也包括移除触发标签）将 Flow 标记 CANCELLED、退休 queued
+`agentflow flow cancel <flow_id>`（也包括移除触发标签）将 Flow 标记 CANCELLED、退休 queued
 工作；已分配或状态未知的任务留下 stop intent 和 binding。输出 `stop_pending=True` 表示尚未
 确认停止。离线、lease 到期、serve 重启都不能解除这一占用。
 发出 Assignment 前另存 dispatch authorization；Started ACK 丢失后不再将任务重排为
@@ -54,10 +54,10 @@ blocked。恢复原 journal 不等于证明旧进程结束。不要删除 journa
 ## Drain
 
 ```sh
-flowtool worker-drain worker-1
-flowtool workers
+agentflow worker-drain worker-1
+agentflow workers
 # 需要恢复接受新 Flow 时：
-flowtool worker-drain worker-1 --undo
+agentflow worker-drain worker-1 --undo
 ```
 
 这是现有 worker 的运维控制，不是部署命令。draining 位存 PostgreSQL，跨 reconnect/serve

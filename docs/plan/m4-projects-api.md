@@ -28,7 +28,7 @@ installation 认证规划；个人 Project 若需要另一类凭据，应另拆�
   mutation 禁止 SDK 透明自动重试；HTTP 200 带 GraphQL errors/partial data 不能当成功。
 - 响应丢失后的核对由 F9 负责，本 adapter 只返回结构化错误和确切远端事实。
   `clientMutationId` 仅用于关联，不把它当服务端幂等保证。
-- 提供最小只读 `flowtool project check <repo>`，校验 App 可见目标、字段和映射并显示
+- 提供最小只读 `agentflow project check <repo>`，校验 App 可见目标、字段和映射并显示
   缺项；不创建 Project、字段、选项或测试卡片。
 
 添加 item 后需要单独设置字段，接口及字段 ID 用法见

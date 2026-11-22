@@ -73,13 +73,13 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
         application.state.runtime = active_runtime
         application.state.metrics = active_runtime.metrics
         active_runtime.startup()
-        logger.info("FlowTool control plane up on {}:{}", active_runtime.settings.host, active_runtime.settings.port)
+        logger.info("AgentFlow control plane up on {}:{}", active_runtime.settings.host, active_runtime.settings.port)
         try:
             yield
         finally:
             await active_runtime.shutdown()
 
-    application = FastAPI(title="FlowTool", lifespan=lifespan)
+    application = FastAPI(title="AgentFlow", lifespan=lifespan)
     application.include_router(console_router, dependencies=[Depends(_require_owner)])
 
     @application.exception_handler(ConsoleFailure)

@@ -203,7 +203,7 @@ def test_assignment_secret_remains_wire_only_and_flow_identity_is_checked() -> N
                 "token": "push-token",
                 "repository": "owner/repo",
                 "expires_at": "2026-09-05T01:00:00Z",
-                "bot_login": "flowtool[bot]", "bot_user_id": 7654321,
+                "bot_login": "agentflow[bot]", "bot_user_id": 7654321,
             }
         },
     }

@@ -51,7 +51,7 @@
     修改多个 Flow；触发器为每个 Flow 追加一条 `state` 快照。
   - 之后：清扫按 `flow_id` 升序逐个调用写入口。每个确实处于 `running` 的 Flow 得到一条
     `kind=queued`、`cause=assignment_requeued`、带 `job_id` 的事实，并在同一事务更新为 `queued`；
-    已经不在 `running` 的 Flow 不写任何行。`flowtool flow history` 可以直接读到这条事实。
+    已经不在 `running` 的 Flow 不写任何行。`agentflow flow history` 可以直接读到这条事实。
 - **错误情形：**
   - 事实追加失败或投影违反表约束：整个业务事务回滚，状态和事实都不留下。
   - 事实字段不合法（缺少必需的 `metadata` 字段、轮次不符）：写入口报错，由调用方按现有方式处理。
@@ -89,7 +89,7 @@
   - `app/persistence/jobs.py`、`workers.py`，`app/controler/workflow/` 下的 `lifecycle.py`、
     `results.py`、`service.py`、`coordinator.py`，以及 `app/controler/reconciliation/pull_requests.py`：
     把现有写入点改为调用写入口，业务判断不变。
-  - [`app/cli.py`](../../app/cli.py)：新增 `flowtool flow verify`。
+  - [`app/cli.py`](../../app/cli.py)：新增 `agentflow flow verify`。
   - `tests/test_boundaries.py`：新增“只有 `flows.py` 写 `flows`”的检查。
 - **接口与流程：**
   - `apply_fact(flow: Flow | None, fact: FlowFact) -> Flow | None`
@@ -113,7 +113,7 @@
     更新两个指针列，不产生事实。
   - `FlowStore.replay(self, flow_id: int) -> Flow`
     读取事实并调用领域层 `replay`，供校验命令和测试使用。
-  - `flowtool flow verify [FLOW_ID]`
+  - `agentflow flow verify [FLOW_ID]`
     比较重放结果与当前行；不带参数检查全部 Flow。
 - **边界情形：**
   - 合并：一个事务内先后写 `finalizing` 和 `archive` 两条事实。
@@ -248,14 +248,14 @@
     [`flows.py`](../../app/persistence/flows.py) 的 `create_flow`、`transition`、`set_title` 追加事实，新增 `verify`；
     [`console_schema.py`](../../app/persistence/console_schema.py) 扩大不可变触发器、新增两个部分唯一索引和存量快照。
   - 调用方：[`initial.py`](../../app/controler/workflow/initial.py)、[`results.py`](../../app/controler/workflow/results.py)
-    改用 `FlowStore` 的标题与指针方法。CLI 新增 `flowtool flow verify`。
+    改用 `FlowStore` 的标题与指针方法。CLI 新增 `agentflow flow verify`。
   - 测试：边界测试改为“只有 `flows.py` 写 `flows`”；conftest 在每个 PostgreSQL 用例结束时校验全部 Flow；
     新增存量快照与差异报告用例，并把不可变检查扩展到 `created` 事实。
 - **证据 / 验证：**
-  - 同步后、改动前的全量回归：`FLOWTOOL_TEST_DATABASE_URL=… uv run pytest`，1957 passed / 1 skipped。
+  - 同步后、改动前的全量回归：`AGENTFLOW_TEST_DATABASE_URL=… uv run pytest`，1957 passed / 1 skipped。
   - 改动后（含每用例账本校验）：全量回归 1958 passed / 1 skipped，用时 364 秒（改动前 355 秒）；
     `ruff check app tests`、`mypy app` 通过。
-  - CLI 冒烟：在临时库创建并取消一个直接任务 Flow，`flowtool flow verify` 退出 0；`flow history` 依次列出
+  - CLI 冒烟：在临时库创建并取消一个直接任务 Flow，`agentflow flow verify` 退出 0；`flow history` 依次列出
     `created`、`finalization_requested`、`archive` 与触发器 `state` 行；用 SQL 改写 `archive_summary` 后
     `flow verify 1` 报告该列差异并退出 1。
   - 消融 1（每用例账本校验是否必要）：在副本中让 `set_title` 不追加事实，模拟遗漏的写入点，运行

@@ -11,8 +11,8 @@ Flow/Attempt 归属和多会话顺序由 control 处理；无独立 SessionRef�
 
 ## 配置与请求
 
-在 control 配置 `FLOWTOOL_ACCESS_ISSUER`、`FLOWTOOL_ACCESS_AUDIENCE` 和唯一的
-`FLOWTOOL_ACCESS_OWNER_EMAIL`，通过 Cloudflare Access 完成 GitHub 登录和 MFA。
+在 control 配置 `AGENTFLOW_ACCESS_ISSUER`、`AGENTFLOW_ACCESS_AUDIENCE` 和唯一的
+`AGENTFLOW_ACCESS_OWNER_EMAIL`，通过 Cloudflare Access 完成 GitHub 登录和 MFA。
 后端仅接受 `Cf-Access-Jwt-Assertion`，独立验签并限制 owner 邮箱；不接受旧共享 Bearer Token、
 邮箱 header 或直接传入的 Cookie。三项均未配置时返回 503，部分配置时启动失败。
 所有 API 响应带 `Cache-Control: no-store`。配置、公钥缓存和真实验收见

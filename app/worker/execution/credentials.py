@@ -15,7 +15,7 @@ def inherited_agent_environment(source: Mapping[str, str]) -> dict[str, str]:
     return {
         key: value for key, value in source.items()
         if key not in parent_agent
-        and not key.startswith(("FLOWTOOL_", "GIT_", "GH_", "GITHUB_", "SSH_"))
+        and not key.startswith(("AGENTFLOW_", "FLOWTOOL_", "GIT_", "GH_", "GITHUB_", "SSH_"))
     }
 
 
@@ -24,7 +24,7 @@ def git_credential_environment(push_token: SecretStr | None) -> dict[str, str]:
     if push_token is None:
         return {}
     return {
-        "FLOWTOOL_PUSH_TOKEN": push_token.get_secret_value(),
+        "AGENTFLOW_PUSH_TOKEN": push_token.get_secret_value(),
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_CONFIG_COUNT": "3",
         "GIT_CONFIG_KEY_0": "credential.https://github.com.username",
@@ -32,5 +32,5 @@ def git_credential_environment(push_token: SecretStr | None) -> dict[str, str]:
         "GIT_CONFIG_KEY_1": "credential.https://github.com.helper",
         "GIT_CONFIG_VALUE_1": "",
         "GIT_CONFIG_KEY_2": "credential.https://github.com.helper",
-        "GIT_CONFIG_VALUE_2": '!f() { [ "$1" = get ] && printf "password=%s\\n" "$FLOWTOOL_PUSH_TOKEN"; }; f',
+        "GIT_CONFIG_VALUE_2": '!f() { [ "$1" = get ] && printf "password=%s\\n" "$AGENTFLOW_PUSH_TOKEN"; }; f',
     }

@@ -2,41 +2,41 @@
 # Operates only on an explicitly selected, already installed disposable test namespace.
 set -euo pipefail
 : "${KUBE_CONTEXT:?set the exact test cluster context}"
-: "${KUBE_NAMESPACE:?set a flowtool-smoke-* namespace}"
-: "${FLOWTOOL_K8S_STORAGE_CLASS:?set the expected RWOP CSI StorageClass}"
-: "${FLOWTOOL_K8S_RENDERED:?set the rendered, namespace-specific manifest path}"
-case "$KUBE_NAMESPACE" in flowtool-smoke-?*) ;; *) echo 'refusing non-test namespace' >&2; exit 2;; esac
-python scripts/smoke/validate_kubernetes.py "$FLOWTOOL_K8S_RENDERED"
+: "${KUBE_NAMESPACE:?set an agentflow-smoke-* namespace}"
+: "${AGENTFLOW_K8S_STORAGE_CLASS:?set the expected RWOP CSI StorageClass}"
+: "${AGENTFLOW_K8S_RENDERED:?set the rendered, namespace-specific manifest path}"
+case "$KUBE_NAMESPACE" in agentflow-smoke-?*) ;; *) echo 'refusing non-test namespace' >&2; exit 2;; esac
+python scripts/smoke/validate_kubernetes.py "$AGENTFLOW_K8S_RENDERED"
 kubectl_bin=${KUBECTL:-kubectl}
 k=("$kubectl_bin" --context "$KUBE_CONTEXT" --namespace "$KUBE_NAMESPACE")
-"${k[@]}" apply --dry-run=server -f "$FLOWTOOL_K8S_RENDERED" >/dev/null
-"${k[@]}" wait --for=condition=complete job/flowtool-schema --timeout=180s
+"${k[@]}" apply --dry-run=server -f "$AGENTFLOW_K8S_RENDERED" >/dev/null
+"${k[@]}" wait --for=condition=complete job/agentflow-schema --timeout=180s
 for role in serve worker-1; do
-  test "$("${k[@]}" get "statefulset/flowtool-$role" -o jsonpath='{.spec.replicas}')" = 1
-  "${k[@]}" wait --for=condition=ready "pod/flowtool-$role-0" --timeout=300s
-  test "$("${k[@]}" get pods -l "flowtool-role=$role" -o name | wc -l | tr -d ' ')" = 1
+  test "$("${k[@]}" get "statefulset/agentflow-$role" -o jsonpath='{.spec.replicas}')" = 1
+  "${k[@]}" wait --for=condition=ready "pod/agentflow-$role-0" --timeout=300s
+  test "$("${k[@]}" get pods -l "agentflow-role=$role" -o name | wc -l | tr -d ' ')" = 1
 done
-pvc=data-flowtool-worker-1-0
+pvc=data-agentflow-worker-1-0
 test "$("${k[@]}" get "pvc/$pvc" -o jsonpath='{.spec.accessModes[0]}')" = ReadWriteOncePod
-test "$("${k[@]}" get "pvc/$pvc" -o jsonpath='{.spec.storageClassName}')" = "$FLOWTOOL_K8S_STORAGE_CLASS"
+test "$("${k[@]}" get "pvc/$pvc" -o jsonpath='{.spec.storageClassName}')" = "$AGENTFLOW_K8S_STORAGE_CLASS"
 test "$("${k[@]}" get "pvc/$pvc" -o jsonpath='{.status.phase}')" = Bound
-"${k[@]}" exec flowtool-serve-0 -c serve -- python -c \
+"${k[@]}" exec agentflow-serve-0 -c serve -- python -c \
   "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/readyz',timeout=3).status==200"
-"${k[@]}" exec flowtool-worker-1-0 -- python -c \
-  "import os; from pathlib import Path; assert os.getuid()==10001; assert not os.getenv('FLOWTOOL_DATABASE_URL'); assert not Path('/run/secrets/github/app.pem').exists(); assert not Path('/var/run/secrets/kubernetes.io/serviceaccount/token').exists()"
-"${k[@]}" exec -i flowtool-worker-1-0 -- python - <<'PY'
+"${k[@]}" exec agentflow-worker-1-0 -- python -c \
+  "import os; from pathlib import Path; assert os.getuid()==10001; assert not os.getenv('AGENTFLOW_DATABASE_URL'); assert not Path('/run/secrets/github/app.pem').exists(); assert not Path('/var/run/secrets/kubernetes.io/serviceaccount/token').exists()"
+"${k[@]}" exec -i agentflow-worker-1-0 -- python - <<'PY'
 from pathlib import Path
 from app.worker.state.execution import ExecutionState
 
-root = Path('/var/lib/flowtool')
+root = Path('/var/lib/agentflow')
 # The running worker owns the root lock; inspection must not scan/migrate its journals.
 records = [ExecutionState(root, int(path.stem.removeprefix('flow-'))).load()
            for path in sorted((root / 'journals').glob('flow-*.json'))]
 print(f'{sum(record is not None for record in records)} Flow journals validated; active recovery not tested')
 PY
-if [ "${FLOWTOOL_K8S_RECREATE_IDLE_WORKER:-no}" = yes ]; then
-  "${k[@]}" exec flowtool-serve-0 -c serve -- flowtool worker-drain worker-1
-  "${k[@]}" exec flowtool-serve-0 -c serve -- flowtool workers | awk '
+if [ "${AGENTFLOW_K8S_RECREATE_IDLE_WORKER:-no}" = yes ]; then
+  "${k[@]}" exec agentflow-serve-0 -c serve -- agentflow worker-drain worker-1
+  "${k[@]}" exec agentflow-serve-0 -c serve -- agentflow workers | awk '
     /^[^[:space:]]/ {
       selected = ($1 == "worker-1")
       if (selected) { found++; if ($2 != "online" || $3 != "True") bad = 1 }
@@ -48,13 +48,13 @@ if [ "${FLOWTOOL_K8S_RECREATE_IDLE_WORKER:-no}" = yes ]; then
     }
     END { exit (found != 1 || slots < 1 || bad) }
   '
-  "${k[@]}" exec flowtool-worker-1-0 -- touch /var/lib/flowtool/.k8s-smoke
-  "${k[@]}" delete pod flowtool-worker-1-0 --wait=true --timeout=90s
-  "${k[@]}" wait --for=create pod/flowtool-worker-1-0 --timeout=90s
-  "${k[@]}" wait --for=condition=ready pod/flowtool-worker-1-0 --timeout=300s
-  "${k[@]}" exec flowtool-worker-1-0 -- test -f /var/lib/flowtool/.k8s-smoke
-  "${k[@]}" exec flowtool-serve-0 -c serve -- flowtool worker-drain worker-1 --undo
+  "${k[@]}" exec agentflow-worker-1-0 -- touch /var/lib/agentflow/.k8s-smoke
+  "${k[@]}" delete pod agentflow-worker-1-0 --wait=true --timeout=90s
+  "${k[@]}" wait --for=create pod/agentflow-worker-1-0 --timeout=90s
+  "${k[@]}" wait --for=condition=ready pod/agentflow-worker-1-0 --timeout=300s
+  "${k[@]}" exec agentflow-worker-1-0 -- test -f /var/lib/agentflow/.k8s-smoke
+  "${k[@]}" exec agentflow-serve-0 -c serve -- agentflow worker-drain worker-1 --undo
 fi
 "$kubectl_bin" --context "$KUBE_CONTEXT" version -o json
-"$kubectl_bin" --context "$KUBE_CONTEXT" get storageclass "$FLOWTOOL_K8S_STORAGE_CLASS" -o jsonpath='{.provisioner}{"\n"}'
+"$kubectl_bin" --context "$KUBE_CONTEXT" get storageclass "$AGENTFLOW_K8S_STORAGE_CLASS" -o jsonpath='{.provisioner}{"\n"}'
 printf 'Idle deployment smoke passed. Active journal remount, node loss and live GitHub/model recovery NOT VALIDATED. Resources retained.\n'

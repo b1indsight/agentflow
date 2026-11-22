@@ -56,7 +56,7 @@ def _codex_environment(
     if context is not None:
         environment.update(git_credential_environment(context.github.token if context.github else None))
         if context.mcp_token is not None:
-            environment["FLOWTOOL_MCP_TOKEN"] = context.mcp_token.get_secret_value()
+            environment["AGENTFLOW_MCP_TOKEN"] = context.mcp_token.get_secret_value()
     return environment
 
 
@@ -69,7 +69,7 @@ def _mcp_args(context: CodingExecutionContext | None) -> list[str]:
     if url is None:
         return ["-c", 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}']
     config = (
-        f'{{url={json.dumps(url)}, bearer_token_env_var="FLOWTOOL_MCP_TOKEN", '
+        f'{{url={json.dumps(url)}, bearer_token_env_var="AGENTFLOW_MCP_TOKEN", '
         'enabled_tools=["open_pr","search_flows"], required=true, default_tools_approval_mode="auto"}'
     )
     return ["-c", f"mcp_servers.flow={config}"]
@@ -87,7 +87,7 @@ def _start_args(
     if not trusted_host:
         raise RuntimeError(
             "Codex trusted-host full-access execution requires "
-            "FLOWTOOL_TRUSTED_HOST_EXECUTION=true"
+            "AGENTFLOW_TRUSTED_HOST_EXECUTION=true"
         )
     args = [
         CODEX_BIN,
@@ -157,7 +157,7 @@ class CodexAgent(CodingAgent):
         if not self.trusted_host:
             raise RuntimeError(
                 "Codex trusted-host full-access execution requires "
-                "FLOWTOOL_TRUSTED_HOST_EXECUTION=true"
+                "AGENTFLOW_TRUSTED_HOST_EXECUTION=true"
             )
         if session_id is None:
             args = _start_args(prompt, cwd, trusted_host=self.trusted_host, context=context)
@@ -176,7 +176,7 @@ class CodexAgent(CodingAgent):
             args.extend(["--model", model])
         if effort is not None:
             args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
-        with tempfile.TemporaryDirectory(prefix="flowtool-coding-") as directory:
+        with tempfile.TemporaryDirectory(prefix="agentflow-coding-") as directory:
             run_directory = Path(directory)
             environment = _codex_environment(context=context)
             if context is not None and context.github is not None:
@@ -452,7 +452,7 @@ class CodexHistory:
             if not isinstance(value, str):
                 raise TypeError("non-text history field")
             # Known runtime credentials and common token forms must not leak via tool text.
-            for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "FLOWTOOL_WORKER_TOKEN"):
+            for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "AGENTFLOW_WORKER_TOKEN"):
                 secret = os.environ.get(key)
                 if secret:
                     value = value.replace(secret, "[REDACTED]")

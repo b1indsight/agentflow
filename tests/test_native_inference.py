@@ -30,7 +30,7 @@ async def test_schema_calls_use_existing_cwd_and_clean_only_owned_files(monkeypa
         directory = Path(kwargs["cwd"])
         assert directory == tmp_path
         assert {entry for entry in directory.iterdir() if entry.is_dir()} == {native}
-        assert not any(key.startswith(("FLOWTOOL_", "GIT_CONFIG_")) for key in kwargs["env"])
+        assert not any(key.startswith(("AGENTFLOW_", "GIT_CONFIG_")) for key in kwargs["env"])
         schema, = directory.glob("output-schema-*.json")
         schemas.append(schema)
         assert json.loads(schema.read_text())["type"] == "object"

@@ -116,7 +116,7 @@ GitHub 不提供“线程评论版本未变才 resolve”的跨请求事务；�
 deferred/clarification/遗漏/新版本/远端 SHA 变化时保留；reply 在 resolve 前完成；多次重放只有
 一个回复和一次必要 mutation；所有路径不新开 PR、不重新跑 CodeAgent、不错误消费下一批反馈。
 
-执行 Ruff、Mypy、完整 pytest（含 `FLOWTOOL_TEST_DATABASE_URL` PostgreSQL 场景）和
+执行 Ruff、Mypy、完整 pytest（含 `AGENTFLOW_TEST_DATABASE_URL` PostgreSQL 场景）和
 `uv build --no-sources`。fake GitHub/Codex/bub E2E 验证控制流，不代替真实集成验收。
 升级前处理旧 pending results/effects；不把旧本地 resolved 标记迁移成已核验远端 receipt。
 

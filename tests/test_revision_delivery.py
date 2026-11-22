@@ -107,7 +107,7 @@ async def revision_workspace(tmp_path):
     secret = AssignmentSecret(push=PushSecret(
         repository="owner/repo", token=SecretStr("fresh-token"),
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
-        bot_login="flowtool[bot]", bot_user_id=7654321,
+        bot_login="agentflow[bot]", bot_user_id=7654321,
     ))
     journal = ExecutionState(root, 1)
     journal.record_received(
@@ -147,7 +147,7 @@ async def revision_backend(revision_workspace, request):
     if request.param is VcsKind.JJ:
         if shutil.which("jj") is None:
             pytest.skip("jj is not installed")
-        env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+        env = os.environ | {"JJ_USER": "AgentFlow Test", "JJ_EMAIL": "agentflow@example.test"}
         await _jj("git", "init", "--colocate", cwd=repo, env=env)
         await _jj("bookmark", "track", task.branch, "--remote=origin", cwd=repo, env=env)
     return request.param
@@ -235,7 +235,7 @@ async def test_retry_keeps_unfinished_edits_but_does_not_accept_an_unpushed_comm
             assert await local_commit(cwd) == before
             assert (cwd / "README.md").read_text() == "unfinished\n"
             if revision_backend is VcsKind.JJ:
-                env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+                env = os.environ | {"JJ_USER": "AgentFlow Test", "JJ_EMAIL": "agentflow@example.test"}
                 await _jj("commit", "-m", "Local change", cwd=cwd, env=env)
                 await _jj("bookmark", "set", task.branch, "-r", "@-", cwd=cwd, env=env)
             else:
@@ -269,7 +269,7 @@ async def test_revision_runs_on_fetched_external_contents(
     # The PR read and fetch can observe different heads, including a rewritten history.
     root, repo, task, secret, pool = revision_workspace
     backend = revision_backend
-    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    env = os.environ | {"JJ_USER": "AgentFlow Test", "JJ_EMAIL": "agentflow@example.test"}
     observed = publish_external(revision_collaborator, task, rewrite=rewrite)
     task = task.model_copy(update={"expected_head_sha": observed})
     (revision_collaborator / "external.txt").write_text("newer external contents\n")
@@ -322,16 +322,16 @@ async def test_fetch_snapshot_remains_the_baseline_when_remote_changes_before_ag
     root, repo, task, secret, pool = revision_workspace
     baseline = publish_external(revision_collaborator, task, rewrite=True)
     task = task.model_copy(update={"expected_head_sha": baseline})
-    monkeypatch.setenv("FLOWTOOL_WORKER_TOKEN", "worker-secret")
-    monkeypatch.setenv("FLOWTOOL_PUSH_TOKEN", "stale-secret")
+    monkeypatch.setenv("AGENTFLOW_WORKER_TOKEN", "worker-secret")
+    monkeypatch.setenv("AGENTFLOW_PUSH_TOKEN", "stale-secret")
     _git("config", "credential.helper", "!exit 97", cwd=repo)
     run = vcs._run
 
     async def advance_after_fetch(*args, **kwargs):
         if "fetch" in args and f"refs/heads/{task.branch}" in args:
             assert kwargs["cwd"] != repo
-            assert kwargs["environment"]["FLOWTOOL_PUSH_TOKEN"] == "fresh-token"
-            assert "FLOWTOOL_WORKER_TOKEN" not in kwargs["environment"]
+            assert kwargs["environment"]["AGENTFLOW_PUSH_TOKEN"] == "fresh-token"
+            assert "AGENTFLOW_WORKER_TOKEN" not in kwargs["environment"]
             assert all("fresh-token" not in arg and "stale-secret" not in arg for arg in args)
             # Resolve credentials offline with the actual fetch flags: a later command-line
             # helper reset used to erase the assignment helper despite its environment presence.
@@ -379,7 +379,7 @@ async def test_revision_accepts_local_work_published_only_in_new_history(
     _, repo, task, _, _ = revision_workspace
     remote = publish_external(revision_collaborator, task, rewrite=True)
     if revision_backend is VcsKind.JJ:
-        env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+        env = os.environ | {"JJ_USER": "AgentFlow Test", "JJ_EMAIL": "agentflow@example.test"}
         await _jj("git", "fetch", "--remote", "origin", "-b", task.branch, cwd=repo, env=env)
         await _jj("new", task.branch, cwd=repo, env=env)
     else:
@@ -414,7 +414,7 @@ async def test_jj_baseline_path_transitions_preserve_retained_leaves(
         subprocess.check_output, ["git", "rev-parse", "HEAD"], cwd=repo, text=True,
     )).strip()
     _git("pull", "--ff-only", cwd=revision_collaborator)
-    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    env = os.environ | {"JJ_USER": "AgentFlow Test", "JJ_EMAIL": "agentflow@example.test"}
     await _jj("git", "init", "--colocate", cwd=repo, env=env)
     await _jj("bookmark", "track", task.branch, "--remote=origin", cwd=repo, env=env)
     with (repo / ".git/info/exclude").open("a") as excluded:
@@ -518,9 +518,9 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, monkeypat
                 ["git", "log", "-1", "--format=%an <%ae>%n%cn <%ce>%n%B"], cwd=repo, text=True,
             )
             assert commit.splitlines()[:2] == [
-                "flowtool[bot] <7654321+flowtool[bot]@users.noreply.github.com>",
+                "agentflow[bot] <7654321+agentflow[bot]@users.noreply.github.com>",
             ] * 2
-            assert "Co-authored-by: FlowTool Test <flowtool@example.test>" in commit
+            assert "Co-authored-by: AgentFlow Test <agentflow@example.test>" in commit
 
 
 @pytest.mark.parametrize("behavior,success", [
@@ -599,7 +599,7 @@ async def test_revision_preflight_rejects_before_model_execution(
 ):
     # External synchronization must not erase work, including ignored paths newly tracked upstream.
     root, repo, task, secret, pool = revision_workspace
-    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    env = os.environ | {"JJ_USER": "AgentFlow Test", "JJ_EMAIL": "agentflow@example.test"}
     remote = publish_external(revision_collaborator, task, rewrite=True)
     preserved = repo / "README.md"
     if problem == "unpublished":
@@ -976,7 +976,7 @@ async def test_revision_checks_real_jj_repository(revision_workspace, behavior):
     if shutil.which("jj") is None:
         pytest.skip("jj is not installed")
     _, repo, task, _, _ = revision_workspace
-    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    env = os.environ | {"JJ_USER": "AgentFlow Test", "JJ_EMAIL": "agentflow@example.test"}
     await _jj("git", "init", "--colocate", cwd=repo, env=env)
     await _jj("bookmark", "track", task.branch, "--remote=origin", cwd=repo, env=env)
     context = await prepare_revision_context(repo, task.branch, task.expected_head_sha)
@@ -1003,7 +1003,7 @@ async def test_answer_checks_real_jj_working_commit(revision_workspace, changed_
     if shutil.which("jj") is None:
         pytest.skip("jj is not installed")
     root, repo, task, secret, pool = revision_workspace
-    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    env = os.environ | {"JJ_USER": "AgentFlow Test", "JJ_EMAIL": "agentflow@example.test"}
     await _jj("git", "init", "--colocate", cwd=repo, env=env)
     # jj's working commit differs from the PR head even before a read-only task runs.
     task = task.model_copy(update={"purpose": "answer"})
@@ -1027,7 +1027,7 @@ async def test_changed_repository_after_session_rejection_does_not_fallback(
     revision_workspace, revision_backend, mutation,
 ):
     root, repo, task, secret, pool = revision_workspace
-    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    env = os.environ | {"JJ_USER": "AgentFlow Test", "JJ_EMAIL": "agentflow@example.test"}
 
     class ChangedRejection(RevisionAgent):
         async def resume(self, *args, **kwargs):
@@ -1103,7 +1103,7 @@ async def test_jj_sync_preserves_other_unpublished_changes(revision_workspace, r
     if shutil.which("jj") is None:
         pytest.skip("jj is not installed")
     _, repo, task, _, _ = revision_workspace
-    env = os.environ | {"JJ_USER": "FlowTool Test", "JJ_EMAIL": "flowtool@example.test"}
+    env = os.environ | {"JJ_USER": "AgentFlow Test", "JJ_EMAIL": "agentflow@example.test"}
     await _jj("git", "init", "--colocate", cwd=repo, env=env)
     await _jj("bookmark", "track", task.branch, "--remote=origin", cwd=repo, env=env)
     (repo / "other-work").write_text("unpublished side change")

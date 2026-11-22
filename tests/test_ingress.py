@@ -117,7 +117,7 @@ async def test_valid_signature_dispatches_webhook(
         EventRouter(
             ControlService(database=store.database),
             settings,
-            bot_login="flowtool[bot]",
+            bot_login="agentflow[bot]",
             database=store.database,
         ),
         settings,

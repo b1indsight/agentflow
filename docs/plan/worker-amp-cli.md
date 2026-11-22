@@ -53,8 +53,8 @@ INITIAL → REVISION → ARCHIVE 流程。默认仍为 Codex；一个 worker 固
 
 ## 配置与发布合同
 
-- `FLOWTOOL_CODING_AGENT=amp`；默认 `codex`。
-- `FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200`；Amp 固定 `--mode low`。
+- `AGENTFLOW_CODING_AGENT=amp`；默认 `codex`。
+- `AGENTFLOW_AMP_RUN_TIMEOUT_SECONDS=1200`；Amp 固定 `--mode low`。
 - worker 镜像固定 Amp `0.0.1792555249-g702cd1`，下载官方 Linux x64 产物并校验 SHA-256；
   具体值以 Dockerfile 为准，不在计划中重复维护。
 - 最终合同为 **wire v15 / journal v4 / manifest v1**；serve/worker 固定同一 commit 或镜像。
@@ -151,7 +151,7 @@ skill manifest、配置解析器或兼容层。trusted-host、进程监督、Sch
    `amp_environment()` 和 `_codex_environment()` 使用，避免两套规则漂移：
    - 保留 HOME、PATH、原生配置位置、CLI 登录变量，以及 MCP/skill 所需的自定义变量；
      Amp 的更新检查仍由 `AMP_SKIP_UPDATE_CHECK=1` 关闭。
-   - 先移除全部 ambient `FLOWTOOL_*`、`GH_*`、`GITHUB_*`，以及 Git 凭据/配置/仓库重定向、
+   - 先移除全部 ambient `AGENTFLOW_*`、`GH_*`、`GITHUB_*`，以及 Git 凭据/配置/仓库重定向、
      askpass、SSH 认证入口；保留既有 Git 作者/提交者 NAME、EMAIL 语义。
    - 移除父 agent 的运行时 thread 身份变量，例如 `AMP_CURRENT_THREAD_ID`，不继承父会话身份。
      不按整个 vendor 前缀一律删除，否则会误删原生配置入口或合法 MCP 变量。
@@ -355,8 +355,8 @@ INITIAL 丢弃 adapter 的 `failure_detail`，controler 又把后端名称写死
    示例：`编码失败（exit=124，阶段=execution）：Amp 连续 1200 秒无新输出，执行超时。`
    `result`、`delivery`、`push` 等既有阶段继续准确显示。
 
-6. **配置与文档同步。** 保留 `FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS` 与
-   `FLOWTOOL_CODEX_RUN_TIMEOUT_SECONDS` 名称及 1200 默认值，将它们明确为编码空闲秒数；
+6. **配置与文档同步。** 保留 `AGENTFLOW_AMP_RUN_TIMEOUT_SECONDS` 与
+   `AGENTFLOW_CODEX_RUN_TIMEOUT_SECONDS` 名称及 1200 默认值，将它们明确为编码空闲秒数；
    两者均要求正且有限。更新 README、部署说明、架构中的单轮/修订总时限描述和 changelog，
    保留历史查询、VCS 命令、恢复/租约的独立时限说明。现有配置在新 worker 上按新语义解释，
    不保留旧编码绝对时限作为 fallback。
@@ -459,7 +459,7 @@ Python 假 CLI 子进程另行确认真实管道续期、Amp 输出上限与进�
 空闲 helper 检查通过。构建保留既有大 chunk 提示。首次全量运行遇到旧凭据回收测试仍只模拟
 `communicate`、等待启动信号不返回；已将该测试改为 reader 模拟，并单独验证凭据临时目录
 保留到进程回收结束。消融脚本是一次性本地验证，不进入仓库。
-最终通过 `FLOWTOOL_TEST_DATABASE_URL` 指向独立本机 PostgreSQL 实例运行全量 pytest，
+最终通过 `AGENTFLOW_TEST_DATABASE_URL` 指向独立本机 PostgreSQL 实例运行全量 pytest，
 全部通过、无跳过，仅有既有 Starlette/httpx 弃用警告。全量日志保存在 `full-pytest.log`。
 
 可复现入口：`python -m pytest -q tests/test_worker_idle.py tests/test_amp_driver.py

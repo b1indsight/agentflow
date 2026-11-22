@@ -38,7 +38,7 @@
 
 覆盖配置解析、核心枚举/Pydantic 契约和 SQLite schema/repository 行为，重点验证：
 
-- `FLOWTOOL_` 配置、逗号 allowlist 和路径展开；
+- `AGENTFLOW_` 配置、逗号 allowlist 和路径展开；
 - active flow 唯一约束，同时允许终态 flow 后重新触发；
 - flow/attempt/job 的创建与往返、当前 attempt 关联；
 - job enqueue/claim/heartbeat/finish，以及 stale running job 重新排队；
@@ -67,8 +67,8 @@ Mypy 错误。实施时在持久化边界做显式校验/收窄，让需要数�
 验证 worker 能 claim queued job、调用 engine、成功置 DONE、异常置 FAILED，并在启动时恢复 stale
 job。测试不等待真实轮询间隔。随后执行真实 CLI/runtime smoke：
 
-1. `flowtool --help`；
-2. 使用临时数据库启动 `flowtool serve`；
+1. `agentflow --help`；
+2. 使用临时数据库启动 `agentflow serve`；
 3. 请求 `/healthz` 并确认 200；
 4. 关闭服务并确认正常清理。
 
@@ -104,7 +104,7 @@ Ruff 的现有 5 项问题随其所属模块修正；Mypy 错误随行为和测�
 - `ruff check app tests` 通过；
 - `mypy app tests` 通过；
 - HMAC/health/store/worker 的 M0 验收场景由自动化测试覆盖；
-- `flowtool --help` 成功；临时数据库下 `flowtool serve` 可启动且 `/healthz` 返回 200；
+- `agentflow --help` 成功；临时数据库下 `agentflow serve` 可启动且 `/healthz` 返回 200；
 - 测试不访问网络、不使用真实 GitHub/Codex/bub 凭据，不依赖 sleep；
 - 最终 diff 只包含 M0 验收所需代码、测试和文档。
 
@@ -129,7 +129,7 @@ lifespan，而不是已弃用的同步 TestClient；这保持了原计划的隔�
 
 - 19 个 pytest 测试全部通过；
 - `ruff check app tests` 与 `mypy app tests` 通过；
-- `uv sync --locked`、`flowtool --help` 通过；
+- `uv sync --locked`、`agentflow --help` 通过；
 - 使用临时 SQLite 启动真实服务后，`GET /healthz` 返回 200，服务正常关闭；
 - 测试未访问 GitHub/Codex/bub，也未使用真实凭据或真实轮询 sleep。
 

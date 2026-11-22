@@ -18,7 +18,7 @@ def validate(path: Path, placeholders: bool) -> None:
             assert spec['updateStrategy']['type'] == 'OnDelete'
         template = spec['template']
         pod = template['spec']
-        role = template['metadata']['labels']['flowtool-role']
+        role = template['metadata']['labels']['agentflow-role']
         assert pod['automountServiceAccountToken'] is False
         assert not pod.get('hostPID') and not pod.get('hostNetwork')
         assert pod['securityContext']['runAsNonRoot'] is True
@@ -33,17 +33,17 @@ def validate(path: Path, placeholders: bool) -> None:
         secrets = {v['secret']['secretName'] for v in pod.get('volumes', []) if 'secret' in v}
         secrets |= {e['secretRef']['name'] for c in pod['containers'] for e in c.get('envFrom', []) if 'secretRef' in e}
         if role.startswith('worker-'):
-            assert secrets == {f'flowtool-{role}-env', 'flowtool-worker-ca'}, 'worker secret boundary changed'
+            assert secrets == {f'agentflow-{role}-env', 'agentflow-worker-ca'}, 'worker secret boundary changed'
             for claim in spec['volumeClaimTemplates']:
                 assert claim['spec']['accessModes'] == ['ReadWriteOncePod']
                 assert placeholders or not claim['spec']['storageClassName'].startswith('replace-')
         elif role == 'serve':
-            assert secrets == {'flowtool-serve-env', 'flowtool-app-key', 'flowtool-worker-tls'}
+            assert secrets == {'agentflow-serve-env', 'agentflow-app-key', 'agentflow-worker-tls'}
             serve = next(c for c in pod['containers'] if c['name'] == 'serve')
             assert 'livenessProbe' not in serve and 'startupProbe' not in serve, 'DB stalls must not restart serve'
             assert serve['readinessProbe']['httpGet']['path'] == '/readyz'
         elif role == 'cloudflare':
-            assert secrets == {'flowtool-tunnel-credentials'}
+            assert secrets == {'agentflow-tunnel-credentials'}
     for resource in objects:
         if resource['kind'] == 'Service':
             assert resource['spec'].get('type', 'ClusterIP') == 'ClusterIP', 'no public service'

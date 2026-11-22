@@ -13,7 +13,7 @@ PostgreSQL 生产基线 17.x（Compose 为固定 digest），用同 major 的 pg
 [pg_dump](https://www.postgresql.org/docs/17/app-pgdump.html) 的一致快照仅覆盖数据库，不覆盖 worker 文件。
 
 1. 停 Cloudflare/公网 webhook 入口，记录最后成功 delivery 与 inbox；GitHub 后续可能需要人工重投。
-2. 每 worker `flowtool worker-drain ID`，允许现有 Flow 收敛；检查 jobs、results/effects、stop 和绑定。
+2. 每 worker `agentflow worker-drain ID`，允许现有 Flow 收敛；检查 jobs、results/effects、stop 和绑定。
    drain 不会结束正在等待 review 的 Flow，不能为赶备份强制 cancel。
 3. 停 serve，再停 worker，禁用自动重启/重建；验证旧进程和子进程已退出，所有写入源已停止。
    systemd 用 `systemctl stop`；Compose 用 `stop`（不 down -v）；K8s 两类 StatefulSet scale 0，
@@ -69,7 +69,7 @@ root identity 变化也需独立迁移机制；该前置未完成前不承诺活
 ## 可重复隔离演练
 
 ```sh
-FLOWTOOL_TEST_DATABASE_URL='postgresql://test_user@127.0.0.1:5432/test_db' \
+AGENTFLOW_TEST_DATABASE_URL='postgresql://test_user@127.0.0.1:5432/test_db' \
 uv run python -m scripts.smoke.recovery --run --work-dir .cache/2026-09-18/my-recovery \
   --postgres-bin /path/to/postgresql/bin --revision REVIEWED_COMMIT
 ```

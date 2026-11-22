@@ -38,16 +38,16 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
     native_settings = '{// repository policy\n"amp.mcpPermissions":[]}'
     settings.write_text(native_settings)
     await asyncio.to_thread(subprocess.run, ["git", "init", "-q"], cwd=tmp_path, check=True)
-    await configure_git_identity(tmp_path, "flowtool[bot]", 7654321)
+    await configure_git_identity(tmp_path, "agentflow[bot]", 7654321)
     monkeypatch.delenv("AMP_DISABLE_AMP_COAUTHOR_TRAILER", raising=False)
     monkeypatch.setenv("AMP_SETTINGS_FILE", str(tmp_path / "user.jsonc"))
     monkeypatch.setenv("EXAMPLE_MCP_TOKEN", "custom-mcp-token")
-    monkeypatch.setenv("FLOWTOOL_MCP_TOKEN", "stale-broker-token")
+    monkeypatch.setenv("AGENTFLOW_MCP_TOKEN", "stale-broker-token")
     schema = tmp_path / "schema.json"
     schema.write_text('{"type":"object","required":["caller_owned"]}')
     context = CodingExecutionContext(
         github=GitHubCapability(SecretStr("bot-secret"), "owner/repo",
-                                datetime.now(UTC) + timedelta(minutes=5), "flowtool[bot]", 7654321),
+                                datetime.now(UTC) + timedelta(minutes=5), "agentflow[bot]", 7654321),
         mcp_url=None if resume else "http://127.0.0.1:12345/mcp",
         mcp_token=None if resume else SecretStr("broker-secret"),
     )
@@ -62,7 +62,7 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
         assert cwd == tmp_path
         assert "bot-secret" not in " ".join(args) and "broker-secret" not in input_text
         assert "caller_owned" in input_text and "task" in input_text
-        assert env["GH_TOKEN"] == env["FLOWTOOL_PUSH_TOKEN"] == "bot-secret"
+        assert env["GH_TOKEN"] == env["AGENTFLOW_PUSH_TOKEN"] == "bot-secret"
         assert env["EXAMPLE_MCP_TOKEN"] == "custom-mcp-token"
         assert env["AMP_SETTINGS_FILE"] == str(tmp_path / "user.jsonc")
         assert env["AMP_DISABLE_AMP_COAUTHOR_TRAILER"] == "1"
@@ -74,7 +74,7 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
             assert args[:3] == ["threads", "continue", THREAD]
             assert "--mode" not in args and "--model" not in args and "--effort" not in args
             assert broker == {"url": "http://127.0.0.1:0/mcp"}
-            assert "FLOWTOOL_MCP_TOKEN" not in env
+            assert "AGENTFLOW_MCP_TOKEN" not in env
         else:
             if model is None:
                 assert args[args.index("--mode") + 1] == "low"
@@ -88,8 +88,8 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
             else:
                 assert args[args.index("--effort") + 1] == effort
             assert broker["url"] == context.mcp_url
-            assert broker["headers"]["Authorization"] == "Bearer ${FLOWTOOL_MCP_TOKEN}"
-            assert env["FLOWTOOL_MCP_TOKEN"] == "broker-secret"
+            assert broker["headers"]["Authorization"] == "Bearer ${AGENTFLOW_MCP_TOKEN}"
+            assert env["AGENTFLOW_MCP_TOKEN"] == "broker-secret"
         return AmpProcessResult(stream(result='{"caller_owned":"bot-secret"}', tools=[
             "shell_command", "skill", "tool_search", "code_exec", "mcp__example__lookup",
         ]), b"", 0)
@@ -224,7 +224,7 @@ async def test_unproven_missing_thread_does_not_trigger_replay(monkeypatch, tmp_
 def test_environment_keeps_amp_login_but_excludes_ambient_credentials():
     environment = amp_environment({"HOME": "/worker", "AMP_API_KEY": "amp-secret",
                                    "PATH": "/usr/bin", "GIT_AUTHOR_NAME": "bot",
-                                   "FLOWTOOL_WORKER_TOKEN": "worker-secret",
+                                   "AGENTFLOW_WORKER_TOKEN": "worker-secret",
                                    "GH_TOKEN": "personal", "OPENAI_API_KEY": "other",
                                    "AMP_URL": "https://amp.example",
                                    "GIT_CONFIG_PARAMETERS": "personal-credentials",
@@ -233,7 +233,7 @@ def test_environment_keeps_amp_login_but_excludes_ambient_credentials():
     assert environment["HOME"] == "/worker" and environment["AMP_API_KEY"] == "amp-secret"
     assert "GIT_AUTHOR_NAME" not in environment  # Workspace Git config owns commit identity.
     assert environment["OPENAI_API_KEY"] == "other" and environment["AMP_URL"] == "https://amp.example"
-    assert not {"GH_TOKEN", "FLOWTOOL_WORKER_TOKEN", "GIT_CONFIG_PARAMETERS",
+    assert not {"GH_TOKEN", "AGENTFLOW_WORKER_TOKEN", "GIT_CONFIG_PARAMETERS",
                 "SSH_AUTH_SOCK", "AMP_CURRENT_THREAD_ID"} & environment.keys()
 
 

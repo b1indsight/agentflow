@@ -359,7 +359,7 @@ def cancel_jobs(self, flow_id: int, *, reason: str = "Flow cancelled") -> None
 - **语句序列对照（临时，不提交）：** 第 1 步的记录与最终实现逐场景比较归一化后的 SQL 文本和事务边界。预期只有“边界情况”的两项差异；其他差异要么修掉，要么作为新的决定记入时间线并重新请求确认。
 - **结构性测试（新增，并入 `tests/test_boundaries.py`）：** `app/persistence` 内对 `app.persistence` 的函数内导入只允许 `flows.py → reviews` 一处。
 - **`_ELIGIBLE_JOB` 等价性测试（新增）：** 见“两项判断”。
-- **全量检查：** 设置 `FLOWTOOL_TEST_DATABASE_URL` 后执行 `uv run pytest --no-testmon -q --tb=short -rs`，以及 `uv run ruff check app tests scripts/smoke/recovery.py`、`uv run mypy app tests`、`uv run python scripts/build_console.py`、`uv build --no-sources` 和 diff 空白检查。未配置数据库导致的 skip 不算通过。本项没有界面改动，不做截图。
+- **全量检查：** 设置 `AGENTFLOW_TEST_DATABASE_URL` 后执行 `uv run pytest --no-testmon -q --tb=short -rs`，以及 `uv run ruff check app tests scripts/smoke/recovery.py`、`uv run mypy app tests`、`uv run python scripts/build_console.py`、`uv build --no-sources` 和 diff 空白检查。未配置数据库导致的 skip 不算通过。本项没有界面改动，不做截图。
 
 **简化对照：** 在全量回归后、代码审查前执行，实验文件用完删除。本项主要是移动和抽取，新增的机制只有纯函数和模块边界，对照集中在这两点：
 

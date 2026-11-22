@@ -64,7 +64,7 @@ def _coding_failure(job: Job, now: datetime) -> Observation:
     assert job.result_payload is not None and job.result_digest is not None
     inbox = decode_result_inbox(job.result_payload, job_id=job.id, assignment_token=job.assignment_token,
                                 result_digest=job.result_digest)
-    author, body = "FlowTool", "控制端处理任务结果失败。"
+    author, body = "AgentFlow", "控制端处理任务结果失败。"
     if isinstance(inbox.terminal, Failed):
         if inbox.source == "worker":
             author, body = "Worker", "Worker 报告任务失败。"

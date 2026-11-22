@@ -25,7 +25,7 @@ from app.worker.cli import app as worker_app
 if TYPE_CHECKING:
     from app.persistence.store import Store
 
-app = typer.Typer(help="FlowTool admin CLI")
+app = typer.Typer(help="AgentFlow admin CLI")
 app.add_typer(worker_app, name="worker")
 flow_app = typer.Typer(help="flow 运维")
 app.add_typer(flow_app, name="flow")

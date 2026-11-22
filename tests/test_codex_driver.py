@@ -79,8 +79,8 @@ def test_codex_environment_removes_worker_and_github_credentials() -> None:
             "OPENAI_API_KEY": "codex-secret",
             "HTTPS_PROXY": "https://proxy.example",
             "SSL_CERT_FILE": "/etc/ssl/corp.pem",
-            "FLOWTOOL_WORKER_TOKEN": "worker-secret",
-            "FLOWTOOL_DATABASE_URL": "database-secret",
+            "AGENTFLOW_WORKER_TOKEN": "worker-secret",
+            "AGENTFLOW_DATABASE_URL": "database-secret",
             "GH_TOKEN": "github-secret",
             "GITHUB_TOKEN": "github-secret",
             "GIT_CONFIG_COUNT": "1",
@@ -107,7 +107,7 @@ def test_codex_environment_removes_worker_and_github_credentials() -> None:
 def test_run_context_injects_only_scoped_push_and_mcp_capabilities() -> None:
     context = CodingExecutionContext(
         github=GitHubCapability(SecretStr("push-secret"), "owner/repo",
-                                datetime.now(UTC) + timedelta(minutes=5), "flowtool[bot]", 7654321),
+                                datetime.now(UTC) + timedelta(minutes=5), "agentflow[bot]", 7654321),
         mcp_url="http://127.0.0.1:12345/mcp",
         mcp_token=SecretStr("mcp-secret"),
     )
@@ -120,13 +120,13 @@ def test_run_context_injects_only_scoped_push_and_mcp_capabilities() -> None:
         context=context,
     )
 
-    assert environment["FLOWTOOL_PUSH_TOKEN"] == "push-secret"
+    assert environment["AGENTFLOW_PUSH_TOKEN"] == "push-secret"
     assert environment["GIT_CONFIG_KEY_1"].endswith("helper")
     assert "push-secret" not in " ".join(args)
-    assert environment["FLOWTOOL_MCP_TOKEN"] == "mcp-secret"
+    assert environment["AGENTFLOW_MCP_TOKEN"] == "mcp-secret"
     assert "mcp-secret" not in " ".join(args)
     assert any('url="http://127.0.0.1:12345/mcp"' in item for item in args)
-    assert any('bearer_token_env_var="FLOWTOOL_MCP_TOKEN"' in item for item in args)
+    assert any('bearer_token_env_var="AGENTFLOW_MCP_TOKEN"' in item for item in args)
     config = tomllib.loads(next(item for item in args if item.startswith("mcp_servers.flow=")))
     assert set(config["mcp_servers"]["flow"]["enabled_tools"]) == {"open_pr", "search_flows"}
     assert not any("mcp_servers.flow.command" in item for item in args)

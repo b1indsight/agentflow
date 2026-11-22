@@ -120,7 +120,7 @@ SQL 保留版本、授权信号和并发事实查询；TRIAGE/REVISION 选择、
 
 ### 2026-09-29 · 4. 最终验证
 
-- `FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55439/postgres uv run --no-sync pytest -q --tb=short`：855 passed，0 skipped，58.67 秒。数据库为本次独立实例，测试按 schema 隔离。
+- `AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55439/postgres uv run --no-sync pytest -q --tb=short`：855 passed，0 skipped，58.67 秒。数据库为本次独立实例，测试按 schema 隔离。
 - Ruff、Mypy（136 个源文件）、`uv build --no-sources` 和 `git diff --check` 全部通过。
 - 首轮全量使用 Unix socket，现有 `freeze_connection` 的 3 个 TCP 回环校验用例失败；切换 TCP 后通过。原 55429 TCP 端口已被其他实例占用，最终在本次实例的 55439 端口复核。此过程未修改备份恢复实现或测试。
 - 唯一 warning 来自现有 FastAPI/Starlette TestClient 的依赖弃用提示，不影响本次结果。

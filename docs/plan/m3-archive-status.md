@@ -78,7 +78,7 @@ Flow 在归档期间保持 ACTIVE，占用原 binding，现有同 Issue 活跃 F
   ResultPlan、回执和本地完成边界，外部 GitHub 用 adapter 替身注入故障。
 
 实现完成运行 `uv run ruff check app tests`、`uv run mypy app tests`、完整 pytest
-（配置 `FLOWTOOL_TEST_DATABASE_URL`，数据库用例不跳过）与 `uv build --no-sources`。
+（配置 `AGENTFLOW_TEST_DATABASE_URL`，数据库用例不跳过）与 `uv build --no-sources`。
 本计划阶段仅检查文档差异与链接，未运行产品测试。
 
 真实 M3 验收在专用仓库使用真实 App 和原绑定 worker：创建 Flow PR → 用户合并 → 核对
@@ -100,7 +100,7 @@ M1/M2 的独立真实验收和同秒 webhook 重放缺陷继续保留在原状�
 
 自动化证据：
 
-- `FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run pytest -q --tb=short`：
+- `AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres uv run pytest -q --tb=short`：
   **483 passed / 0 skipped**，包含真实 PostgreSQL、Git/jj 目录、worker 断线/ACK 重放和下一 Flow 复用。
 - 新增测试覆盖标签并发变化、已有标签、缺失定义/404、配置冲突、部分回写与永久拒绝、429/503、
   响应丢失、评论落账前重启、真实连接池重建、未知评论、冻结配置和 marker、合并版本变化、历史计划及插件异常。

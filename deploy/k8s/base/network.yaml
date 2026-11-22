@@ -1,7 +1,7 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: flowtool-default-deny
+  name: agentflow-default-deny
 spec:
   podSelector: {}
   policyTypes:
@@ -13,11 +13,11 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: flowtool-serve
+  name: agentflow-serve
 spec:
   podSelector:
     matchLabels:
-      flowtool-role: serve
+      agentflow-role: serve
   policyTypes:
   - Ingress
   - Egress
@@ -25,14 +25,14 @@ spec:
   - from:
     - podSelector:
         matchLabels:
-          flowtool-role: worker-1
+          agentflow-role: worker-1
     ports:
     - protocol: TCP
       port: 8443
   - from:
     - podSelector:
         matchLabels:
-          flowtool-role: cloudflare
+          agentflow-role: cloudflare
     ports:
     - protocol: TCP
       port: 8000
@@ -77,11 +77,11 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: flowtool-worker-1
+  name: agentflow-worker-1
 spec:
   podSelector:
     matchLabels:
-      flowtool-role: worker-1
+      agentflow-role: worker-1
   policyTypes:
   - Ingress
   - Egress
@@ -102,7 +102,7 @@ spec:
   - to:
     - podSelector:
         matchLabels:
-          flowtool-role: serve
+          agentflow-role: serve
     ports:
     - protocol: TCP
       port: 8443
@@ -123,11 +123,11 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: flowtool-schema
+  name: agentflow-schema
 spec:
   podSelector:
     matchLabels:
-      flowtool-role: schema
+      agentflow-role: schema
   policyTypes:
   - Ingress
   - Egress

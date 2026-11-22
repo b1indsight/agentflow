@@ -69,7 +69,7 @@
   lifecycle、installation 与 delivery version。过期快照只延后复查。
 - webhook 和 poll 共用 `ControlService.record_merge`；合并事实、任务收敛、ARCHIVE 与
   poll 成功时间同事务提交，提交后再通知插件与 worker。poll 不伪造 webhook delivery ID。
-- `FLOWTOOL_RECONCILE_INTERVAL_SECONDS` 默认 300，批次默认 64、并发默认 4；
+- `AGENTFLOW_RECONCILE_INTERVAL_SECONDS` 默认 300，批次默认 64、并发默认 4；
   永久读取错误低频探测，临时错误持久退避；共用 `github_retry.retry_delay` 保持 effects 的服务端等待语义。
 - `flow show` 展示检查时间/错误；普通 close 和 head/base 漂移只记诊断，不修改已核验交付。
 - 实际 PostgreSQL 完整回归 548 passed / 0 skipped；涵盖原 M3 合并与归档路径。

@@ -151,7 +151,7 @@ BEGIN
  author,title,body,metadata,digest) VALUES(identity,next_version,
  (next_facts->>'current_attempt_id')::bigint,
  'flow:'||identity||':'||state_revision,'flow',CASE WHEN baseline THEN 'baseline' ELSE 'state' END,
- clock_timestamp(),clock_timestamp(),'FlowTool',
+ clock_timestamp(),clock_timestamp(),'AgentFlow',
  CASE WHEN baseline THEN '迁移基线：此前业务历史不可还原' ELSE 'Flow 状态变更' END,
  jsonb_build_object('before',previous_facts,'after',next_facts)::text,
  jsonb_build_object('baseline',baseline),

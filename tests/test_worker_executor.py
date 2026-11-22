@@ -107,7 +107,7 @@ def assignment_secret() -> AssignmentSecret:
             token=SecretStr("push-token"),
             repository="owner/repo",
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
-            bot_login="flowtool[bot]", bot_user_id=7654321,
+            bot_login="agentflow[bot]", bot_user_id=7654321,
         )
     )
 
@@ -388,7 +388,7 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
 
     async def offline(*args, **kwargs):
         if "clone" in args or "ls-remote" in args:
-            assert kwargs["environment"]["FLOWTOOL_PUSH_TOKEN"] == "push-token"
+            assert kwargs["environment"]["AGENTFLOW_PUSH_TOKEN"] == "push-token"
             authenticated.append("clone" if "clone" in args else "verify")
             args = tuple(str(remote) if value == "https://github.com/owner/repo.git" else value
                          for value in args)
@@ -441,7 +441,7 @@ async def test_initial_bootstrap_push_mcp_and_final_verification_share_current_c
         ["git", "log", "-1", "--format=%an <%ae>%n%cn <%ce>"], cwd=repo, text=True,
     )
     assert identities.splitlines() == [
-        "flowtool[bot] <7654321+flowtool[bot]@users.noreply.github.com>",
+        "agentflow[bot] <7654321+agentflow[bot]@users.noreply.github.com>",
     ] * 2
 
 

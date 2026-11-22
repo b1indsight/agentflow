@@ -173,7 +173,7 @@ sweep 仍先锁全体 worker，再按 Flow id 锁相关 Flow，最后读取/锁�
 - **真实 PostgreSQL 并发：** 重用 `test_recovery_decisions.py`、`test_recovery_concurrency.py`、`test_workflow_transactions.py` 和现有领取并发用例，以 barrier/event 固定交错，验证等待后读到新 receipt/owner、领取与结果/sweep 不死锁、跳过已锁候选、失败时 job 与 Flow 一起回滚。GitHub I/O 保持 recording fake，不做远端写入。
 - **单写所有者与批量边界：** 在现有 `test_boundaries.py` 补充当前运行期状态 SQL 的所有者约束，临时审计残留 `.state =` 与旧 updater；不靠变量名或固定 helper 调用顺序断言业务正确。对相同批量输入比较最终事实和 SQL/事务数量，不将逐 job 查询带入 sweep。
 - **测试 setup：** 优先扩展现有文件；只保留保护上述合同且能发现真实错误的测试。现有断言原则上不变，因移除通用状态 updater 而必要的准备数据路径调整单独核查，不能通过改变预期掩盖行为漂移。
-- **全量检查：** 在隔离测试库设置 `FLOWTOOL_TEST_DATABASE_URL` 后执行 `uv run pytest --no-testmon -q --tb=short`，并运行 `uv run ruff check app tests`、`uv run mypy app tests`、`python scripts/build_console.py` 和 `uv build --no-sources`，核查 wheel 内的 console 产物以及 diff 空白错误。不能以未配置数据库导致的 skip 代替通过。[测试库隔离机制](../../tests/conftest.py#L66-L89)、[CI 检查与构建](../../.github/workflows/ci.yml)。本项无 UI 外观变更，不增加截图或 UI 重设计。
+- **全量检查：** 在隔离测试库设置 `AGENTFLOW_TEST_DATABASE_URL` 后执行 `uv run pytest --no-testmon -q --tb=short`，并运行 `uv run ruff check app tests`、`uv run mypy app tests`、`python scripts/build_console.py` 和 `uv build --no-sources`，核查 wheel 内的 console 产物以及 diff 空白错误。不能以未配置数据库导致的 skip 代替通过。[测试库隔离机制](../../tests/conftest.py#L66-L89)、[CI 检查与构建](../../.github/workflows/ci.yml)。本项无 UI 外观变更，不增加截图或 UI 重设计。
 
 在全量回归后、代码审查前执行临时对照并删除实验文件：
 
@@ -214,7 +214,7 @@ sweep 仍先锁全体 worker，再按 Flow id 锁相关 Flow，最后读取/锁�
 
 ### 2026-11-15：最终本地验证与交付边界
 
-- **验证完成：** 在隔离 PostgreSQL 上执行 `FLOWTOOL_TEST_DATABASE_URL=postgresql://127.0.0.1:15479/flow_state_test uv run pytest --no-testmon -q --tb=short -rs`，全量通过。唯一 skip 是 Git 后端组合不适用的 jj metadata 保留场景，并非缺少数据库。现有 Starlette/httpx 弃用警告保持原样。
+- **验证完成：** 在隔离 PostgreSQL 上执行 `AGENTFLOW_TEST_DATABASE_URL=postgresql://127.0.0.1:15479/flow_state_test uv run pytest --no-testmon -q --tb=short -rs`，全量通过。唯一 skip 是 Git 后端组合不适用的 jj metadata 保留场景，并非缺少数据库。现有 Starlette/httpx 弃用警告保持原样。
 - **其余检查：** `uv run ruff check app tests scripts/smoke/recovery.py`、`uv run mypy app tests`、`uv run python scripts/build_console.py`、`uv build --no-sources` 及 diff 空白检查通过；wheel 内的 console HTML/CSS/JS 已核验。保留现有 Vite 大 chunk 提示，本项没有 UI 改动。
 - **写入审计：** AST 合同及额外函数级审计确认既有行的两条状态 UPDATE 均位于 `FlowStore.transition()`；旧 updater 和 jobs/workers 状态 SQL 不再存在，四态离线迁移保持冻结。
 - **测试准备修正：** 首次全量发现 PR backlog fixture 在锁内重读后仍比较旧的 queued 对象；现改为 sweep 前保存实际 blocked 快照，保持“不完整 merge 不变”的业务断言。最终完整重跑通过。

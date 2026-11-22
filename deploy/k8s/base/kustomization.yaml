@@ -1,6 +1,6 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-namespace: flowtool
+namespace: agentflow
 resources:
 - namespace.yaml
 - config.yaml
@@ -9,15 +9,15 @@ resources:
 - services.yaml
 - network.yaml
 configMapGenerator:
-- name: flowtool-gateway
+- name: agentflow-gateway
   files:
   - nginx.conf
 generatorOptions:
   disableNameSuffixHash: true
 images:
-- name: flowtool-serve
+- name: agentflow-serve
   newName: ghcr.io/b1indsight/agentflow-serve
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
-- name: flowtool-worker
+- name: agentflow-worker
   newName: ghcr.io/b1indsight/agentflow-worker
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

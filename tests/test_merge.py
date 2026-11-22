@@ -46,7 +46,7 @@ async def route_merge(store: Store, flow: Flow, event: str = "merge-1", payload=
             database=store.database,
         ),
         settings,
-        bot_login="flowtool[bot]",
+        bot_login="agentflow[bot]",
         database=store.database,
     ).dispatch(
         "pull_request",
@@ -114,7 +114,7 @@ def test_concurrent_merge_deliveries_enqueue_once(store, merge_flow):
 async def test_merge_routing_uses_pr_identity_not_feedback_authorization(store, merge_flow, case):
     payload = merge_payload(merge_flow)
     if case == "bot":
-        payload["sender"] = {"login": "flowtool[bot]", "type": "Bot"}
+        payload["sender"] = {"login": "agentflow[bot]", "type": "Bot"}
     elif case == "wrong-installation":
         payload["installation"]["id"] = 99
     elif case == "unmerged":

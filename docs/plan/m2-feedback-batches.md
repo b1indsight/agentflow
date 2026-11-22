@@ -137,7 +137,7 @@ bot 判断覆盖 payload 的 actor 类型与配置的 bot login；edited/deleted
   旧 relayed=false 数据作为待处理版本导入，旧 resolved 标记不声称已获 GitHub 确认。
   无 batch 的在途旧任务不得猜测消费集合；显式阻止启动并给出待处理 job 清单。
 - 执行 `uv run ruff check app tests`、`uv run mypy app tests`、`uv run pytest`、
-  `uv build --no-sources`；PostgreSQL 用例需设置 `FLOWTOOL_TEST_DATABASE_URL`，不能以 skipped 验收。
+  `uv build --no-sources`；PostgreSQL 用例需设置 `AGENTFLOW_TEST_DATABASE_URL`，不能以 skipped 验收。
 
 完成标准是确定性自动化证明上述事务与批次行为。真实 bub、Codex 和 GitHub 线程验收分别属于后续 feature。
 计划阶段记录结束；实际交付范围与验证见下。

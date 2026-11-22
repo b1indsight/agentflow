@@ -32,10 +32,10 @@ class GitHubApp(BaseModel):
         from githubkit import AppAuthStrategy, GitHub
 
         if settings.github_app_id <= 0:
-            raise ValueError("FLOWTOOL_GITHUB_APP_ID must be a positive integer")
+            raise ValueError("AGENTFLOW_GITHUB_APP_ID must be a positive integer")
         key = settings.github_private_key_path.read_text()
         if not key.strip():
-            raise ValueError("FLOWTOOL_GITHUB_PRIVATE_KEY_PATH points to an empty file")
+            raise ValueError("AGENTFLOW_GITHUB_PRIVATE_KEY_PATH points to an empty file")
         super().__init__(app_id=settings.github_app_id)
         self._sdk = GitHub(
             AppAuthStrategy(self.app_id, key),

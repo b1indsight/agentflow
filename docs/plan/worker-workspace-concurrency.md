@@ -8,7 +8,7 @@
 
 - 同一时刻，一个 Flow 最多绑定一个 workspace，一个 workspace 最多绑定一个 Flow。
 - 一个 worker 可以绑定多个 Flow，同时执行多个编码 job，但这些 job 必须位于不同 workspace。同一 Flow、同一 workspace 的 job 串行。
-- 每个 worker、每个 repository 的库存上限取该 worker 的 `FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT`，默认 2，配置为 3 时可供三个 Flow 使用。不同仓库分别计数。
+- 每个 worker、每个 repository 的库存上限取该 worker 的 `AGENTFLOW_WORKER_REPO_WORKSPACE_LIMIT`，默认 2，配置为 3 时可供三个 Flow 使用。不同仓库分别计数。
 - workspace 的创建、路径、准备、清理、隔离和代际由 worker 管理。controller 只从已登记的具体 `(worker_id, workspace)` 领取任务。
 - 每个远程 worker 启动时创建或核对一个真实、无仓库的默认推理 workspace。它不占仓库配额，也不绑定编码 Flow；推理请求继续使用独立临时子目录。
 - 等待 review 保留原目录；revision、archive 使用原 worker 和 workspace，普通后续 job 不推进 generation。停止清理与合并同时发生时，原 Flow 的 archive 使用清理后的下一代，见第 4 节。容量不足的新 Flow 排队，已有绑定不自动迁移。
@@ -108,7 +108,7 @@ Session 保持有界 FIFO。有效消息突发填满队列时暂停 reader，由
 
 最终验证在临时 UTF-8 PostgreSQL 17 上执行，完整 pytest 无失败、无跳过；Ruff、Mypy、console 构建、sdist/wheel 构建及包内 console 检查通过。保留已有 Starlette/httpx 弃用警告及前端 chunk 大小提示，不以屏蔽诊断换取通过。源码没有 UI 外观变更，未做真实 GitHub/模型写入或部署验收。
 
-复现命令为设置 `FLOWTOOL_TEST_DATABASE_URL` 后执行 `uv run pytest -q --tb=short`；静态检查使用 `uv run ruff check app tests`、`uv run mypy app tests`，构建使用 `uv run python scripts/build_console.py` 与 `uv build --no-sources`。历史迁移脚本另以 `mypy --explicit-package-bases` 检查。详细结果保存在[本线程实施记录](https://ampcode.com/artifacts/worker-workspace-206bc2d8-54dd-48f9-934a-52242e13f040)。
+复现命令为设置 `AGENTFLOW_TEST_DATABASE_URL` 后执行 `uv run pytest -q --tb=short`；静态检查使用 `uv run ruff check app tests`、`uv run mypy app tests`，构建使用 `uv run python scripts/build_console.py` 与 `uv build --no-sources`。历史迁移脚本另以 `mypy --explicit-package-bases` 检查。详细结果保存在[本线程实施记录](https://ampcode.com/artifacts/worker-workspace-206bc2d8-54dd-48f9-934a-52242e13f040)。
 
 ### 简化对照与取舍
 

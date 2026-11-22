@@ -63,7 +63,7 @@
 
 ### 取舍、成本与兼容
 
-- 环境变量无法满足网页修改及即时生效；修改原生 CLI 的用户配置会影响非 FlowTool 调用；配置广播会增加连接状态和竞态。因此选择 server 持久化、assignment 携带当前值、每次 start 显式传参。
+- 环境变量无法满足网页修改及即时生效；修改原生 CLI 的用户配置会影响非 AgentFlow 调用；配置广播会增加连接状态和竞态。因此选择 server 持久化、assignment 携带当前值、每次 start 显式传参。
 - 动态获取完整模型列表需要新增 worker / provider 能力和权限判断，超出首个设置项的范围。首版接受模型 ID 输入及有明确含义的 Amp 模式选项，不声称知道账户可用性。
 - 保留一个 `revision`，用于防止旧页面覆盖新配置；不加入设置历史、推送通知、配置缓存或审计框架。两个原子字段不需要通用 key-value 注册表。
 - 不为旧会话新增一套模型状态；依赖原生恢复，同时把固定版本的会话恢复语义列为实施前置检查。若无法满足“不强制换已有会话模型”，暂停对应支持并回报，不静默扩大范围。
@@ -134,7 +134,7 @@
 
 - **后端：** 在独立 PostgreSQL 17 / UTF8 数据库执行完整 `pytest -q --tb=short -ra` 通过；唯一 skip 是 Git 参数化下不适用的 jj 元数据保护场景，其 JJ 参数化仍执行。保留既有 Starlette TestClient 的 httpx 弃用提示。`ruff check app tests`、`mypy app tests` 均通过；使用共享 `.venv` 的绝对可执行路径，未同步或更改原工作区环境。
 - **前端：** `npm run format:check`、`npm run typecheck`、`npm test` 与完整 Playwright 均通过。浏览器命令为 `CI=1 PLAYWRIGHT_PORT=5187 PLAYWRIGHT_ARTIFACT_DIR=<原工作区>/.amp/in/artifacts npm run test:e2e -- --workers=2`；设置用例覆盖真实模拟的 409、网络 / 503 / 畸形响应、GET 回读失败与恢复、迟到读取及导航竞态，其他页面全量回归同时运行。
-- **复现与证据：** 从独立 workspace 运行，后端测试设置 `FLOWTOOL_TEST_DATABASE_URL` 指向专用测试库。日志 `full-pytest.log`、`ruff.log`、`mypy.log`、`web-format.log`、`web-typecheck.log`、`web-unit.log`、`web-e2e.log`、`build-console.log`、`build-package.log` 位于原工作区 `.amp/in/artifacts/code-agent-model-settings/`。发布前需重新准备测试库；本次专用 PostgreSQL 和校准下载目录在验证后清理。
+- **复现与证据：** 从独立 workspace 运行，后端测试设置 `AGENTFLOW_TEST_DATABASE_URL` 指向专用测试库。日志 `full-pytest.log`、`ruff.log`、`mypy.log`、`web-format.log`、`web-typecheck.log`、`web-unit.log`、`web-e2e.log`、`build-console.log`、`build-package.log` 位于原工作区 `.amp/in/artifacts/code-agent-model-settings/`。发布前需重新准备测试库；本次专用 PostgreSQL 和校准下载目录在验证后清理。
 - **交付：** 产品改动保留在 `.cache/code-agent-model-settings` 的 `feat/code-agent-model-settings`；原共享工作区仅同步本功能记录，其他任务的改动未合入、未覆盖。未推送、未创建 PR、未部署、未执行生产迁移或真实模型调用；发布前审查、server / worker 成组升级与真实账号 / resume 验收仍需后续处理。
 
 ### 2026-11-14 — 重新核对 Amp 的具体模型选择，纠正 help 推断

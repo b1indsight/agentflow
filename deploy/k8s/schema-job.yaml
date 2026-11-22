@@ -1,18 +1,18 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: flowtool-schema
-  namespace: flowtool
+  name: agentflow-schema
+  namespace: agentflow
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 120
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: flowtool
-        flowtool-role: schema
+        app.kubernetes.io/name: agentflow
+        agentflow-role: schema
     spec:
-      serviceAccountName: flowtool
+      serviceAccountName: agentflow
       automountServiceAccountToken: false
       nodeSelector:
         kubernetes.io/os: linux
@@ -27,21 +27,21 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
       - name: schema
-        image: flowtool-serve:replace-me
+        image: agentflow-serve:replace-me
         command:
         - python
         - -c
-        - 'import os; from app.persistence.store import Store; store=Store(os.environ[''FLOWTOOL_DATABASE_URL'']);
+        - 'import os; from app.persistence.store import Store; store=Store(os.environ[''AGENTFLOW_DATABASE_URL'']);
 
           try: store.init_db()
 
           finally: store.close()'
         env:
-        - name: FLOWTOOL_DATABASE_URL
+        - name: AGENTFLOW_DATABASE_URL
           valueFrom:
             secretKeyRef:
-              name: flowtool-serve-env
-              key: FLOWTOOL_DATABASE_URL
+              name: agentflow-serve-env
+              key: AGENTFLOW_DATABASE_URL
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

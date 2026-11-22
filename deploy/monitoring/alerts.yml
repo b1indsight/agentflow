@@ -1,74 +1,74 @@
 groups:
-- name: flowtool
+- name: agentflow
   rules:
-  - alert: FlowtoolUnavailable
-    expr: (up{job="flowtool"} == 0) or absent(up{job="flowtool"})
+  - alert: AgentFlowUnavailable
+    expr: (up{job="agentflow"} == 0) or absent(up{job="agentflow"})
     for: 1m
     labels:
       severity: warning
     annotations:
       runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
-  - alert: FlowtoolSnapshotStale
-    expr: (flowtool_metrics_snapshot_age_seconds{job="flowtool"} > 60) or (flowtool_metrics_snapshot_ready{job="flowtool"}
-      == 0) or absent(flowtool_metrics_snapshot_ready{job="flowtool"})
+  - alert: AgentFlowSnapshotStale
+    expr: (agentflow_metrics_snapshot_age_seconds{job="agentflow"} > 60) or (agentflow_metrics_snapshot_ready{job="agentflow"}
+      == 0) or absent(agentflow_metrics_snapshot_ready{job="agentflow"})
     for: 1m
     labels:
       severity: warning
     annotations:
       runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
-  - alert: FlowtoolInboxOld
-    expr: flowtool_oldest_age_seconds{job="flowtool",queue="inbox"} > 300
+  - alert: AgentFlowInboxOld
+    expr: agentflow_oldest_age_seconds{job="agentflow",queue="inbox"} > 300
     for: 1m
     labels:
       severity: warning
     annotations:
       runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
-  - alert: FlowtoolInboxBlocked
-    expr: flowtool_inbox{job="flowtool",state="blocked"} > 0
+  - alert: AgentFlowInboxBlocked
+    expr: agentflow_inbox{job="agentflow",state="blocked"} > 0
     for: 1m
     labels:
       severity: warning
     annotations:
       runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
-  - alert: FlowtoolNoWorkers
-    expr: (sum by (job, instance) (flowtool_jobs{job="flowtool",state="queued"}) > 0) unless on (job, instance) (sum by (job,
-      instance) (flowtool_workers{job="flowtool",state=~"online|busy"}) > 0)
+  - alert: AgentFlowNoWorkers
+    expr: (sum by (job, instance) (agentflow_jobs{job="agentflow",state="queued"}) > 0) unless on (job, instance) (sum by (job,
+      instance) (agentflow_workers{job="agentflow",state=~"online|busy"}) > 0)
     for: 2m
     labels:
       severity: warning
     annotations:
       runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
-  - alert: FlowtoolRecoveryOld
-    expr: flowtool_oldest_age_seconds{job="flowtool",queue="recovery"} > 600
+  - alert: AgentFlowRecoveryOld
+    expr: agentflow_oldest_age_seconds{job="agentflow",queue="recovery"} > 600
     for: 1m
     labels:
       severity: warning
     annotations:
       runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
-  - alert: FlowtoolArchiveOld
-    expr: flowtool_archive_pending_age_seconds{job="flowtool"} > 600
+  - alert: AgentFlowArchiveOld
+    expr: agentflow_archive_pending_age_seconds{job="agentflow"} > 600
     for: 1m
     labels:
       severity: warning
     annotations:
       runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
-  - alert: FlowtoolBackupFailed
-    expr: flowtool_backup_last_run_success{job="flowtool-backup"} == 0
+  - alert: AgentFlowBackupFailed
+    expr: agentflow_backup_last_run_success{job="agentflow-backup"} == 0
     for: 1m
     labels:
       severity: warning
     annotations:
       runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
-  - alert: FlowtoolBackupOld
-    expr: (time() - flowtool_backup_last_success_timestamp_seconds{job="flowtool-backup"}) > 93600
+  - alert: AgentFlowBackupOld
+    expr: (time() - agentflow_backup_last_success_timestamp_seconds{job="agentflow-backup"}) > 93600
     for: 1m
     labels:
       severity: warning
     annotations:
       runbook_url: https://github.com/b1indsight/agentflow/blob/feat/m5-operations-recovery/docs/operations/runbook.md#alerts
-  - alert: FlowtoolBackupMissing
-    expr: (up{job="flowtool-backup"} == 0) or absent(up{job="flowtool-backup"}) or absent(flowtool_backup_last_run_success{job="flowtool-backup"})
-      or absent(flowtool_backup_last_success_timestamp_seconds{job="flowtool-backup"})
+  - alert: AgentFlowBackupMissing
+    expr: (up{job="agentflow-backup"} == 0) or absent(up{job="agentflow-backup"}) or absent(agentflow_backup_last_run_success{job="agentflow-backup"})
+      or absent(agentflow_backup_last_success_timestamp_seconds{job="agentflow-backup"})
     for: 1m
     labels:
       severity: warning

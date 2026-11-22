@@ -111,7 +111,7 @@ class GitHubProbe:
 
     def create_issue(self, repo: str, marker: str) -> int:
         return Issue.model_validate(self.request(f"repos/{repo}/issues", {
-            "title": "FlowTool live smoke: greeting fixture", "body": TASK + "\n" + marker,
+            "title": "AgentFlow live smoke: greeting fixture", "body": TASK + "\n" + marker,
             "labels": ["flow"],
         })).number
 
@@ -291,9 +291,9 @@ def _run(args: argparse.Namespace, deadline: float) -> int:
             print(f"Issue: https://github.com/{args.repo}/issues/{issue}")
             if not args.observe:
                 return 0
-            database_url = os.environ.get("FLOWTOOL_DATABASE_URL")
+            database_url = os.environ.get("AGENTFLOW_DATABASE_URL")
             if not database_url or args.source_revision == "unrecorded":
-                raise SmokeError("observation requires FLOWTOOL_DATABASE_URL and --source-revision")
+                raise SmokeError("observation requires AGENTFLOW_DATABASE_URL and --source-revision")
             store = Store(database_url)
             try:
                 while True:

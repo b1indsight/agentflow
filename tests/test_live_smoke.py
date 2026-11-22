@@ -260,7 +260,7 @@ def test_cli_deadline_bounds_unresponsive_database_connection(tmp_path):
                 '--run-id', 'timeout', '--state-dir', str(tmp_path / 'state'),
                 '--observe', '--source-revision', 'fixture', '--wait-seconds', '1'],
                 env={**os.environ, 'PATH': f'{tmp_path}:{os.environ["PATH"]}',
-                     'FLOWTOOL_DATABASE_URL': url}, capture_output=True, timeout=4, check=False)
+                     'AGENTFLOW_DATABASE_URL': url}, capture_output=True, timeout=4, check=False)
         except subprocess.TimeoutExpired:
             pytest.fail('database exceeded total smoke deadline')
     assert result.returncode == 2

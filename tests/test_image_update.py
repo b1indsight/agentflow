@@ -62,8 +62,8 @@ class ImageCommands:
         # The live snapshot validates server settings before connecting.
         self.env = dict(
             os.environ,
-            FLOWTOOL_DATABASE_URL=store.database_url if store else "unused",
-            FLOWTOOL_WORKER_TOKENS='{"test":"test-token"}',
+            AGENTFLOW_DATABASE_URL=store.database_url if store else "unused",
+            AGENTFLOW_WORKER_TOKENS='{"test":"test-token"}',
         )
 
     def pod(self):
@@ -180,7 +180,7 @@ class ImageCommands:
             f"schema.SCHEMAS = {schemas!r}\n"
             "namespace = {'__name__': 'column_probe'}\n"
             f"exec({check[2]!r}, namespace)\n"
-            "dsn = os.environ['FLOWTOOL_DATABASE_URL']\n"
+            "dsn = os.environ['AGENTFLOW_DATABASE_URL']\n"
             "password = token_urlsafe(32)\n"
             "def connect(database, user):\n"
             "    if user == 'postgres':\n"
@@ -361,7 +361,7 @@ def test_preflight_and_deployment_order(invoke_image_update, tmp_path, capsys, a
     commands = ImageCommands()
     commands.workload["spec"]["template"]["spec"]["containers"][0]["env"] = [
         {
-            "name": "FLOWTOOL_DATABASE_URL",
+            "name": "AGENTFLOW_DATABASE_URL",
             "value": "postgresql://user:TEST-UPDATER-SECRET@localhost/database",
         }
     ]

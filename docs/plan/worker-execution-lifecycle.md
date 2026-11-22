@@ -540,7 +540,7 @@ wire、数据库及 server 实现未改；公共 Session/Gateway、outbox 和历
 全量中的 recovery bundle 校验要求 TCP loopback，Unix socket 不满足，随后改用独立端口的
 `127.0.0.1` 连接，完整重跑通过。未修改产品代码绕过环境问题，未访问生产数据库或真实 GitHub 副作用。
 
-- `PYTHONPATH="$PWD" FLOWTOOL_TEST_DATABASE_URL=<隔离 UTF8 PostgreSQL TCP DSN> python -m pytest -q` 全量通过，
+- `PYTHONPATH="$PWD" AGENTFLOW_TEST_DATABASE_URL=<隔离 UTF8 PostgreSQL TCP DSN> python -m pytest -q` 全量通过，
   PostgreSQL 用例实际执行；既有 Starlette TestClient 弃用警告保留。
 - `ruff check app tests scripts/smoke/recovery.py`、`mypy app tests`、`bash -n scripts/smoke/kubernetes.sh`
   和 `uv build --no-sources` 通过；wheel 包含新 lifecycle/state 模块，不再含旧 session 模块。

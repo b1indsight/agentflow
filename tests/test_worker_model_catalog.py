@@ -25,7 +25,7 @@ def cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[str, str],
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-config"))
     monkeypatch.setenv("AMP_API_KEY", "test-auth")
-    monkeypatch.setenv("FLOWTOOL_WORKER_TOKEN", "do-not-inherit")
+    monkeypatch.setenv("AGENTFLOW_WORKER_TOKEN", "do-not-inherit")
     return install
 
 
@@ -55,7 +55,7 @@ async def test_refresh_projects_only_coding_models(
     cli(agent, f"""
         import os, sys
         from pathlib import Path
-        assert sys.argv[1:] == {args!r} and 'FLOWTOOL_WORKER_TOKEN' not in os.environ
+        assert sys.argv[1:] == {args!r} and 'AGENTFLOW_WORKER_TOKEN' not in os.environ
         {check}
         print((Path.home() / 'response').read_text())
     """)

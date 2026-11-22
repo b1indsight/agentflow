@@ -8,7 +8,7 @@
 ### Summary and motivation
 
 用户要求增加权限和账号安全校验，并确定首版只允许自己登录。当前对话 API 使用
-`FLOWTOOL_CONTROL_API_TOKEN` 共享 Bearer Token，没有个人登录身份。拟采用 Cloudflare Access
+`AGENTFLOW_CONTROL_API_TOKEN` 共享 Bearer Token，没有个人登录身份。拟采用 Cloudflare Access
 完成 GitHub 登录和 MFA，应用校验 Access JWT 并限定单个 owner 邮箱。
 
 基线为已合并架构文档更新的 main。现有实现见

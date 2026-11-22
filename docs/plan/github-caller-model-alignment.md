@@ -180,7 +180,7 @@ review 的实际更新时间可能使较晚编辑的正文被批次截止排除�
 状态机制，无需另造消融。原有上下文测试直接验证迁移前后分页请求、截断、截止、
 缺失时间和失败传播不变；补充三种来源的已删除作者、空正文和来源时间回归。
 定向测试 69 passed。完整数据库测试命令：
-`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run --no-sync pytest -q --tb=short`，
+`AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres uv run --no-sync pytest -q --tb=short`，
 888 passed，1 条既有 Starlette/httpx 弃用警告。`uv run --no-sync ruff check app tests`、
 `uv run --no-sync mypy app tests`（165 个源码文件）和 `uv build` 均通过。
 未执行真实 GitHub App 在线调用；公开返回类型变更的所有项目调用者和测试替身已迁移。
@@ -218,7 +218,7 @@ TYPE_CHECKING 中导入，不改变 worker 离线导入边界。
 **验证：** 定向反馈、SDK 与上下文测试通过；已补充实际更新时间截止、空作者
 保留/扫描跳过、20/21 条截断、过滤后不续读、GraphQL 失败传播及 SDK Unset 回归。
 完整测试曾暴露两处测试替身身份不一致，已修正并重新验证。
-最终命令：`FLOWTOOL_TEST_DATABASE_URL=postgresql://flowtool@127.0.0.1:55419/postgres uv run --no-sync pytest -q --tb=short`，
+最终命令：`AGENTFLOW_TEST_DATABASE_URL=postgresql://agentflow@127.0.0.1:55419/postgres uv run --no-sync pytest -q --tb=short`，
 891 passed，1 条既有 Starlette/httpx 弃用警告。Ruff、Mypy（165 个源码文件）、
 `uv build` 和 `git diff --check` 均通过。本次没有引入新状态或通用机制，不另造
 消融实验；预算 sentinel 与现有截断/不补满测试直接验证保守读取规则。

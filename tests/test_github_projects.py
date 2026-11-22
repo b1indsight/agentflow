@@ -82,7 +82,7 @@ def adapter(tmp_path, monkeypatch, *responses, installation=42):
 
 def test_config_is_optional_and_strict(tmp_path, monkeypatch):
     assert settings(tmp_path).projects == {}
-    monkeypatch.setenv("FLOWTOOL_PROJECTS", '{"Owner/Repo": ' + config().model_dump_json() + '}')
+    monkeypatch.setenv("AGENTFLOW_PROJECTS", '{"Owner/Repo": ' + config().model_dump_json() + '}')
     assert settings(tmp_path).projects == {"owner/repo": config()}
     for change in ({"installation_id": 0}, {"project_id": " "}, {"options": {"todo": "x"}},
                    {"options": {status.value: "" for status in ProjectStatus}}, {"surprise": "value"}):

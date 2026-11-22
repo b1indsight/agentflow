@@ -8,6 +8,71 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "agentflow"
+version = "0.0.1"
+source = { editable = "." }
+dependencies = [
+    { name = "anyio" },
+    { name = "bub" },
+    { name = "fastapi" },
+    { name = "githubkit", extra = ["auth-app"] },
+    { name = "httpx" },
+    { name = "loguru" },
+    { name = "markdown-it-py" },
+    { name = "mdit-py-plugins" },
+    { name = "pluggy" },
+    { name = "prometheus-client" },
+    { name = "psycopg", extra = ["binary", "pool"] },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "pyyaml" },
+    { name = "typer" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-testmon" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anyio", specifier = ">=4" },
+    { name = "bub", specifier = "==0.4.1" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "githubkit", extras = ["auth-app"], specifier = ">=0.16,<0.17" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "loguru", specifier = ">=0.7" },
+    { name = "markdown-it-py", specifier = ">=4,<5" },
+    { name = "mdit-py-plugins", specifier = ">=0.6,<0.7" },
+    { name = "pluggy", specifier = ">=1.5" },
+    { name = "prometheus-client", specifier = "==0.24.1" },
+    { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2" },
+    { name = "pydantic", specifier = ">=2.12" },
+    { name = "pydantic-settings", specifier = ">=2.3" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.13,<3" },
+    { name = "pyyaml", specifier = ">=6" },
+    { name = "typer", specifier = ">=0.12" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "websockets", specifier = ">=14" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "pytest-asyncio", specifier = ">=0.23" },
+    { name = "pytest-testmon", specifier = ">=2.3,<3" },
+    { name = "ruff", specifier = ">=0.6" },
+]
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -607,71 +672,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/8a/02/91e3416a8fdd715abb903a952a6bec7cdd8d14eed55d415fc8595524c319/fastapi-0.141.1.tar.gz", hash = "sha256:e8822fc40db1e1858054d7a949a888695bc9bdce70139178e33bd2871a453ca1", size = 425799, upload-time = "2026-07-29T17:18:05.568Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/03/10388a42375ee7e4ac9b94eb2c5c569c8b5795e377e701c9ac3ad63de890/fastapi-0.141.1-py3-none-any.whl", hash = "sha256:bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3", size = 131954, upload-time = "2026-07-29T17:18:04.364Z" },
-]
-
-[[package]]
-name = "flowtool"
-version = "0.0.1"
-source = { editable = "." }
-dependencies = [
-    { name = "anyio" },
-    { name = "bub" },
-    { name = "fastapi" },
-    { name = "githubkit", extra = ["auth-app"] },
-    { name = "httpx" },
-    { name = "loguru" },
-    { name = "markdown-it-py" },
-    { name = "mdit-py-plugins" },
-    { name = "pluggy" },
-    { name = "prometheus-client" },
-    { name = "psycopg", extra = ["binary", "pool"] },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pyjwt", extra = ["crypto"] },
-    { name = "pyyaml" },
-    { name = "typer" },
-    { name = "uvicorn", extra = ["standard"] },
-    { name = "websockets" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-testmon" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anyio", specifier = ">=4" },
-    { name = "bub", specifier = "==0.4.1" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "githubkit", extras = ["auth-app"], specifier = ">=0.16,<0.17" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "loguru", specifier = ">=0.7" },
-    { name = "markdown-it-py", specifier = ">=4,<5" },
-    { name = "mdit-py-plugins", specifier = ">=0.6,<0.7" },
-    { name = "pluggy", specifier = ">=1.5" },
-    { name = "prometheus-client", specifier = "==0.24.1" },
-    { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2" },
-    { name = "pydantic", specifier = ">=2.12" },
-    { name = "pydantic-settings", specifier = ">=2.3" },
-    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.13,<3" },
-    { name = "pyyaml", specifier = ">=6" },
-    { name = "typer", specifier = ">=0.12" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
-    { name = "websockets", specifier = ">=14" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "mypy", specifier = ">=1.11" },
-    { name = "pytest", specifier = ">=8" },
-    { name = "pytest-asyncio", specifier = ">=0.23" },
-    { name = "pytest-testmon", specifier = ">=2.3,<3" },
-    { name = "ruff", specifier = ">=0.6" },
 ]
 
 [[package]]

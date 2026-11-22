@@ -7,14 +7,14 @@
 
 ## 1. 背景与目标
 
-当前 `flowtool serve` 同时装配 FastAPI/Webhook、`FlowEngine`、Codex/Judge/GitHub adapters 和进程内
+当前 `agentflow serve` 同时装配 FastAPI/Webhook、`FlowEngine`、Codex/Judge/GitHub adapters 和进程内
 `Worker`。worker 直接轮询 PostgreSQL，控制面与执行面没有网络协议或权限边界。
 
 本 feature 完成以下最小纵向切片：
 
-1. `flowtool serve` 成为唯一数据库权威，负责 Webhook、状态机、GitHub API、任务持久化和一个 worker
+1. `agentflow serve` 成为唯一数据库权威，负责 Webhook、状态机、GitHub API、任务持久化和一个 worker
    连接；
-2. 新增独立 `flowtool worker` 进程，通过主动发起的认证 WebSocket 长连接接收所有现有 job kind；
+2. 新增独立 `agentflow worker` 进程，通过主动发起的认证 WebSocket 长连接接收所有现有 job kind；
 3. worker 只执行 workspace、Codex、Judge 和清理动作，不连接 PostgreSQL，也不持有 GitHub App
    私钥；
 4. 把当前 `FlowEngine` 拆成控制侧 coordinator 与执行侧 executor，双方只交换版本化 Pydantic 消息；
@@ -44,7 +44,7 @@
 - 多 `serve`、broker、控制面 HA 或 exactly-once 外部副作用；
 - Kanban Web UI、新的无认证管理 API、完整 Reconciler、可靠 Codex kill 或真实 GitHub/Codex/bub
   集成校准；
-- 拆成多个 Python distribution。两个角色仍由同一个 `flowtool` 包交付。
+- 拆成多个 Python distribution。两个角色仍由同一个 `agentflow` 包交付。
 
 ## 3. 架构与模块布局
 
@@ -104,13 +104,13 @@ app/
 FastAPI 新增 `/internal/workers/connect` WebSocket。worker 主动连接，因此远端执行节点不需要开放入站
 端口。首版 serve 配置一个预期的 `worker_id` 和 secret：
 
-- serve：`FLOWTOOL_WORKER_ID`、`FLOWTOOL_WORKER_TOKEN`；
-- worker：相同 identity/token，以及 `FLOWTOOL_SERVE_WS_URL`；
+- serve：`AGENTFLOW_WORKER_ID`、`AGENTFLOW_WORKER_TOKEN`；
+- worker：相同 identity/token，以及 `AGENTFLOW_SERVE_WS_URL`；
 - token 在握手阶段用常量时间比较，不写日志或数据库；
 - 生产部署要求 `wss://`，只有显式开发配置允许 `ws://`；
 - 非预期 identity、错误 token、协议版本不兼容或已有 worker 在线时，连接在派发前关闭。
 
-worker 使用独立 `FLOWTOOL_WORKER_ROOT` 存放 repo/workspace、agent session state 和临时产物。worker
+worker 使用独立 `AGENTFLOW_WORKER_ROOT` 存放 repo/workspace、agent session state 和临时产物。worker
 启动后对 root 持有进程生命周期独占锁，防止误启动第二个进程覆盖状态。多 root/多实例留给 Feature 2。
 
 ### 4.2 消息与 job kind
@@ -169,7 +169,7 @@ Store 在现有手写 schema 上兼容增加：
 
 不引入 Alembic/ORM，也不删除历史数据。旧 queued job 视为未分配；旧 running job 启动时 fail closed。
 
-`flowtool serve` 初始化 Store，只启动控制面 tasks 和 WorkerGateway；`flowtool worker` 不读取数据库、
+`agentflow serve` 初始化 Store，只启动控制面 tasks 和 WorkerGateway；`agentflow worker` 不读取数据库、
 Webhook secret 或 GitHub App 私钥，只装配 client/executor。两边分别处理 SIGINT/SIGTERM 并清理自己的
 连接与后台 task。
 
@@ -185,7 +185,7 @@ Webhook secret 或 GitHub App 私钥，只装配 client/executor。两边分别�
    - 覆盖鉴权、唯一连接、完整消息序列、heartbeat、未开始 requeue 和已开始 fail closed；
    - 实现 ASGI WebSocket gateway、worker client 和 root lock。
 4. **独立运行时与 CLI**
-   - `serve` 去掉进程内 worker，新增前台 `flowtool worker`；
+   - `serve` 去掉进程内 worker，新增前台 `agentflow worker`；
    - 拆分 role settings，并迁移现有 Webhook/worker 测试。
 5. **端到端与文档**
    - 真实 PostgreSQL + ASGI server + fake executor 验证 queued -> remote execution -> DONE；
@@ -209,7 +209,7 @@ uv run ruff check app tests
 uv run mypy app tests
 uv lock --check
 uv build --no-sources
-uv run flowtool --help
+uv run agentflow --help
 ```
 
 CI 分别启动 serve 和一个 fake-executor worker，确认 `/healthz`、注册、一次远程 job 和优雅关闭，再运行
@@ -232,8 +232,8 @@ CI 分别启动 serve 和一个 fake-executor worker，确认 `/healthz`、注�
 
 - 按计划拆成 `app/control/`、`app/worker/` 和 `app/protocol.py`；旧的平铺 ingress/router/engine/
   worker/reconcile 模块已删除，没有保留转发 shim；
-- `flowtool serve` 只装配 Store、Webhook、ControlService、JobCoordinator、GitHub、Gateway 和 Reconciler；
-  `flowtool worker` 只装配 Client、Executor、Codex/Judge 和 worker root lock；
+- `agentflow serve` 只装配 Store、Webhook、ControlService、JobCoordinator、GitHub、Gateway 和 Reconciler；
+  `agentflow worker` 只装配 Client、Executor、Codex/Judge 和 worker root lock；
 - 单 worker v1 WebSocket 协议覆盖五类 job、鉴权/唯一连接、Started/Heartbeat/result ack、assignment token
   fencing、未开始 requeue、已开始 fail closed 和 serve 启动收敛；
 - 角色配置已分离，worker 不要求数据库/Webhook/GitHub App 配置；明文 `ws://` 必须显式开发开关；

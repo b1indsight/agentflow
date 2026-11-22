@@ -68,7 +68,7 @@ def test_delayed_merge_automatically_corrects_without_resuming(store, archived, 
     original = activity.archived(archived.id, archived.required_attempt_id)
     before = authority(store, archived.id)
     service = ControlService(database=store.database)
-    router = EventRouter(service, SimpleNamespace(), bot_login="flowtool[bot]", database=store.database)
+    router = EventRouter(service, SimpleNamespace(), bot_login="agentflow[bot]", database=store.database)
     router.dispatch("pull_request", "delayed", merge_payload(archived))
     assert store.webhooks.event_seen("delayed")
     current = store.flows.get_flow(archived.id)
@@ -108,7 +108,7 @@ def test_delayed_old_attempt_merge_does_not_change_resumed_flow(store, archived)
     current_delivery.pr_number, current_delivery.state = 29, DeliveryState.OPEN
     store.deliveries.update_delivery(current_delivery)
     before = authority(store, archived.id)
-    router = EventRouter(service, SimpleNamespace(), bot_login="flowtool[bot]", database=store.database)
+    router = EventRouter(service, SimpleNamespace(), bot_login="agentflow[bot]", database=store.database)
     payload = merge_payload(resumed)
     payload["installation"]["id"] = 99
     router.dispatch("pull_request", "late-merge", payload)

@@ -2,7 +2,7 @@
 
 ## 1. 定位
 
-FlowTool 的**目标形态**是本地优先、headless 的编排器：把带 `flow` 标签的 GitHub issue 运行成
+AgentFlow 的**目标形态**是本地优先、headless 的编排器：把带 `flow` 标签的 GitHub issue 运行成
 `Codex 编码 → PR → 人工审核 → 回喂修订 → 人工合并 → 归档` 的闭环。产品交互面是 GitHub
 issue / PR；Web 控制台已提供单 owner 的看板、详情、执行记录和混合时间线，
 支持 cancelled Flow 的本地展示归档，保留取消状态且不修改交付。
@@ -116,5 +116,5 @@ PostgreSQL 是唯一运行时数据库，由 control 独占。表按职责分为
 - **其他表**保持各自的权威，不由账本重建。
 - **协调数据**记录谁占用什么、处理到哪里，不进入账本。
 
-`flowtool flow verify` 重放比较；账本之前的 Flow 从启动时补录的快照开始重放。
+`agentflow flow verify` 重放比较；账本之前的 Flow 从启动时补录的快照开始重放。
 完整分类、事实目录和写入规则见 [Flow 事实账本与状态表](flow-ledger.md)。

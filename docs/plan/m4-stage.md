@@ -87,7 +87,7 @@ F4/F5、F8 在设计上可分别推进，本轮仍逐项实现。每项把原计
 
 每个 PR 先写证明具体缺陷/边界的失败测试，再实现；数据库竞态和恢复使用实际 PostgreSQL。
 优先跑变更相关文件，通过后跑一次完整检查：`uv run ruff check app tests`、
-`uv run mypy app tests`、配置 `FLOWTOOL_TEST_DATABASE_URL` 的 `uv run pytest -q --tb=short`、
+`uv run mypy app tests`、配置 `AGENTFLOW_TEST_DATABASE_URL` 的 `uv run pytest -q --tb=short`、
 `uv build --no-sources`。数据库用例跳过不能记作恢复验收通过。
 
 | 阶段真实验收 | 通过证据 |

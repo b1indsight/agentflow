@@ -1,10 +1,10 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: flowtool
+  name: agentflow
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: flowtool
+  name: agentflow
 automountServiceAccountToken: false

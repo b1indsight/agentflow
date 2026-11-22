@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 项目、安装包、CLI 和插件入口组改名为 `agentflow`；配置改用 `AGENTFLOW_` 前缀。旧命令和旧配置键不再提供，现有部署见[升级说明](docs/deployment/README.md#从-flowtool-升级)。
+
 - 会话消息与评审回复先显示预览，进入可视区后自动补齐；跨批次的 Markdown 连续显示，正文中的 diff 沿用评审代码块的行号与增删高亮。
 
 - Worker 注册及保存 skill 仓库设置时，在推理 workspace 内同步仓库。首次编码前自动链接 `always_on: true` 的 skill，再让 agent 根据描述选择其余 skill。serve 与 worker 需一起升级至 wire30，无数据库迁移。
@@ -64,7 +66,7 @@
   不改 wire、journal、数据库或部署。
 - Flow 事实账本：`flows` 的每次账本列变化在同一事务内向 `console_activity` 追加一条不可变事实，
   状态转换以 `FlowEvent` 命名，另有创建、归档、归档后合并、归档更正和标题事实；标题与两类指针的写入
-  收进 `FlowStore`，边界测试禁止其他模块写 `flows`。新增 `flowtool flow verify [FLOW_ID]` 重放并报告差异，
+  收进 `FlowStore`，边界测试禁止其他模块写 `flows`。新增 `agentflow flow verify [FLOW_ID]` 重放并报告差异，
   不自动修复；存量 Flow 在启动时补一条快照作为起点。任务原文不进入活动正文，只记录摘要。
   设置当前 attempt 不再推进 Flow 的 `updated_at`。不新增表或列，不改 wire、API 或控制台展示。
 - Worker 兼容 Amp 私有附件：将允许的附件地址转换为原有文件链接，使用自身 Amp 登录态按需读取，
@@ -117,7 +119,7 @@
 - GitHub 推送凭据准备时保留 Bot 查询客户端，避免 SDK 弱引用导致客户端提前回收、编码任务在下发前以 `RuntimeError` 失败；身份与权限校验保持不变。
 - Webhook 冷启动查询 App 身份遇到 GitHub 错误时遵守 `Retry-After` 并退避，新事件不会提前触发重试；等待可取消，未处理 receipt 及数据库线程关闭语义保持不变。
 - 同一 PR 的来源分支允许外部 push/rebase/force-push 和目标分支调整，不因历史 SHA 漂移暂停 Flow。revise 编码前安全同步 Git/jj，以实际 fetch 基线校验结果和识别 no-op，保留脏文件、未发布提交、反馈版本及回执恢复保护；过期 Judge context 连同决定重建。wire24 须协调升级，journal/inbox 不变，不自动解封已有 BLOCKED Flow。修复未合并 PR 缺少 `merge_commit_sha` 时读取失败，合并证据仍严格验证。
-- Worker 编码 workspace 首次准备时配置当前 App bot 的 Git 作者/提交者，后续提交检查身份并将原有效作者保留为 `Co-authored-by`，包括显式 `git commit -m`。App JWT 核对当前 App ID，从 slug 自动解析并共享 bot login，移除手工 `FLOWTOOL_BOT_LOGIN` 配置；凭据生成、评论恢复及反馈过滤使用同一身份，仍拒绝其他 App 的 bot。后续准备不重写配置。配置按 worktree 隔离，不修改个人全局身份、jj 身份或历史提交；只读 answer 不修改配置。assignment 增加 bot login/用户 ID，wire23 需协调升级，journal/inbox 版本不变。
+- Worker 编码 workspace 首次准备时配置当前 App bot 的 Git 作者/提交者，后续提交检查身份并将原有效作者保留为 `Co-authored-by`，包括显式 `git commit -m`。App JWT 核对当前 App ID，从 slug 自动解析并共享 bot login，移除手工 `AGENTFLOW_BOT_LOGIN` 配置；凭据生成、评论恢复及反馈过滤使用同一身份，仍拒绝其他 App 的 bot。后续准备不重写配置。配置按 worktree 隔离，不修改个人全局身份、jj 身份或历史提交；只读 answer 不修改配置。assignment 增加 bot login/用户 ID，wire23 需协调升级，journal/inbox 版本不变。
 - Judge 的 answer/revise 统一创建 worker 任务，answer 显式要求只回答、不改码；worker 比较本地提交不变，controller 核对目标 open PR 的冻结 head。复用逐条线程答复和回执恢复，answer 不更新交付提交、不请求再次 review。Judge 上下文仅包含相关 PR、冻结反馈、所在讨论和引用片段，无关大 diff 不再造成 WAIT。wire22 须协调升级；journal5、历史结果和上下文 digest 保持不变。
 - Issue 成为可选输入：看板顶栏“新建 Flow”选择授权代码仓库并输入内容，无需 GitHub 事件；
   同时提供 owner-only 创建 API、分页目标清单与管理 CLI。原始任务持久保存并用于首轮、修订和审核，
@@ -281,7 +283,7 @@
   候选 Pod 按固定归属/UID/输入复用，Kubernetes 写入响应丢失按实际状态核对，拒绝冲突与版本回退。
   保留删列检查、正常停旧启新和普通恢复；无全局暂停、Worker 门槛、备份或自动回滚。
   三个 Server 脚本集中到 `scripts/server_update/`，直接复制，不提供安装器或工具自升级。
-- `flowtool worker --update` 自动查询最新已核验发布，在原有可信 uv Git 安装中更新包及依赖，
+- `agentflow worker --update` 自动查询最新已核验发布，在原有可信 uv Git 安装中更新包及依赖，
   新解释器核验 revision、导入路径、CLI 和依赖后退出，无需指定 SHA。
   安装级锁保护共享安装的普通 Worker 与更新，不创建新环境、版本目录、源码跳过分支或后台服务；
   操作者先正常停止旧进程，成功后按原方式启动，保留身份、root、journal 和认证。
@@ -305,8 +307,8 @@
   protocol v14 / journal v4 / manifest v1，不增加字段或整目录删除。旧停止重放仍核对下一
   任务，已 dispatch 却缺 journal 时明确失败且不重跑，避免空等。入口优化见 #108。
 
-- worker 可保持默认 Codex，或以 `FLOWTOOL_CODING_AGENT=amp` 选择固定版本的 Amp CLI；Amp
-  单轮超时为 `FLOWTOOL_AMP_RUN_TIMEOUT_SECONDS=1200`。worker 镜像固定安装
+- worker 可保持默认 Codex，或以 `AGENTFLOW_CODING_AGENT=amp` 选择固定版本的 Amp CLI；Amp
+  单轮超时为 `AGENTFLOW_AMP_RUN_TIMEOUT_SECONDS=1200`。worker 镜像固定安装
   `0.0.1792555249-g702cd1` 并校验官方 Linux x64 SHA-256，serve 不安装 Amp。部署示例说明
   专用持久 HOME 的原生登录/可选 `AMP_API_KEY`、逐轮 GitHub App Git/gh 凭据、原生历史快照
   的滞后可能及未知续跑不自动重跑；镜像 smoke 只检查 CLI 启动和角色边界，不构成真实模型或
@@ -317,7 +319,7 @@
 - worker 自动 clone 缺失/空 seed；每次编码使用 assignment bot 的临时 gh 包装、独立配置与
   隔离的 Git helper，INITIAL 的 MCP/最终远端核验也使用当前 token。执行位置按 worker/仓库
   复用一个完整副本并以临时 Git worktree 溢出，总上限默认 2，可用
-  `FLOWTOOL_WORKER_REPO_WORKSPACE_LIMIT` 配置；归档按持久位置/代次释放，保留温热缓存，
+  `AGENTFLOW_WORKER_REPO_WORKSPACE_LIMIT` 配置；归档按持久位置/代次释放，保留温热缓存，
   拒绝覆盖异常或未知目录。worker 镜像安装 gh。protocol v14 / journal v4，旧目录不自动接管。
 
 - serve 后台自动发现 GitHub App 已授权的非归档仓库，补齐三个配置标签，保留已有名称、颜色与描述。
@@ -625,7 +627,7 @@
   resolve 成功后的确认查询失败保留待确认记录，持久恢复遵守 Retry-After 或限流重置时间。
   重试资格校验归回 control service，归档等待检查改为数据库存在性查询。
 - M3 F3：清理核验后，对 Issue/PR 增量增加完成标签、移除 in-review 标签，并各发布稳定 marker
-  的固定归档说明；保留用户与触发标签，不创建仓库 label。新增 `FLOWTOOL_DONE_LABEL` 及配置冲突校验。
+  的固定归档说明；保留用户与触发标签，不创建仓库 label。新增 `AGENTFLOW_DONE_LABEL` 及配置冲突校验。
 - 归档 GitHub 回写复用冻结 ResultPlan 和 effect 回执：响应丢失先查询，部分成功只续跑缺失操作；
   永久错误保留 ACTIVE Flow、清理凭据和 binding。`flow retry` 仅重置原结果的明确失败回写，
   `flow show` 显示清理与回写进度；全部回写后才原子成功、释放 worker 并 ACK。

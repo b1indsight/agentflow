@@ -6,7 +6,7 @@
 |---|---|---|
 | 认证 | GitHub App | 目标已定，adapter 尚未在真实 App 上校准；见 [GitHub App 接入](github-app.md) |
 | 合并 | 全程人工 | 工具只监听合并事件，不提供自动合并路径 |
-| CI 门禁 | 使用目标仓库自身 CI | FlowTool 不自建门禁，人工合并者依据 PR checks 判断 |
+| CI 门禁 | 使用目标仓库自身 CI | AgentFlow 不自建门禁，人工合并者依据 PR checks 判断 |
 | 会话连续 | Codex `resume` 同一会话 | 2026-08-01 独立实测成立；真实多轮修订仍待验证 |
 | PR 所有权 | Orchestrator 创建 PR | Code Agent 改码/提交/push 后调用 `flow.open_pr`；control 独占 GitHub API，真实 E2E 待验收 |
 | 持久化 | PostgreSQL + 持久化 jobs/result inbox | Runtime 管理 Database，服务自建具体仓储；Store 用于 CLI/live smoke/测试；epoch + assignment token 对远程消息 fencing，仓储接口仍同步 |

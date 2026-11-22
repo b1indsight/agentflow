@@ -51,7 +51,7 @@ def app_client(monkeypatch, factory):
 
 
 @pytest.mark.parametrize("identity", [
-    None, SimpleNamespace(id=124, slug="flowtool-bot"),
+    None, SimpleNamespace(id=124, slug="agentflow-bot"),
     SimpleNamespace(id=123, slug=None), SimpleNamespace(id=123, slug=""),
 ])
 async def test_app_bot_identity_retries_failures_and_shares_success(tmp_path, monkeypatch, identity):
@@ -74,11 +74,11 @@ async def test_app_bot_identity_retries_failures_and_shares_success(tmp_path, mo
     with pytest.raises(RuntimeError):
         _ = github.bot_login
 
-    identity = SimpleNamespace(id=123, slug="flowtool-bot")
+    identity = SimpleNamespace(id=123, slug="agentflow-bot")
     assert await asyncio.gather(*(github.resolve_bot_login() for _ in range(3))) == [
-        "flowtool-bot[bot]",
+        "agentflow-bot[bot]",
     ] * 3
-    assert await github.resolve_bot_login() == github.bot_login == "flowtool-bot[bot]"
+    assert await github.resolve_bot_login() == github.bot_login == "agentflow-bot[bot]"
     assert len(calls) == 2
 
 
@@ -191,7 +191,7 @@ def settings(tmp_path: Path) -> ServerSettings:
     key = tmp_path / "app.pem"
     key.write_text("test-private-key")
     return ServerSettings(
-        database_url="postgresql://localhost/flowtool",
+        database_url="postgresql://localhost/agentflow",
         worker_tokens={"worker-1": SecretStr("secret")},
         github_app_id=123,
         github_private_key_path=key,
@@ -205,7 +205,7 @@ def test_push_capability_never_represents_or_serializes_secret() -> None:
         repository="octo/repo",
         permissions={"contents": "write"},
         expires_at=datetime(2026, 9, 5, 10, tzinfo=UTC),
-        bot_login="flowtool[bot]", bot_user_id=7654321,
+        bot_login="agentflow[bot]", bot_user_id=7654321,
     )
 
     assert capability.token.get_secret_value() == token
@@ -234,9 +234,9 @@ def test_both_github_auth_clients_use_finite_timeouts(
 ) -> None:
     # A client left at githubkit's timeout=None can hold result recovery indefinitely.
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("AGENTFLOW_GITHUB_REQUEST_TIMEOUT_SECONDS", raising=False)
     if configured_timeout is not None:
-        monkeypatch.setenv("FLOWTOOL_GITHUB_REQUEST_TIMEOUT_SECONDS", configured_timeout)
+        monkeypatch.setenv("AGENTFLOW_GITHUB_REQUEST_TIMEOUT_SECONDS", configured_timeout)
     github = GitHubApp(settings(tmp_path))
     expected = float(configured_timeout) if configured_timeout is not None else 30.0
     transport = httpx.MockTransport(lambda _: httpx.Response(200))
@@ -439,7 +439,7 @@ async def test_creates_repository_scoped_contents_push_capability(
         )
     )
     bot = {
-        "login": "Flowtool-bot[bot]", "type": "Bot", "id": 7654321, "node_id": "bot-node",
+        "login": "AgentFlow-bot[bot]", "type": "Bot", "id": 7654321, "node_id": "bot-node",
         "avatar_url": "", "url": "", "html_url": "", "followers_url": "", "following_url": "",
         "gists_url": "", "starred_url": "", "subscriptions_url": "", "organizations_url": "",
         "repos_url": "", "events_url": "", "received_events_url": "", "site_admin": False,
@@ -448,7 +448,7 @@ async def test_creates_repository_scoped_contents_push_capability(
         "followers": 0, "following": 0,
         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
     }
-    get_app = AsyncEndpoint(response(SimpleNamespace(id=123, slug="flowtool-bot")))
+    get_app = AsyncEndpoint(response(SimpleNamespace(id=123, slug="agentflow-bot")))
     client = SimpleNamespace(
         rest=SimpleNamespace(
             apps=SimpleNamespace(async_create_installation_access_token=create_token,
@@ -475,14 +475,14 @@ async def test_creates_repository_scoped_contents_push_capability(
     assert capability.permissions == permissions
     assert capability.expires_at == datetime(2026, 9, 5, 11, 30, tzinfo=UTC)
     assert capability.token.get_secret_value() == "ghs_scoped"
-    assert (capability.bot_login, capability.bot_user_id) == ("flowtool-bot[bot]", 7654321)
+    assert (capability.bot_login, capability.bot_user_id) == ("agentflow-bot[bot]", 7654321)
     assert create_token.calls == [
         ((42,), {"repositories": ["repo"], "permissions": {"contents": "write"}})
     ]
     # A valid scoped token must never authorize guessing a missing or different bot identity.
     for login, kind, user_id in (("other[bot]", "Bot", 7654321),
-                                ("flowtool-bot[bot]", "User", 7654321),
-                                ("flowtool-bot[bot]", "Bot", 0)):
+                                ("agentflow-bot[bot]", "User", 7654321),
+                                ("agentflow-bot[bot]", "Bot", 0)):
         bot.update(login=login, type=kind, id=user_id)
         with pytest.raises(GitHubError) as caught:
             await github.installation(42).repository("octo/repo").create_push_capability()
@@ -570,7 +570,7 @@ async def test_comment_recovery_checks_author_and_paginates(tmp_path, monkeypatc
                 SimpleNamespace(
                     id=700,
                     body=f"Done.\n\n{marker}",
-                    user=SimpleNamespace(login="Flowtool-bot[bot]", type="Bot"),
+                    user=SimpleNamespace(login="AgentFlow-bot[bot]", type="Bot"),
                 )
             ]
         )
@@ -584,7 +584,7 @@ async def test_comment_recovery_checks_author_and_paginates(tmp_path, monkeypatc
         )
     )
     github = GitHubApp(settings(tmp_path))
-    get_app = AsyncEndpoint(response(SimpleNamespace(id=123, slug="flowtool-bot")))
+    get_app = AsyncEndpoint(response(SimpleNamespace(id=123, slug="agentflow-bot")))
     app_client(monkeypatch, lambda **kwargs: SimpleNamespace(
         rest=SimpleNamespace(apps=SimpleNamespace(async_get_authenticated=get_app)),
     ))

@@ -9,7 +9,7 @@
 
 准备专用空测试仓库、初始提交、App 安装/标签/allowlist，以及已运行的 serve/worker。
 执行工具的 gh 登录身份必须是 allowlist 用户；模型认证只留在 worker。
-固定应用版本，准备 control 的 `FLOWTOOL_DATABASE_URL`，不要把连接串放命令行参数。
+固定应用版本，准备 control 的 `AGENTFLOW_DATABASE_URL`，不要把连接串放命令行参数。
 工具不读取 `.env`，观察时通过安全的进程环境注入该变量，不要求其它 control secret。
 
 所有阶段复用同一个 repo/run-id/私有 state-dir。state-dir 持久保留本地创建意图，禁止为了重试
