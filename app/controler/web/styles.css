@@ -55,6 +55,7 @@
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
+    border-radius: 999px;
     background: var(--scrollbar-thumb);
   }
   ::-webkit-scrollbar-button {
