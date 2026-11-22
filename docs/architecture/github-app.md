@@ -179,6 +179,10 @@ App 需要额外的**组织级 Projects read/write** 权限，且 installation �
 "options":{"todo":"option1","in_progress":"option2","in_review":"option3","blocked":"option4","done":"option5"}}}
 ```
 
+可用 `FLOWTOOL_SKILL_REPOSITORY=owner/repo` 将其中一个项目指定为 skill 仓库。
+仓库名不区分大小写，留空或移除设置可取消指定。指定未配置的仓库会导致服务启动失败。
+此设置只记录仓库用途，不会下载或安装 skill。
+
 字段和选项按查询所得 ID 绑定；允许多个逻辑状态指向同一个选项，展示名称更改不影响映射。
 修改配置后重启 serve。用 `flowtool project check owner/repo` 只读校验真实 repo installation、
 组织 Project 可写性、字段归属和全部选项；命令不创建测试卡片，也不访问数据库。

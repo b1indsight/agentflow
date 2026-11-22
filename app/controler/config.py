@@ -43,6 +43,7 @@ class ServerSettings(BaseSettings):
     in_review_label: str = "flow:in-review"
     done_label: str = "flow:done"
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
+    skill_repository: str | None = None
 
     @field_validator("access_issuer", "access_audience", "access_owner_email", mode="before")
     @classmethod
@@ -73,6 +74,13 @@ class ServerSettings(BaseSettings):
         ):
             raise ValueError("Projects keys must be unique owner/repository names")
         return normalized
+
+    @model_validator(mode="after")
+    def _select_skill_repository(self) -> ServerSettings:
+        self.skill_repository = (self.skill_repository or "").strip().casefold() or None
+        if self.skill_repository is not None and self.skill_repository not in self.projects:
+            raise ValueError("FLOWTOOL_SKILL_REPOSITORY must name a repository in FLOWTOOL_PROJECTS")
+        return self
 
     database_url: str
     worker_tokens: dict[str, SecretStr]
