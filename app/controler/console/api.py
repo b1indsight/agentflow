@@ -27,6 +27,7 @@ from app.contracts.console import (
     ResumeRequest,
     RetryRequest,
     UpdateSettingsRequest,
+    UpdateSkillRepositoryRequest,
 )
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.catalog import read_catalog
@@ -166,6 +167,36 @@ async def settings(request: Request) -> CodingModelSettings:
 async def model_catalog(request: Request) -> dict[str, CatalogGroup]:
     runtime: ServerRuntime = request.app.state.runtime
     return await read_catalog(runtime.gateway, runtime.worker_sessions)
+
+
+@router.get("/settings/skill-repository")
+async def skill_repository(request: Request) -> str | None:
+    runtime: ServerRuntime = request.app.state.runtime
+    return await runtime.console.db(SettingsStore(runtime.database).skill_repository)
+
+
+@router.put("/settings/skill-repository")
+async def update_skill_repository(request: Request, body: UpdateSkillRepositoryRequest) -> str | None:
+    _require_same_origin_json(request)
+    runtime: ServerRuntime = request.app.state.runtime
+    repo = None
+    if body.target is not None:
+        target = runtime.github.installation(body.target.installation_id).repository(body.target.repo)
+        try:
+            await target.verify_installation()
+            repository = await target.refetch()
+        except GitHubError as error:
+            raise _github_failure(error) from error
+        if repository.archived:
+            raise ConsoleFailure("repository_archived", 422)
+        repo = repository.full_name
+    try:
+        await runtime.console.db(partial(
+            SettingsStore(runtime.database).set_skill_repository, repo, body.expected_repository,
+        ))
+    except SettingsConflict as error:
+        raise ConsoleFailure("settings_conflict") from error
+    return repo
 
 
 @router.put("/settings", response_model=CodingModelSettings)

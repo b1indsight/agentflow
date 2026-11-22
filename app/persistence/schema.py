@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
   amp_model TEXT,
   codex_effort TEXT,
   amp_effort TEXT,
+  skill_repository TEXT,
   revision BIGINT NOT NULL DEFAULT 0 CHECK (revision>=0)
 );
 INSERT INTO runtime_settings(id) VALUES (1) ON CONFLICT DO NOTHING;

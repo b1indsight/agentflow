@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { ArrowLeft, Check, RefreshCw, Save } from "lucide-react";
 import { ApiError, getModelCatalog, getSettings, updateSettings } from "./api";
 import { Button } from "./components/ui/button";
+import { SkillRepositorySetting } from "./SkillRepositorySetting";
 import type { CatalogModel, CodingModelSettings, ModelCatalog } from "./types";
 
 type Values = Omit<CodingModelSettings, "revision">;
@@ -503,6 +504,7 @@ export function SettingsPage({
             </div>
           </form>
         </section>
+        <SkillRepositorySetting refresh={refresh} />
       </div>
     </main>
   );

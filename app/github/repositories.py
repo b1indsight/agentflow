@@ -123,6 +123,14 @@ class Repository(BaseModel):
     def name(self) -> str:
         return split_repo(self.full_name)[1]
 
+    async def verify_installation(self) -> None:
+        """Public repository metadata can be readable even without an installation grant."""
+        client = self.installation.app._client(auto_retry=False)
+        with translate_errors("get_repo_installation"):
+            grant = (await client.rest.apps.async_get_repo_installation(self.owner, self.name)).parsed_data
+            if grant.id != self.installation.installation_id or grant.suspended_at is not None:
+                raise GitHubError(GitHubErrorKind.PERMISSION, "get_repo_installation")
+
     async def refetch(self) -> Repository:
         client = self.installation._client(auto_retry=False)
 

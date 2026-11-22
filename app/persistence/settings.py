@@ -14,6 +14,20 @@ class SettingsConflict(Exception):
 class SettingsStore(Repository):
     """Read and atomically replace the one server-wide coding configuration."""
 
+    def skill_repository(self) -> str | None:
+        with self._db.connection() as connection:
+            row = required(connection.execute("SELECT skill_repository FROM runtime_settings WHERE id=1").fetchone())
+            return row["skill_repository"]
+
+    def set_skill_repository(self, repo: str | None, expected: str | None) -> None:
+        with self._db.connection() as connection:
+            updated = connection.execute(
+                "UPDATE runtime_settings SET skill_repository=%s WHERE id=1"
+                " AND skill_repository IS NOT DISTINCT FROM %s", (repo, expected),
+            )
+            if not updated.rowcount:
+                raise SettingsConflict
+
     def get(self) -> CodingModelSettings:
         with self._db.connection() as connection:
             return required(connection.cursor(row_factory=class_row(CodingModelSettings)).execute(

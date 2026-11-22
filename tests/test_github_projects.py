@@ -92,16 +92,6 @@ def test_config_is_optional_and_strict(tmp_path, monkeypatch):
         type(settings(tmp_path))(**(settings(tmp_path).model_dump() | {"projects": {"bad": config()}}))
 
 
-def test_skill_repository_selects_a_configured_project(tmp_path, monkeypatch):
-    monkeypatch.setenv("FLOWTOOL_PROJECTS", '{"Owner/Repo": ' + config().model_dump_json() + '}')
-    assert settings(tmp_path).skill_repository is None
-    monkeypatch.setenv("FLOWTOOL_SKILL_REPOSITORY", "OWNER/Repo")
-    assert settings(tmp_path).skill_repository == "owner/repo"
-    monkeypatch.setenv("FLOWTOOL_SKILL_REPOSITORY", "other/repo")
-    with pytest.raises(ValidationError, match="FLOWTOOL_SKILL_REPOSITORY"):
-        settings(tmp_path)
-
-
 async def test_validate_uses_stable_ids_and_actual_repository_installation(tmp_path, monkeypatch):
     api, client, lookup = adapter(tmp_path, monkeypatch, target())
     checked = await api.validate(api.installation.repository("owner/repo"))
