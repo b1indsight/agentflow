@@ -38,7 +38,7 @@ from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.flows import FlowStore
 from app.persistence.inference_notices import InferenceNoticeStore
-from app.persistence.settings import SettingsConflict, SettingsStore
+from app.persistence.settings import SettingsConflict, SettingsStore, TextSetting
 
 router = APIRouter(prefix="/api")
 FlowId = Annotated[int, Path(gt=0)]
@@ -171,7 +171,7 @@ async def model_catalog(request: Request) -> dict[str, CatalogGroup]:
 
 async def skill_repository(request: Request) -> str | None:
     runtime: ServerRuntime = request.app.state.runtime
-    return await runtime.console.db(SettingsStore(runtime.database).skill_repository)
+    return await runtime.console.db(partial(SettingsStore(runtime.database).get_value, TextSetting.SKILL_REPOSITORY))
 
 
 async def update_skill_repository(request: Request, body: UpdateSkillRepositoryRequest) -> str | None:
@@ -189,7 +189,7 @@ async def update_skill_repository(request: Request, body: UpdateSkillRepositoryR
         repo = repository.full_name
     try:
         await runtime.console.db(partial(
-            SettingsStore(runtime.database).set_skill_repository, repo, body.expected_repository,
+            SettingsStore(runtime.database).set_value, TextSetting.SKILL_REPOSITORY, repo, expected=body.expected_repository,
         ))
     except SettingsConflict as error:
         raise ConsoleFailure("settings_conflict") from error

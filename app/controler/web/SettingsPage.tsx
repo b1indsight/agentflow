@@ -2,8 +2,9 @@ import { useEffect, useId, useRef, useState } from "react";
 import { ArrowLeft, Check, RefreshCw, Save } from "lucide-react";
 import { ApiError, getModelCatalog, getSettings, updateSettings } from "./api";
 import { Button } from "./components/ui/button";
+import { SettingSelect } from "./SettingSelect";
 import { SkillRepositorySetting } from "./SkillRepositorySetting";
-import type { CatalogModel, CodingModelSettings, ModelCatalog } from "./types";
+import type { CodingModelSettings, ModelCatalog } from "./types";
 
 type Values = Omit<CodingModelSettings, "revision">;
 type Draft = Record<keyof Values, string>;
@@ -56,34 +57,6 @@ function defaultEffort(
 ): string {
   if (agent === "codex" && !model) return "medium";
   return effortsFor(catalog, agent, model).includes("medium") ? "medium" : "";
-}
-
-/** Keep both the draft and latest server value selectable when their catalogs differ. */
-function CatalogOptions({
-  options,
-  current,
-}: {
-  options: readonly Pick<CatalogModel, "id" | "displayName">[];
-  current: (string | null | undefined)[];
-}) {
-  const noncatalog = [...new Set(current)].filter(
-    (value): value is string =>
-      Boolean(value) && !options.some((model) => model.id === value),
-  );
-  return (
-    <>
-      {noncatalog.map((value) => (
-        <option key={value} value={value}>
-          {value} · 目录外
-        </option>
-      ))}
-      {options.map((model) => (
-        <option key={model.id} value={model.id}>
-          {model.displayName}
-        </option>
-      ))}
-    </>
-  );
 }
 
 function failureMessage(error: unknown): string {
@@ -366,52 +339,44 @@ export function SettingsPage({
                 efforts.length > 0 || !!draft[effortField] || !!currentEffort;
               return (
                 <div className="settings-agent" key={agent}>
-                  <div className="settings-field">
-                    <label htmlFor={`${id}-${agent}`}>{label} 模型</label>
-                    <select
-                      id={`${id}-${agent}`}
-                      title={draft[modelField] || undefined}
-                      value={draft[modelField]}
-                      disabled={!saved || pending}
-                      onChange={(event) =>
-                        changeModel(agent, event.target.value)
-                      }
-                    >
-                      <option value="">
-                        {agent === "codex"
-                          ? "不指定（原生默认）"
-                          : "不指定（默认 low）"}
+                  <SettingSelect
+                    label={`${label} 模型`}
+                    options={catalog?.[agent].models ?? []}
+                    savedValue={saved?.[modelField]}
+                    missingSuffix=" · 目录外"
+                    id={`${id}-${agent}`}
+                    title={draft[modelField] || undefined}
+                    value={draft[modelField]}
+                    disabled={!saved || pending}
+                    onChange={(event) => changeModel(agent, event.target.value)}
+                  >
+                    <option value="">
+                      {agent === "codex"
+                        ? "不指定（原生默认）"
+                        : "不指定（默认 low）"}
+                    </option>
+                  </SettingSelect>
+                  <SettingSelect
+                    options={efforts.map((level) => ({
+                      id: level,
+                      displayName: level === "medium" ? "mid" : level,
+                    }))}
+                    savedValue={currentEffort}
+                    missingSuffix=" · 目录外"
+                    id={`${id}-${agent}-effort`}
+                    aria-label={`${label} 推理强度`}
+                    value={draft[effortField]}
+                    disabled={!saved || pending || !hasEfforts}
+                    onChange={(event) =>
+                      change({ ...draft, [effortField]: event.target.value })
+                    }
+                  >
+                    {!draft[effortField] && (
+                      <option value="" disabled>
+                        {hasEfforts ? "选择强度" : "—"}
                       </option>
-                      <CatalogOptions
-                        options={catalog?.[agent].models ?? []}
-                        current={[draft[modelField], saved?.[modelField]]}
-                      />
-                    </select>
-                  </div>
-                  <div className="settings-field">
-                    <select
-                      id={`${id}-${agent}-effort`}
-                      aria-label={`${label} 推理强度`}
-                      value={draft[effortField]}
-                      disabled={!saved || pending || !hasEfforts}
-                      onChange={(event) =>
-                        change({ ...draft, [effortField]: event.target.value })
-                      }
-                    >
-                      {!draft[effortField] && (
-                        <option value="" disabled>
-                          {hasEfforts ? "选择强度" : "—"}
-                        </option>
-                      )}
-                      <CatalogOptions
-                        options={efforts.map((level) => ({
-                          id: level,
-                          displayName: level === "medium" ? "mid" : level,
-                        }))}
-                        current={[draft[effortField], currentEffort]}
-                      />
-                    </select>
-                  </div>
+                    )}
+                  </SettingSelect>
                 </div>
               );
             })}

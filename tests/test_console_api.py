@@ -131,6 +131,7 @@ def test_skill_repository_can_be_selected_and_cleared_without_changing_models(co
         assert client.get(path, headers=headers).json() == "owner/skills"
         assert client.put(path, json={**body, "target": None}, headers=headers).status_code == 409
         assert client.put(path, json={"target": None, "expected_repository": "owner/skills"}, headers=headers).json() is None
+        assert client.get(path, headers=headers).json() is None
         assert client.get("/api/settings/values/coding-models", headers=headers).json()["revision"] == 0
 
 

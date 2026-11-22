@@ -1,5 +1,8 @@
-"""Durable coding defaults with optimistic concurrency for independent settings tabs."""
+"""Durable console settings with independent optimistic concurrency checks."""
 
+from enum import StrEnum
+
+from psycopg import sql
 from psycopg.rows import class_row
 
 from app.domain.models import CodingModelSettings
@@ -11,19 +14,28 @@ class SettingsConflict(Exception):
     """Another settings write has advanced the caller's revision."""
 
 
+class TextSetting(StrEnum):
+    """Nullable text columns that can be changed independently of a settings group."""
+
+    SKILL_REPOSITORY = "skill_repository"
+
+
 class SettingsStore(Repository):
-    """Read and atomically replace the one server-wide coding configuration."""
+    """Persist individual settings and the revision-guarded coding defaults."""
 
-    def skill_repository(self) -> str | None:
+    def get_value(self, key: TextSetting) -> str | None:
         with self._db.connection() as connection:
-            row = required(connection.execute("SELECT skill_repository FROM runtime_settings WHERE id=1").fetchone())
-            return row["skill_repository"]
+            row = required(connection.execute(
+                sql.SQL("SELECT {} AS value FROM runtime_settings WHERE id=1").format(sql.Identifier(key.value)),
+            ).fetchone())
+            return row["value"]
 
-    def set_skill_repository(self, repo: str | None, expected: str | None) -> None:
+    def set_value(self, key: TextSetting, value: str | None, *, expected: str | None) -> None:
+        """Replace a single value only if it still matches the caller's snapshot (including NULL)."""
         with self._db.connection() as connection:
             updated = connection.execute(
-                "UPDATE runtime_settings SET skill_repository=%s WHERE id=1"
-                " AND skill_repository IS NOT DISTINCT FROM %s", (repo, expected),
+                sql.SQL("UPDATE runtime_settings SET {col}=%s WHERE id=1 AND {col} IS NOT DISTINCT FROM %s")
+                .format(col=sql.Identifier(key.value)), (value, expected),
             )
             if not updated.rowcount:
                 raise SettingsConflict

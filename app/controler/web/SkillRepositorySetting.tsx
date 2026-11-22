@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { ArrowDown, RefreshCw, Save } from "lucide-react";
 import { api, getFlowTargets, settingPath } from "./api";
 import { Button } from "./components/ui/button";
+import { SettingSelect } from "./SettingSelect";
 import type { FlowTarget } from "./types";
 
 const path = settingPath("skill-repository");
@@ -94,26 +95,19 @@ export function SkillRepositorySetting({ refresh }: { refresh: number }) {
         void save();
       }}
     >
-      <div className="settings-field">
-        <label htmlFor={id}>Skill 仓库</label>
-        <select
-          id={id}
-          value={choice}
-          disabled={saved === undefined || saving}
-          onChange={(event) => {
-            setChoice(event.target.value);
-            setMessage("");
-          }}
-        >
-          <option value="">不指定</option>
-          {choice && !targets.some((item) => item.repo === choice) && (
-            <option>{choice}</option>
-          )}
-          {targets.map((item) => (
-            <option key={item.repo}>{item.repo}</option>
-          ))}
-        </select>
-      </div>
+      <SettingSelect
+        label="Skill 仓库"
+        options={targets.map(({ repo }) => ({ id: repo, displayName: repo }))}
+        id={id}
+        value={choice}
+        disabled={saved === undefined || saving}
+        onChange={(event) => {
+          setChoice(event.target.value);
+          setMessage("");
+        }}
+      >
+        <option value="">不指定</option>
+      </SettingSelect>
       <div className="settings-feedback" aria-live="polite">
         {readError && <p className="settings-error">{readError}</p>}
         {message && <p>{message}</p>}

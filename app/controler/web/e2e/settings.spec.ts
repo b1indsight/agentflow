@@ -186,6 +186,12 @@ for (const width of [1440, 390]) {
     await choice.selectOption("owner/skills");
     await submit.click();
     await expect(page.getByText("Skill 仓库设置已保存。")).toBeVisible();
+    // A saved repository may no longer appear in the installation inventory.
+    await page.route("**/api/flow-targets", (route) =>
+      route.fulfill({
+        json: { items: [], next_cursor: null, has_more: false },
+      }),
+    );
     await page.reload();
     await expect(choice).toHaveValue("owner/skills");
     await page.screenshot({
