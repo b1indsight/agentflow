@@ -9,7 +9,6 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
   amp_model TEXT,
   codex_effort TEXT,
   amp_effort TEXT,
-  skill_repository TEXT,
   revision BIGINT NOT NULL DEFAULT 0 CHECK (revision>=0)
 );
 INSERT INTO runtime_settings(id) VALUES (1) ON CONFLICT DO NOTHING;
@@ -350,12 +349,22 @@ CREATE TABLE IF NOT EXISTS project_projections (
 CREATE INDEX IF NOT EXISTS ix_projects_due ON project_projections(next_at,id) WHERE NOT blocked;
 """
 
+# These declarations also apply to existing v3 databases when the column is absent.
+COLUMN_ADDITIONS = {
+    ("runtime_settings", "skill_repository"): "ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS skill_repository TEXT",
+}
+
 SCHEMAS = (
     SCHEMA,
+    *COLUMN_ADDITIONS.values(),
     STOP_SCHEMA,
     RESULT_SCHEMA,
     REVIEW_SCHEMA,
     RECONCILE_SCHEMA,
     PROJECT_SCHEMA,
     CONSOLE_SCHEMA,
+    """
+    CREATE TABLE IF NOT EXISTS flowtool_schema_version(version integer PRIMARY KEY CHECK(version=3));
+    INSERT INTO flowtool_schema_version(version) VALUES(3) ON CONFLICT DO NOTHING;
+    """,
 )

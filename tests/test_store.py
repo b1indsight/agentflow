@@ -48,6 +48,18 @@ def test_startup_does_not_repair_an_incomplete_current_schema(store):
         assert connection.execute("SELECT to_regclass('reconcile_checks') AS name").fetchone() == {"name": None}
 
 
+def test_startup_adds_skill_repository_to_existing_v3_settings(store):
+    # An installation predating skill selection already has live model settings.
+    with store.connection() as connection:
+        connection.execute("ALTER TABLE runtime_settings DROP COLUMN skill_repository")
+        connection.execute("UPDATE runtime_settings SET codex_model='existing', revision=7 WHERE id=1")
+    store.init_db()
+    with store.connection() as connection:
+        assert connection.execute("SELECT codex_model, revision, skill_repository FROM runtime_settings WHERE id=1").fetchone() == {
+            "codex_model": "existing", "revision": 7, "skill_repository": None,
+        }
+
+
 def test_current_schema_restarts_in_a_read_only_transaction(store):
     with store.database.transaction() as db:
         with db.connection() as connection:

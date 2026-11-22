@@ -14,7 +14,7 @@ from psycopg_pool import ConnectionPool
 
 from app.domain.models import Flow, Job, utcnow
 from app.persistence.records import Row
-from app.persistence.schema import SCHEMAS
+from app.persistence.schema import COLUMN_ADDITIONS, SCHEMAS
 
 FLOW_TABLES = frozenset(
     [
@@ -66,8 +66,8 @@ def require_worker_key(connection: Connection[Row]) -> None:
         )
 
 
-def require_current_schema(connection: Connection[Row], relations: dict[str, str]) -> None:
-    """Check the cutover marker and required relations without installing or repairing anything."""
+def _pending_column_additions(connection: Connection[Row], relations: dict[str, str]) -> list[str]:
+    """Validate the v3 baseline before selecting any additive DDL for this installation."""
     tables = {name for name, kind in relations.items() if kind in ("r", "p")}
     if (
         FLOW_TABLES | {"flowtool_schema_version"} <= tables
@@ -92,20 +92,15 @@ def require_current_schema(connection: Connection[Row], relations: dict[str, str
             "SELECT version FROM flowtool_schema_version"
         ).fetchall() == [{"version": 3}]:
             require_worker_key(connection)
-            if ("runtime_settings", "skill_repository") not in columns:
-                raise ValueError("upgrade offline: ALTER TABLE runtime_settings ADD COLUMN skill_repository TEXT")
-            return
+            return [ddl for column, ddl in COLUMN_ADDITIONS.items() if column not in columns]
     raise ValueError(
         "expected Flow schema v3; inspect the database offline with scripts.migrate_flow_attempts"
     )
 
 
-def mark_flow_schema_current(connection: Connection[Row]) -> None:
-    """Publish the history boundary only when schema and data commit together."""
-    connection.execute("""
-        CREATE TABLE flowtool_schema_version(version integer PRIMARY KEY CHECK(version=3));
-        INSERT INTO flowtool_schema_version VALUES(3);
-    """)
+def require_current_schema(connection: Connection[Row], relations: dict[str, str]) -> None:
+    if pending := _pending_column_additions(connection, relations):
+        raise ValueError(f"pending schema update: {pending[0]}")
 
 
 class _WorkflowOwnershipChanged(Exception):
@@ -254,15 +249,12 @@ class Database:
         ).fetchall()
 
     def init_db(self) -> None:
-        """Bootstrap an empty schema; existing installations must already be current."""
+        """Apply all schema declarations on bootstrap, or only missing additions on v3."""
         with self.connection() as connection:
             relations = schema_relations(connection)
-            if relations:
-                require_current_schema(connection, relations)
-                return
-            for schema in SCHEMAS:
+            statements = _pending_column_additions(connection, relations) if relations else SCHEMAS
+            for schema in statements:
                 connection.execute(schema)
-            mark_flow_schema_current(connection)
 
     def now(self) -> datetime:
         return self._clock()
