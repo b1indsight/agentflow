@@ -9,7 +9,10 @@ import {
   parseDiff,
   tokenize,
 } from "react-diff-view";
-import { CODE_LINES, useReadingState } from "./windowing";
+import { CODE_CHARS, CODE_LINES, useReadingState } from "./windowing";
+
+// The tokenizer allocates space up to the absolute line number, even for a one-line patch.
+const MAX_TOKEN_LINE = 65536;
 
 /** Parse a patch or standalone GitHub hunk; window rows without losing their original line numbers. */
 export function DiffWindow({
@@ -24,9 +27,17 @@ export function DiffWindow({
   const files = useMemo(() => {
     try {
       // GitHub's diffHunk omits the file headers required by the patch parser.
-      return parseDiff(
+      const parsed = parseDiff(
         text.startsWith("@@ ") ? `--- a/code\n+++ b/code\n${text}` : text,
       );
+      for (const file of parsed) {
+        for (const hunk of file.hunks) {
+          for (const change of hunk.changes) {
+            if (change.content.length > CODE_CHARS) change.content = "字符太多";
+          }
+        }
+      }
+      return parsed;
     } catch {
       // A fenced diff can be an incomplete patch or just an illustrative snippet.
       return [];
@@ -38,19 +49,33 @@ export function DiffWindow({
   )
     return fallback;
   return files.map((file, index) => (
-    <FileDiffWindow key={index} file={file} stateKey={`${stateKey}-${index}`} />
+    <FileDiffWindow
+      key={index}
+      file={file}
+      stateKey={`${stateKey}-${index}`}
+      showPath={files.length > 1}
+    />
   ));
 }
 
 function FileDiffWindow({
   file,
   stateKey,
+  showPath,
 }: {
   file: FileData;
   stateKey: string;
+  showPath: boolean;
 }) {
   const tokens = useMemo(
-    () => tokenize(file.hunks, { enhancers: [markEdits(file.hunks)] }),
+    () =>
+      file.hunks.some(
+        (hunk) =>
+          Math.max(hunk.oldStart, hunk.newStart) + hunk.changes.length - 1 >
+          MAX_TOKEN_LINE,
+      )
+        ? undefined
+        : tokenize(file.hunks, { enhancers: [markEdits(file.hunks)] }),
     [file],
   );
   const [saved, setStart] = useReadingState(stateKey, 0);
@@ -73,6 +98,13 @@ function FileDiffWindow({
         tabIndex={0}
         aria-label="版本差异"
       >
+        {showPath && (
+          <header className="diff-file-path">
+            {file.oldPath === file.newPath
+              ? file.newPath
+              : `${file.oldPath} → ${file.newPath}`}
+          </header>
+        )}
         <Diff
           viewType="unified"
           diffType={file.type}

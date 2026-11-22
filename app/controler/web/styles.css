@@ -2446,6 +2446,19 @@ pre code {
   overflow: auto;
   font-size: var(--text-control);
 }
+.diff-file-path {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+.diff-window .diff {
+  table-layout: auto;
+}
+.diff-window .diff-gutter {
+  white-space: nowrap;
+}
 .diff-window .diff-gutter-col {
   width: 4ch;
 }

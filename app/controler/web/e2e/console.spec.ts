@@ -3681,6 +3681,75 @@ test("visible Markdown grows one review diff across reads without scrolling", as
   }
 });
 
+test("multi-file diff labels files and keeps oversized lines local to their rows", async ({
+  page,
+}) => {
+  // Generated files can have enormous lines, while short edits can occur far into another file.
+  const body = [
+    "```diff",
+    "diff --git a/src/old.ts b/src/new.ts",
+    "rename from src/old.ts",
+    "rename to src/new.ts",
+    "--- a/src/old.ts",
+    "+++ b/src/new.ts",
+    "@@ -3 +3,2 @@",
+    "-old",
+    "+" + "x".repeat(8193),
+    "+keep this line",
+    "diff --git a/src/config.ts b/src/config.ts",
+    "--- a/src/config.ts",
+    "+++ b/src/config.ts",
+    "@@ -90001 +90001 @@",
+    "-disabled",
+    "+enabled",
+    "```",
+  ].join("\n");
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            ...activity,
+            body,
+            body_length: body.length,
+            previous_version: null,
+          },
+        ],
+        snapshot: 2,
+        total: 1,
+        has_more: false,
+        next_cursor: null,
+        sources: [],
+        changes: {},
+      },
+    }),
+  );
+  await page.goto("/#flow/42/conversation");
+  const message = page.locator("[data-entry='comment-1'] .markdown-body");
+  const files = message.getByLabel("版本差异", { exact: true });
+  await expect(
+    files.nth(0).getByText("src/old.ts → src/new.ts", { exact: true }),
+  ).toBeVisible();
+  await expect(files.nth(0).locator(".diff-code-insert")).toHaveText([
+    "字符太多",
+    "keep this line",
+  ]);
+  await expect(
+    files.nth(1).getByText("src/config.ts", { exact: true }),
+  ).toBeVisible();
+  await expect(files.nth(1).locator(".diff-code-insert")).toHaveText("enabled");
+  await expect(files.nth(1).locator(".diff-gutter-insert").last()).toHaveText(
+    "90001",
+  );
+  await expect(files.nth(1).locator(".diff-code-edit")).toHaveCount(0);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await message.screenshot({
+      path: `../../../.amp/in/artifacts/multi-file-diff-${width}.png`,
+    });
+  }
+});
+
 test("consecutive authors share identity while conversation bodies render safe Markdown", async ({
   page,
 }) => {
