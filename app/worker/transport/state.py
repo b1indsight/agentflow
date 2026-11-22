@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -40,6 +41,7 @@ from app.contracts.protocol import (
     StopExecution,
     StopResult,
     Succeeded,
+    SyncSkills,
     TerminalPayload,
     ToolCall,
     ToolResult,
@@ -60,6 +62,7 @@ from app.contracts.validation import RejectedMessage
 from app.domain.inference_models import InferenceCapability
 from app.inference.transport import WorkerInferenceCallbacks
 from app.worker.execution.lifecycle import WorkerProtocolError
+from app.worker.execution.skills import clone_skills
 from app.worker.execution.workspaces import RepositoryProvisionError
 
 if TYPE_CHECKING:
@@ -120,6 +123,7 @@ class WorkerStateCallbacks:
         self._inventory_dirty = False
         self._unmatched_error_logged = False
         self._recovery_required = False
+        self._skill_clones: set[asyncio.Task[Path]] = set()
 
     def bind(self, routes: Dispatcher[ServerMessageUnion]) -> None:
         self.routes = routes
@@ -127,6 +131,7 @@ class WorkerStateCallbacks:
         routes.register("worker.stop", StopExecution, self.on_stop)
         routes.register("worker.reject_recovery", RecoveryRejected, self.on_reject)
         routes.register("worker.provision", RepositoryDemand, self.on_provision)
+        routes.register("worker.sync_skills", SyncSkills, self.on_sync_skills)
         routes.configure(
             opened=self.on_opened,
             message=self.on_message,
@@ -244,6 +249,7 @@ class WorkerStateCallbacks:
                 if self._pages:
                     raise WorkerProtocolError("registration completed before all inventory pages")
                 self.ready = True
+                self.runtime.workspaces.skill_checkout = None
                 self.on_ready(True)
                 if self._inventory_dirty:
                     await self.report_inventory()
@@ -438,6 +444,24 @@ class WorkerStateCallbacks:
         if len(self._accepted) > MAX_PAYLOAD_ITEMS * 2:
             self._accepted.pop(next(iter(self._accepted)))
 
+    async def on_sync_skills(self, call: SyncSkills, message: ServerMessageUnion) -> None:
+        if not self.ready:
+            raise WorkerProtocolError("skill synchronization requires completed registration")
+        pool = self.runtime.workspaces
+        if call.source is None:
+            pool.skill_checkout = None
+            return
+        # Stops, revisions and inference do not need to wait for an INITIAL's skill checkout.
+        clone = asyncio.create_task(clone_skills(pool.inference_path, call.source))
+        pool.skill_checkout = clone
+        self._skill_clones.add(clone)
+        clone.add_done_callback(self._clone_finished)
+
+    def _clone_finished(self, clone: asyncio.Task[Path]) -> None:
+        self._skill_clones.discard(clone)
+        if not clone.cancelled() and clone.exception() is not None:
+            logger.warning("skill repository sync failed; INITIAL cannot use this snapshot")
+
     async def on_provision(self, call: RepositoryDemand, message: ServerMessageUnion) -> None:
         if not self.ready:
             raise WorkerProtocolError("inventory demand requires completed registration")
@@ -474,6 +498,7 @@ class WorkerStateCallbacks:
         for task in observers:
             task.cancel()
         await asyncio.gather(*observers, return_exceptions=True)
+        await asyncio.gather(*self._skill_clones, return_exceptions=True)
 
     async def send_terminal(self, terminal: TerminalPayload) -> None:
         previous = self.expected_result.get(terminal.job_id)

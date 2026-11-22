@@ -193,6 +193,8 @@ async def update_skill_repository(request: Request, body: UpdateSkillRepositoryR
         ))
     except SettingsConflict as error:
         raise ConsoleFailure("settings_conflict") from error
+    for session in runtime.worker_sessions:
+        session.request_skill_sync()
     return repo
 
 

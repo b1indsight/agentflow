@@ -43,11 +43,13 @@ from app.contracts.protocol import (
     ServerMessage,
     ServerMessageUnion,
     ServerPayload,
+    SkillRepositorySource,
     Started,
     StopAccepted,
     StopExecution,
     StopResult,
     Succeeded,
+    SyncSkills,
     TerminalPayload,
     ToolCall,
     ToolResult,
@@ -74,11 +76,13 @@ from app.controler.workflow.results import ResultApplication
 from app.controler.workflow.tools import FlowToolService
 from app.domain.inference_models import InferenceFailure
 from app.domain.models import Job, JobKind, JobState, WorkerRecord
+from app.github import GitHubError
 from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.inference import InferenceStore
 from app.persistence.jobs import JobStore
+from app.persistence.settings import SettingsStore, TextSetting
 from app.persistence.stops import StopIntent, StopStore
 from app.persistence.workers import WorkerStore
 from app.telemetry.metrics import Metrics
@@ -109,6 +113,9 @@ class ServerCallbacks:
         self.deliveries, self.jobs = DeliveryStore(database), JobStore(database)
         self.stops, self.workers = StopStore(database), WorkerStore(database)
         self.assignments, self.inference = AssignmentStore(database), InferenceStore(database)
+        self.settings = SettingsStore(database)
+        self._skill_sync_pending = True
+        self._sent_skills = False
         self.coordinator, self.results = coordinator, results
         self.notify_jobs, self.metrics = notify_jobs, metrics
         self.heartbeat_interval, self.heartbeat_timeout = heartbeat_interval, heartbeat_timeout
@@ -276,11 +283,32 @@ class ServerCallbacks:
         await self._send(stop)
         self.receive_deadline = asyncio.get_running_loop().time() + self.heartbeat_timeout
 
+    def request_skill_sync(self) -> None:
+        """Have this session's next poll send the latest committed skill repository setting."""
+        self._skill_sync_pending = True
+        self.session.wake()
+
     async def poll(self) -> float | None:
         """Advance scheduling once; return an absolute receive/idle deadline to Session."""
         assert self.worker is not None
         if not self.registered:
             return self.receive_deadline
+        if self.register.execute and self._skill_sync_pending:
+            self._skill_sync_pending = False
+            repository = self.settings.get_value(TextSetting.SKILL_REPOSITORY)
+            if repository or self._sent_skills:
+                source = None
+                if repository:
+                    try:
+                        read_token = await self.coordinator.github.repository_read_token(repository)
+                    except GitHubError as error:
+                        logger.warning("skill repository read credential unavailable: {}", error.kind)
+                        read_token = None
+                    if self._skill_sync_pending:  # A newer setting committed during token issuance.
+                        return asyncio.get_running_loop().time()
+                    source = SkillRepositorySource(repository=repository, token=read_token)
+                await self._send(SyncSkills(**call_header(), method="worker.sync_skills", source=source))
+                self._sent_skills = source is not None
         for stop in self.stops.pending_for_worker(self.worker_id):
             if stop.job_id not in self.starting:
                 await self._begin_stop(stop)

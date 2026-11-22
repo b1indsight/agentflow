@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- Worker 注册及保存 skill 仓库设置时，在推理 workspace 内同步仓库。首次编码前自动链接 `always_on: true` 的 skill，再让 agent 根据描述选择其余 skill。serve 与 worker 需一起升级至 wire30，无数据库迁移。
+
 - 首次编码的 Worker Agent 可用只读 MCP 工具 `search_flows` 搜索当前仓库的看板任务。serve 和 worker 需同时升级到 wire29，无数据库迁移。
 
 - 数据库启动只在空 schema 建表；已有 v3 库只读校验，旧库必须离线迁移。重启不再自动合表或补写历史快照。

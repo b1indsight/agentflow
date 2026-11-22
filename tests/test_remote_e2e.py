@@ -4,6 +4,7 @@ import asyncio
 import subprocess
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -15,9 +16,11 @@ from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobState
 from app.github import GitHubError, GitHubErrorKind, RemoteRef, Repository
 from app.persistence.records import required
+from app.persistence.settings import SettingsStore, TextSetting
 from app.worker.config import WorkerSettings
 from app.worker.runtime import WorkerRuntime
 from tests.github import RecordingGitHub, RecordingRepository
+from tests.test_vcs import _git, _git_fixture
 from tests.test_worker_executor import RecordingAgent
 from tests.test_worker_workspaces import managed_seed
 from tests.test_workspace_dispatch import wait_until
@@ -69,8 +72,6 @@ class QueueConnection:
 @pytest.fixture
 def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtime, request):
     """Use the normal coordinator/executor; only GitHub and the coding agent are scripted."""
-    from tests.test_vcs import _git
-
     flow = required(ControlService(database=store.database).create_flow("owner/repo", 8, 42))
     github = RecordingGitHub()
     server = server_runtime(github=github)
@@ -163,18 +164,23 @@ async def remote_connection(server, worker):
 
 
 @pytest.mark.parametrize("remote_flow", ["codex", "amp"], indirect=True)
-async def test_control_gateway_and_worker_client_complete_one_remote_job(store, remote_flow, monkeypatch):
-    from app.persistence.settings import SettingsStore
-
-    SettingsStore(store.database).update(
+async def test_control_gateway_and_worker_client_complete_one_remote_job(store, remote_flow, skill_repository, monkeypatch):
+    settings = SettingsStore(store.database)
+    settings.update(
         "codex-wire-model", "anthropic/claude-opus-5-5", codex_effort="ultra", amp_effort="low", expected_revision=0,
     )
+    settings.set_value(TextSetting.SKILL_REPOSITORY, "owner/skills", expected=None)
+    published = skill_repository / "style/SKILL.md"
+    original = published.read_text()
     flow, subject, github, worker, agent = remote_flow
     # Search before editing the checkout: no pushed branch or PR receipt exists yet.
     store.flows.create_flow("other/repo", 8, 42)
     start = agent.start
 
-    async def search_then_start(*args, context, **kwargs):
+    async def search_then_start(task, cwd, *, context, **kwargs):
+        link = cwd / ".agents/skills/style"
+        assert link.is_symlink() and link.resolve().is_relative_to(worker.workspaces.inference_path)
+        assert (link / "SKILL.md").read_text() == original
         async with httpx.AsyncClient(trust_env=False) as client:
             reply = await client.post(context.mcp_url, headers={
                 "Authorization": f"Bearer {context.mcp_token.get_secret_value()}",
@@ -183,7 +189,7 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(store, 
             }})
         page = reply.json()["result"]["structuredContent"]
         assert [row["id"] for row in page["items"]] == [flow.id] and sum(page["counts"].values()) == 1
-        return await start(*args, context=context, **kwargs)
+        return await start(task, cwd, context=context, **kwargs)
 
     monkeypatch.setattr(agent, "start", search_then_start)
     job, = store.jobs.list_jobs(flow.id)
@@ -196,6 +202,22 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(store, 
         assert state.assignment is None and state.path.is_file()
         journal = state.load()
         assert journal.terminal.result.delivery_receipt.status == "prepared"
+
+        # A settings refresh must not retarget this Flow's initialized workspace.
+        (_, workspace), = agent.started
+        linked = workspace / ".agents/skills/style/SKILL.md"
+        published.write_text(original + "Updated\n")
+        _git("commit", "-am", "refresh skill", cwd=skill_repository)
+        first = worker.workspaces.skill_checkout
+        session, = subject.worker_sessions
+        session.request_skill_sync()
+        await wait_until(lambda: worker.workspaces.skill_checkout is not first)
+        refreshed = await required(worker.workspaces.skill_checkout)
+        assert (refreshed / "style/SKILL.md").read_text() == published.read_text()
+        settings.set_value(TextSetting.SKILL_REPOSITORY, None, expected="owner/skills")
+        session.request_skill_sync()
+        await wait_until(lambda: worker.workspaces.skill_checkout is None)
+        assert linked.read_text() == original
 
     persisted = required(store.jobs.get_job(job.id))
     assert persisted.state is JobState.DONE and persisted.started_at is not None
@@ -221,8 +243,6 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(store, 
 
 async def test_existing_remote_branch_is_not_taken_over(store, remote_flow):
     # Even a valid model answer cannot authorize coding on an unrelated existing ref.
-    from tests.test_vcs import _git
-
     flow, server, github, worker, agent = remote_flow
     seed = worker.settings.worker_root / "repos/owner/repo"
     branch = "feat/implement-task"
@@ -239,3 +259,23 @@ async def test_existing_remote_branch_is_not_taken_over(store, remote_flow):
     assert github.opened == agent.started == []
     assert not any(call["operation"] == "create_push_capability" for call in github.resource_calls)
     assert _git("ls-remote", "origin", f"refs/heads/{branch}", cwd=seed) == before
+
+
+@pytest.fixture
+def skill_repository(tmp_path, monkeypatch):
+    from app.worker.execution.vcs import _vcs_environment
+
+    source = tmp_path / "skill-source"
+    source.mkdir()
+    publisher, _ = _git_fixture(source)
+    skill = publisher / "style"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text('---\nname: style\ndescription: Style rules\nmetadata:\n  always_on: "true"\n---\n')
+    _git("add", "style", cwd=publisher)
+    _git("commit", "-m", "publish skill", cwd=publisher)
+    config = source / "gitconfig"
+    config.write_text(f'[url "{publisher.as_uri()}"]\n insteadOf = https://github.com/owner/skills.git\n')
+    monkeypatch.setattr("app.worker.execution.skills._vcs_environment",
+                        lambda: _vcs_environment() | {"GIT_CONFIG_GLOBAL": str(config)})
+    monkeypatch.setattr(RecordingGitHub, "repository_read_token", AsyncMock(return_value=SecretStr("read")))
+    return publisher

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from dataclasses import replace
@@ -38,6 +39,7 @@ from app.worker.execution.prompts import (
     build_revision_prompt,
     build_revision_retry_prompt,
 )
+from app.worker.execution.skills import clear_skill_links, link_skills
 from app.worker.execution.vcs import (
     VcsExecutionContext,
     VcsVerificationError,
@@ -123,6 +125,7 @@ class WorkerExecutor:
                 raise VcsVerificationError("binding", "initial assignment target is missing")
             model = assignment.model
             effort = assignment.effort
+            skills = self.workspaces.skill_checkout
             capability = _github_capability(secret, task.repo)
             binding = await self.workspaces.claim(
                 task.repo, task.flow_id, assignment.workspace, assignment.generation,
@@ -138,6 +141,11 @@ class WorkerExecutor:
             await self.workspaces.configure_git_identity(
                 binding, capability.bot_login, capability.bot_user_id,
             )
+            receipt = self.workspaces.skill_receipt(binding)
+            clear_skill_links(workspace, receipt)
+            if skills is not None:
+                await link_skills(await asyncio.shield(skills), workspace, task.task_content,
+                                  self.code_agent, model, effort, receipt)
         except VcsVerificationError as error:
             return _vcs_failure(None, "", error.stage, str(error))
         except OSError:
