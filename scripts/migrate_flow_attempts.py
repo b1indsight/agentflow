@@ -9,7 +9,6 @@ from psycopg.rows import dict_row
 
 from app.persistence.database import (
     FLOW_TABLES,
-    mark_flow_schema_current,
     require_current_schema,
     require_worker_key,
     schema_relations,
@@ -202,7 +201,6 @@ def _freeze(c: Connection[Row]) -> None:
     c.execute("UPDATE flows SET history_only=true,is_issue_owner=false")
     # A public link names a worker file, not a Flow. Retire old capabilities as one registry.
     c.execute("ALTER TABLE worker_file_links RENAME TO historical_worker_file_links")
-    c.execute("ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS skill_repository TEXT")
     for schema in SCHEMAS:
         c.execute(schema)
     # Keep coverage, timestamps, gaps, cursors and source content. Stopping a scan does not
@@ -217,7 +215,6 @@ def _freeze(c: Connection[Row]) -> None:
         UPDATE review_buffers SET due_at=NULL WHERE due_at IS NOT NULL;
         UPDATE console_activity SET awaiting_agent=false WHERE awaiting_agent;
     """)
-    mark_flow_schema_current(c)
 
 
 def migrate(database_url: str, *, apply: bool = False) -> Row:

@@ -82,7 +82,7 @@ API 错误显式显示，已有内容不会被示例数据替换；Worker 离线
 Inbox 可折叠，原有阶段分组保留；它只提供导航，不自动重试、归档或修改 GitHub。
 
 在「设置 → Skill 仓库」从当前授权项目中选择一个仓库，点击「保存仓库」即可生效，无需重启。选择「不指定」可取消。此选择独立于模型设置，不会下载或安装 skill。
-已有数据库升级前应执行 `ALTER TABLE runtime_settings ADD COLUMN IF NOT EXISTS skill_repository TEXT;`，新数据库由初始化流程建列。
+已有 v3 数据库首次启动时会自动添加缺少的 `runtime_settings.skill_repository` 列，保留现有设置，Skill 仓库默认为「不指定」。首次补列需要应用数据库账号有权修改 `runtime_settings` 表。
 
 「设置」按 Codex / Amp 后端分别保存本服务器全局默认值，仅用于新建编码会话。
 正在运行或恢复的已有会话不被强制换模型，独立 inference / Judge 不受影响。
