@@ -38,6 +38,7 @@ from app.domain.models import CodingExecutionContext, CodingExecutionResult
 from app.worker.coding_agent import CodingAgent
 from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 from app.worker.execution.gh import github_environment
+from app.worker.execution.git_identity import disables_amp_coauthor
 from app.worker.execution.idle import wait_for_inactivity
 from app.worker.model_catalog import read_model_catalog
 from app.worker.state.file_links import FileLinks
@@ -424,6 +425,8 @@ class AmpCodingAgent(CodingAgent):
             environment = amp_environment(context=context)
             if context and context.github:
                 environment.update(github_environment(context.github, run_directory, environment))
+                if await disables_amp_coauthor(cwd):
+                    environment["AMP_DISABLE_AMP_COAUTHOR_TRAILER"] = "1"
             args = (["threads", "continue", session_id] if session_id else []) + [
                 "--mcp-config", json.dumps(mcp), "--executor", "local",
                 "--visibility", "private", "--no-ide", "--no-notifications",
