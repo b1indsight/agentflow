@@ -1,10 +1,13 @@
 """Flow tool routes on the server, fenced by the original worker connection."""
 
+import asyncio
 from collections.abc import Callable
 
 from app.communication.dispatch import Dispatcher
 from app.communication.session import Session
 from app.contracts.protocol import (
+    FlowSearchCall,
+    FlowSearchResult,
     FlowToolErrorKind,
     FlowToolRequest,
     FlowToolResponse,
@@ -46,6 +49,15 @@ class ServerFlowCallbacks:
 
     def bind(self, routes: Dispatcher[WorkerMessageUnion]) -> None:
         routes.register("flow.open_pr", FlowToolRequest, self.on_tool)
+        routes.register("server.search_flows", FlowSearchCall, self.on_search)
+
+    async def on_search(self, item: FlowSearchCall, message: WorkerMessageUnion) -> None:
+        self.validate_active(item.arguments.job_id, item.arguments.assignment_token)
+        if self.is_stopping(item.arguments.job_id):
+            result = FlowSearchResult(**result_header(item.message_id), method=item.method, error="assignment stopping")
+        else:
+            result = await asyncio.to_thread(self.tools.search, item, worker_id=self.worker_id, connection_epoch=self.epoch)
+        await self.session.send(ServerMessage(**message_header(self.epoch), control=None, payload=[result]))
 
     def _validate_tool(self, item: FlowToolRequest) -> None:
         args = item.arguments

@@ -91,6 +91,9 @@ class BackendlessAgent(RecordingAgent):
 
 
 class RecordingToolCaller:
+    async def search_flows(self, query):
+        raise AssertionError("unexpected task search")
+
     async def call_tool(self, name, arguments, *, call_id=None, vcs_outcome):
         assert name == "flow.open_pr"
         assert call_id

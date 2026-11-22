@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 首次编码的 Worker Agent 可用只读 MCP 工具 `search_flows` 搜索当前仓库的看板任务。serve 和 worker 需同时升级到 wire29，无数据库迁移。
+
 - 数据库启动只在空 schema 建表；已有 v3 库只读校验，旧库必须离线迁移。重启不再自动合表或补写历史快照。
 
 - 切换前已归档的 Flow 保留原链接，只能查看历史；切换后新建的 Flow 归档后仍可重新开工。升级须先结清在途工作，再按[离线升级说明](docs/operations/upgrade.md)操作。

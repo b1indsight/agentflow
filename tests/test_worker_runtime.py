@@ -10,23 +10,36 @@ from pydantic import SecretStr
 
 from app.contracts.conversation import HistoryPage, HistoryQuery
 from app.contracts.protocol import (
+    ExecutionIdentity,
+    FlowSearchCall,
+    FlowSearchPage,
+    FlowSearchQuery,
+    FlowSearchResult,
     InferenceRequest,
     InferenceResult,
     Register,
     ServerMessage,
+    StopFence,
     call_header,
     message_header,
     parse_worker_message,
+    result_header,
 )
 from app.domain.inference_models import InferenceError, InferenceMessage, InferenceTask
 from app.domain.models import CodingExecutionResult
 from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
+from app.worker.execution.lifecycle import WorkerProtocolError
 from app.worker.execution.vcs import _run
 from app.worker.runtime import WorkerRootLock, WorkerRuntime
 from tests.test_remote_e2e import QueueConnection
-from tests.test_worker_client import ScriptedConnection, assignment_message, registered_message
+from tests.test_worker_client import (
+    CancellableExecutor,
+    ScriptedConnection,
+    assignment_message,
+    registered_message,
+)
 from tests.test_worker_session import _assignment
 from tests.worker_fixtures import run_worker
 
@@ -107,6 +120,67 @@ async def test_runtime_shares_configured_agent_for_coding_and_history(
     monkeypatch.setattr(agent, "read_history", lambda query: page)
     assert await runtime.read_history(HistoryQuery(session_id=session_id)) == page
     assert other.executor.code_agent is agent
+
+
+@pytest.mark.parametrize("outcome", ["page", "disconnect", "stop"])
+async def test_search_belongs_to_one_live_assignment_and_connection(tmp_path, outcome):
+    # Unlike delivery, a disconnected read must fail, and a reply after stop grants no data.
+    runtime = WorkerRuntime(WorkerSettings(worker_id="w", worker_token=SecretStr("secret"),
+                            worker_root=tmp_path, serve_ws_url="wss://unused"))
+    runtime.initialize()
+    slots = await runtime.workspaces.provision("owner/repo")
+    assignment = _assignment(workspace=next(s.workspace for s in slots if s.repository))
+    execution = runtime.receive(assignment)
+    executor = CancellableExecutor()
+    execution.executor = executor
+    query = FlowSearchQuery(q="status:blocked", limit=2, cursor=None)
+    with pytest.raises(WorkerProtocolError, match="active"):
+        await execution.search_flows(query)
+
+    outgoing, incoming = asyncio.Queue(), asyncio.Queue()
+    serving = asyncio.create_task(run_worker(runtime, QueueConnection(outgoing, incoming)))
+    try:
+        async with asyncio.timeout(3):
+            await incoming.put(registered_message().model_dump_json())
+            await incoming.put(assignment_message(assignment).model_dump_json())
+            await executor.started.wait()
+            search = asyncio.create_task(execution.search_flows(query))
+            while True:
+                frame = parse_worker_message(await outgoing.get())
+                call = next((i for i in frame.payload if isinstance(i, FlowSearchCall)), None)
+                if call is not None:
+                    break
+            identity = ExecutionIdentity(job_id=assignment.job_id,
+                                         assignment_token=assignment.assignment_token)
+            assert call.arguments == identity and call.query == query
+            assert frame.connection_epoch == "epoch-1" and execution.pending_tool_call() is None
+            if outcome == "disconnect":
+                serving.cancel()
+                await asyncio.gather(serving, return_exceptions=True)
+                with pytest.raises(WorkerProtocolError, match="unavailable"):
+                    await search
+                assert execution.lease() == assignment
+                with pytest.raises(WorkerProtocolError, match="unavailable"):
+                    await execution.search_flows(query)
+                return
+
+            if outcome == "stop":
+                await execution.stop(StopFence(request_id="stop", flow_id=assignment.flow_id,
+                                               **identity.model_dump()))
+            page = FlowSearchPage(items=[], counts={}, next_cursor=None, has_more=False)
+            reply = FlowSearchResult(**result_header(call.message_id), method=call.method,
+                                     page=page, error=None)
+            await incoming.put(ServerMessage(**message_header("epoch-1"), control=None,
+                                             payload=[reply]).model_dump_json())
+            if outcome == "stop":
+                with pytest.raises(WorkerProtocolError, match="assignment"):
+                    await search
+            else:
+                assert await search == page
+    finally:
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+        await execution.shutdown()
 
 
 @pytest.mark.parametrize("backend,expected", [("codex", CodexAgent), ("amp", AmpCodingAgent)])

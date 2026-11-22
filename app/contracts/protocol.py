@@ -24,6 +24,7 @@ from pydantic import (
 )
 
 from app.contracts.catalog import CatalogModel
+from app.contracts.console import Phase
 from app.contracts.conversation import ConversationError, HistoryPage, SessionId
 from app.contracts.files import MAX_FILE_BASE64, FileError, FileId
 from app.domain.context_models import ReviewContext
@@ -42,7 +43,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[28] = 28
+PROTOCOL_VERSION: Literal[29] = 29
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -391,6 +392,49 @@ class FileRegister(ToolCall):
     file_id: FileId
 
 
+class FlowSearchQuery(ProtocolModel):
+    q: str = Field(max_length=2000, pattern=r"^[^\x00]*$")
+    limit: int = Field(default=50, strict=True, ge=1, le=50)
+    cursor: str | None = Field(default=None, min_length=1, max_length=1024)
+
+
+class FlowSearchCall(ToolCall):
+    method: Literal["server.search_flows"]
+    arguments: ExecutionIdentity
+    query: FlowSearchQuery
+
+    def execution(self) -> tuple[int, str]:
+        return self.arguments.job_id, self.arguments.assignment_token
+
+
+class FlowSearchItem(ProtocolModel):
+    id: int
+    title: str | None
+    phase: Phase
+    repo: str
+    issue_number: int | None
+    pr_number: int | None
+
+
+class FlowSearchPage(ProtocolModel):
+    items: list[FlowSearchItem] = Field(max_length=50)
+    counts: dict[Phase, int]
+    next_cursor: str | None
+    has_more: bool
+
+
+class FlowSearchResult(ToolResult):
+    method: Literal["server.search_flows"]
+    page: FlowSearchPage | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def _one_outcome(self) -> Self:
+        if (self.page is None) == (self.error is None):
+            raise ValueError("flow search requires exactly one outcome")
+        return self
+
+
 class FileQuery(ToolCall):
     method: Literal["worker.file_read"]
     file_id: FileId
@@ -614,8 +658,8 @@ type WorkerResults = (
     ExecuteResult | StopResult | ConversationResult | FileResult | InferenceResult | ProvisionResult
     | CatalogResult
 )
-type ServerCalls = Started | AcceptResultRequest | AcceptStop | FileRegister
-type ServerResults = AcceptResultResponse | StopAccepted | FileRegistered
+type ServerCalls = Started | AcceptResultRequest | AcceptStop | FileRegister | FlowSearchCall
+type ServerResults = AcceptResultResponse | StopAccepted | FileRegistered | FlowSearchResult
 
 _FIXED_METHODS = frozenset(
     get_args(model.model_fields["method"].annotation)[0]
@@ -682,7 +726,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[28]
+    protocol_version: Literal[29]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -889,7 +933,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[28]
+    protocol_version: Literal[29]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

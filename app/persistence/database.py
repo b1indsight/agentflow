@@ -131,6 +131,7 @@ class Database:
         self.recovery_grace = recovery_grace
         self._bound_connection: Connection[Row] | None = None
         self._transaction_closed = False
+        self._read_snapshot = False
         self._pool = cast(
             ConnectionPool[Connection[Row]],
             ConnectionPool(
@@ -168,6 +169,17 @@ class Database:
                 yield bound
             finally:
                 bound._transaction_closed = True
+
+    @contextmanager
+    def read_snapshot(self) -> Iterator[Database]:
+        """Read authorization and paginated projections at one committed database state."""
+        if self._read_snapshot:
+            yield self
+            return
+        with self.transaction() as tx, tx.connection() as connection:
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            tx._read_snapshot = True
+            yield tx
 
     def serialize_issue(self, repo: str, issue_number: int | None) -> None:
         """Serialize trigger/retry of the same issue, including creation before a Flow row exists."""

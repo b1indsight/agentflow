@@ -23,8 +23,13 @@ from app.contracts.conversation import ConversationFailure, HistoryPage, History
 from app.contracts.files import FileFailure
 from app.contracts.protocol import (
     AssignmentArguments,
+    ExecutionIdentity,
     FileRegister,
     FileRegistered,
+    FlowSearchCall,
+    FlowSearchPage,
+    FlowSearchQuery,
+    FlowSearchResult,
     InitialTask,
     ServerMessageUnion,
     WorkerMessage,
@@ -211,7 +216,7 @@ class WorkerRuntime:
         )
         return WorkerExecution(
             worker_id=self.settings.worker_id, executor=executor, state=state,
-            on_change=self.notify,
+            on_change=self.notify, search=self._search_flows,
         )
 
     def execution_for(self, job_id: int, token: str | None = None) -> WorkerExecution:
@@ -309,6 +314,32 @@ class WorkerRuntime:
         if agent is None:
             raise FileFailure("file_unreadable")
         return agent, source
+
+    async def _search_flows(
+        self, identity: ExecutionIdentity, query: FlowSearchQuery,
+    ) -> FlowSearchPage:
+        """Bind the read to one registered session, just like file registration; never replay it."""
+        registration = self.gateway.get("server")
+        if not self._connected or registration is None:
+            raise WorkerProtocolError("Flow search unavailable")
+        call = FlowSearchCall(
+            **call_header(), method="server.search_flows", arguments=identity, query=query,
+        )
+        message = WorkerMessage(**message_header(registration.session.epoch), control=None, payload=[call])
+        try:
+            response, _ = await request_reply(
+                registration, call, FlowSearchResult, message, timeout=10.0,
+            )
+        except TimeoutError:
+            raise WorkerProtocolError("Flow search timed out") from None
+        except SessionClosed:
+            raise WorkerProtocolError("Flow search unavailable") from None
+        except ReplyRejected:
+            raise WorkerProtocolError("Invalid Flow search response") from None
+        if response.error is not None:
+            raise WorkerProtocolError(response.error)
+        assert response.page is not None
+        return response.page
 
     async def register_file(self, source: Path | str, backend: str | None = None) -> str:
         """Return an owner-only URL for local bytes or a private Amp attachment (at most 512 KiB).

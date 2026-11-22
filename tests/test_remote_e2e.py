@@ -5,6 +5,7 @@ import subprocess
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 
+import httpx
 import pytest
 from pydantic import SecretStr
 
@@ -162,13 +163,29 @@ async def remote_connection(server, worker):
 
 
 @pytest.mark.parametrize("remote_flow", ["codex", "amp"], indirect=True)
-async def test_control_gateway_and_worker_client_complete_one_remote_job(store, remote_flow):
+async def test_control_gateway_and_worker_client_complete_one_remote_job(store, remote_flow, monkeypatch):
     from app.persistence.settings import SettingsStore
 
     SettingsStore(store.database).update(
         "codex-wire-model", "anthropic/claude-opus-5-5", codex_effort="ultra", amp_effort="low", expected_revision=0,
     )
     flow, subject, github, worker, agent = remote_flow
+    # Search before editing the checkout: no pushed branch or PR receipt exists yet.
+    store.flows.create_flow("other/repo", 8, 42)
+    start = agent.start
+
+    async def search_then_start(*args, context, **kwargs):
+        async with httpx.AsyncClient(trust_env=False) as client:
+            reply = await client.post(context.mcp_url, headers={
+                "Authorization": f"Bearer {context.mcp_token.get_secret_value()}",
+            }, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "search_flows", "arguments": {"q": "issue:8"},
+            }})
+        page = reply.json()["result"]["structuredContent"]
+        assert [row["id"] for row in page["items"]] == [flow.id] and sum(page["counts"].values()) == 1
+        return await start(*args, context=context, **kwargs)
+
+    monkeypatch.setattr(agent, "start", search_then_start)
     job, = store.jobs.list_jobs(flow.id)
     async with remote_connection(subject, worker):
         await wait_until(lambda: required(store.jobs.get_job(job.id)).result_applied_at is not None)
