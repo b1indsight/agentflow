@@ -66,9 +66,14 @@ function checkedSettings(value: CodingModelSettings): CodingModelSettings {
   return value;
 }
 
+type SettingKey = "coding-models" | "skill-repository";
+export const settingPath = (key: SettingKey) => `/api/settings/values/${key}`;
+
 // Mutable settings deliberately bypass the immutable conversation/session caches below.
 export const getSettings = async (signal: AbortSignal) =>
-  checkedSettings(await api<CodingModelSettings>("/api/settings", {}, signal));
+  checkedSettings(
+    await api<CodingModelSettings>(settingPath("coding-models"), {}, signal),
+  );
 /** Read discovery independently of the revision-guarded settings document. */
 export async function getModelCatalog(
   signal: AbortSignal,
@@ -104,11 +109,16 @@ export const updateSettings = async (
   },
 ) => {
   const saved = checkedSettings(
-    await api<CodingModelSettings>("/api/settings", {}, undefined, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(request),
-    }),
+    await api<CodingModelSettings>(
+      settingPath("coding-models"),
+      {},
+      undefined,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+      },
+    ),
   );
   if (
     saved.revision !== request.expected_revision + 1 ||

@@ -82,9 +82,10 @@ def test_settings_are_owner_only_durable_and_reject_stale_tabs(console_runtime, 
         assert client.put("/api/settings", json=payload, headers={
             **headers, "Origin": "https://other.test",
         }).status_code == 403
-        # Two stale tabs must not both succeed, even when their writes arrive together.
+        # An older console and a new console must still share the same revision fence.
         with ThreadPoolExecutor(2) as executor:
-            responses = list(executor.map(lambda _: client.put("/api/settings", json=payload, headers=headers), range(2)))
+            responses = list(executor.map(lambda path: client.put(path, json=payload, headers=headers),
+                                          ["/api/settings", "/api/settings/values/coding-models"]))
         assert sorted(response.status_code for response in responses) == [200, 409]
         conflict = next(response for response in responses if response.status_code == 409)
         assert conflict.json() == {"detail": "settings_conflict"}
@@ -117,7 +118,7 @@ def test_skill_repository_can_be_selected_and_cleared_without_changing_models(co
         parsed_data=SimpleNamespace(id=42, suspended_at=None),
     ))
     monkeypatch.setattr(RecordingGitHub, "_client", lambda *args, **kwargs: sdk)
-    path = "/api/settings/skill-repository"
+    path = "/api/settings/values/skill-repository"
     with TestClient(create_app(console_runtime)) as client:
         headers = console_runtime.issuer.headers()
         assert client.get(path).status_code == 401
@@ -130,7 +131,7 @@ def test_skill_repository_can_be_selected_and_cleared_without_changing_models(co
         assert client.get(path, headers=headers).json() == "owner/skills"
         assert client.put(path, json={**body, "target": None}, headers=headers).status_code == 409
         assert client.put(path, json={"target": None, "expected_repository": "owner/skills"}, headers=headers).json() is None
-        assert client.get("/api/settings", headers=headers).json()["revision"] == 0
+        assert client.get("/api/settings/values/coding-models", headers=headers).json()["revision"] == 0
 
 
 @pytest.mark.parametrize("changes", [

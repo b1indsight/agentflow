@@ -1,10 +1,10 @@
 import { useEffect, useId, useState } from "react";
 import { ArrowDown, RefreshCw, Save } from "lucide-react";
-import { api, getFlowTargets } from "./api";
+import { api, getFlowTargets, settingPath } from "./api";
 import { Button } from "./components/ui/button";
 import type { FlowTarget } from "./types";
 
-const path = "/api/settings/skill-repository";
+const path = settingPath("skill-repository");
 
 /** Save this choice independently of the coding-model draft. */
 export function SkillRepositorySetting({ refresh }: { refresh: number }) {

@@ -84,7 +84,7 @@ async function server(page: Page, initial = defaults) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    if (url.pathname === "/api/settings/skill-repository") {
+    if (url.pathname === "/api/settings/values/skill-repository") {
       if (request.method() === "PUT") {
         const body = request.postDataJSON();
         expect(body.expected_repository).toBe(state.skillRepository);
@@ -110,7 +110,7 @@ async function server(page: Page, initial = defaults) {
       state.reads.push(url.pathname);
       return route.fulfill({ json: catalog });
     }
-    if (url.pathname === "/api/settings") {
+    if (url.pathname === "/api/settings/values/coding-models") {
       if (request.method() === "PUT") {
         const body = request.postDataJSON();
         state.puts.push(body);
@@ -907,9 +907,9 @@ for (const width of [1440, 390]) {
     await expect(codex(page)).toBeEnabled();
     const settingsPaths = [
       "/api/flow-targets",
-      "/api/settings",
       "/api/settings/model-catalog",
-      "/api/settings/skill-repository",
+      "/api/settings/values/coding-models",
+      "/api/settings/values/skill-repository",
     ];
     expect([...new Set(state.reads)].sort()).toEqual(settingsPaths);
     // Development StrictMode may abort a first mount read; count only the explicit refresh delta.

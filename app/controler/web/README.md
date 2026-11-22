@@ -104,8 +104,10 @@ Amp 未指定模型、未知模型或没有可选强度时，禁用空强度框�
 切换模型保留兼容强度，否则预选 `mid`；若支持其他强度但没有 `medium`，需选择可用档位后才能保存。
 非空 Amp 强度要求明确模型。服务端负责最终格式和组合校验，不自动保存。
 
-设置通过同源 `GET /api/settings` 读取 `{codex_model, amp_model, codex_effort, amp_effort, revision}`，不使用会话响应缓存。
-显式保存以 `PUT /api/settings` 同时提交四项（包括 `null`）和 `expected_revision`；成功响应须回显四项，版本恰好加一。
+可写设置统一使用 `GET / PUT /api/settings/values/{key}`，当前支持 `coding-models` 和 `skill-repository`。新增设置只需在控制台 API 的 `setting_values` 注册表中加入 key 及其带类型的读写函数。所有写入共用同源 JSON 检查；每项独立校验请求、处理并发并保存。旧模型设置路径 `/api/settings` 保留兼容。
+
+模型设置通过 `GET /api/settings/values/coding-models` 读取 `{codex_model, amp_model, codex_effort, amp_effort, revision}`，不使用会话响应缓存。
+显式保存以 `PUT` 向同一路径提交四项（包括 `null`）和 `expected_revision`；成功响应须回显四项，版本恰好加一。
 读取、校验和权限失败保留草稿；409 冲突须先重新读取，再对照服务器当前设置显式保存或选择「使用服务器设置」。
 网络、5xx 或不完整的成功响应视为保存结果未知，锁定重发；「回读核对」仅发 GET，并保留草稿供比较，
 失败时不解除锁定，也不会自动重发 PUT。离开设置时取消读取；迟到响应不能覆盖新页面或读取期间编辑的草稿。
