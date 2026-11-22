@@ -26,7 +26,12 @@ import Markdown, {
 import remarkGfm from "remark-gfm";
 import { getContent, getDiff, getThread } from "./api";
 import { DiffWindow } from "./DiffWindow";
-import { workerFileLink, type WorkerFile } from "./files";
+import {
+  previewFile,
+  readFile,
+  workerFileLink,
+  type WorkerFile,
+} from "./files";
 import type {
   ActivityIdentity,
   ActivityItem,
@@ -65,6 +70,28 @@ function MarkdownImage({ src, alt, title }: ComponentProps<"img">) {
 export const OpenWorkerFile = createContext<
   ((file: WorkerFile) => void) | "history-only" | null
 >(null);
+
+function WorkerImage({
+  fileId,
+  alt,
+  title,
+}: { fileId: string } & ComponentProps<"img">) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    void readFile(fileId, controller.signal)
+      .then(previewFile)
+      .then((preview) => {
+        if (!controller.signal.aborted && preview.kind === "image")
+          setSrc(preview.url);
+      })
+      .catch(() => {
+        /* The file link remains available for errors and retries. */
+      });
+    return () => controller.abort();
+  }, [fileId]);
+  return <MarkdownImage src={src ?? undefined} alt={alt} title={title} />;
+}
 
 function MarkdownLink({
   node,
@@ -183,13 +210,21 @@ export function ActivityMarkdown({
   const components = useMemo<Components>(
     () => ({
       ...markdownComponents,
-      // Private attachments still require activation; ordinary web images can load inline.
       img: ({ node, src, alt, title }) =>
         typeof src === "string" &&
         typeof location !== "undefined" &&
         workerFileLink(src.split(/[?#]/, 1)[0], location.origin) ? (
           <MarkdownLink node={node} href={src} onFileOpen={onFileOpen}>
-            图片：{alt || "查看图片"}
+            {typeof node?.properties["data-worker-file-id"] === "string" ? (
+              <WorkerImage
+                key={node.properties["data-worker-file-id"]}
+                fileId={node.properties["data-worker-file-id"]}
+                alt={alt}
+                title={title}
+              />
+            ) : (
+              <>图片：{alt || "查看图片"}</>
+            )}
           </MarkdownLink>
         ) : (
           <MarkdownImage src={src} alt={alt} title={title} />

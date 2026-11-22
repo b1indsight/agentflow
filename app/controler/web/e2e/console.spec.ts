@@ -3917,7 +3917,7 @@ test("consecutive authors share identity while conversation bodies render safe M
 test("conversation images load inline and fit the body on desktop and mobile", async ({
   page,
 }) => {
-  // Web images stay responsive beside private attachments that require explicit activation.
+  // Registered images are served as authenticated downloads, not public image URLs.
   const privateId = "0123456789abcdef0123456789abcdef";
   const body = [
     "## 图片预览",
@@ -3931,12 +3931,23 @@ test("conversation images load inline and fit the body on desktop and mobile", a
     "图片随正文列宽调整。",
   ].join("\n\n");
   const referrers: (string | undefined)[] = [];
-  let privateReads = 0;
+  const png = Buffer.from(
+    await page.evaluate(() => {
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d")!;
+      ctx.fillStyle = "#edf5ee";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#27653f";
+      ctx.font = "20px sans-serif";
+      ctx.fillText("Worker attachment", 30, 80);
+      return canvas.toDataURL().split(",")[1];
+    }),
+    "base64",
+  );
   await page.route(`**/api/files/${privateId}`, (route) => {
-    privateReads++;
     return route.fulfill({
       contentType: "application/octet-stream",
-      body: "Private attachment preview",
+      body: png,
     });
   });
   await page.route("https://images.example.test/**", (route) => {
@@ -3976,7 +3987,11 @@ test("conversation images load inline and fit the body on desktop and mobile", a
   await page.goto("/#flow/42/conversation");
   const row = page.locator("article[data-entry='comment-1']");
   const images = row.locator(".markdown-body img");
-  await expect(images).toHaveCount(4);
+  await expect(row.getByRole("img", { name: "私有图片" })).toHaveJSProperty(
+    "naturalWidth",
+    300,
+  );
+  await expect(images).toHaveCount(5);
   await expect(row.getByRole("img", { name: "运行截图" })).toHaveAttribute(
     "title",
     "运行截图",
@@ -4028,7 +4043,6 @@ test("conversation images load inline and fit the body on desktop and mobile", a
   }
   expect(referrers).toHaveLength(4);
   expect(referrers.every((referrer) => !referrer)).toBe(true);
-  expect(privateReads).toBe(0);
   await page
     .context()
     .route("https://example.test/full.png", (route) =>
@@ -4039,13 +4053,11 @@ test("conversation images load inline and fit the body on desktop and mobile", a
   const original = await destination;
   await expect(original).toHaveURL("https://example.test/full.png");
   await original.close();
-  await row.getByRole("link", { name: "图片：私有图片" }).press("Enter");
+  await row.getByRole("link", { name: "私有图片" }).press("Enter");
   await expect(
     page.getByRole("tab", { name: "private.png", exact: true }),
   ).toBeVisible();
-  await expect(
-    page.getByText("Private attachment preview", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole("img", { name: "文件图片预览" })).toBeVisible();
 });
 
 test("footnotes navigate within their own message without replacing the conversation route", async ({
@@ -6245,7 +6257,7 @@ for (const width of [1440, 390]) {
   test(`worker files open named editor tabs safely at ${width}px`, async ({
     page,
   }) => {
-    // Rewritten worker links must win over source-relative resolution, without auto-fetching images.
+    // File links, including links to bitmaps, stay inert until explicitly opened.
     await page.setViewportSize({ width, height: 900 });
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -6265,7 +6277,7 @@ for (const width of [1440, 390]) {
     );
     const body = [
       `[源码](${links[0]})`,
-      `![位图](${links[1]}) [二进制](${links[2]}) [伪装图片](${links[3]})`,
+      `[位图](${links[1]}) [二进制](${links[2]}) [伪装图片](${links[3]})`,
       `[离线](${links[4]}) [超限](${links[5]}) [登录](${links[6]})`,
       `[外部](https://example.test/guide) [跨域文件](https://other.test${paths[0]})`,
       "[普通相对](../guide.md)",
@@ -6479,7 +6491,7 @@ for (const width of [1440, 390]) {
     await open("源码", 0);
     await expect(page.getByRole("tab")).toHaveCount(4);
     await conversation();
-    await open("图片：位图", 1);
+    await open("位图", 1);
     const image = panel.getByRole("img", { name: "文件图片预览" });
     await expect(image).toBeVisible();
     await expect(image).toHaveJSProperty("naturalWidth", 640);
