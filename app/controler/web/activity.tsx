@@ -41,7 +41,6 @@ import type {
 import { ACTIVITY_PROVENANCE_ROWS } from "./useConversation";
 import {
   CODE_CHARS,
-  TEXT_CHARS,
   SavedDetails,
   TextWindow,
   WindowList,
@@ -97,8 +96,48 @@ function MarkdownLink({
   return <a {...props} target="_blank" rel="noopener noreferrer" />;
 }
 
+const MessageDiff = createContext<{
+  key: string;
+  partialEnd?: number;
+  tail: string;
+} | null>(null);
+
+function MarkdownPre({ node, children }: ComponentProps<"pre"> & ExtraProps) {
+  const message = useContext(MessageDiff);
+  const code = node?.children[0];
+  const raw = <pre tabIndex={0}>{children}</pre>;
+  if (
+    !message ||
+    code?.type !== "element" ||
+    !Array.isArray(code.properties.className) ||
+    !code.properties.className.includes("language-diff")
+  )
+    return raw;
+  const literal = code.children[0];
+  if (literal?.type !== "text") return raw;
+  // Markdown adds a terminal newline even when the response ended halfway through a diff line.
+  let patch = literal.value;
+  if (
+    message.partialEnd !== undefined &&
+    node?.position?.end.offset === message.partialEnd &&
+    patch.endsWith(message.tail + "\n")
+  )
+    patch = patch.slice(0, -(message.tail.length + 1));
+  return (
+    <DiffWindow
+      text={patch}
+      stateKey={`${message.key}-diff-${node?.position?.start.offset}`}
+      fallback={
+        <pre tabIndex={0}>
+          <code>{patch}</code>
+        </pre>
+      }
+    />
+  );
+}
+
 const markdownComponents: Components = {
-  pre: ({ children }) => <pre tabIndex={0}>{children}</pre>,
+  pre: MarkdownPre,
   table: ({ children }) => (
     <div className="markdown-table" tabIndex={0} aria-label="Markdown 表格">
       <table>{children}</table>
@@ -258,8 +297,105 @@ export function ActivityMarkdown({
   );
 }
 
-/** Mounted pages own their text so virtualization releases old bodies, not just their DOM. */
-function BodyPage({
+function BodyReadError({ error, retry }: { error: string; retry: () => void }) {
+  return (
+    <p role="alert">
+      正文读取失败：{error}{" "}
+      <button
+        type="button"
+        className="btn ghost"
+        aria-label="重试正文读取"
+        title="重试正文读取"
+        onClick={retry}
+      >
+        <RefreshCw aria-hidden="true" />
+      </button>
+    </p>
+  );
+}
+
+/** Keep one Markdown document per mounted message; transport offsets count Unicode code points. */
+function MessageBody({
+  entry,
+  flowId,
+}: {
+  entry: ActivityItem;
+  flowId: number;
+}) {
+  const openFile = useContext(OpenWorkerFile);
+  const root = useRef<HTMLDivElement>(null);
+  const [page, setPage] = useState(() => {
+    const length = Array.from(entry.body).length;
+    return {
+      text: entry.body,
+      next: length < entry.body_length ? length : null,
+    };
+  });
+  const [started, setStarted] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const node = root.current;
+    if (started || page.next === null || !node) return;
+    const observer = new IntersectionObserver(
+      ([item]) => {
+        if (item.isIntersecting) setStarted(true);
+      },
+      { root: node.closest("[data-scroll-root]") },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [started, page.next]);
+  useEffect(() => {
+    if (!started || page.next === null || error) return;
+    const controller = new AbortController();
+    getContent(
+      flowId,
+      entry.key,
+      entry.version,
+      page.next,
+      16384,
+      controller.signal,
+    )
+      .then((part) => {
+        if (!controller.signal.aborted)
+          setPage((previous) => ({
+            text: previous.text + part.text,
+            next: part.next_offset,
+          }));
+      })
+      .catch((e) => {
+        if (!controller.signal.aborted)
+          setError(e instanceof Error ? e.message : "正文读取失败");
+      });
+    return () => controller.abort();
+  }, [started, page.next, error, flowId, entry.key, entry.version]);
+  const partial = page.next !== null && !page.text.endsWith("\n");
+  return (
+    <div ref={root}>
+      <MessageDiff
+        value={{
+          key: `${flowId}-${entry.key}-${entry.version}`,
+          partialEnd: partial ? page.text.length : undefined,
+          tail: partial ? page.text.slice(page.text.lastIndexOf("\n") + 1) : "",
+        }}
+      >
+        <ActivityMarkdown
+          text={page.text}
+          url={entry.url}
+          onFileOpen={
+            entry.source === "worker" && typeof openFile === "function"
+              ? openFile
+              : undefined
+          }
+        />
+      </MessageDiff>
+      {error && <BodyReadError error={error} retry={() => setError("")} />}
+    </div>
+  );
+}
+
+/** Mounted tool pages own their text so virtualization releases old output, not just its DOM. */
+function ToolPage({
   entry,
   flowId,
   offset,
@@ -276,8 +412,6 @@ function BodyPage({
   append: () => void;
   showName: boolean;
 }) {
-  const openFile = useContext(OpenWorkerFile);
-  const tool = isToolActivity(entry);
   const [text, setText] = useState<string | null>(
     offset === 0 ? initial : null,
   );
@@ -295,7 +429,7 @@ function BodyPage({
         entry.key,
         entry.version,
         offset,
-        tool ? CODE_CHARS : TEXT_CHARS,
+        CODE_CHARS,
         c.signal,
       );
       if (!c.signal.aborted) setText(p.text);
@@ -326,30 +460,17 @@ function BodyPage({
   if (text !== null) {
     let start = 0;
     do {
-      const end = textEnd(text, start, tool);
+      const end = textEnd(text, start, true);
       const part = text.slice(start, end);
       chunks.push(
-        tool ? (
-          <pre key={start} tabIndex={0} aria-label="工具摘要">
-            <code>
-              {showName && start === 0 && (
-                <span className="tool-call-name">{entry.title || "调用"} </span>
-              )}
-              <span>{part}</span>
-            </code>
-          </pre>
-        ) : (
-          <ActivityMarkdown
-            key={start}
-            text={part}
-            url={entry.url}
-            onFileOpen={
-              entry.source === "worker" && typeof openFile === "function"
-                ? openFile
-                : undefined
-            }
-          />
-        ),
+        <pre key={start} tabIndex={0} aria-label="工具摘要">
+          <code>
+            {showName && start === 0 && (
+              <span className="tool-call-name">{entry.title || "调用"} </span>
+            )}
+            <span>{part}</span>
+          </code>
+        </pre>,
       );
       start = end;
     } while (start < text.length);
@@ -357,20 +478,7 @@ function BodyPage({
   return (
     <div className="body-page" aria-busy={text === null && !error}>
       {chunks}
-      {error && (
-        <p role="alert">
-          正文读取失败：{error}{" "}
-          <button
-            type="button"
-            className="btn ghost"
-            aria-label="重试正文读取"
-            title="重试正文读取"
-            onClick={() => void read()}
-          >
-            <RefreshCw aria-hidden="true" />
-          </button>
-        </p>
-      )}
+      {error && <BodyReadError error={error} retry={read} />}
       {text === null && !error && <p role="status">正在读取正文…</p>}
       {more && <div ref={sentinel} className="body-sentinel" />}
     </div>
@@ -378,7 +486,7 @@ function BodyPage({
 }
 
 /** Append immutable pages at the reading boundary; offsets count Unicode code points. */
-function ActivityBody({
+function ToolBody({
   entry,
   flowId,
   framed = true,
@@ -387,9 +495,7 @@ function ActivityBody({
   flowId: number;
   framed?: boolean;
 }) {
-  const tool = isToolActivity(entry);
-  const budget = tool ? CODE_CHARS : TEXT_CHARS;
-  const initial = entry.body.slice(0, textEnd(entry.body, 0, tool));
+  const initial = entry.body.slice(0, textEnd(entry.body, 0, true));
   const firstEnd = Array.from(initial).length;
   const [count, saveCount] = useReadingState(
     `${flowId}-${entry.key}-${entry.version}-body-pages`,
@@ -403,13 +509,14 @@ function ActivityBody({
       estimate={400}
     >
       {(index) => (
-        <BodyPage
+        <ToolPage
           entry={entry}
           flowId={flowId}
-          offset={index === 0 ? 0 : firstEnd + (index - 1) * budget}
+          offset={index === 0 ? 0 : firstEnd + (index - 1) * CODE_CHARS}
           initial={initial}
           more={
-            index === count - 1 && firstEnd + index * budget < entry.body_length
+            index === count - 1 &&
+            firstEnd + index * CODE_CHARS < entry.body_length
           }
           append={() => saveCount(count + 1)}
           showName={!framed && entry.kind === "tool_call" && index === 0}
@@ -417,7 +524,7 @@ function ActivityBody({
       )}
     </WindowList>
   );
-  return tool && framed ? (
+  return framed ? (
     <SavedDetails
       className="tool"
       stateKey={`${entry.key}-${entry.version}-tool`}
@@ -431,6 +538,18 @@ function ActivityBody({
     </SavedDetails>
   ) : (
     content
+  );
+}
+
+function ActivityBody(props: {
+  entry: ActivityItem;
+  flowId: number;
+  framed?: boolean;
+}) {
+  return isToolActivity(props.entry) ? (
+    <ToolBody {...props} />
+  ) : (
+    <MessageBody {...props} />
   );
 }
 

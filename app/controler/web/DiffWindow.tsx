@@ -1,8 +1,9 @@
-import { useMemo } from "react";
+import { type ReactNode, useMemo } from "react";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import {
   Decoration,
   Diff,
+  type FileData,
   Hunk,
   markEdits,
   parseDiff,
@@ -14,36 +15,56 @@ import { CODE_LINES, useReadingState } from "./windowing";
 export function DiffWindow({
   text,
   stateKey,
+  fallback = <p>没有文本差异。</p>,
 }: {
   text: string;
   stateKey: string;
+  fallback?: ReactNode;
 }) {
-  const file = useMemo(
-    // GitHub's diffHunk omits the file headers required by the patch parser.
-    () =>
-      parseDiff(
+  const files = useMemo(() => {
+    try {
+      // GitHub's diffHunk omits the file headers required by the patch parser.
+      return parseDiff(
         text.startsWith("@@ ") ? `--- a/code\n+++ b/code\n${text}` : text,
-      )[0],
-    [text],
-  );
+      );
+    } catch {
+      // A fenced diff can be an incomplete patch or just an illustrative snippet.
+      return [];
+    }
+  }, [text]);
+  if (
+    !files.length ||
+    files.some((file) => !file.hunks.some((hunk) => hunk.changes.length))
+  )
+    return fallback;
+  return files.map((file, index) => (
+    <FileDiffWindow key={index} file={file} stateKey={`${stateKey}-${index}`} />
+  ));
+}
+
+function FileDiffWindow({
+  file,
+  stateKey,
+}: {
+  file: FileData;
+  stateKey: string;
+}) {
   const tokens = useMemo(
-    () => file && tokenize(file.hunks, { enhancers: [markEdits(file.hunks)] }),
+    () => tokenize(file.hunks, { enhancers: [markEdits(file.hunks)] }),
     [file],
   );
   const [saved, setStart] = useReadingState(stateKey, 0);
-  const total =
-    file?.hunks.reduce((n, hunk) => n + hunk.changes.length, 0) ?? 0;
+  const total = file.hunks.reduce((n, hunk) => n + hunk.changes.length, 0);
   const start = saved < total ? saved : 0;
   const end = Math.min(total, start + CODE_LINES);
   let skipped = 0;
-  const hunks = file?.hunks.flatMap((hunk) => {
+  const hunks = file.hunks.flatMap((hunk) => {
     const from = Math.max(0, start - skipped);
     const to = Math.min(hunk.changes.length, end - skipped);
     skipped += hunk.changes.length;
     if (from >= to) return [];
     return [{ ...hunk, changes: hunk.changes.slice(from, to) }];
   });
-  if (!file || !hunks || !total) return <p>没有文本差异。</p>;
   return (
     <>
       <div
