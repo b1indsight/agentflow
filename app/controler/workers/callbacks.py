@@ -114,7 +114,7 @@ class ServerCallbacks:
         self.stops, self.workers = StopStore(database), WorkerStore(database)
         self.assignments, self.inference = AssignmentStore(database), InferenceStore(database)
         self.settings = SettingsStore(database)
-        self.skills_dirty = True
+        self._skill_sync_pending = True
         self._sent_skills = False
         self.coordinator, self.results = coordinator, results
         self.notify_jobs, self.metrics = notify_jobs, metrics
@@ -283,13 +283,18 @@ class ServerCallbacks:
         await self._send(stop)
         self.receive_deadline = asyncio.get_running_loop().time() + self.heartbeat_timeout
 
+    def request_skill_sync(self) -> None:
+        """Have this session's next poll send the latest committed skill repository setting."""
+        self._skill_sync_pending = True
+        self.session.wake()
+
     async def poll(self) -> float | None:
         """Advance scheduling once; return an absolute receive/idle deadline to Session."""
         assert self.worker is not None
         if not self.registered:
             return self.receive_deadline
-        if self.register.execute and self.skills_dirty:
-            self.skills_dirty = False
+        if self.register.execute and self._skill_sync_pending:
+            self._skill_sync_pending = False
             repository = self.settings.get_value(TextSetting.SKILL_REPOSITORY)
             if repository or self._sent_skills:
                 source = None
@@ -299,7 +304,7 @@ class ServerCallbacks:
                     except GitHubError as error:
                         logger.warning("skill repository read credential unavailable: {}", error.kind)
                         read_token = None
-                    if self.skills_dirty:  # A newer setting committed during token issuance.
+                    if self._skill_sync_pending:  # A newer setting committed during token issuance.
                         return asyncio.get_running_loop().time()
                     source = SkillRepositorySource(repository=repository, token=read_token)
                 await self._send(SyncSkills(**call_header(), method="worker.sync_skills", source=source))

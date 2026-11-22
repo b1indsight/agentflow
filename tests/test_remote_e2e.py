@@ -4,6 +4,7 @@ import asyncio
 import subprocess
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -239,3 +240,46 @@ async def test_existing_remote_branch_is_not_taken_over(store, remote_flow):
     assert github.opened == agent.started == []
     assert not any(call["operation"] == "create_push_capability" for call in github.resource_calls)
     assert _git("ls-remote", "origin", f"refs/heads/{branch}", cwd=seed) == before
+
+
+async def test_initial_workspace_keeps_linked_skill_on_refresh(store, remote_flow, tmp_path, monkeypatch):
+    from app.persistence.settings import SettingsStore, TextSetting
+    from app.worker.execution.vcs import _vcs_environment
+    from tests.test_vcs import _git, _git_fixture
+
+    flow, server, _, worker, agent = remote_flow
+    source = tmp_path / "skill-source"
+    source.mkdir()
+    publisher, _ = _git_fixture(source)
+    skill = publisher / "style"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text('---\nname: style\ndescription: Style rules\nmetadata:\n  always_on: "true"\n---\n')
+    _git("add", "style", cwd=publisher)
+    _git("commit", "-m", "publish skill", cwd=publisher)
+    config = source / "gitconfig"
+    config.write_text(f'[url "{publisher.as_uri()}"]\n insteadOf = https://github.com/owner/skills.git\n')
+    monkeypatch.setattr("app.worker.execution.skills._vcs_environment",
+                        lambda: _vcs_environment() | {"GIT_CONFIG_GLOBAL": str(config)})
+    monkeypatch.setattr(RecordingGitHub, "repository_read_token", AsyncMock(return_value=SecretStr("read")))
+    settings = SettingsStore(store.database)
+    settings.set_value(TextSetting.SKILL_REPOSITORY, "owner/skills", expected=None)
+    job, = store.jobs.list_jobs(flow.id)
+    async with remote_connection(server, worker):
+        await wait_until(lambda: required(store.jobs.get_job(job.id)).result_applied_at is not None)
+        assert required(store.jobs.get_job(job.id)).state is JobState.DONE
+        (_, workspace), = agent.started
+        link = workspace / ".agents/skills/style"
+        assert link.is_symlink() and link.resolve().is_relative_to(worker.workspaces.inference_path)
+        previous = (link / "SKILL.md").read_text()
+        (skill / "SKILL.md").write_text(previous + "Updated\n")
+        _git("commit", "-am", "refresh skill", cwd=publisher)
+        first = worker.workspaces.skill_checkout
+        session, = server.worker_sessions
+        session.request_skill_sync()
+        await wait_until(lambda: worker.workspaces.skill_checkout is not first)
+        refreshed = await required(worker.workspaces.skill_checkout)
+        assert (refreshed / "style/SKILL.md").read_text() == previous + "Updated\n"
+        settings.set_value(TextSetting.SKILL_REPOSITORY, None, expected="owner/skills")
+        session.request_skill_sync()
+        await wait_until(lambda: worker.workspaces.skill_checkout is None)
+        assert (link / "SKILL.md").read_text() == previous

@@ -483,6 +483,8 @@ class RecoveryRejected(ToolCall):
 
 
 class SkillRepositorySource(ProtocolModel):
+    """The inference workspace has no assignment token; clone with a skill-repo-only read grant."""
+
     repository: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
     # A configured but inaccessible source must not be mistaken for a cleared setting.
     token: SecretStr | None

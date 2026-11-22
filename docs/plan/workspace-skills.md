@@ -28,3 +28,4 @@
 1. 实现同时支持独立仓库的顶层 `<name>/SKILL.md` 和项目布局 `.agents/skills/<name>/SKILL.md`（后者优先）。worker 注册和设置成功保存后同步；后台 clone 不占用协议接收循环，INITIAL 等待对应的 checkout。读取凭据或 clone 失败会阻止使用该版本的首次编码，不影响其他 Flow 的修订。
 2. 使用仓库提交号固定符号链接的目标。本地 Git 与 PostgreSQL 集成测试覆盖同步、刷新和清空；将版本目录替换为反复覆盖的 `current` 后，同一测试读到 `new` 而非旧任务应得的 `base`。移除始终开启的链接步骤后，选择调用看不到 `style`。两项对照均在内存中替换实现后执行 `pytest -q tests/test_workspace_skills.py`，未改测试预期。
 3. worker 为链接生成仅列出本次名称的 `.agents/skills/.gitignore`，已有同名忽略文件时不覆盖并报告冲突。槽位复用依照工作区外的安装记录清理。历史 checkout 保留在推理目录，本次未实现自动回收。
+4. 选择提示只列出可选 skill 的 `name`、`description` 和可选 `allowed-tools`。工具声明仅供选择参考，不向选择会话授权。常开标记可放在标准 frontmatter 的 `metadata.always_on: "true"`；兼容已有的顶层 `always_on: true`。注册、首次编码、刷新和清空共用远程 Flow 测试流程，直接检查编码工作区中的链接。
