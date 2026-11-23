@@ -387,7 +387,11 @@ for (const width of [1440, 390]) {
     await page.route("**/api/flows/42", (route) =>
       route.fulfill({ json: current }),
     );
-    const requests: { instruction: string; request_id: string }[] = [];
+    const requests: {
+      instruction: string;
+      request_id: string;
+      images?: string[];
+    }[] = [];
     const messages: ActivityItem[] = [activity];
     await page.route("**/api/flows/42/activity?**", (route) =>
       route.fulfill({
@@ -421,7 +425,7 @@ for (const width of [1440, 390]) {
     await page.goto("/#flow/42/conversation");
     const composer = page.getByRole("form", { name: "与 Agent 交流" });
     const input = composer.getByRole("textbox", { name: "补充要求" });
-    const send = composer.getByRole("button");
+    const send = composer.locator('button[type="submit"]');
     await expect(send).toHaveAccessibleName("发送");
     await expect(send).toBeDisabled();
     await input.fill("   ");
@@ -442,6 +446,59 @@ for (const width of [1440, 390]) {
     await composer.screenshot({
       path: `../../../.amp/in/artifacts/active-flow-input-${width}-default.png`,
     });
+    const before = (await input.boundingBox())!;
+    const grip = (await composer
+      .getByRole("button", { name: "调整输入框高度" })
+      .boundingBox())!;
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + 5);
+    await page.mouse.down();
+    await page.mouse.move(grip.x + grip.width / 2, grip.y - 91);
+    await page.mouse.up();
+    const after = (await input.boundingBox())!;
+    expect(after.height - before.height).toBeCloseTo(96, 0);
+    expect(after.y + after.height).toBeCloseTo(before.y + before.height, 0);
+    const png = await page.evaluate(() => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 80;
+      canvas.height = 50;
+      const ctx = canvas.getContext("2d")!;
+      ctx.fillStyle = "#d8e7ef";
+      ctx.fillRect(0, 0, 80, 50);
+      ctx.fillStyle = "#47667f";
+      ctx.fillRect(8, 9, 36, 6);
+      ctx.fillRect(8, 21, 64, 4);
+      return canvas.toDataURL();
+    });
+    await composer.locator('input[type="file"]').setInputFiles({
+      name: "界面.png",
+      mimeType: "image/png",
+      buffer: Buffer.from(png.split(",")[1], "base64"),
+    });
+    await expect(
+      composer.getByRole("img", { name: "界面.png" }),
+    ).toHaveJSProperty("naturalWidth", 80);
+    await input.evaluate(async (el, url) => {
+      const dt = new DataTransfer();
+      dt.items.add(
+        new File([await (await fetch(url)).blob()], "拖入.png", {
+          type: "image/png",
+        }),
+      );
+      el.dispatchEvent(
+        new DragEvent("drop", {
+          dataTransfer: dt,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }, png);
+    await composer.getByRole("button", { name: "移除 界面.png" }).click();
+    await expect(
+      composer.getByRole("img", { name: "拖入.png" }),
+    ).toHaveJSProperty("naturalWidth", 80);
+    await composer.screenshot({
+      path: `../../../.amp/in/artifacts/image-input-${width}.png`,
+    });
     await input.press("Control+Enter");
     await expect(send).toHaveAccessibleName("重试发送");
     await expect(send).toHaveAttribute("title", /无法确认是否已发送/);
@@ -454,8 +511,9 @@ for (const width of [1440, 390]) {
     await expect(
       composer.getByRole("button", { name: "正在发送…" }),
     ).toBeDisabled();
-    expect(requests).toHaveLength(2);
+    await expect.poll(() => requests.length).toBe(2);
     expect(requests[0]).toEqual(requests[1]);
+    expect(requests[0].images).toEqual([png]);
     expect(requests[0].instruction).toBe("补充键盘导航\n保留原有行为");
     expect(requests[0].request_id).toMatch(/^[0-9a-f-]{36}$/);
     await composer.screenshot({
@@ -465,6 +523,7 @@ for (const width of [1440, 390]) {
       await page.getByRole("tab", { name: "执行记录", exact: true }).click();
     finish();
     await expect(send).toHaveAccessibleName("消息已记录");
+    await expect(composer.getByRole("img")).toHaveCount(0);
     await expect(input).toHaveValue("");
     await expect(send).toBeDisabled();
     if (width === 390)
@@ -549,7 +608,7 @@ for (const width of [1440, 390]) {
     current = archivedFlow;
     await page.reload();
     await expect(input).toBeDisabled();
-    await expect(composer.getByRole("button")).toBeDisabled();
+    await expect(composer.locator('button[type="submit"]')).toBeDisabled();
     expect(writes).toBe(1);
     await composer.screenshot({
       path: `../../../.amp/in/artifacts/active-flow-input-${width}-archived.png`,
@@ -5847,7 +5906,13 @@ for (const width of [1440, 390]) {
       dialog.getByRole("button", { name: "重新读取项目", exact: true }),
     ).toBeFocused();
     await page.keyboard.press("Tab");
+    const resize = dialog.getByRole("button", { name: "调整输入框高度" });
+    await expect(resize).toBeFocused();
+    await resize.press("ArrowUp");
+    await page.keyboard.press("Tab");
     await expect(dialog.getByLabel("任务内容", { exact: true })).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(resize).toBeFocused();
     await page.keyboard.press("Shift+Tab");
     await expect(
       dialog.getByRole("button", { name: "重新读取项目", exact: true }),

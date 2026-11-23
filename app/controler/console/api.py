@@ -245,7 +245,7 @@ async def create_flow(request: Request, body: CreateFlowRequest) -> FlowDetail:
             database=runtime.database,
             jobs_available=notify_jobs,
         ).create_flow(repository.full_name, body.issue_number, body.installation_id,
-                      task_content=body.task_content)
+                      task_content=body.task_content, images=body.images)
         if flow is None:
             raise ConsoleFailure("flow_conflict")
         return ConsoleStore(runtime.database).detail(flow.id)
@@ -354,7 +354,7 @@ async def append_agent_task(request: Request, flow_id: FlowId, body: AppendAgent
             jobs_available=notify_jobs,
         )
         try:
-            service.append_agent_task(flow_id, body.instruction, str(body.request_id))
+            service.append_agent_task(flow_id, body.instruction, str(body.request_id), body.images)
         except AgentTaskRejected as error:
             code = str(error)
             raise ConsoleFailure(code, 404 if code == "flow_not_found" else 409) from error

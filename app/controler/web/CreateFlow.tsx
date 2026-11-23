@@ -25,6 +25,7 @@ export function CreateFlow({
   const [targets, setTargets] = useState<FlowTarget[]>([]);
   const [selected, setSelected] = useState<FlowTarget | null>(null);
   const [body, setBody] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [next, setNext] = useState<string | null>(null);
   const [more, setMore] = useState(true);
@@ -37,7 +38,7 @@ export function CreateFlow({
   const [failure, setFailure] = useState<ReturnType<
     typeof createFailure
   > | null>(null);
-  const content = taskContentFromText(body);
+  const content = taskContentFromText(body, files.length > 0);
   const uncertain = failure?.unknown ?? false;
   const options =
     selected &&
@@ -89,8 +90,9 @@ export function CreateFlow({
     setPending(true);
     setFailure(null);
     try {
-      const flow = await createFlow(selected, content.task);
+      const flow = await createFlow(selected, content.task, files);
       setBody("");
+      setFiles([]);
       setSelected(null);
       dialog.current?.close();
       onCreated(flow.id);
@@ -224,8 +226,13 @@ export function CreateFlow({
           </div>
           <label htmlFor={`${id}-body`}>任务内容</label>
           <FlowTaskInput
+            files={files}
+            onFilesChange={(next) => {
+              setFiles(next);
+              setFailure(null);
+            }}
             id={`${id}-body`}
-            required
+            required={!files.length}
             rows={7}
             value={body}
             disabled={pending || uncertain}

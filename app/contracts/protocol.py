@@ -27,6 +27,7 @@ from app.contracts.catalog import CatalogModel
 from app.contracts.console import Phase
 from app.contracts.conversation import ConversationError, HistoryPage, SessionId
 from app.contracts.files import MAX_FILE_BASE64, FileError, FileId
+from app.contracts.input_images import InputImage
 from app.domain.context_models import ReviewContext
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.inference_models import (
@@ -43,7 +44,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[30] = 30
+PROTOCOL_VERSION: Literal[31] = 31
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -63,6 +64,7 @@ class InitialTask(ProtocolModel):
     repo: str
     issue_number: int | None
     task_content: str
+    images: list[InputImage] = Field(default_factory=list, exclude_if=lambda value: not value)
     branch: str
     base_branch: str = "main"
     remote: str = "origin"
@@ -109,6 +111,7 @@ class RevisionTask(ProtocolModel):
     retry_status: str | None = Field(default=None, exclude_if=lambda value: value is None)
     instruction: str
     task_content: str
+    images: list[InputImage] = Field(default_factory=list, exclude_if=lambda value: not value)
     previous_summary: str
     open_points: list[str]
     context: ReviewContext | None = None
@@ -743,7 +746,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[30]
+    protocol_version: Literal[31]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -950,7 +953,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[30]
+    protocol_version: Literal[31]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

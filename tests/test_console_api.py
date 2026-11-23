@@ -32,7 +32,7 @@ from app.persistence.console import ConsoleStore
 from app.persistence.console_sync import ConsoleSyncStore
 from app.telemetry.metrics import Metrics
 from tests.access import AccessIssuer
-from tests.flow_fixtures import apply_flow_event, enqueue_job
+from tests.flow_fixtures import PNG_IMAGE, apply_flow_event, enqueue_job
 from tests.github import RecordingGitHub
 from tests.test_cancel_drain import running
 from tests.test_coordinator import apply_result, coordinator, prepare_initial
@@ -223,6 +223,8 @@ def test_history_link_stays_readable_and_rejects_writes(console_runtime, store):
     {"task_content": {"title": "old object", "body": "内容"}},
     {"task_content": "中" * 10923},
     {"task_content": "a\0b"},
+    {"images": ["data:image/png;base64,PHN2Zz4="]},
+    {"images": [PNG_IMAGE] * 5},
     {"installation_id": True},
     {"repo": "owner/repo/extra"},
 ])
@@ -364,7 +366,7 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
         )
         console = client.get("/console/", headers=headers)
         policy = console.headers["content-security-policy"]
-        assert "img-src 'self' data: https: http:;" in policy
+        assert "img-src 'self' blob: data: https: http:;" in policy
         assert "script-src 'self';" in policy and "connect-src 'self';" in policy
         assert console.headers["referrer-policy"] == "no-referrer"
         console_runtime.settings.access_owner_email = None
@@ -398,6 +400,8 @@ async def test_append_agent_task_uses_revision_pipeline_and_records_input_once(
     flow = flow_ready_for_agent_task
     path = f"/api/flows/{flow.id}/agent-tasks"
     body = {"instruction": "  添加键盘导航\n保留现有行为  ", "request_id": str(uuid4())}
+    if request_key == "agent_task_request_id":
+        body["images"] = [PNG_IMAGE]
     notifications = []
     console_runtime.gateway.wake_all = lambda: notifications.append(
         (get_ident(), len(store.jobs.list_jobs(flow.id)))
@@ -417,7 +421,9 @@ async def test_append_agent_task_uses_revision_pipeline_and_records_input_once(
         page = client.get(f"/api/flows/{flow.id}/activity", headers=headers).json()
     assert notifications == [(loop_thread, 2)]
     messages = [item for item in page["items"] if item["source"] == "agent_task"]
-    assert [item["body"] for item in messages] == ["添加键盘导航\n保留现有行为"]
+    assert len(messages) == 1
+    assert messages[0]["body"].startswith("添加键盘导航\n保留现有行为")
+    assert PNG_IMAGE not in messages[0]["body"]
     assert messages[0]["attempt_id"] == flow.current_attempt_id
     assert messages[0]["author"] == "user"
     job = store.jobs.list_jobs(flow.id)[-1]
@@ -435,7 +441,8 @@ async def test_append_agent_task_uses_revision_pipeline_and_records_input_once(
     task = await subject.prepare(assigned)
     assert task.flow_id == flow.id and task.attempt_id == flow.current_attempt_id
     assert task.session_id == "original-session" and task.branch == "flow/7"
-    assert task.pr_number == 17 and task.instruction == "添加键盘导航\n保留现有行为"
+    assert task.pr_number == 17 and task.instruction == messages[0]["body"]
+    assert task.images == body.get("images", [])
     assert task.feedback == [] and task.purpose == "revise"
     assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-1", "next-token", "epoch")
     subject.mark_started(assigned, task, "worker-1")
@@ -509,7 +516,7 @@ def test_append_agent_task_accepts_without_starting_unsafe_work(console_runtime,
 async def test_queued_messages_reach_first_session_in_order_after_restart(store, recording_resources):
     # No PR or worker exists when either message is received.
     service = ControlService(database=store.database)
-    flow = service.create_flow("owner/repo", None, 42, task_content="Original task")
+    flow = service.create_flow("owner/repo", None, 42, task_content="Original task", images=[PNG_IMAGE])
     service.append_agent_task(flow.id, "First note", str(uuid4()))
     service.append_agent_task(flow.id, "Second note", str(uuid4()))
     register_worker(store, "worker-1", repo=flow.repo, epoch="epoch")
@@ -519,7 +526,8 @@ async def test_queued_messages_reach_first_session_in_order_after_restart(store,
     subject = coordinator(store, github)
     first = await prepare_initial(subject, job)
     replay = await subject.prepare(job)
-    assert first.task_content == replay.task_content == "Original task\n\nFirst note\n\nSecond note"
+    assert first.images == replay.images == [PNG_IMAGE]
+    assert first.task_content == replay.task_content == flow.task_content + "\n\nFirst note\n\nSecond note"
 
 
 @pytest.mark.parametrize("when", ["during_execution", "after_failure"])

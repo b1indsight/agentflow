@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- 网页新建任务和追加输入可上拉增高、选择或拖入图片，发送前可预览及移除。图片随首轮和修订输入交给编码 Agent；serve 与 worker 需同时升级到 wire31。
+
 - 项目、安装包、CLI 和插件入口组改名为 `agentflow`；配置改用 `AGENTFLOW_` 前缀。旧命令和旧配置键不再提供，现有部署见[升级说明](docs/deployment/README.md#从-flowtool-升级)。
 
 - 会话消息与评审回复先显示预览，进入可视区后自动补齐；跨批次的 Markdown 连续显示，正文中的 diff 沿用评审代码块的行号与增删高亮。

@@ -1,7 +1,10 @@
 """Queue owner messages on their existing, attempt-scoped conversation records."""
 
+import re
+
 from psycopg.types.json import Jsonb
 
+from app.contracts.input_images import image_ref
 from app.domain.models import Flow, Job, JobState
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
@@ -10,6 +13,30 @@ from app.persistence.repository import Repository
 
 class AgentInputStore(Repository):
     """Writers hold the workflow lock; taking input and freezing a job share one transaction."""
+
+    def save_images(self, flow_id: int, images: list[str]) -> None:
+        with self._db.connection() as conn:
+            for url in images:
+                conn.execute("INSERT INTO flow_input_images VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                             (flow_id, image_ref(url), url))
+
+    def image_budget_exceeded(self, flow_id: int) -> bool:
+        # Pending inputs can be combined into one assignment. Bound the worst-case wire size.
+        with self._db.connection() as conn:
+            row = conn.execute("SELECT sum(octet_length(data_url)) AS size FROM flow_input_images WHERE flow_id=%s",
+                               (flow_id,)).fetchone()
+            assert row is not None
+            return bool(row["size"] > 8 * 1024 * 1024)
+
+    def images_for(self, flow_id: int, text: str) -> list[str]:
+        refs = re.findall(r"^image:[a-f0-9]{64}$", text, re.MULTILINE)
+        if not refs:
+            return []
+        with self._db.connection() as conn:
+            return [row["data_url"] for row in conn.execute(
+                "SELECT data_url FROM flow_input_images WHERE flow_id=%s AND ref=ANY(%s) ORDER BY array_position(%s,ref)",
+                (flow_id, refs, refs),
+            )]
 
     def previous(self, flow_id: int, request_id: str) -> str | None:
         with self._db.connection() as conn:
