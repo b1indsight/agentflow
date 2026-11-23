@@ -18,6 +18,7 @@ from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
 from app.persistence.metrics import read_snapshot
+from app.persistence.settings import SettingsStore, TextSetting
 from app.persistence.store import Store
 from app.persistence.webhooks import DeliveryConflict, WebhookStore
 from app.plugins import get_plugin_manager
@@ -45,14 +46,33 @@ def receive(inbox, delivery="one", body=None):
     return inbox.receive(delivery, "issues", body, hashlib.sha256(json.dumps(body).encode()).hexdigest())
 
 
-def consumer(store):
+def consumer(store, request_skill_sync=lambda: None):
     return WebhookConsumer(
         settings(),
         RecordingGitHub(),
         database=store.database,
         plugins=get_plugin_manager(),
         jobs_available=lambda: None,
+        request_skill_sync=request_skill_sync,
     )
+
+
+def test_pushes_that_do_not_change_skill_source_do_not_wake_workers(store):
+    # The App also delivers pushes for unrelated installations, branches and tags.
+    SettingsStore(store.database).set_value(TextSetting.SKILL_REPOSITORY, "owner/skills", expected=None)
+    notifications = []
+    worker = consumer(store, lambda: notifications.append(True))
+    for number, (repo, ref, deleted) in enumerate([
+        ("other/skills", "refs/heads/trunk", False),
+        ("owner/skills", "refs/heads/main", False),
+        ("owner/skills", "refs/tags/trunk", False),
+        ("owner/skills", "refs/heads/trunk", True),
+    ]):
+        store.webhooks.receive(str(number), "push", {
+            "repository": {"full_name": repo, "default_branch": "trunk"}, "ref": ref, "deleted": deleted,
+        }, "digest")
+    assert worker.sweep() == 4
+    assert not notifications
 
 
 def test_received_delivery_survives_new_consumer_and_duplicate(store):
@@ -241,6 +261,7 @@ def test_failed_completion_rolls_back_business_and_notifications(store, monkeypa
         database=store.database,
         plugins=service.plugins,
         jobs_available=service.notify_jobs,
+        request_skill_sync=lambda: None,
     ).sweep()
     assert store.flows.get_active_flow("owner/repo", 7) is None
     assert not notifications
@@ -260,6 +281,7 @@ def test_webhook_transaction_does_not_rebind_the_root_service(store):
         database=store.database,
         plugins=service.plugins,
         jobs_available=service.notify_jobs,
+        request_skill_sync=lambda: None,
     )
     receive(store.webhooks)
     assert worker.sweep() == 1
@@ -429,6 +451,7 @@ def test_all_business_routes_rollback_with_receipt(store, monkeypatch, event, ac
         database=store.database,
         plugins=plugins,
         jobs_available=lambda: None,
+        request_skill_sync=lambda: None,
     )
 
     def unavailable(*args):

@@ -203,19 +203,22 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(store, 
         journal = state.load()
         assert journal.terminal.result.delivery_receipt.status == "prepared"
 
-        # A settings refresh must not retarget this Flow's initialized workspace.
+        # A skill push refreshes future workspaces without retargeting an initialized Flow.
         (_, workspace), = agent.started
         linked = workspace / ".agents/skills/style/SKILL.md"
         published.write_text(original + "Updated\n")
         _git("commit", "-am", "refresh skill", cwd=skill_repository)
         first = worker.workspaces.skill_checkout
-        session, = subject.worker_sessions
-        session.request_skill_sync()
+        await subject.receive_webhook("push", "skill-push", {
+            "repository": {"full_name": "Owner/Skills", "default_branch": "main"},
+            "ref": "refs/heads/main", "sender": {"type": "Bot"},
+        }, "digest")
+        assert await asyncio.to_thread(subject.webhooks.sweep, asyncio.get_running_loop()) == 1
         await wait_until(lambda: worker.workspaces.skill_checkout is not first)
         refreshed = await required(worker.workspaces.skill_checkout)
         assert (refreshed / "style/SKILL.md").read_text() == published.read_text()
         settings.set_value(TextSetting.SKILL_REPOSITORY, None, expected="owner/skills")
-        session.request_skill_sync()
+        subject.request_skill_sync()
         await wait_until(lambda: worker.workspaces.skill_checkout is None)
         assert linked.read_text() == original
 

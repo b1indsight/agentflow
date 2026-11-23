@@ -103,6 +103,7 @@ class ServerRuntime:
             database=database,
             plugins=plugins,
             jobs_available=self.gateway.wake_all,
+            request_skill_sync=self.request_skill_sync,
         )
         self.reconciler = Reconciler(
             github,
@@ -136,6 +137,11 @@ class ServerRuntime:
         self.result_store = ResultStore(database)
         self.webhook_store = WebhookStore(database)
         self._tasks: list[asyncio.Task[None]] = []
+
+    def request_skill_sync(self) -> None:
+        """Wake connected sessions to refresh skills; new sessions sync on registration."""
+        for session in self.worker_sessions:
+            session.request_skill_sync()
 
     async def serve_worker_session(
         self,
