@@ -31,6 +31,7 @@ _OUTPUT_INSTRUCTION = (
     "needs_clarification (list of string)."
 )
 
+# 仅约束最终交付；执行中的公开消息和工具记录由会话历史接口提供。
 _INITIAL_OUTPUT_INSTRUCTION = (
     "When done, output a JSON object with `summary` and `vcs_backend_used`. "
     "Set `vcs_backend_used` to `git` or `jj` according to the backend you actually used."

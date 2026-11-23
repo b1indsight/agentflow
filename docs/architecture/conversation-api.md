@@ -1,13 +1,18 @@
 # Flow 会话查询
 
-`GET /api/flows/{flow_id}/conversation` 按需代理对应 worker 读取 Codex 历史。
+`GET /api/flows/{flow_id}/conversation` 按需代理对应 worker 读取编码会话历史。
 此接口本身仅查询现有 flow、attempt、session 和 worker 归属，不保存会话内容，也不维护队列。
 Web 控制台的独立同步器会主动复用该服务，将展示正文归档到本地 Flow 时间线；
 控制台 `/activity` 读取本地快照，不等同于此处的实时 Worker 代理读取。
 
-worker 每次只接收 `session_id`、`cursor`、`limit`，由 `HistoryQuery` 校验后直接交给
-`CodexHistory.query()`。返回的 `HistoryPage` 只含该会话的记录、状态及续读位置。
+worker 每次只接收 `session_id`、`cursor`、`limit`，由 `HistoryQuery` 校验后交给对应后端：
+Codex 读取 rollout 文件，Amp 导出 thread。返回的 `HistoryPage` 只含该会话的记录、状态及续读位置。
 Flow/Attempt 归属和多会话顺序由 control 处理；无独立 SessionRef、HistoryCursor 或 spec 转换层。
+
+**执行过程和交付摘要分开读取。** Codex 的 `--json` 和 Amp 的 `--stream-json` 用于传输 CLI 事件；
+编码任务的 JSON Schema 只约束最终答复。首轮交付的 `summary` 不包含必填的步骤清单，提示也不要求逐步播报。
+查看某轮实际做过什么，可在控制台展开「工具活动」查看调用和结果。会话历史还包含助手写出的公开说明，
+不会把内部推理转成步骤说明。若希望助手在关键改动和验证后多作说明，可以在任务中明确要求，无需修改交付格式。
 
 ## 配置与请求
 
