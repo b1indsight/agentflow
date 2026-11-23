@@ -22,6 +22,11 @@ _HARD_CONSTRAINTS = (
     "- Run the repo's tests / lint if present and keep them green.\n"
 )
 
+_PROGRESS_INSTRUCTION = (
+    "At milestones during coding, briefly tell the user in the conversation what you found, "
+    "how far you got, and what you will do next."
+)
+
 # 修订轮要 codex 回的结构化产出（--output-schema 对应 models.RevisionCodingOutput）
 _OUTPUT_INSTRUCTION = (
     "When done, output a JSON object with keys: summary (nonempty string), "
@@ -31,6 +36,7 @@ _OUTPUT_INSTRUCTION = (
     "needs_clarification (list of string)."
 )
 
+# 仅约束最终交付；执行中的公开消息和工具记录由会话历史接口提供。
 _INITIAL_OUTPUT_INSTRUCTION = (
     "When done, output a JSON object with `summary` and `vcs_backend_used`. "
     "Set `vcs_backend_used` to `git` or `jj` according to the backend you actually used."
@@ -46,6 +52,7 @@ def build_initial_prompt(
         f"# Repo conventions\n{repo_conventions or '(none provided)'}\n",
         f"# VCS guidance\n{vcs_guidance}\n",
         _HARD_CONSTRAINTS,
+        _PROGRESS_INSTRUCTION,
         _INITIAL_OUTPUT_INSTRUCTION,
     ]
     return "\n".join(parts)
@@ -141,8 +148,10 @@ def build_revision_prompt(
         "or amend it. If the existing code already satisfies the feedback, explain why and leave "
         "that baseline unchanged. Report exact item/version/comment identities. Preserve deferred work "
         "and ask concrete clarification questions. Prior conversation may be unavailable."),
-        _OUTPUT_INSTRUCTION,
     ]
+    if task.purpose == "revise":
+        parts.append(_PROGRESS_INSTRUCTION)
+    parts.append(_OUTPUT_INSTRUCTION)
     if baseline_sha is not None:
         parts.insert(3, f"# Coding start\nFetched coding baseline: {baseline_sha}\n"
                      "The worker synchronized this checkout before this invocation. Start from "
