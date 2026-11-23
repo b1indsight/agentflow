@@ -394,6 +394,7 @@ class WorkerRuntime:
                 try:
                     async with connect(
                         settings.serve_ws_url,
+                        max_size=16 * 1024 * 1024,
                         additional_headers={
                             "Authorization": f"Bearer {settings.worker_token.get_secret_value()}",
                             "X-FlowTool-Worker-ID": settings.worker_id,

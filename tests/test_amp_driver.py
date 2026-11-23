@@ -1,11 +1,13 @@
 """Amp's public CodingAgent contract, without network or model calls."""
 
 import asyncio
+import base64
 import json
 import os
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
@@ -13,6 +15,7 @@ from pydantic import SecretStr
 from app.domain.models import CodingExecutionContext, GitHubCapability
 from app.worker.execution.amp_agent import AmpCodingAgent, AmpProcessResult, amp_environment
 from app.worker.execution.git_identity import configure_git_identity
+from tests.flow_fixtures import PNG_IMAGE
 
 THREAD = "T-01a15d70-eb3d-722c-9f6d-563dd65eb0a8"
 
@@ -50,6 +53,7 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
                                 datetime.now(UTC) + timedelta(minutes=5), "agentflow[bot]", 7654321),
         mcp_url=None if resume else "http://127.0.0.1:12345/mcp",
         mcp_token=None if resume else SecretStr("broker-secret"),
+        images=(PNG_IMAGE,),
     )
     directories = []
 
@@ -62,6 +66,7 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
         assert cwd == tmp_path
         assert "bot-secret" not in " ".join(args) and "broker-secret" not in input_text
         assert "caller_owned" in input_text and "task" in input_text
+        assert Path(input_text.splitlines()[-1]).read_bytes() == base64.b64decode(PNG_IMAGE.split(",")[1])
         assert env["GH_TOKEN"] == env["AGENTFLOW_PUSH_TOKEN"] == "bot-secret"
         assert env["EXAMPLE_MCP_TOKEN"] == "custom-mcp-token"
         assert env["AMP_SETTINGS_FILE"] == str(tmp_path / "user.jsonc")

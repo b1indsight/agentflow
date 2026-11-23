@@ -1125,13 +1125,18 @@ function DetailPanel({
                   ? "note"
                   : "active"
             }
-            onSubmit={async (instruction, requestId) => {
+            onSubmit={async (instruction, requestId, files) => {
               if (writing.current)
                 throw new Error("正在提交其他操作，请稍候。");
               writing.current = true;
               setPending("agent-task");
               try {
-                const value = await appendAgentTask(id, instruction, requestId);
+                const value = await appendAgentTask(
+                  id,
+                  instruction,
+                  requestId,
+                  files,
+                );
                 onChanged(value);
                 if (mounted.current) {
                   setAcceptedInputs((count) => count + 1);

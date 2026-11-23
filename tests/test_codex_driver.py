@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import signal
 import tomllib
 from datetime import UTC, datetime, timedelta
@@ -10,6 +11,7 @@ from pydantic import SecretStr
 
 from app.domain.models import CodingExecutionContext, GitHubCapability, SessionUnavailable
 from app.worker.execution.codex import CodexAgent, _codex_environment, _start_args
+from tests.flow_fixtures import PNG_IMAGE
 
 
 def pipe(data=b""):
@@ -42,6 +44,7 @@ async def test_adapter_returns_raw_output_without_interpreting_business_schema(m
     async def spawn(*args, **kwargs):
         assert kwargs["cwd"] == tmp_path
         assert args[:3] == ("codex", "exec", "task")
+        assert Path(args[args.index("--image") + 1]).read_bytes() == base64.b64decode(PNG_IMAGE.split(",")[1])
         assert args[args.index("-C") + 1] == str(tmp_path)
         assert args[args.index("-s") + 1] == "danger-full-access"
         assert "workspace-write" not in args
@@ -60,7 +63,8 @@ async def test_adapter_returns_raw_output_without_interpreting_business_schema(m
         return Process()
 
     monkeypatch.setattr("app.worker.execution.codex.asyncio.create_subprocess_exec", spawn)
-    run = await CodexAgent(trusted_host=True).start("task", tmp_path, output_schema=schema, model=model, effort=effort)
+    run = await CodexAgent(trusted_host=True).start("task", tmp_path, output_schema=schema, model=model, effort=effort,
+                                                   context=CodingExecutionContext(images=(PNG_IMAGE,)))
     assert (run.session_id, run.last_message, run.exit_code) == ("session-1", raw, 0)
     assert run.backend == "codex" and run.model == model
 

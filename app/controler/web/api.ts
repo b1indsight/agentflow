@@ -184,11 +184,37 @@ export async function getFlowTargets(
   entry.page = page;
   return page;
 }
-export const createFlow = async (target: FlowTarget, task: string) => {
+
+async function imagePayload(files: File[]) {
+  if (!files.length) return {};
+  const images = await Promise.all(
+    files.map(
+      (file) =>
+        new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () =>
+            reject(new ApiError("无法读取图片，请重新选择。", 422));
+          reader.readAsDataURL(file);
+        }),
+    ),
+  );
+  return { images };
+}
+
+export const createFlow = async (
+  target: FlowTarget,
+  task: string,
+  files: File[] = [],
+) => {
   const flow = await api<FlowDetail>("/api/flows", {}, undefined, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...target, task_content: task }),
+    body: JSON.stringify({
+      ...target,
+      task_content: task,
+      ...(await imagePayload(files)),
+    }),
   });
   // An incomplete success response cannot identify the committed Flow for verification/navigation.
   if (!Number.isSafeInteger(flow.id) || flow.id <= 0)
@@ -244,6 +270,7 @@ export async function appendAgentTask(
   id: number,
   instruction: string,
   requestId: string,
+  files: File[] = [],
 ) {
   try {
     return await api<FlowDetail>(
@@ -253,12 +280,18 @@ export async function appendAgentTask(
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instruction, request_id: requestId }),
+        body: JSON.stringify({
+          instruction,
+          request_id: requestId,
+          ...(await imagePayload(files)),
+        }),
       },
     );
   } catch (error) {
     if (error instanceof ApiError) {
       const refusals: Record<string, string> = {
+        image_budget_exceeded:
+          "本 Flow 的图片已达到容量上限，请减少图片或缩小尺寸。",
         agent_task_busy:
           "Flow 仍有任务、反馈处理或结果待确认，请刷新后再发送。",
         agent_task_unavailable:
@@ -270,7 +303,11 @@ export async function appendAgentTask(
       if (error.status === 401 || error.status === 403)
         throw new Error("登录失效或没有发送权限，请重新登录后再操作。");
       if (error.status === 422)
-        throw new Error("请输入 1–16000 字的有效内容。");
+        throw new Error(
+          files.length
+            ? "未受理：请检查图片格式、大小及文字内容。"
+            : "请输入 1–16000 字的有效内容。",
+        );
       if (refusals[error.message]) throw new Error(refusals[error.message]);
     }
     throw new Error(

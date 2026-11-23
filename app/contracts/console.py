@@ -17,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.contracts.input_images import InputImage
 from app.domain.inference_models import AdapterVersion, FailureCode, StopReason
 from app.domain.models import ArchiveReason, FlowState
 
@@ -86,13 +87,16 @@ class CreateFlowRequest(FlowTarget):
 
     issue_number: int | None = Field(default=None, strict=True, gt=0)
     task_content: str | None = None
+    images: list[InputImage] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="after")
     def _input(self) -> CreateFlowRequest:
+        if self.images and self.task_content is None:
+            raise ValueError("images require direct task content")
         if (self.issue_number is None) == (self.task_content is None):
             raise ValueError("provide exactly one of issue_number and task_content")
         if self.task_content is not None:
-            if not self.task_content.strip():
+            if not self.task_content.strip() and not self.images:
                 raise ValueError("task content must not be blank")
             if len(self.task_content.encode("utf-8")) > 32768:
                 raise ValueError("task content exceeds 32 KiB UTF-8")
@@ -121,12 +125,19 @@ class AppendAgentTaskRequest(ConsoleModel):
     """An idempotent Agent task instruction for an existing Flow."""
 
     request_id: UUID
+    images: list[InputImage] = Field(default_factory=list, max_length=4)
     instruction: Annotated[
         str,
         StringConstraints(
-            strip_whitespace=True, min_length=1, max_length=16000, pattern=r"^[^\x00]*$"
+            strip_whitespace=True, max_length=16000, pattern=r"^[^\x00]*$"
         ),
     ]
+
+    @model_validator(mode="after")
+    def _nonempty(self) -> AppendAgentTaskRequest:
+        if not self.instruction and not self.images:
+            raise ValueError("provide text or an image")
+        return self
 
 
 class FlowSummary(ConsoleModel):

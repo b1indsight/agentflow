@@ -1,6 +1,7 @@
 /** Validate without trimming, normalizing line endings or deriving a display title. */
 export function taskContentFromText(
   body: string,
+  hasImages = false,
 ): { ok: true; task: string } | { ok: false; error: string } {
   if (body.includes("\0"))
     return { ok: false, error: "任务内容不能包含 NUL 字符。" };
@@ -9,7 +10,8 @@ export function taskContentFromText(
       ok: false,
       error: "任务内容不能超过 32768 字节（32 KiB UTF-8），请缩短内容。",
     };
-  if (!body.trim()) return { ok: false, error: "任务内容不能全部为空白。" };
+  if (!hasImages && !body.trim())
+    return { ok: false, error: "任务内容不能全部为空白。" };
   return { ok: true, task: body };
 }
 

@@ -57,7 +57,8 @@ npm run preview -- --port 8767
 迁移后标记为 `history_only: true` 的 Flow 保留原详情地址，显示「历史记录 · 只读」。概览、会话和执行记录只读已保存的数据，不重新同步、不打开 Worker 附件，也不提供归档、重试、重新开工或 Agent 输入。
 
 普通 Flow 详情各页签底部的 `AgentTaskInput` 与「新建 Flow」共用 `FlowTaskInput` 文本组件，保留粘贴换行及输入光标。
-继续工作支持 Enter 换行、Ctrl / ⌘ + Enter 发送，中文输入法确认不发送；空白不可提交，最多 16000 字。
+从输入框顶部上拉增高，下拉缩小，聚焦手柄后也可用上下方向键。可选择或拖入 PNG、JPEG、WebP，预览后逐张移除。每次最多 4 张，每张最多 1 MiB；每个 Flow 内去重后图片编码总量上限 8 MiB。
+继续工作支持 Enter 换行、Ctrl / ⌘ + Enter 发送，中文输入法确认不发送；可单独发送图片，无附件时空白不可提交，最多 16000 字。
 切换页签保留草稿，切换 Flow 清空。提交中禁止重复发送；响应不确定时重试沿用 UUID。
 `POST /api/flows/{id}/agent-tasks` 接收 `instruction`、`request_id`，要求 owner 同源 JSON，向未归档的 Flow 追加消息，无需等待 PR。
 成功后自动刷新本 Flow 的会话。回执仅表示消息已记录，不表示任务已排队、已开始或 Agent 已读取；执行情况以会话和执行记录为准。
