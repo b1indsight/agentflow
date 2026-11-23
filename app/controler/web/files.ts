@@ -5,6 +5,52 @@ const fileId = /^[0-9a-f]{32}$/;
 
 export type WorkerFile = { id: string; name: string | null };
 
+export type Preview =
+  | { kind: "text"; text: string }
+  | { kind: "image"; url: string }
+  | { kind: "binary" };
+
+/** Only signed, decodable raster formats become images. Everything else is escaped UTF-8 or a download. */
+export async function previewFile(
+  bytes: Uint8Array<ArrayBuffer>,
+): Promise<Preview> {
+  const begins = (...signature: number[]) =>
+    signature.every((byte, i) => bytes[i] === byte);
+  const header = new TextDecoder("ascii").decode(bytes.subarray(0, 12));
+  const mime = begins(137, 80, 78, 71, 13, 10, 26, 10)
+    ? "image/png"
+    : begins(255, 216, 255)
+      ? "image/jpeg"
+      : header.startsWith("GIF87a") || header.startsWith("GIF89a")
+        ? "image/gif"
+        : header.startsWith("RIFF") && header.slice(8) === "WEBP"
+          ? "image/webp"
+          : null;
+  if (mime) {
+    try {
+      const bitmap = await createImageBitmap(new Blob([bytes], { type: mime }));
+      bitmap.close();
+    } catch {
+      return { kind: "binary" };
+    }
+    const chunks: string[] = [];
+    for (let i = 0; i < bytes.length; i += 8192)
+      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
+    return {
+      kind: "image",
+      url: `data:${mime};base64,${btoa(chunks.join(""))}`,
+    };
+  }
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text))
+      return { kind: "text", text };
+  } catch {
+    // Non-UTF-8 data is not lossy-decoded into misleading source text.
+  }
+  return { kind: "binary" };
+}
+
 /** Match before relative resolution; a basename fragment is display-only, never part of a file request. */
 export function workerFileLink(
   destination: string,
