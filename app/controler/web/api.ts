@@ -165,8 +165,26 @@ export const getFlows = (
 ) => api<FlowPage>("/api/flows", params, signal);
 export const getRepos = (cursor: string | null, signal?: AbortSignal) =>
   api<RepositoryPage>("/api/repos", { cursor, limit: 100 }, signal);
-export const getFlowTargets = (cursor: string | null, signal: AbortSignal) =>
-  api<FlowTargetPage>("/api/flow-targets", { cursor }, signal);
+
+// Share only the first project page. Pagination stays owned by the open picker.
+let firstTargets: { page?: FlowTargetPage } = {};
+export async function getFlowTargets(
+  cursor: string | null,
+  signal: AbortSignal,
+  refresh = false,
+) {
+  signal.throwIfAborted();
+  if (cursor !== null)
+    return api<FlowTargetPage>("/api/flow-targets", { cursor }, signal);
+  if (refresh) firstTargets = {};
+  const entry = firstTargets;
+  if (entry.page) return entry.page;
+  const page = await api<FlowTargetPage>("/api/flow-targets", {}, signal);
+  signal.throwIfAborted();
+  entry.page = page;
+  return page;
+}
+
 async function imagePayload(files: File[]) {
   if (!files.length) return {};
   const images = await Promise.all(

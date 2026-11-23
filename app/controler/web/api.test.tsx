@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { getActivity, getContent, getDiff, getThread } from "./api";
+import {
+  getActivity,
+  getContent,
+  getDiff,
+  getFlowTargets,
+  getThread,
+} from "./api";
 import type { ActivityPage, ContentPage } from "./types";
 
 Object.defineProperty(globalThis, "location", {
@@ -8,6 +14,26 @@ Object.defineProperty(globalThis, "location", {
   value: new URL("https://console.test"),
 });
 after(() => Reflect.deleteProperty(globalThis, "location"));
+
+test("project pickers share their first page until explicitly refreshed", async (t) => {
+  // Settings and the create dialog read the same directory, but later cursors are distinct pages.
+  let reads = 0;
+  t.mock.method(globalThis, "fetch", async () =>
+    Response.json({
+      items: [{ repo: `repo-${++reads}`, installation_id: 1 }],
+      next_cursor: "p2",
+      has_more: true,
+    }),
+  );
+  const signal = new AbortController().signal;
+  const firstRepo = async (cursor: string | null, refresh = false) =>
+    (await getFlowTargets(cursor, signal, refresh)).items[0].repo;
+  assert.equal(await firstRepo(null), "repo-1");
+  assert.equal(await firstRepo("p2"), "repo-2");
+  assert.equal(await firstRepo(null), "repo-1");
+  assert.equal(await firstRepo(null, true), "repo-3");
+  assert.equal(await firstRepo(null), "repo-3");
+});
 
 const content: ContentPage = {
   key: "entry",

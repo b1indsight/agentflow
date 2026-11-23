@@ -55,7 +55,11 @@ export function CreateFlow({
     setLoading(true);
     setReadError(null);
     try {
-      const page = await getFlowTargets(reset ? null : next, controller.signal);
+      const page = await getFlowTargets(
+        reset ? null : next,
+        controller.signal,
+        reset,
+      );
       if (controller.signal.aborted) return;
       setTargets((prior) => {
         const merged = new Map(

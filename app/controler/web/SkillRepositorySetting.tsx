@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ArrowDown, RefreshCw, Save } from "lucide-react";
 import { api, getFlowTargets, settingPath } from "./api";
 import { Button } from "./components/ui/button";
@@ -18,6 +18,7 @@ export function SkillRepositorySetting({ refresh }: { refresh: number }) {
     cursor: string;
   }>();
   const cursor = pageRequest?.refresh === refresh ? pageRequest.cursor : null;
+  const lastRefresh = useRef(refresh);
   const [next, setNext] = useState<string | null>(null);
   const [readError, setReadError] = useState("");
   const [message, setMessage] = useState("");
@@ -45,7 +46,9 @@ export function SkillRepositorySetting({ refresh }: { refresh: number }) {
     const controller = new AbortController();
     setNext(null);
     setReadError("");
-    getFlowTargets(cursor, controller.signal)
+    const force = refresh !== lastRefresh.current;
+    lastRefresh.current = refresh;
+    getFlowTargets(cursor, controller.signal, force)
       .then((page) => {
         if (controller.signal.aborted) return;
         setTargets((prior) =>

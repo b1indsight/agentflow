@@ -252,6 +252,7 @@ function Board({
 
 function Detail({
   id,
+  summary,
   tab,
   columns,
   counts,
@@ -261,6 +262,7 @@ function Detail({
   onBack,
 }: {
   id: number;
+  summary?: FlowSummary;
   tab: Tab;
   columns: Record<Phase, Column>;
   counts: Record<Phase, number>;
@@ -433,6 +435,7 @@ function Detail({
       <DetailPanel
         key={id}
         id={id}
+        summary={summary}
         tab={tab}
         refresh={refresh}
         onChanged={onChanged}
@@ -446,6 +449,7 @@ function Detail({
 
 function DetailPanel({
   id,
+  summary,
   tab,
   refresh,
   onChanged,
@@ -454,6 +458,7 @@ function DetailPanel({
   onNav,
 }: {
   id: number;
+  summary?: FlowSummary;
   tab: Tab;
   refresh: number;
   onChanged: (flow: FlowDetail) => void;
@@ -461,8 +466,10 @@ function DetailPanel({
   nav: boolean;
   onNav: () => void;
 }) {
-  const [flow, setFlow] = useState<FlowDetail | null>(null),
+  const [freshFlow, setFlow] = useState<FlowDetail | null>(null),
     [error, setError] = useState("");
+  // A previously visited conversation can mount while its mutable detail revalidates.
+  const flow = freshFlow ?? (tab === "conversation" ? summary : null);
   const [pending, setPending] = useState<
     "archive" | "resume" | "retry" | "agent-task" | null
   >(null);
@@ -880,7 +887,7 @@ function DetailPanel({
               ) : (
                 (
                   {
-                    overview: (
+                    overview: freshFlow && (
                       <>
                         {!flow.history_only && (
                           <section
@@ -888,10 +895,10 @@ function DetailPanel({
                           >
                             <span className="eyebrow">当前动作</span>
                             <h2>{actionLabel(flow)}</h2>
-                            <p>{flow.reason}</p>
+                            <p>{freshFlow.reason}</p>
                             <div className="next-step">
                               <span>下一步条件</span>
-                              <p>{flow.next_condition}</p>
+                              <p>{freshFlow.next_condition}</p>
                             </div>
                             <div className="round-actions">
                               {flow.lifecycle === "blocked" && (
@@ -954,7 +961,7 @@ function DetailPanel({
                             {writeNotice && <p role="status">{writeNotice}</p>}
                           </section>
                         )}
-                        {flow.task_content && (
+                        {freshFlow.task_content && (
                           <section
                             className="task-content"
                             aria-label="原始任务内容"
@@ -964,7 +971,7 @@ function DetailPanel({
                               value={flow.history_only ? "history-only" : null}
                             >
                               <ActivityMarkdown
-                                text={flow.task_content}
+                                text={freshFlow.task_content}
                                 url={null}
                               />
                             </OpenWorkerFile>
@@ -1026,7 +1033,7 @@ function DetailPanel({
                           <dd>{flow.state_version}（与阅读快照独立）</dd>
                         </dl>
                         <h2 className="panel-title">数据来源</h2>
-                        <SourceList sources={flow.sources} />
+                        <SourceList sources={freshFlow.sources} />
                       </>
                     ),
                     conversation: (
@@ -1107,7 +1114,7 @@ function DetailPanel({
             </section>
           </TabsContent>
         </div>
-        {!flow.history_only && (
+        {freshFlow && !flow.history_only && (
           <AgentTaskInput
             busy={pending !== null}
             mode={
@@ -1661,6 +1668,7 @@ export default function App() {
       {current.settings ? null : current.id ? (
         <Detail
           id={current.id}
+          summary={updates.get(current.id)}
           tab={current.tab}
           columns={columns}
           counts={counts}

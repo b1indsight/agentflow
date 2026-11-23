@@ -3348,7 +3348,17 @@ test("returning to a cached flow keeps it resident when another flow is opened",
   for (const id of [42, 43, 44, 45]) await visit(id);
   const initialReads = new Map(reads);
   // Revisiting a Flow without fetching must still promote it ahead of less recently read Flows.
+  // Hold the mutable detail request: its latency must not hide an already loaded conversation.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/flows/42", async (route) => {
+    await gate;
+    await route.fulfill({ json: { ...blockedFlow, id: 42 } });
+  });
   await visit(42);
+  release();
   expect(reads).toEqual(initialReads);
   await visit(46);
   await visit(42);
