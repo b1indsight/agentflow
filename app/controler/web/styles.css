@@ -947,13 +947,18 @@ svg {
 }
 .input-images {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   margin-top: 4px;
 }
+.input-previews {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+}
 .image-preview {
   position: relative;
+  flex: none;
 }
 .image-preview img {
   width: 64px;
@@ -973,12 +978,11 @@ svg {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-.flow-input-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 8px;
+.flow-input .input-images > small {
+  flex: none;
+}
+.flow-input .input-images > button[type="submit"] {
+  margin-left: auto;
 }
 .flow-input small {
   color: var(--muted);

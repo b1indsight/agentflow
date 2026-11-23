@@ -22,6 +22,7 @@ function Thumbnail({ file }: { file: File }) {
 export function FlowTaskInput({
   value,
   files,
+  children,
   onFilesChange,
   onValueChange,
   onSubmitShortcut,
@@ -198,23 +199,28 @@ export function FlowTaskInput({
         >
           <ImagePlus aria-hidden="true" />
         </button>
-        {files.map((file, index) => (
-          <span className="image-preview" key={index}>
-            <Thumbnail file={file} />
-            <button
-              type="button"
-              className="btn"
-              disabled={props.disabled}
-              aria-label={`移除 ${file.name}`}
-              onClick={() => {
-                setError("");
-                onFilesChange(files.filter((_, i) => i !== index));
-              }}
-            >
-              <X aria-hidden="true" />
-            </button>
-          </span>
-        ))}
+        {files.length > 0 && (
+          <div className="input-previews">
+            {files.map((file, index) => (
+              <span className="image-preview" key={index}>
+                <Thumbnail file={file} />
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={props.disabled}
+                  aria-label={`移除 ${file.name}`}
+                  onClick={() => {
+                    setError("");
+                    onFilesChange(files.filter((_, i) => i !== index));
+                  }}
+                >
+                  <X aria-hidden="true" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        {children}
       </div>
       {error && (
         <small role="alert" className="create-flow-error">

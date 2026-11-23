@@ -428,6 +428,20 @@ for (const width of [1440, 390]) {
     const send = composer.locator('button[type="submit"]');
     await expect(send).toHaveAccessibleName("发送");
     await expect(send).toBeDisabled();
+    const picker = (await composer
+      .getByRole("button", { name: "添加图片" })
+      .boundingBox())!;
+    const submit = (await send.boundingBox())!;
+    const hint = (await composer
+      .getByText("Ctrl / ⌘ + Enter 发送")
+      .boundingBox())!;
+    expect(picker.width).toBe(submit.width);
+    expect(picker.height).toBe(submit.height);
+    expect(picker.y).toBeCloseTo(submit.y, 0);
+    expect(hint.y + hint.height / 2).toBeCloseTo(
+      submit.y + submit.height / 2,
+      0,
+    );
     await input.fill("   ");
     await expect(send).toBeDisabled();
     await input.fill("补充键盘导航\n保留原有行为");

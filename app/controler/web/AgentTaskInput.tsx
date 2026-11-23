@@ -120,8 +120,7 @@ export function AgentTaskInput({
           setStatus("idle");
         }}
         onSubmitShortcut={() => void send()}
-      />
-      <div className="flow-input-actions">
+      >
         <small id={`${id}-hint`}>Ctrl / ⌘ + Enter 发送</small>
         <button
           type="submit"
@@ -138,7 +137,7 @@ export function AgentTaskInput({
             }
           />
         </button>
-      </div>
+      </FlowTaskInput>
       <span className="sr-only" role="status">
         {status === "idle" ? "" : error || feedback}
       </span>
