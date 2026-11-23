@@ -59,6 +59,8 @@ App JWT ── POST /app/installations/{id}/access_tokens ──► Installation
 超时仍走现有 transient 错误处理；可能已发送的非幂等写入保留待核对，不能直接重发。
 
 订阅事件候选：Issues、Issue comment、Pull request、Pull request review、Pull request review comment。
+要让 worker 自动更新 skills，请给 App 授权访问配置的 skill 仓库，并订阅 **Push** 事件。
+该仓库的默认分支更新后，已连接的执行 worker 会刷新 skill 快照；现有 Flow 继续使用原快照。
 GitHub 会根据已选权限决定哪些事件可订阅；正式接入时应逐事件核对
 [Webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads)。
 

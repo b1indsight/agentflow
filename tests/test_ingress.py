@@ -51,6 +51,7 @@ class WebhookRuntime(ServerRuntime):
                 database=store.database,
                 plugins=get_plugin_manager(),
                 jobs_available=lambda: None,
+                request_skill_sync=lambda: None,
             )
 
     async def receive_webhook(self, event_type: str, delivery_id: str, payload: dict, digest: str) -> None:

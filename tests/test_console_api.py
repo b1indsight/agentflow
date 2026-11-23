@@ -56,6 +56,7 @@ def console_runtime(store):
         console=ConsoleSynchronizer(SimpleNamespace(), SimpleNamespace(), database=store._db),
         conversations=SimpleNamespace(read=AsyncMock()),
         worker_sessions=set(),
+        request_skill_sync=Mock(),
         gateway=SimpleNamespace(wake_all=Mock()),
     )
 

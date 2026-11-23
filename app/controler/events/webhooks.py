@@ -17,7 +17,17 @@ from app.controler.workflow.service import ControlService
 from app.github import GitHubApp, GitHubError, retry_delay
 from app.persistence.console_sync import ConsoleSyncStore
 from app.persistence.database import Database
+from app.persistence.settings import SettingsStore, TextSetting
 from app.persistence.webhooks import WebhookStore
+
+
+def _updates_skill_source(payload: dict, database: Database) -> bool:
+    # Workers clone the default branch, regardless of which ref triggered a push.
+    repo = payload["repository"]
+    if payload.get("deleted") or payload.get("ref") != f"refs/heads/{repo['default_branch']}":
+        return False
+    configured = SettingsStore(database).get_value(TextSetting.SKILL_REPOSITORY)
+    return configured is not None and configured.casefold() == repo["full_name"].casefold()
 
 
 class WebhookConsumer:
@@ -29,6 +39,7 @@ class WebhookConsumer:
         database: Database,
         plugins: PluginManager,
         jobs_available: Callable[[], None],
+        request_skill_sync: Callable[[], None],
     ) -> None:
         self.database = database
         self.webhook_store = WebhookStore(database)
@@ -36,6 +47,7 @@ class WebhookConsumer:
         self.github = github
         self.plugins = plugins
         self.jobs_available = jobs_available
+        self.request_skill_sync = request_skill_sync
         self.wakeup = asyncio.Event()
 
     def sweep(self, loop: asyncio.AbstractEventLoop | None = None) -> int:
@@ -73,6 +85,8 @@ class WebhookConsumer:
                         item.delivery_id,
                         item.payload,
                     )
+                    if item.event_type == "push" and _updates_skill_source(item.payload, tx):
+                        callbacks.append(self.request_skill_sync)
                     ConsoleSyncStore(tx).observe_webhook(item.event_type, item.payload)
                     if not leased.complete(item):
                         raise RuntimeError("webhook claim changed")
