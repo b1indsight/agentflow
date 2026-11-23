@@ -2487,7 +2487,7 @@ for (const width of [1440, 390]) {
   test(`conversation prefetches before the page boundary without moving the reading position at ${width}px`, async ({
     page,
   }) => {
-    // A delayed next page must start while more than a viewport of unread messages remains.
+    // Leave enough unread messages for fast scrolling while the next page is delayed.
     await page.setViewportSize({ width, height: 900 });
     const cursors: string[] = [];
     let releasePage!: () => void;
@@ -2540,7 +2540,7 @@ for (const width of [1440, 390]) {
     const reading = await root.evaluate(async (node) => {
       // The mobile header changes the viewport height after the first scroll.
       for (let step = 0; step < 2; step++) {
-        node.scrollTop = node.scrollHeight - node.clientHeight * 2.5;
+        node.scrollTop = node.scrollHeight - node.clientHeight * 4.5;
         for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
       }
       const bounds = node.getBoundingClientRect();
@@ -2564,7 +2564,7 @@ for (const width of [1440, 390]) {
         viewport: node.clientHeight,
       };
     });
-    expect(reading.remaining).toBeGreaterThan(reading.viewport);
+    expect(reading.remaining).toBeGreaterThan(reading.viewport * 3);
     await expect.poll(() => cursors).toEqual(["page-2:2"]);
     await expect(list).toHaveAttribute("data-window-count", "20");
     const positions = root.evaluate(async (node, key) => {

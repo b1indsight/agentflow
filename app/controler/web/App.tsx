@@ -1246,7 +1246,7 @@ function Conversation({
     const boundary = `${state.snapshot}:${state.next_cursor}`;
     if (automaticBoundary.current === boundary) return;
     let observer: IntersectionObserver | undefined;
-    // Keep two screens ready, including when the mobile header changes the reading viewport.
+    // Recalculate the reading runway when the mobile header changes the viewport.
     const resize = new ResizeObserver(() => {
       observer?.disconnect();
       observer = new IntersectionObserver(
@@ -1260,7 +1260,7 @@ function Conversation({
         },
         {
           root: viewport,
-          rootMargin: `0px 0px ${viewport.clientHeight * 2}px 0px`,
+          rootMargin: `0px 0px ${viewport.clientHeight * 4}px 0px`,
         },
       );
       observer.observe(node);
