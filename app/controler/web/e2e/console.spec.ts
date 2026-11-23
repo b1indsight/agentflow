@@ -1360,6 +1360,10 @@ test("detail reads synchronize sidebar and board without reloading the page", as
   await mockFlows(page, () => [current, other]);
   await page.goto("/#board");
   await expect(page.locator(".column.phase-running .card")).toHaveCount(2);
+  const listReads: string[] = [];
+  page.on("request", (req) => {
+    if (new URL(req.url()).pathname === "/api/flows") listReads.push(req.url());
+  });
   current = {
     ...current,
     lifecycle: "blocked",
@@ -1381,6 +1385,7 @@ test("detail reads synchronize sidebar and board without reloading the page", as
   );
   await page.getByRole("tab", { name: "概览", exact: true }).click();
   await expect(page.locator(".task-facts")).toContainText("blocked / 受阻");
+  expect(listReads).toEqual([]);
   await page.screenshot({
     path: "../../../.amp/in/artifacts/detail-board-sync-failed.png",
   });
@@ -1574,24 +1579,16 @@ for (const width of [1440, 390]) {
       page.getByRole("button", { name: "重试", exact: true }),
     ).toBeDisabled();
     await expect(page.locator(".detail-head .badge")).toHaveText("受阻");
-    // Keep sidebar reloads pending so the command notice coexists with other live statuses.
-    let finishRefresh = () => {};
-    const refreshed = new Promise<void>((resolve) => {
-      finishRefresh = resolve;
-    });
-    await page.route("**/api/flows?**", async (route) => {
-      await refreshed;
-      return route.fallback();
-    });
     finish();
-    if (width === 1440)
-      await expect(page.locator(".rail-inbox").getByRole("status")).toHaveCount(
-        2,
-      );
     await expect(
       page.locator(".execution-summary").getByRole("status"),
     ).toContainText("归档请求已受理");
-    finishRefresh();
+    await expect(page.locator(".rail-group.phase-running .count")).toHaveText(
+      "1",
+    );
+    await expect(page.locator(".rail-inbox").getByRole("status")).toHaveCount(
+      0,
+    );
     await expect(page.locator(".detail-head .badge")).toHaveText("进行中");
     await expect(page.locator(".task-facts")).toContainText(
       "finalizing / 进行中",

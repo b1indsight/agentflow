@@ -1,4 +1,4 @@
-import type { Phase } from "./types";
+import type { FlowSummary, Phase } from "./types";
 import { phases } from "./phases";
 
 export interface SearchQuery {
@@ -77,4 +77,21 @@ export function parseSearch(
     }
   }
   return { ok: true, query };
+}
+
+/** Recheck an already loaded row against the console list's filters after a detail update. */
+export function matchesSearch(q: SearchQuery, f: FlowSummary): boolean {
+  const text = [f.title, f.id, f.issue_number, f.pr_number, f.repo]
+    .filter((part) => part !== null)
+    .join(" ")
+    .toLowerCase();
+  return (
+    (!q.repo || q.repo.toLowerCase() === f.repo.toLowerCase()) &&
+    (!q.lifecycle ||
+      (q.lifecycle === "archived") === (f.lifecycle === "archived")) &&
+    (!q.status || q.status === f.phase) &&
+    (!q.issue || q.issue === f.issue_number) &&
+    (!q.pr || q.pr === f.pr_number) &&
+    q.terms.every((term) => text.includes(term))
+  );
 }

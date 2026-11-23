@@ -53,6 +53,7 @@ import type { WorkerFile } from "./files";
 import { InferenceNotices } from "./InferenceNotices";
 import { actionLabel, archiveReasonLabels, flowLabel, phases } from "./phases";
 import { SearchBox } from "./SearchBox";
+import { matchesSearch, parseSearch } from "./search";
 import { SettingsPage } from "./SettingsPage";
 import { Button } from "./components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
@@ -265,7 +266,7 @@ function Detail({
   counts: Record<Phase, number>;
   load: (p: Phase) => void;
   refresh: number;
-  onChanged: () => void;
+  onChanged: (flow: FlowDetail) => void;
   onBack: () => void;
 }) {
   const [collapsed, setCollapsed] = useState(
@@ -433,7 +434,6 @@ function Detail({
         key={id}
         id={id}
         tab={tab}
-        columns={columns}
         refresh={refresh}
         onChanged={onChanged}
         onBack={onBack}
@@ -447,7 +447,6 @@ function Detail({
 function DetailPanel({
   id,
   tab,
-  columns,
   refresh,
   onChanged,
   onBack,
@@ -456,9 +455,8 @@ function DetailPanel({
 }: {
   id: number;
   tab: Tab;
-  columns: Record<Phase, Column>;
   refresh: number;
-  onChanged: () => void;
+  onChanged: (flow: FlowDetail) => void;
   onBack: () => void;
   nav: boolean;
   onNav: () => void;
@@ -494,7 +492,7 @@ function DetailPanel({
         : action === "resume"
           ? resumeFlow(id, flow.current_attempt_id)
           : archiveFlow(id, flow.current_attempt_id));
-      onChanged();
+      onChanged(value);
       if (mounted.current) {
         setFlow((prior) =>
           prior && prior.state_version > value.state_version ? prior : value,
@@ -670,12 +668,7 @@ function DetailPanel({
         setFlow((prior) =>
           prior && prior.state_version > value.state_version ? prior : value,
         );
-        // Revalidate changed summaries without resetting unchanged list pages.
-        const summary = columns[value.phase].items.find(
-          (item) => item.id === value.id,
-        );
-        if (!summary || summary.state_version < value.state_version)
-          onChanged();
+        onChanged(value);
       })
       .catch((e) => !c.signal.aborted && setError(e.message));
     return () => c.abort();
@@ -1132,7 +1125,7 @@ function DetailPanel({
               setPending("agent-task");
               try {
                 const value = await appendAgentTask(id, instruction, requestId);
-                onChanged();
+                onChanged(value);
                 if (mounted.current) {
                   setAcceptedInputs((count) => count + 1);
                   setFlow((prior) =>
@@ -1428,10 +1421,53 @@ export default function App() {
     [boardStarted, setBoardStarted] = useState(!current.settings),
     [mobilePhase, setMobilePhase] = useState<Phase>("running"),
     [boardRevision, setBoardRevision] = useState(0),
-    [columns, setColumns] = useState(blank),
-    [counts, setCounts] = useState(
+    [pages, setColumns] = useState(blank),
+    [pageCounts, setCounts] = useState(
       Object.fromEntries(phases.map(([p]) => [p, 0])) as Record<Phase, number>,
+    ),
+    [updates, setUpdates] = useState(new Map<number, FlowSummary>());
+  const updateSummary = (summary: FlowSummary) => {
+    setUpdates((old) =>
+      (old.get(summary.id)?.state_version ?? -1) >= summary.state_version
+        ? old
+        : new Map(old).set(summary.id, summary),
     );
+  };
+  // Keep page cursors and server snapshots intact, including pages arriving after the detail.
+  const { columns, counts } = useMemo(() => {
+    const columns = { ...pages },
+      counts = { ...pageCounts };
+    const search = parseSearch(query, []);
+    for (const [phase] of phases) {
+      for (const row of pages[phase].items) {
+        const updated = updates.get(row.id);
+        if (!updated || updated.state_version <= row.state_version) continue;
+        const visible = search.ok && matchesSearch(search.query, updated);
+        const source = columns[phase];
+        if (visible && phase === updated.phase) {
+          columns[phase] = {
+            ...source,
+            items: source.items.map((f) => (f.id === row.id ? updated : f)),
+          };
+          continue;
+        }
+        columns[phase] = {
+          ...source,
+          items: source.items.filter((f) => f.id !== row.id),
+        };
+        counts[phase]--;
+        const dest = columns[updated.phase];
+        if (visible && !dest.items.some((f) => f.id === row.id)) {
+          columns[updated.phase] = {
+            ...dest,
+            items: [...dest.items, updated].sort((a, b) => b.id - a.id),
+          };
+          counts[updated.phase]++;
+        }
+      }
+    }
+    return { columns, counts };
+  }, [pages, pageCounts, updates, query]);
   const boardRequests = useRef(new Map<Phase, AbortController>());
   useEffect(() => {
     const sync = () => {
@@ -1488,11 +1524,25 @@ export default function App() {
     )
       .then((page) => {
         if (c.signal.aborted || boardRequests.current.get(phase) !== c) return;
-        setCounts(page.counts);
+        const first = reset || prior.next === null;
+        if (first) setCounts((x) => ({ ...x, [phase]: page.counts[phase] }));
+        // A flow moved here can reappear below the old cursor. Keep its original
+        // list membership as the baseline for the count adjustment.
+        let items = page.items;
+        if (!first) {
+          const known = new Set(
+            phases.flatMap(([p]) => pages[p].items.map((f) => f.id)),
+          );
+          items = items.filter((item) => {
+            if (!known.has(item.id)) return true;
+            updateSummary(item);
+            return false;
+          });
+        }
         setColumns((x) => ({
           ...x,
           [phase]: {
-            items: reset ? page.items : [...x[phase].items, ...page.items],
+            items: first ? items : [...x[phase].items, ...items],
             next: page.next_cursor,
             more: page.has_more,
             busy: false,
@@ -1512,6 +1562,7 @@ export default function App() {
   };
   useEffect(() => {
     if (!boardStarted) return;
+    setUpdates(new Map());
     phases.forEach(([p]) => load(p, true));
     return () => boardRequests.current.forEach((c) => c.abort());
   }, [query, boardRevision, boardStarted]);
@@ -1589,7 +1640,7 @@ export default function App() {
               if (current.settings) setSettingsRefresh((x) => x + 1);
               else {
                 if (current.id) setRefresh((x) => x + 1);
-                phases.forEach(([p]) => load(p, true));
+                setBoardRevision((x) => x + 1);
               }
             }}
           >
@@ -1610,7 +1661,13 @@ export default function App() {
           counts={counts}
           load={load}
           refresh={refresh}
-          onChanged={() => setBoardRevision((x) => x + 1)}
+          onChanged={({
+            task_content,
+            reason,
+            next_condition,
+            sources,
+            ...summary
+          }) => updateSummary(summary)}
           onBack={() => (location.hash = "board")}
         />
       ) : (
