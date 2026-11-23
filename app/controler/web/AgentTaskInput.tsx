@@ -23,12 +23,17 @@ export function AgentTaskInput({
   mode,
   busy,
 }: {
-  onSubmit: (instruction: string, requestId: string) => Promise<void>;
+  onSubmit: (
+    instruction: string,
+    requestId: string,
+    files: File[],
+  ) => Promise<void>;
   mode: keyof typeof composerCopy;
   busy: boolean;
 }) {
   const id = useId();
   const [instruction, setInstruction] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
   const [status, setStatus] = useState<"idle" | "pending" | "sent" | "error">(
     "idle",
   );
@@ -59,7 +64,7 @@ export function AgentTaskInput({
   }, []);
   const send = async () => {
     const text = instruction.trim();
-    if (writing.current || disabled || !text) return;
+    if (writing.current || disabled || (!text && !files.length)) return;
     writing.current = true;
     setStatus("pending");
     setError("");
@@ -67,9 +72,10 @@ export function AgentTaskInput({
       // Reuse the identity after a lost response, even if the user switches tabs.
       if (request.current?.instruction !== text)
         request.current = { instruction: text, id: crypto.randomUUID() };
-      await onSubmit(text, request.current.id);
+      await onSubmit(text, request.current.id, files);
       if (mounted.current) {
         setInstruction("");
+        setFiles([]);
         request.current = null;
         setStatus("sent");
       }
@@ -94,6 +100,13 @@ export function AgentTaskInput({
       }}
     >
       <FlowTaskInput
+        files={files}
+        onFilesChange={(next) => {
+          setFiles(next);
+          request.current = null;
+          setStatus("idle");
+          setError("");
+        }}
         aria-label={label}
         aria-describedby={`${id}-hint`}
         placeholder={placeholder}
@@ -107,8 +120,7 @@ export function AgentTaskInput({
           setStatus("idle");
         }}
         onSubmitShortcut={() => void send()}
-      />
-      <div className="flow-input-actions">
+      >
         <small id={`${id}-hint`}>Ctrl / ⌘ + Enter 发送</small>
         <button
           type="submit"
@@ -116,7 +128,7 @@ export function AgentTaskInput({
           aria-label={feedback}
           title={error || feedback}
           data-state={status}
-          disabled={disabled || !instruction.trim()}
+          disabled={disabled || (!instruction.trim() && !files.length)}
         >
           <Icon
             aria-hidden="true"
@@ -125,7 +137,7 @@ export function AgentTaskInput({
             }
           />
         </button>
-      </div>
+      </FlowTaskInput>
       <span className="sr-only" role="status">
         {status === "idle" ? "" : error || feedback}
       </span>

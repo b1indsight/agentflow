@@ -40,6 +40,7 @@ from app.worker.execution.credentials import git_credential_environment, inherit
 from app.worker.execution.gh import github_environment
 from app.worker.execution.git_identity import disables_amp_coauthor
 from app.worker.execution.idle import wait_for_inactivity
+from app.worker.execution.input_images import write_images
 from app.worker.model_catalog import read_model_catalog
 from app.worker.state.file_links import FileLinks
 
@@ -422,6 +423,9 @@ class AmpCodingAgent(CodingAgent):
                        "Do not wrap it in Markdown or add explanatory text.\n" + output_schema.read_text())
         with tempfile.TemporaryDirectory(prefix="agentflow-amp-") as directory:
             run_directory = Path(directory)
+            if context and context.images:
+                paths = write_images(context.images, run_directory)
+                prompt += "\n\nView the attached task images with view_media:\n" + "\n".join(map(str, paths))
             environment = amp_environment(context=context)
             if context and context.github:
                 environment.update(github_environment(context.github, run_directory, environment))

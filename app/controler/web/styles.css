@@ -314,7 +314,8 @@ svg {
   font-size: 1rem;
 }
 .create-flow-dialog textarea {
-  resize: vertical;
+  resize: none;
+  max-height: 55dvh;
   min-height: 140px;
   line-height: 1.6;
 }
@@ -911,7 +912,7 @@ svg {
 .flow-input textarea {
   display: block;
   width: 100%;
-  max-height: 18vh;
+  max-height: 55dvh;
   min-height: 64px;
   padding: 10px 12px;
   border: 1px solid var(--line);
@@ -920,18 +921,68 @@ svg {
   color: var(--ink);
   font: inherit;
   line-height: 1.5;
-  resize: vertical;
+  resize: none;
+}
+.input-grip {
+  display: grid;
+  width: 100%;
+  height: 14px;
+  place-items: center;
+  background: transparent;
+  border: 0;
+  cursor: ns-resize;
+  touch-action: none;
+}
+.input-grip::before {
+  content: "";
+  background: var(--subtle);
+  width: 36px;
+  height: 2px;
+}
+.input-grip:hover::before {
+  background: var(--accent);
+}
+.task-composer[data-dragging] {
+  outline: 2px dashed var(--accent);
+}
+.input-images {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.input-previews {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+}
+.image-preview {
+  position: relative;
+  flex: none;
+}
+.image-preview img {
+  width: 64px;
+  height: 48px;
+  display: block;
+  object-fit: contain;
+  background: var(--wash);
+}
+.image-preview .btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 0;
+  background: var(--paper);
 }
 .flow-input textarea:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-.flow-input-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 8px;
+.flow-input .input-images > small {
+  flex: none;
+}
+.flow-input .input-images > button[type="submit"] {
+  margin-left: auto;
 }
 .flow-input small {
   color: var(--muted);

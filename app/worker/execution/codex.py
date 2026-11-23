@@ -34,6 +34,7 @@ from app.worker.coding_agent import CodingAgent
 from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 from app.worker.execution.gh import github_environment
 from app.worker.execution.idle import wait_for_inactivity
+from app.worker.execution.input_images import write_images
 from app.worker.model_catalog import read_model_catalog
 
 CODEX_BIN = "codex"
@@ -178,6 +179,9 @@ class CodexAgent(CodingAgent):
             args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
         with tempfile.TemporaryDirectory(prefix="agentflow-coding-") as directory:
             run_directory = Path(directory)
+            if context:
+                for path in write_images(context.images, run_directory):
+                    args.extend(["--image", str(path)])
             environment = _codex_environment(context=context)
             if context is not None and context.github is not None:
                 environment.update(github_environment(context.github, run_directory, environment))

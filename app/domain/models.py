@@ -374,6 +374,7 @@ class CodingExecutionContext:
     github: GitHubCapability | None = None
     mcp_url: str | None = None
     mcp_token: SecretStr | None = None
+    images: tuple[str, ...] = ()
 
 
 # ------------------------------------------------------------ 跨模型 JSON 契约（pydantic）

@@ -138,13 +138,16 @@ class InitialPreparation:
             current_delivery.base_branch = repository.default_branch
             deliveries_tx.update_delivery(current_delivery)
             delivery = current_delivery
-            task_content = AgentInputStore(tx).initial_content(fresh, job, task_content)
+            inputs = AgentInputStore(tx)
+            task_content = inputs.initial_content(fresh, job, task_content)
+            images = inputs.images_for(flow.id, task_content)
         return InitialTask(
             flow_id=flow.id,
             attempt_id=attempt.id,
             repo=flow.repo,
             issue_number=flow.issue_number,
             task_content=task_content,
+            images=images,
             branch=delivery.branch,
             base_branch=repository.default_branch,
             remote="origin",

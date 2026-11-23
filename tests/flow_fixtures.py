@@ -5,6 +5,9 @@ from app.domain.models import Flow, Job, JobKind
 from app.persistence.records import required
 from app.persistence.store import Store
 
+PNG_IMAGE = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjd"
+             "AAAAD0lEQVR4nGP4X+Uupe8AAAprAkohTMgDAAAAAElFTkSuQmCC")
+
 
 def apply_flow_event(store: Store, flow: Flow, event: FlowEvent) -> Flow:
     """Re-read after claims or enqueue, which can leave a fixture's snapshot stale."""

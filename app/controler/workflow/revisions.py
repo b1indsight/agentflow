@@ -175,6 +175,7 @@ async def prepare_revision(
             current.payload = {
                 **current_payload, "owner_messages": [*current_payload.get("owner_messages", []), *messages],
             }
+        task.images = AgentInputStore(tx).images_for(flow.id, task.task_content + "\n" + task.instruction)
         return reviews_tx.freeze_revision(current, task)
 
 

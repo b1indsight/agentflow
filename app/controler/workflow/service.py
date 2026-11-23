@@ -9,6 +9,7 @@ from typing import Literal
 from loguru import logger
 from pluggy import PluginManager
 
+from app.contracts.input_images import attach_refs
 from app.contracts.protocol import RevisionTaskResult, Succeeded
 from app.contracts.receipts import decode_result_inbox
 from app.controler.workflow.archive import verify_archive, verify_merge_notice
@@ -104,7 +105,7 @@ class ControlService:
 
     def create_flow(
         self, repo: str, issue_number: int | None, installation_id: int | None,
-        *, task_content: str | None = None,
+        *, task_content: str | None = None, images: list[str] | None = None,
     ) -> Flow | None:
         """Atomically queue a task; only Issue identities deduplicate active Flows."""
         with self.database.transaction() as tx:
@@ -114,7 +115,12 @@ class ControlService:
             if flows_tx.get_active_flow(repo, issue_number):
                 logger.info("flow already active for {}#{}", repo, issue_number)
                 return None
+            if images:
+                assert task_content is not None
+                task_content = attach_refs(task_content, images)
             flow = flows_tx.create_flow(repo, issue_number, installation_id, task_content=task_content)
+            if images:
+                AgentInputStore(tx).save_images(flow.id, images)
             jobs_tx.enqueue_job(
                 flow, JobKind.INITIAL,
                 payload={"issue_number": issue_number} if issue_number is not None else {},
@@ -300,7 +306,7 @@ class ControlService:
             self._fire("on_archived", flow=flow)
         self._jobs_available()
 
-    def append_agent_task(self, flow_id: int, instruction: str, request_id: str) -> None:
+    def append_agent_task(self, flow_id: int, instruction: str, request_id: str, images: list[str] | None = None) -> None:
         """Accept messages independently of whether this Attempt can dispatch work now."""
         with self.flows.locked(flow_id) as context:
             tx, fresh = context.database, context.flow
@@ -309,6 +315,8 @@ class ControlService:
             if fresh.history_only:
                 raise FlowReadOnly()
             inputs = AgentInputStore(tx)
+            if images:
+                instruction = attach_refs(instruction, images)
             previous = inputs.previous(flow_id, request_id)
             if previous is not None:
                 if previous != instruction:
@@ -316,6 +324,10 @@ class ControlService:
                 return
             if fresh.state is FlowState.ARCHIVED:
                 raise AgentTaskRejected("agent_task_unavailable")
+            if images:
+                inputs.save_images(flow_id, images)
+                if inputs.image_budget_exceeded(flow_id):
+                    raise AgentTaskRejected("image_budget_exceeded")
             inputs.record(fresh, request_id, instruction)
             queued = self._queue_agent_inputs(tx, fresh, request_id)
         if queued:

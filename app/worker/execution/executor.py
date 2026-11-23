@@ -160,7 +160,7 @@ class WorkerExecutor:
         try:
             async with WorkerMCP(tool_caller, vcs_context) as mcp:
                 context = CodingExecutionContext(
-                    github=capability, mcp_url=mcp.url, mcp_token=mcp.token,
+                    github=capability, mcp_url=mcp.url, mcp_token=mcp.token, images=tuple(task.images),
                 )
                 run = await self.code_agent.start(
                     prompt, workspace, output_schema=schema_path, context=context, model=model, effort=effort,
@@ -297,7 +297,7 @@ class WorkerExecutor:
             binding = self.workspaces.lookup(task.repo, task.flow_id)
             self.state.bind_workspace(binding)
             workspace = self.workspaces.path(binding)
-            context = CodingExecutionContext(github=capability)
+            context = CodingExecutionContext(github=capability, images=tuple(task.images))
             if task.retry_status is not None and not task.session_id:
                 raise VcsVerificationError("session", "original coding session is missing")
             answer_sha = await local_commit(workspace) if task.purpose == "answer" else None
