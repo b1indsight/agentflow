@@ -38,6 +38,36 @@
 * {
   box-sizing: border-box;
 }
+@media (forced-colors: none) {
+  * {
+    --scrollbar-thumb: transparent;
+  }
+  :hover {
+    --scrollbar-thumb: var(--accent-soft);
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar,
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: var(--scrollbar-thumb);
+  }
+  ::-webkit-scrollbar-button {
+    display: none;
+  }
+  @supports not selector(::-webkit-scrollbar) {
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: var(--scrollbar-thumb) transparent;
+    }
+  }
+}
 body {
   margin: 0;
   background: var(--bg);
@@ -608,10 +638,6 @@ svg {
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  scrollbar-width: none;
-}
-.column-scroll::-webkit-scrollbar {
-  display: none;
 }
 .col-header {
   display: flex;
