@@ -97,11 +97,12 @@ async def test_amp_repeat_and_next_page_keep_native_cursor_and_cache(worker, mon
 
 
 @pytest.mark.parametrize("history_backend", ["codex", "amp"])
+@pytest.mark.parametrize("directory", ["attachments", "temporary-files"])
 async def test_private_amp_images_register_without_downloading_or_trusting_source(
-    worker, tmp_path, monkeypatch, history_backend,
+    worker, tmp_path, monkeypatch, history_backend, directory,
 ):
-    # The published URL needs Amp auth; amp-media-source is only metadata, not file authority.
-    url = "https://ampcode.com/user-content/attachments/" + "b" * 64 + "-screen.png"
+    # Both uploaded attachments and thread_file_url screenshots require Amp auth even before expiry.
+    url = f"https://ampcode.com/user-content/{directory}/" + "b" * 64 + "-screen.png"
     sentinel = tmp_path / "do-not-expose.txt"
     sentinel.write_text("not an image")
     full = url + "#amp-media-source=" + quote(sentinel.as_uri(), safe="")

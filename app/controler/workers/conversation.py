@@ -150,7 +150,7 @@ class ConversationService:
             )
         fingerprint = hashlib.sha256(
             json.dumps(
-                ["file-links-v2-names", flow_id,
+                ["file-links-v3-temporary-files", flow_id,
                  [[a.id, a.codex_session_id, a.session_generation] for a in attempts]]
             ).encode()
         ).hexdigest()
