@@ -183,14 +183,6 @@ class FlowStore(Repository):
             },
         )
 
-    def set_child_flow(self, flow_id: int, child_flow_id: int) -> None:
-        """Select a derived Flow, or restore the self-link by passing the Flow's own ID."""
-        with self._db.connection() as connection:
-            connection.execute(
-                "UPDATE flows SET child_flow_id=NULLIF(%s::bigint,id) WHERE id=%s",
-                (child_flow_id, flow_id),
-            )
-
     def set_title_job(self, flow_id: int, job_id: int) -> None:
         """Point the Flow at the naming inference whose result may set its title."""
         with self._db.connection() as connection:
