@@ -518,6 +518,26 @@ for (const width of [1440, 390]) {
     await expect(
       composer.getByRole("img", { name: "拖入.png" }),
     ).toHaveJSProperty("naturalWidth", 80);
+    await input.evaluate(async (el: HTMLTextAreaElement, url) => {
+      // Pasting a screenshot over selected task text must only add an attachment.
+      el.select();
+      const clipboardData = new DataTransfer();
+      const blob = await (await fetch(url)).blob();
+      clipboardData.items.add(
+        new File([blob], "截图.png", { type: blob.type }),
+      );
+      el.dispatchEvent(
+        new ClipboardEvent("paste", {
+          clipboardData,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }, png);
+    await expect(
+      composer.getByRole("img", { name: "截图.png" }),
+    ).toHaveJSProperty("naturalWidth", 80);
+    await composer.getByRole("button", { name: "移除 拖入.png" }).click();
     await composer.screenshot({
       path: `../../../.amp/in/artifacts/image-input-${width}.png`,
     });
