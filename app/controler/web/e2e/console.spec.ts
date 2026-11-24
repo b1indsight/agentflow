@@ -428,6 +428,14 @@ for (const width of [1440, 390]) {
     const send = composer.locator('button[type="submit"]');
     await expect(send).toHaveAccessibleName("发送");
     await expect(send).toBeDisabled();
+    // Native overscroll can expose the page background even when scrollY stays zero.
+    await expect(page.locator("html")).toHaveCSS(
+      "overscroll-behavior-y",
+      "none",
+    );
+    await input.hover();
+    await page.mouse.wheel(0, 900);
+    await expect(send).toBeInViewport();
     const picker = (await composer
       .getByRole("button", { name: "添加图片" })
       .boundingBox())!;

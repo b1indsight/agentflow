@@ -72,6 +72,10 @@ body {
   margin: 0;
   background: var(--bg);
 }
+:root:has(.detail-shell) {
+  overflow-y: clip;
+  overscroll-behavior-y: none;
+}
 button,
 input,
 select {
