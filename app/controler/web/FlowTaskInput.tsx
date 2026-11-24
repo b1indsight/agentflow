@@ -149,8 +149,16 @@ export function FlowTaskInput({
         onPaste={(event) => {
           // Native paste normalizes CRLF before onChange can observe it.
           event.preventDefault();
+          const images = Array.from(event.clipboardData.files).filter((file) =>
+            file.type.startsWith("image/"),
+          );
+          if (images.length) {
+            addFiles(images);
+            return;
+          }
           const input = event.currentTarget;
           const pasted = event.clipboardData.getData("text/plain");
+          if (!pasted) return;
           const next = replaceTaskText(
             value,
             input.selectionStart,
@@ -193,7 +201,7 @@ export function FlowTaskInput({
           className="btn"
           type="button"
           disabled={props.disabled}
-          title="选择图片或将图片拖入输入框"
+          title="选择图片，或在输入框中粘贴、拖入图片"
           aria-label="添加图片"
           onClick={() => picker.current?.click()}
         >
