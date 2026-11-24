@@ -1,6 +1,6 @@
 # 统一执行权限模型：路径级文件权限与网络策略
 
-**Stage:** Implementation — 已实现策略模型、纯判定器和构造期能力检查；不包含进程隔离。
+**Stage:** Implementation — 已实现策略模型、路径与 TCP 判定器和构造期能力检查；不包含进程隔离。
 
 **方案 PR:** [#129](https://github.com/b1indsight/agentflow/pull/129)。
 
@@ -79,7 +79,7 @@ Codex 的 domain allowlist/deny 优先规则是参考；本方案增加显式目
 | `TcpRule.__post_init__(self) -> None` | 校验规则主机格式、端口和 action；规则要求规范形式，不隐式改写 |
 | `RestrictedFileSystem.__post_init__(self) -> None` / `RestrictedNetwork.__post_init__(self) -> None` | 保证规则集合是对应规则的 tuple，防止 frozen 对象包住可变列表 |
 | `PermissionProfile.is_unrestricted(self) -> bool`（property） | 两个子策略均 unrestricted 才返回 true |
-| `resolve_file_access(policy: FileSystemPolicy, path: PurePosixPath, *, workspace: PurePosixPath) -> FileAccess` | 纯词法路径判定；workspace 由实际执行 worker 提供 |
+| `resolve_file_access(policy: FileSystemPolicy, path: PurePosixPath, *, workspace: PurePosixPath) -> FileAccess` | 在实际 worker 上分别判定请求路径和解析后的目标，取权限交集 |
 | `allows_tcp(policy: NetworkPolicy, host: str, port: int) -> bool` | 规范化查询主机后匹配；不解析 DNS，不建立连接 |
 | `require_supported_permissions(profile: PermissionProfile, *, agent: Literal["Codex", "Amp"]) -> None` | 当前 adapter 只接受 unrestricted；其他 profile 抛 `UnsupportedPermissionProfile` |
 
@@ -94,16 +94,16 @@ Codex 的 domain allowlist/deny 优先规则是参考；本方案增加显式目
    不在 control 节点解析路径，也不把 `worker_root` 默认当成可写范围。
 2. **查询须明确。** 查询路径和 workspace 都必须为 POSIX 绝对路径；拒绝 NUL、`..` 组件和
    双斜线根 `//`。不展开 `~`、环境变量或 glob；路径中的 `~` 只作为普通名字。
-   PurePosixPath 对 `.` 和重复分隔符的词法规范化可用，不调用 `resolve()`、stat 或文件扫描。
+   PurePosixPath 对 `.` 和重复分隔符的词法规范化可用。
 3. **按组件匹配。** 一条规则覆盖它本身及其后代；`/repo/a` 不匹配 `/repo/abc`。
    最长匹配路径胜出，同深度冲突采用 deny > write > read；规则顺序不影响结果。[^cx-path]
 4. **嵌套可以覆盖。** 父路径 deny 允许被更具体的子路径规则覆盖；deny 的最高优先级只用于
    相同具体程度的冲突。需要完全禁止某个目录时，不能再给其后代增加授权规则。
 5. **默认值明确。** restricted 无匹配时 deny，write 同时授权 read；unrestricted 不做细分。
    所有策略先验证查询格式，非法输入不因 unrestricted 被当成有效授权。
-6. **静态判定边界。** 不存在的文件按同一词法规则评估；不检查 symlink/hardlink、大小写折叠、
-   挂载别名、权限位或 TOCTOU。`workspace/link` 指向外部目录时，字符串仍按 workspace 规则匹配。
-   大小写不敏感文件系统也可能有别名。因此本函数不能作为真实 I/O 放行检查或 sandbox 证明。
+6. **符号链接。** 对受限查询，原路径和跟随链接后的最终目标必须都允许所请求的操作。
+   判定目标时，相对规则以解析后的 workspace 为根。允许查询尚未创建的路径，但悬空链接、循环或解析错误返回 deny。
+   判定和实际打开文件之间，链接可能被替换；本函数不能作为真实 I/O 放行检查或 sandbox 证明。
 7. **不暗加路径例外。** 暂不实现 glob、home/tmp 特殊根或隐藏的 `.git`/`.jj` 写保护。
    这些文件如需限制，应写成显式规则；现有 coding agent 的本地 VCS 能力保持不变。
 
@@ -215,7 +215,7 @@ def __init__(
 |---|---|
 | `resolve_file_access` | 上述文件示例；空 restricted；write 包含读取；最长组件前缀；相同路径 deny > write > read；更具体规则覆盖父级；重排规则结果不变；非法路径拒绝 |
 | `allows_tcp` | 上述网络示例；空 restricted；显式 loopback/IP 允许；大小写/尾点/IPv6 规范化；通配标签边界；deny 优先；端口独立；无隐式 MCP/模型 API 例外；非法 host/port 拒绝 |
-| 规则构造与静态边界 | 错误锚点、非 tuple、非法访问级别/网络动作被拒绝；不存在路径可评估；symlink 名称仅作词法匹配；无文件扫描、DNS 或网络 I/O |
+| 规则构造与路径边界 | 错误锚点、非 tuple、非法访问级别/网络动作被拒绝；不存在路径可评估；链接路径和最终目标均须获准；无目录扫描、DNS 或网络 I/O |
 | Codex/Amp 现有 driver 测试 | 默认/显式 FULL_ACCESS 的 start/resume argv、cwd、环境、会话、超时/取消契约不变；两种 adapter 的 restricted 文件、网络及组合请求都在构造时拒绝 |
 | `tests/test_worker_runtime.py` | 两种后端均收到相同默认全允许策略；trusted-host 与策略无相互推导 |
 | 现有 config/凭据/revision 测试 | trusted-host opt-in、隔离声明、secret 检查、原生继承、本轮 capability 和仅 SessionUnavailable 可 replay 的契约保持 |
@@ -240,7 +240,7 @@ def __init__(
   无法兑现的状态。外部隔离仍是运维声明，不自动检测或证明它真实生效。
 - **不忽略 restricted 请求：** 可独立评估的策略不能无提示地进入 full-access 执行。构造期报错
   的代价小于暴露一套表面有效的安全配置；不提供用户可设置却无效果的受限选项。
-- **词法规则的局限：** 当前方法不识别 inode、symlink、大小写别名或 DNS 结果。以后即便启用
+- **判定器的局限：** 当前方法不识别硬链接、大小写别名或 DNS 结果。以后即便启用
   OS 后端，也不能先评估一次路径/名称就直接 exec，必须在真实访问边界强制执行并单独验收。
 - **覆盖面必须明确：** 本模型的执行对象是 coding adapter。worker/control 网络、executor 的
   clone/VCS 准备和外部 MCP 服务端权限不在其中。构造期拒绝可避免新 adapter 进入任务执行；
@@ -271,6 +271,11 @@ Codex 和 Amp 构造时检查 profile，runtime 显式传入 `FULL_ACCESS`，未
 `uv run pytest -q tests/test_execution_permissions.py tests/test_worker_runtime.py`：48 项通过。
 逐项将组件匹配换为字符串前缀、忽略路径深度、忽略 TCP deny、忽略端口、跳过 adapter 检查，
 再运行上述权限测试，对应失败数分别为 1、1、1、1、6；恢复后通过。
+
+### 2026-11-24 — 受限路径查询跟随符号链接
+
+按评审要求，路径查询取原路径与最终目标权限的交集。测试使用真实的多级链接，覆盖双向只读、
+任一端拒绝、双方可写以及无法解析的链接。临时授权、执行器能力和部署隔离不变。
 
 ## 源码依据
 

@@ -1,4 +1,4 @@
-"""Evaluate worker path and TCP policy without touching the filesystem or network.
+"""Evaluate worker path and TCP policy without opening file contents or connecting.
 
 These decisions describe requested permissions; they do not sandbox a process.
 """
@@ -6,7 +6,7 @@ These decisions describe requested permissions; they do not sandbox a process.
 import re
 from dataclasses import dataclass
 from ipaddress import ip_address
-from pathlib import PurePosixPath
+from pathlib import PosixPath, PurePosixPath
 from typing import Literal
 
 FileAccess = Literal["read", "write", "deny"]
@@ -68,14 +68,9 @@ class RestrictedFileSystem:
 FileSystemPolicy = UnrestrictedFileSystem | RestrictedFileSystem
 
 
-def resolve_file_access(
-    policy: FileSystemPolicy, path: PurePosixPath, *, workspace: PurePosixPath
+def _lexical_access(
+    policy: RestrictedFileSystem, path: PurePosixPath, workspace: PurePosixPath
 ) -> FileAccess:
-    """Return the most specific lexical grant; ties prefer deny, then write, then read."""
-    _validate_path(path, absolute=True)
-    _validate_path(workspace, absolute=True)
-    if isinstance(policy, UnrestrictedFileSystem):
-        return "write"
     best = (0, -1)
     access: FileAccess = "deny"
     for rule in policy.rules:
@@ -85,6 +80,40 @@ def resolve_file_access(
         if path.is_relative_to(prefix) and rank > best:
             best, access = rank, rule.access
     return access
+
+
+def _resolved_path(path: PurePosixPath) -> PosixPath:
+    """Resolve the deepest existing entry strictly, retaining any not-yet-created suffix."""
+    entry = PosixPath(path)
+    while True:
+        try:
+            entry.lstat()  # A dangling link exists: strict resolution below must reject it.
+        except FileNotFoundError:
+            if entry == entry.parent:
+                raise
+            entry = entry.parent
+        else:
+            return entry.resolve(strict=True) / path.relative_to(entry)
+
+
+def resolve_file_access(
+    policy: FileSystemPolicy, path: PurePosixPath, *, workspace: PurePosixPath
+) -> FileAccess:
+    """Intersect requested and resolved path grants on this worker; not a race-free I/O guard."""
+    _validate_path(path, absolute=True)
+    _validate_path(workspace, absolute=True)
+    if isinstance(policy, UnrestrictedFileSystem):
+        return "write"
+    requested = _lexical_access(policy, path, workspace)
+    if requested == "deny":
+        return "deny"
+    try:
+        target = _resolved_path(path)
+        root = _resolved_path(workspace)
+    except (OSError, RuntimeError):  # Python 3.12 reports symlink loops as RuntimeError.
+        return "deny"
+    resolved = _lexical_access(policy, target, root)
+    return resolved if requested == "write" or resolved == "deny" else "read"
 
 
 def _validate_port(port: int) -> None:

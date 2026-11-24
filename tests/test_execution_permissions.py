@@ -35,6 +35,38 @@ def test_path_precedence_and_boundaries():
     assert resolve_file_access(FULL_ACCESS.file_system, root, workspace=root) == "write"
 
 
+def test_symlink_requires_both_path_and_target_permissions(tmp_path):
+    # An alias must neither bypass a target restriction nor discard its own restriction.
+    real = tmp_path / "work"
+    real.mkdir()
+    workspace = tmp_path / "workspace-alias"
+    workspace.symlink_to(real)
+    outside = tmp_path.resolve() / "outside"
+    outside.mkdir()
+    (real / "via").symlink_to("second")
+    (real / "second").symlink_to(outside)
+    path = workspace / "via/new/file"
+    for link, target, expected in [
+        ("write", "write", "write"),
+        ("read", "write", "read"),
+        ("write", "read", "read"),
+        ("deny", "write", "deny"),
+        ("write", "deny", "deny"),
+    ]:
+        policy = RestrictedFileSystem(
+            (PathRule("workspace", Path("via"), link), PathRule("absolute", outside, target))
+        )
+        assert resolve_file_access(policy, path, workspace=workspace) == expected
+
+    policy = RestrictedFileSystem((PathRule("workspace", Path("."), "write"),))
+    assert resolve_file_access(policy, path, workspace=workspace) == "deny"
+    assert resolve_file_access(policy, workspace / "new", workspace=workspace) == "write"
+    (real / "broken").symlink_to("absent")
+    (real / "loop").symlink_to("loop")
+    for bad in ("broken/file", "loop/file"):
+        assert resolve_file_access(policy, workspace / bad, workspace=workspace) == "deny"
+
+
 def test_tcp_deny_overrides_allow_and_ports_are_exact():
     rules = (
         TcpRule("*.example.com", 443, "deny"),
