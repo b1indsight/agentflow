@@ -311,7 +311,7 @@ def agent_guidance(branch: str, *, remote: str = "origin") -> str:
         "Inspect the repository conventions and actual VCS metadata, then choose the repository's "
         "native Git or Jujutsu (jj) workflow yourself. Start from the current checkout, create the "
         f"exact branch or bookmark `{branch}`, make at least one new commit, and push it to "
-        f"`{remote}`. Leave no uncommitted changes. Do not open a pull request. In the structured "
+        f"`{remote}`. Leave no uncommitted changes. In the structured "
         "result set `vcs_backend_used` to exactly `git` or `jj` for the backend you actually used."
     )
 
