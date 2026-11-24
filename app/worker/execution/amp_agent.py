@@ -466,7 +466,7 @@ class AmpAttachment(BaseModel):
     def canonical_url(cls, value: str) -> str:
         url = value.split("#", 1)[0]
         match = re.fullmatch(
-            r"https://ampcode\.com/user-content/attachments/[0-9a-f]{64}-"
+            r"https://ampcode\.com/user-content/(?:attachments|temporary-files)/[0-9a-f]{64}-"
             r"((?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+)", url,
         )
         if len(url) > 1024 or match is None:
