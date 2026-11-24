@@ -127,7 +127,7 @@ async def test_demand_concurrent_dispatch_stop_and_result_isolate_workspaces(
         # Restart the stall deadline on either milestone; require every claim before reconnecting.
         while len(worker.running) < 2 * limit:
             progress = len(worker.executions), len(worker.running)
-            await wait_until(lambda: (len(worker.executions), len(worker.running)) != progress)
+            await wait_until(lambda previous=progress: (len(worker.executions), len(worker.running)) != previous)
         assert not host_task.done() and not worker_task.done()
         assert len(set(worker.running.values())) == 2 * limit
         assert len(worker.workspaces.inventory()) == 1 + 2 * limit
