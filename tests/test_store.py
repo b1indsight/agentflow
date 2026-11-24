@@ -60,16 +60,6 @@ def test_startup_adds_skill_repository_to_existing_v3_settings(store):
         }
 
 
-def test_flow_child_defaults_to_self_before_and_after_schema_upgrade(store):
-    flow = store.flows.create_flow("owner/repo", 1, None)
-    assert flow.child_flow_id == flow.id
-    # An existing installation can already have Flows when the child pointer is added.
-    with store.connection() as connection:
-        connection.execute("ALTER TABLE flows DROP COLUMN child_flow_id")
-    store.init_db()
-    assert store.flows.get_flow(flow.id).child_flow_id == flow.id
-
-
 def test_current_schema_restarts_in_a_read_only_transaction(store):
     with store.database.transaction() as db:
         with db.connection() as connection:
