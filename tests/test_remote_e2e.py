@@ -244,7 +244,7 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(store, 
     assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind.value == "inference"]) == 1
 
 
-@pytest.mark.parametrize("next_action", ["continue", "early_input", "succeeded", "abandoned"])
+@pytest.mark.parametrize("next_action", ["continue", "dirty", "unpublished", "early_input", "succeeded", "abandoned"])
 async def test_initial_yields_until_input_or_archive(store, remote_flow, monkeypatch, next_action):
     from uuid import uuid4
 
@@ -281,6 +281,11 @@ async def test_initial_yields_until_input_or_archive(store, remote_flow, monkeyp
 
     async def resume(session_id, prompt, *, cwd, output_schema, context):
         assert session_id == "session-1" and "Verification passed" in prompt
+        if next_action in {"dirty", "unpublished"}:
+            assert (cwd / "README.md").read_text() == "unfinished work\n"
+            if next_action == "dirty":
+                _git("commit", "-am", "finish pending work", cwd=cwd)
+            _git("push", "origin", "HEAD", cwd=cwd)
         return await deliver(context)
 
     monkeypatch.setattr(agent, "finish", pause)
@@ -293,8 +298,14 @@ async def test_initial_yields_until_input_or_archive(store, remote_flow, monkeyp
         assert store.flows.get_flow(flow.id).state is FlowState.REVIEW and not github.opened
         assert ConsoleStore(store.database).detail(flow.id).action == "awaiting_input"
         assert any(item.body == "Waiting for verification" for item in ActivityStore(store.database).page(flow.id).items)
-        if next_action in {"continue", "early_input"}:
-            if next_action == "continue":
+        if next_action not in {"succeeded", "abandoned"}:
+            if next_action != "early_input":
+                # A failed continuation can leave these changes in the original workspace.
+                if next_action in {"dirty", "unpublished"}:
+                    cwd = agent.started[0][1]
+                    (cwd / "README.md").write_text("unfinished work\n")
+                    if next_action == "unpublished":
+                        _git("commit", "-am", "pending work", cwd=cwd)
                 for _ in range(2):
                     await submit_input()
             else:

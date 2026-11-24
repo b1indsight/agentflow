@@ -41,6 +41,7 @@ from app.worker.execution.prompts import (
 )
 from app.worker.execution.skills import clear_skill_links, link_skills
 from app.worker.execution.vcs import (
+    PendingLocalWork,
     VcsExecutionContext,
     VcsVerificationError,
     agent_guidance,
@@ -138,8 +139,17 @@ class WorkerExecutor:
                 )
             self.state.bind_workspace(binding)
             workspace = self.workspaces.path(binding)
+            pending_work = ""
             if task.previous_head_sha:
-                baseline = await prepare_revision_context(workspace, task.branch, task.previous_head_sha, capability.token)
+                try:
+                    baseline = await prepare_revision_context(workspace, task.branch, task.previous_head_sha, capability.token)
+                except PendingLocalWork as error:
+                    if not task.resume_session_id:
+                        raise
+                    baseline = await prepare_revision_context(
+                        workspace, task.branch, task.previous_head_sha, capability.token, explicit_retry=True,
+                    )
+                    pending_work = f"Worker check: {error}. Reconcile the existing work with the remote tip. "
                 vcs_context = replace(baseline, require_new_commit=False)
             else:
                 vcs_context = replace(await prepare_vcs_context(workspace, task.branch, remote=task.remote),
@@ -160,7 +170,7 @@ class WorkerExecutor:
         prompt = build_initial_prompt(
             task.task_content,
             self._repo_conventions(workspace),
-            (f"Continue on the existing pushed branch {task.branch}. Push any new changes; "
+            (f"{pending_work}Continue on the existing pushed branch {task.branch}. Push any new changes; "
              "if no changes are needed, keep the current commit." if task.previous_head_sha
              else agent_guidance(task.branch, remote=task.remote)),
         )

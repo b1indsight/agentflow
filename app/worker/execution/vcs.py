@@ -32,6 +32,10 @@ class VcsVerificationError(RuntimeError):
         self.stage = stage
 
 
+class PendingLocalWork(VcsVerificationError):
+    """Local work that the original coding session can reconcile without moving refs."""
+
+
 @dataclass(frozen=True)
 class VcsExecutionContext:
     """Facts fixed before CodingAgent mutates a Flow-owned repository."""
@@ -448,7 +452,7 @@ async def prepare_revision_context(
         cwd=repo_path,
     )
     if unpublished:
-        raise VcsVerificationError("baseline", "local branch has unpublished commits")
+        raise PendingLocalWork("baseline", "local branch has unpublished commits")
     # Fetch is the snapshot linearization point. Check local facts again, not remote equality.
     await revalidate_revision_context(context, local)
     if context.jj_base_sha is not None:
@@ -640,7 +644,7 @@ async def _require_jj_descendant(repo_path: Path, base: str, commit: str) -> Non
 async def _require_clean(*args: str, cwd: Path) -> None:
     changes = await _required_stdout("workspace", *args, cwd=cwd)
     if changes:
-        raise VcsVerificationError("workspace", "repository has uncommitted changes")
+        raise PendingLocalWork("workspace", "repository has uncommitted changes")
 
 
 async def _jj_remote_url(repo_path: Path, remote: str) -> str:
