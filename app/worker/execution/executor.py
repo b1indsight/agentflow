@@ -41,6 +41,7 @@ from app.worker.execution.prompts import (
 )
 from app.worker.execution.skills import clear_skill_links, link_skills
 from app.worker.execution.vcs import (
+    PendingLocalWork,
     VcsExecutionContext,
     VcsVerificationError,
     agent_guidance,
@@ -127,33 +128,51 @@ class WorkerExecutor:
             effort = assignment.effort
             skills = self.workspaces.skill_checkout
             capability = _github_capability(secret, task.repo)
-            binding = await self.workspaces.claim(
-                task.repo, task.flow_id, assignment.workspace, assignment.generation,
-                base_branch=task.base_branch, remote=task.remote,
-                push_token=capability.token,
-            )
+            if task.previous_head_sha:
+                binding = self.workspaces.lookup(task.repo, task.flow_id)
+                if (binding.slot_id, binding.generation) != (assignment.workspace, assignment.generation):
+                    raise VcsVerificationError("binding", "continuation workspace changed")
+            else:
+                binding = await self.workspaces.claim(
+                    task.repo, task.flow_id, assignment.workspace, assignment.generation,
+                    base_branch=task.base_branch, remote=task.remote, push_token=capability.token,
+                )
             self.state.bind_workspace(binding)
             workspace = self.workspaces.path(binding)
-            vcs_context = replace(
-                await prepare_vcs_context(workspace, task.branch, remote=task.remote),
-                push_token=capability.token,
-            )
+            pending_work = ""
+            if task.previous_head_sha:
+                try:
+                    baseline = await prepare_revision_context(workspace, task.branch, task.previous_head_sha, capability.token)
+                except PendingLocalWork as error:
+                    if not task.resume_session_id:
+                        raise
+                    baseline = await prepare_revision_context(
+                        workspace, task.branch, task.previous_head_sha, capability.token, explicit_retry=True,
+                    )
+                    pending_work = f"Worker check: {error}. Reconcile the existing work with the remote tip. "
+                vcs_context = replace(baseline, require_new_commit=False)
+            else:
+                vcs_context = replace(await prepare_vcs_context(workspace, task.branch, remote=task.remote),
+                                      push_token=capability.token)
             await self.workspaces.configure_git_identity(
                 binding, capability.bot_login, capability.bot_user_id,
             )
-            receipt = self.workspaces.skill_receipt(binding)
-            clear_skill_links(workspace, receipt)
-            if skills is not None:
-                await link_skills(await asyncio.shield(skills), workspace, task.task_content,
-                                  self.code_agent, model, effort, receipt)
+            if not task.previous_head_sha:
+                receipt = self.workspaces.skill_receipt(binding)
+                clear_skill_links(workspace, receipt)
+                if skills is not None:
+                    await link_skills(await asyncio.shield(skills), workspace, task.task_content,
+                                      self.code_agent, model, effort, receipt)
         except VcsVerificationError as error:
-            return _vcs_failure(None, "", error.stage, str(error))
+            return _vcs_failure(task.resume_session_id, "", error.stage, str(error))
         except OSError:
-            return _vcs_failure(None, "", "bootstrap", "repository filesystem preparation failed")
+            return _vcs_failure(task.resume_session_id, "", "bootstrap", "repository filesystem preparation failed")
         prompt = build_initial_prompt(
             task.task_content,
             self._repo_conventions(workspace),
-            agent_guidance(task.branch, remote=task.remote),
+            (f"{pending_work}Continue on the existing pushed branch {task.branch}. Push any new changes; "
+             "if no changes are needed, keep the current commit." if task.previous_head_sha
+             else agent_guidance(task.branch, remote=task.remote)),
         )
         schema_path = _write_output_schema(InitialCodingOutput)
         run: CodingExecutionResult | None = None
@@ -162,10 +181,17 @@ class WorkerExecutor:
                 context = CodingExecutionContext(
                     github=capability, mcp_url=mcp.url, mcp_token=mcp.token, images=tuple(task.images),
                 )
-                run = await self.code_agent.start(
-                    prompt, workspace, output_schema=schema_path, context=context, model=model, effort=effort,
-                )
-                session_id = run.session_id
+                if task.resume_session_id:
+                    try:
+                        run = await self.code_agent.resume(task.resume_session_id, prompt, cwd=workspace,
+                                                           output_schema=schema_path, context=context)
+                    except SessionUnavailable:
+                        return _vcs_failure(task.resume_session_id, "", "session", "original coding session is unavailable")
+                else:
+                    run = await self.code_agent.start(
+                        prompt, workspace, output_schema=schema_path, context=context, model=model, effort=effort,
+                    )
+                session_id = task.resume_session_id or run.session_id
                 corrections = 0
                 while True:
                     if run.session_id != session_id:
@@ -243,14 +269,14 @@ class WorkerExecutor:
             outcome = await verify_vcs_outcome(vcs_context, output.vcs_backend_used)
         except VcsVerificationError as error:
             return _vcs_failure(run.session_id, run.last_message, error.stage, str(error))
-        if (tool_call_id is None or tool_result is None):
+        if mcp.input_request is None and (tool_call_id is None or tool_result is None):
             return _vcs_failure(
                 run.session_id,
                 run.last_message,
                 "delivery",
-                "CodingAgent did not complete flow.open_pr",
+                "CodingAgent did not complete flow.open_pr or flow.request_user_input",
             )
-        if tool_vcs_outcome != outcome or tool_result.head_sha != outcome.commit_sha:
+        if tool_result is not None and (tool_vcs_outcome != outcome or tool_result.head_sha != outcome.commit_sha):
             return _vcs_failure(
                 run.session_id,
                 run.last_message,
@@ -271,9 +297,10 @@ class WorkerExecutor:
             branch=outcome.branch,
             commit_sha=outcome.commit_sha,
             remote_sha=outcome.remote_sha,
-            pushed=outcome.commit_sha == outcome.remote_sha,
+            pushed=True,
             open_pr_call_id=tool_call_id,
             delivery_receipt=tool_result,
+            input_request=mcp.input_request,
         )
 
     async def _revision(

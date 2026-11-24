@@ -348,7 +348,7 @@ class ControlService:
         delivery = self.deliveries.using(tx).get_delivery(flow.id)
         execution = self.flows.using(tx).get_flow_execution(flow.id)
         if (flow.installation_id is None or not delivery
-                or delivery.state is not DeliveryState.OPEN or not execution or execution.released_at
+                or delivery.state not in {DeliveryState.OPEN, DeliveryState.WAITING} or not execution or execution.released_at
                 or self.stops.using(tx).has_pending(flow.id) or jobs.reopen_blocked(flow.id)
                 or any(job.attempt_id == flow.current_attempt_id and job.state in {JobState.QUEUED, JobState.RUNNING}
                        for job in jobs.list_jobs(flow.id))):
@@ -365,6 +365,8 @@ class ControlService:
         if failed:
             self.flows.using(tx).transition(flow, FlowEvent.RETRY_REQUESTED)
             self._retry_revision(tx, flow, failed, notes)
+        elif delivery.state is DeliveryState.WAITING:
+            jobs.enqueue_job(flow, JobKind.INITIAL, {"owner_messages": notes, "agent_task_request_id": request_id})
         else:
             batch = reviews.create_batch(flow, trigger="strong", feedback=[],
                                          open_points=reviews.waiting_open_points(flow.id))

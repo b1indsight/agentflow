@@ -55,6 +55,7 @@ class ArchiveReason(StrEnum):
 
 class DeliveryState(StrEnum):
     NONE = "none"
+    WAITING = "waiting"
     OPENING = "opening"
     OPEN = "open"
     CLOSED = "closed"

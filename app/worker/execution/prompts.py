@@ -17,8 +17,10 @@ _HARD_CONSTRAINTS = (
     "Rules:\n"
     "- Edit code to satisfy the task, then commit locally and push using this repo's VCS "
     "(see VCS guidance below).\n"
-    "- After the push, call the `flow.open_pr` environment tool once with the proposed PR title "
-    "and body. Do NOT use GitHub API/CLI to open a PR or post comments.\n"
+    "- After the push, call `flow.open_pr` with the PR title and body when ready for PR review. "
+    "To yield for a decision, manual action, or delegated work instead, call the Flow MCP tool `flow.request_user_input` "
+    "with a message describing what is pending. No reply is required. Use only one completion tool. "
+    "Do NOT use GitHub API/CLI to open a PR or post comments.\n"
     "- Run the repo's tests / lint if present and keep them green.\n"
 )
 
@@ -69,7 +71,8 @@ def build_initial_correction_prompt(
         if delivery is not None else
         "No successful flow.open_pr receipt was received. Inspect earlier tool results and verify "
         "any uncertain side effects before retrying them. After fixing, testing and pushing, "
-        "complete flow.open_pr through the existing environment tool."
+        "complete the appropriate tool from the task instructions. If request_user_input already "
+        "succeeded, keep that choice and correct the final result."
     )
     return "\n\n".join([
         f"Completion verification failed [{stage}]: {detail}",

@@ -48,7 +48,7 @@ async def test_worker_mcp_http_open_pr_and_lifecycle(tmp_path, monkeypatch):
         })
         assert notified.status_code == 202 and not notified.content
         listed = (await client.post(server.url, headers=headers, json=request)).json()
-        assert {item["name"] for item in listed["result"]["tools"]} == {"open_pr", "search_flows"}
+        assert {item["name"] for item in listed["result"]["tools"]} == {"open_pr", "request_user_input", "search_flows"}
         for _ in range(2):
             search = (await client.post(server.url, headers=headers, json={
                 "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {

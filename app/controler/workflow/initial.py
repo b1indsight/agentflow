@@ -148,6 +148,8 @@ class InitialPreparation:
             issue_number=flow.issue_number,
             task_content=task_content,
             images=images,
+            resume_session_id=attempt.codex_session_id if delivery.state is DeliveryState.WAITING else None,
+            previous_head_sha=delivery.head_sha if delivery.state is DeliveryState.WAITING else None,
             branch=delivery.branch,
             base_branch=repository.default_branch,
             remote="origin",
@@ -264,6 +266,10 @@ def initial_plan(
             f"编码结果与已验证的 Flow delivery 不一致：{mismatch}。",
         )
     assert delivery is not None
+    if result.input_request is not None:
+        return base.model_copy(update={"input_request": result.input_request, "delivery": delivery.model_copy(
+            update={"head_sha": result.commit_sha, "state": DeliveryState.WAITING},
+        )})
     if (
         not delivery.base_branch
         or not delivery.head_sha
@@ -299,8 +305,6 @@ def initial_delivery_mismatch(
         return "delivery is missing"
     if delivery.attempt_id != attempt.id or job.attempt_id != attempt.id:
         return "delivery does not belong to the Job's Attempt"
-    if delivery.state not in {DeliveryState.OPENING, DeliveryState.OPEN}:
-        return f"delivery state is {delivery.state.value}, expected opening or open"
     if result.vcs_backend is None:
         return "verified VCS backend is missing"
     if not result.pushed:
@@ -311,6 +315,13 @@ def initial_delivery_mismatch(
         return "verified commit SHA is missing"
     if result.commit_sha != result.remote_sha:
         return "local and remote commit SHAs differ"
+    if result.input_request is not None:
+        if (delivery.state not in {DeliveryState.NONE, DeliveryState.WAITING}
+                or result.open_pr_call_id is not None or result.delivery_receipt is not None):
+            return "input request conflicts with PR delivery"
+        return None
+    if delivery.state not in {DeliveryState.OPENING, DeliveryState.OPEN}:
+        return f"delivery state is {delivery.state.value}, expected opening or open"
     if result.commit_sha != delivery.head_sha:
         return "result commit SHA does not match delivery head"
     if not result.open_pr_call_id:

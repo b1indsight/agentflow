@@ -244,6 +244,85 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(store, 
     assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind.value == "inference"]) == 1
 
 
+@pytest.mark.parametrize("next_action", ["continue", "dirty", "unpublished", "early_input", "succeeded", "abandoned"])
+async def test_initial_yields_until_input_or_archive(store, remote_flow, monkeypatch, next_action):
+    from uuid import uuid4
+
+    from app.controler.api import create_app
+    from app.persistence.activity import ActivityStore
+    from app.persistence.console import ConsoleStore
+    from tests.access import AccessIssuer
+
+    flow, server, github, worker, agent = remote_flow
+    deliver = agent.finish
+    issuer = AccessIssuer()
+    monkeypatch.setattr(server, "access", issuer.auth)
+    app = create_app(server)
+    app.state.runtime, app.state.metrics = server, server.metrics
+    request_id = str(uuid4())
+
+    async def submit_input():
+        response = await console.post(f"/api/flows/{flow.id}/agent-tasks", headers=issuer.headers(),
+                                      json={"instruction": "Verification passed", "request_id": request_id})
+        response.raise_for_status()
+
+    async def pause(context):
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.post(context.mcp_url, headers={
+                "Authorization": f"Bearer {context.mcp_token.get_secret_value()}",
+            }, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "request_user_input", "arguments": {"message": "Waiting for verification"},
+            }})
+            assert "error" not in response.json() and not response.json()["result"].get("isError")
+        if next_action == "early_input":
+            # A delegated result can arrive through the input queue before the worker's terminal.
+            await submit_input()
+        return await deliver(None)
+
+    async def resume(session_id, prompt, *, cwd, output_schema, context):
+        assert session_id == "session-1" and "Verification passed" in prompt
+        if next_action in {"dirty", "unpublished"}:
+            assert (cwd / "README.md").read_text() == "unfinished work\n"
+            if next_action == "dirty":
+                _git("commit", "-am", "finish pending work", cwd=cwd)
+            _git("push", "origin", "HEAD", cwd=cwd)
+        return await deliver(context)
+
+    monkeypatch.setattr(agent, "finish", pause)
+    monkeypatch.setattr(agent, "resume", resume)
+    job, = store.jobs.list_jobs(flow.id)
+    async with (httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://test") as console,
+                remote_connection(server, worker)):
+        await wait_until(lambda: store.jobs.get_job(job.id).result_applied_at is not None)
+        assert store.jobs.get_job(job.id).state is JobState.DONE
+        assert store.flows.get_flow(flow.id).state is FlowState.REVIEW and not github.opened
+        assert ConsoleStore(store.database).detail(flow.id).action == "awaiting_input"
+        assert any(item.body == "Waiting for verification" for item in ActivityStore(store.database).page(flow.id).items)
+        if next_action not in {"succeeded", "abandoned"}:
+            if next_action != "early_input":
+                # A failed continuation can leave these changes in the original workspace.
+                if next_action in {"dirty", "unpublished"}:
+                    cwd = agent.started[0][1]
+                    (cwd / "README.md").write_text("unfinished work\n")
+                    if next_action == "unpublished":
+                        _git("commit", "-am", "pending work", cwd=cwd)
+                for _ in range(2):
+                    await submit_input()
+            else:
+                server.service.dispatch_pending_inputs()
+            await wait_until(lambda: store.deliveries.get_delivery(flow.id).pr_number is not None)
+            assert len([j for j in store.jobs.list_jobs(flow.id) if j.kind.value == "initial"]) == 2
+            assert len(agent.started) == 1 and len(github.opened) == 1
+        else:
+            response = await console.post(f"/api/flows/{flow.id}/archive", headers=issuer.headers(), json={
+                "reason": next_action, "summary": "Reviewed", "expected_attempt_id": flow.current_attempt_id,
+            })
+            response.raise_for_status()
+            await wait_until(lambda: store.flows.get_flow(flow.id).state is FlowState.ARCHIVED)
+            assert not github.opened
+    await issuer.auth.close()
+
+
 async def test_existing_remote_branch_is_not_taken_over(store, remote_flow):
     # Even a valid model answer cannot authorize coding on an unrelated existing ref.
     flow, server, github, worker, agent = remote_flow

@@ -19,6 +19,7 @@ SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  WHEN j.state IN ('queued','running') THEN j.kind || ':' || j.state
  WHEN j.state='failed' THEN 'execution_failed'
  WHEN a.delivery_state='merged' THEN 'awaiting_archive'
+ WHEN a.delivery_state='waiting' THEN 'awaiting_input'
  WHEN a.delivery_state='open' THEN 'awaiting_review'
  ELSE 'unknown' END AS action,
  COALESCE(x.worker_id,j.assigned_worker_id) AS worker_id,
