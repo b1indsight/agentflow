@@ -465,7 +465,17 @@ class ResultApplication:
             current = deliveries_tx.get_delivery(flow.id)
             if current is None or current.version != plan.delivery.version:
                 raise ResultPending("delivery version changed before result commit")
-            if plan.revision is not None:
+            if plan.input_request is not None:
+                current.state, current.head_sha = plan.delivery.state, plan.delivery.head_sha
+                current.version += 1
+                deliveries_tx.update_delivery(current)
+                now = tx.now()
+                ActivityStore(tx).append(flow.id, Observation(
+                    key=f"workflow_result:{job.id}", source="workflow_result", kind="message",
+                    attempt_id=job.attempt_id, author="Agent", title="待处理", body=plan.input_request,
+                    occurred_at=now, updated_at=now, metadata={"job_id": job.id},
+                ))
+            elif plan.revision is not None:
                 if plan.revision_purpose == "revise":
                     current.head_sha = plan.revision.commit_sha
                     current.base_branch = frozen_revision(job).base_branch
@@ -524,7 +534,7 @@ class ResultApplication:
             return
         if flow.state is FlowState.ARCHIVED and job.kind is not JobKind.ARCHIVE:
             return
-        if job.kind is JobKind.INITIAL and plan.delivery is not None:
+        if job.kind is JobKind.INITIAL and plan.delivery is not None and plan.input_request is None:
             emit_hook(
                 self.plugins,
                 "on_pr_opened",

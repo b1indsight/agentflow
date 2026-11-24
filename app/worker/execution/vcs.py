@@ -45,6 +45,7 @@ class VcsExecutionContext:
     jj_base_sha: str | None
     jj_ancestor_sha: str | None
     push_token: SecretStr | None = field(default=None, repr=False)
+    require_new_commit: bool = True
 
 
 @dataclass(frozen=True)
@@ -317,9 +318,9 @@ async def verify_vcs_outcome(
     """Verify branch, new commit, cleanliness, and the remote ref for the declared backend."""
 
     if declared_backend is VcsKind.GIT:
-        return await _verify_git(context)
+        return await _verify_git(context, require_new=context.require_new_commit)
     if declared_backend is VcsKind.JJ:
-        return await _verify_jj(context)
+        return await _verify_jj(context, require_new=context.require_new_commit)
     raise VcsVerificationError("discovery", f"unsupported VCS backend: {declared_backend}")
 
 

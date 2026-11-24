@@ -105,6 +105,7 @@ class ResultPlan(FrozenModel):
     error: str | None = None
     run: RunUpdate | None = None
     delivery: FlowDelivery | None = None
+    input_request: str | None = None
     revision: RevisionTaskResult | None = None
     revision_purpose: Literal["answer", "revise"] = "revise"
     archive: ArchiveResult | None = None

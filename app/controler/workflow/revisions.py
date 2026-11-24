@@ -68,10 +68,10 @@ async def prepare_revision(
     number = delivery.pr_number
     if number is None:
         raise ValueError(f"flow {flow.id} has no pull request")
+    assert flow.installation_id is not None
+    repository = github.installation(flow.installation_id).repository(flow.repo)
     threads = None
     if batch.threads is None and any(f.kind is ReviewItemKind.INLINE for f in batch.feedback):
-        assert flow.installation_id is not None
-        repository = github.installation(flow.installation_id).repository(flow.repo)
         # Bind persisted identity; the thread query does not need current PR facts.
         pr = PullRequest(repository, number)
         try:
@@ -79,8 +79,6 @@ async def prepare_revision(
         except GitHubError as exc:
             raise PreparationReadFailure(exc) from exc
 
-    assert flow.installation_id is not None
-    repository = github.installation(flow.installation_id).repository(flow.repo)
     payload = job.payload or {}
     purpose = payload.get("purpose", "revise")
     retry_status = payload.get("retry_status") if purpose == "revise" else None
@@ -107,8 +105,7 @@ async def prepare_revision(
     if mismatch:
         await fail(job, "original PR or source branch changed; revision paused")
         return JobState.FAILED
-    assert flow.installation_id is not None
-    assert delivery.head_sha and delivery.base_branch and delivery.pr_number
+    assert delivery.base_branch
     task = RevisionTask(
         batch_id=batch.id,
         purpose=purpose,
@@ -117,7 +114,7 @@ async def prepare_revision(
         repo=flow.repo,
         branch=delivery.branch,
         repo_identity=execution.repo_identity,
-        pr_number=delivery.pr_number,
+        pr_number=number,
         base_branch=remote.base_branch,
         expected_head_sha=remote.head_sha,
         previous_head_sha=delivery.head_sha,

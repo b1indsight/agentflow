@@ -44,7 +44,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[31] = 31
+PROTOCOL_VERSION: Literal[32] = 32
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -69,6 +69,8 @@ class InitialTask(ProtocolModel):
     base_branch: str = "main"
     remote: str = "origin"
     repo_identity: str = ""
+    resume_session_id: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    previous_head_sha: str | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class PushSecret(ProtocolModel):
@@ -165,6 +167,7 @@ class InitialTaskResult(ProtocolModel):
     pushed: bool = False
     open_pr_call_id: str | None = None
     delivery_receipt: DeliveryReceipt | None = None
+    input_request: str | None = Field(default=None, min_length=1, max_length=4000, exclude_if=lambda v: v is None)
 
 
 class RevisionTaskResult(ProtocolModel):
@@ -746,7 +749,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[31]
+    protocol_version: Literal[32]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -953,7 +956,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[31]
+    protocol_version: Literal[32]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

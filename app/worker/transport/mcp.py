@@ -49,6 +49,7 @@ class WorkerMCP:
         self.last_call_id: str | None = None
         self.last_result: DeliveryReceipt | None = None
         self.last_vcs_outcome: VcsOutcome | None = None
+        self.input_request: str | None = None
         self._delivery_lock = asyncio.Lock()
         app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
         app.add_api_route("/mcp", self._handle, methods=["POST", "GET", "DELETE"])
@@ -135,6 +136,11 @@ class WorkerMCP:
                     "required": ["title", "body"], "additionalProperties": False,
                 },
             }, {
+                "name": "request_user_input",
+                "description": "Yield the current coding job without opening a PR. Describe the pending action or delegated work; no reply is required.",
+                "inputSchema": {"type": "object", "properties": {"message": {"type": "string", "minLength": 1, "maxLength": 4000}},
+                                "required": ["message"], "additionalProperties": False},
+            }, {
                 "name": "search_flows",
                 "description": (
                     "Search task summaries in this assignment's repository. Combine title or ID text "
@@ -157,15 +163,22 @@ class WorkerMCP:
                 return {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
             return {"content": [{"type": "text", "text": page.model_dump_json()}],
                     "structuredContent": page.model_dump(mode="json")}
-        if params.get("name") != "open_pr":
+        pause = params.get("name") == "request_user_input"
+        if not pause and params.get("name") != "open_pr":
             raise ValueError("unknown MCP method or tool")
-        if (not isinstance(arguments, dict) or set(arguments) != {"title", "body"}
+        if (not isinstance(arguments, dict) or set(arguments) != ({"message"} if pause else {"title", "body"})
                 or any(not isinstance(value, str) for value in arguments.values())):
-            raise ValueError("open_pr requires title and body strings")
+            raise ValueError("invalid completion tool arguments")
         try:
             async with self._delivery_lock:
-                if self.last_result is not None:
-                    raise ValueError("flow.open_pr already completed; preserve the confirmed delivery")
+                if self.last_result is not None or self.input_request is not None:
+                    raise ValueError("a completion tool already succeeded")
+                if pause:
+                    message = arguments["message"].strip()
+                    if not 1 <= len(message) <= 4000:
+                        raise ValueError("message must contain 1–4000 characters")
+                    self.input_request = message
+                    return {"content": [{"type": "text", "text": "Pause recorded. Return the final coding result."}]}
                 outcome = await verify_pushed_outcome(self.vcs_context)
                 call_id = uuid4().hex
                 result = await self.caller.call_tool("flow.open_pr", arguments, call_id=call_id, vcs_outcome=outcome)

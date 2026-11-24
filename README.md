@@ -33,6 +33,8 @@ AgentFlow 把 GitHub Issue 或一段任务描述交给 Codex 或 Amp。Worker �
 
 没有空闲 Worker 时任务会排队。打开 Flow 详情可以看执行记录、时间线和 PR；在 PR 上审核、留言或请求修改。归档后可在原 Flow 重新开工；重开 Issue 或 PR 不会自动启动编码。
 
+首次编码推送分支后，agent 可用 `request_user_input(message)` 结束当前 Job，不创建 PR。Flow 在审核栏保留待处理说明；没有新输入就不再派发。可直接在控制台成功或废弃归档，也可通过现有输入入口提交新指令或受委托工作的结果：新 Job 会在原会话和工作区继续。该功能不授予其他 agent 跨 Flow 发消息的权限。升级时请一同更新 Control 和 Worker（通信协议 32）。
+
 本次升级前已归档的 Flow 保留原链接，详情标有「历史记录 · 只读」。升级后新建的 Flow 不受此限制，归档后仍可重新开工。
 
 在能访问数据库的服务端，也可用 CLI 查看进度（将 `42` 换成实际 Flow ID）：

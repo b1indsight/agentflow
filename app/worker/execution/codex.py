@@ -71,7 +71,7 @@ def _mcp_args(context: CodingExecutionContext | None) -> list[str]:
         return ["-c", 'mcp_servers.flow={url="http://127.0.0.1", enabled=false}']
     config = (
         f'{{url={json.dumps(url)}, bearer_token_env_var="AGENTFLOW_MCP_TOKEN", '
-        'enabled_tools=["open_pr","search_flows"], required=true, default_tools_approval_mode="auto"}'
+        'enabled_tools=["open_pr","request_user_input","search_flows"], required=true, default_tools_approval_mode="auto"}'
     )
     return ["-c", f"mcp_servers.flow={config}"]
 

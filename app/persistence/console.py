@@ -191,6 +191,8 @@ def _explanation(row: Row) -> tuple[str, str]:
     if facts["delivery_state"] == "merged":
         return "PR 已合并，收尾尚未完成", "检查归档执行记录与原 Worker 绑定，排除阻碍后重试收尾"
     if facts["phase"] == "review":
+        if facts["delivery_state"] == "waiting":
+            return "编码已暂停，未创建 PR", "有新内容时继续编码，也可以直接归档；不要求回复"
         return (
             "PR 已打开，当前没有待执行任务",
             "等待 GitHub 审核或人工合并；新修订请求会触发后续任务",

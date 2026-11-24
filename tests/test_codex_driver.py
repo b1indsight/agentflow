@@ -132,7 +132,7 @@ def test_run_context_injects_only_scoped_push_and_mcp_capabilities() -> None:
     assert any('url="http://127.0.0.1:12345/mcp"' in item for item in args)
     assert any('bearer_token_env_var="AGENTFLOW_MCP_TOKEN"' in item for item in args)
     config = tomllib.loads(next(item for item in args if item.startswith("mcp_servers.flow=")))
-    assert set(config["mcp_servers"]["flow"]["enabled_tools"]) == {"open_pr", "search_flows"}
+    assert set(config["mcp_servers"]["flow"]["enabled_tools"]) == {"open_pr", "request_user_input", "search_flows"}
     assert not any("mcp_servers.flow.command" in item for item in args)
 
 
