@@ -17,8 +17,10 @@ from pydantic import (
     JsonValue,
     SecretStr,
     ValidationInfo,
+    field_validator,
     model_validator,
 )
+from pydantic_core import PydanticUseDefault
 
 from app.domain.delivery_models import DeliveryReceipt
 from app.domain.inference_models import InferenceCapability, InferenceJob
@@ -116,6 +118,7 @@ class Flow(BaseModel):
     """Stable task lifecycle with either live Issue input or persisted direct content."""
 
     id: int
+    child_flow_id: int = Field(default_factory=lambda data: data["id"])
     repo: str  # "owner/name"
     issue_number: int | None
     task_content: str | None = None
@@ -130,6 +133,14 @@ class Flow(BaseModel):
     archived_at: datetime | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+    @field_validator("child_flow_id", mode="before")
+    @classmethod
+    def _default_child(cls, value: object) -> object:
+        # NULL represents a self-link, including for Flows created before this field existed.
+        if value is None:
+            raise PydanticUseDefault()
+        return value
 
     @model_validator(mode="after")
     def _one_input(self) -> Flow:

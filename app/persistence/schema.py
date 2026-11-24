@@ -351,6 +351,7 @@ CREATE INDEX IF NOT EXISTS ix_projects_due ON project_projections(next_at,id) WH
 
 # These declarations also apply to existing v3 databases when the column is absent.
 COLUMN_ADDITIONS = {
+    ("flows", "child_flow_id"): "ALTER TABLE flows ADD COLUMN IF NOT EXISTS child_flow_id BIGINT REFERENCES flows(id)",
     ("flow_input_images", "ref"): "CREATE TABLE IF NOT EXISTS flow_input_images ("
         "flow_id BIGINT NOT NULL REFERENCES flows(id) ON DELETE CASCADE, ref TEXT NOT NULL,"
         " data_url TEXT NOT NULL, PRIMARY KEY(flow_id,ref))",
