@@ -279,6 +279,11 @@ Codex 选择通过原生 `--model` 与 `-c model_reasoning_effort="..."` 传入�
 配置、历史预算和取消限制见[部署说明](../deployment/README.md)；实现与实测记录见
 [Amp feature record](../plan/worker-amp-cli.md)。
 
+两个编码后端默认接收 `FULL_ACCESS`。可用 `resolve_file_access` 和 `allows_tcp` 独立计算
+路径及 TCP 规则。受限路径查询跟随符号链接，取请求路径与最终目标权限的交集；
+查询只读取路径元数据，不打开文件内容，也不解析 DNS。两个后端都不能强制执行受限规则，构造时会拒绝
+任一维度受限的 `PermissionProfile`。详见[权限模型](../plan/unified-execution-permissions.md)。
+
 ### Codex
 
 `CodexAgent` 实现 `CodingAgent` 的 `start` / `resume` / `read_history`，历史读取由同模块的

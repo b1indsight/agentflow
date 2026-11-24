@@ -31,6 +31,7 @@ from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
 from app.worker.execution.lifecycle import WorkerProtocolError
+from app.worker.execution.permissions import FULL_ACCESS
 from app.worker.execution.vcs import _run
 from app.worker.runtime import WorkerRootLock, WorkerRuntime
 from tests.test_remote_e2e import QueueConnection
@@ -110,6 +111,7 @@ async def test_runtime_shares_configured_agent_for_coding_and_history(
     assert isinstance(agent, expected)
     assert agent.timeout == timeout
     assert agent.trusted_host is trusted_host
+    assert agent.permissions is FULL_ACCESS
     assert agent.max_output_bytes == 8 * 1024 * 1024
 
     session_id = ("T-" if backend == "amp" else "") + "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"

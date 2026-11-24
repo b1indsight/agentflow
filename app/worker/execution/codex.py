@@ -35,6 +35,11 @@ from app.worker.execution.credentials import git_credential_environment, inherit
 from app.worker.execution.gh import github_environment
 from app.worker.execution.idle import wait_for_inactivity
 from app.worker.execution.input_images import write_images
+from app.worker.execution.permissions import (
+    FULL_ACCESS,
+    PermissionProfile,
+    require_supported_permissions,
+)
 from app.worker.model_catalog import read_model_catalog
 
 CODEX_BIN = "codex"
@@ -126,7 +131,9 @@ class CodexAgent(CodingAgent):
     backend = "codex"
 
     def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0,
-                 max_output_bytes: int = 8 * 1024 * 1024):
+                 max_output_bytes: int = 8 * 1024 * 1024, permissions: PermissionProfile = FULL_ACCESS):
+        require_supported_permissions(permissions, agent="Codex")
+        self.permissions = permissions
         self.trusted_host = trusted_host
         self.timeout = timeout
         self.max_output_bytes = max_output_bytes

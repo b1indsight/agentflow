@@ -53,6 +53,7 @@ from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
 from app.worker.execution.executor import WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
+from app.worker.execution.permissions import FULL_ACCESS
 from app.worker.execution.workspaces import RepositoryWorkspaces
 from app.worker.health import HealthFile
 from app.worker.state.execution import ExecutionState
@@ -182,8 +183,10 @@ class WorkerRuntime:
         # Coding, inference, history and files share instances; per-run state stays in each call.
         self._agents: dict[str, CodingAgent] = {
             "codex": CodexAgent(trusted_host=self.settings.trusted_host_execution,
+                                permissions=FULL_ACCESS,
                                 timeout=self.settings.codex_run_timeout_seconds),
             "amp": AmpCodingAgent(trusted_host=self.settings.trusted_host_execution,
+                                  permissions=FULL_ACCESS,
                                   timeout=self.settings.amp_run_timeout_seconds),
         }
         self.gateway = Gateway[ServerMessageUnion, WorkerMessageUnion]()

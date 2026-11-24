@@ -123,6 +123,8 @@ uv run agentflow workers
 
 为 worker 使用专用 OS 账号及独立应用检出目录，执行 `uv sync --locked`。确保该账号不能读取
 control 的 `.env`、App 私钥和隧道凭据。仅换终端或更换 repo 目录不等同于账号隔离。
+Codex 和 Amp 都按 `FULL_ACCESS` 执行；路径与 TCP 策略只能独立判定，没有受限部署开关，
+也不会拦截进程访问文件或网络。请继续在部署层提供隔离。
 在 worker 账号下，将下列配置填入自己创建的私有文件（例如 `~/.config/agentflow/worker.env`），
 文件仅包含 shell 变量赋值，权限设置为 `600`；替换 token、模型和 API key 占位符：
 
