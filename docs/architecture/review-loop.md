@@ -160,7 +160,7 @@ GitHub 没有条件式 resolve 事务，刷新与 mutation 之间的竞态仍可
 | `AGENTFLOW_SUBMIT_GRACE_SECONDS` | 15 | review submitted/强信号窗口 |
 | `AGENTFLOW_WORKER_SWEEP_INTERVAL` | 5 | 持久 deadline 与结果恢复扫描间隔 |
 | `AGENTFLOW_CONFIDENCE_THRESHOLD` | 0.6 | revise 最低置信度 |
-| `AGENTFLOW_JUDGE_MODEL` / `AGENTFLOW_JUDGE_API_KEY` | 未配置 | control 专用 provider:model 与凭据；model/key/base 均未配置时路由到可推理 worker，部分配置不转派 |
+| `AGENTFLOW_JUDGE_MODEL` / `AGENTFLOW_JUDGE_API_KEY` | 未配置 | control 托管的 bub worker 使用的模型与凭据；[启动预检](../../app/controler/runtime.py)未通过时不注册本地 bub。推理 Job 仍由[调度策略](../../app/domain/inference_policy.py)从就绪且支持推理的 worker 中选择。 |
 | `AGENTFLOW_JUDGE_API_BASE` | provider 默认 | 可选模型 API 地址 |
 | `AGENTFLOW_JUDGE_TIMEOUT_SECONDS` | 60 | 一轮推理总预算，包含通信、启动、最多 3 次尝试及退避；不因编码进度续期 |
 | `AGENTFLOW_CODEX_RUN_TIMEOUT_SECONDS` | 1200 | Codex 连续无新 stdout/stderr 输出的空闲秒数，正有限值 |

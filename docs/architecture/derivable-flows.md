@@ -10,10 +10,10 @@ AgentFlow 将 **Flow** 提升为持久、可调度、可派生、可通信、可
 subagent 的 `spawn / send / wait / inspect` 协作方式，但编排状态保存在 control plane。首版先采用
 Flow 全生命周期固定绑定，跨 worker/机器恢复属于后续阶段。
 
-以下不变量长期成立：
+派生设计沿用当前交付边界，并增加父子协作约束：
 
-- 一个 Flow 对应一个逻辑隔离执行环境、一个独占 repo 目录、一个稳定 branch，以及最多一个 PR；需要
-  另一个 branch、repo 写入边界或 PR 时必须派生另一个 Flow；首版“逻辑隔离”表示调度和目录所有权，
+- 同次开工的修订沿用该 Attempt 的 branch 和 PR。派生并行任务时，子 Flow 需要独立的可写 repo；
+  这里的“逻辑隔离”表示调度和目录所有权，
   不表示抵御同 VM 上恶意代码的安全边界；
 - Flow 是任务、上下文、依赖、结果和交付物的持久所有者；
 - Agent run 与 worker 只是 Flow 的临时执行载体，不是可持久寻址的协作者身份；
@@ -29,10 +29,10 @@ Flow 全生命周期固定绑定，跨 worker/机器恢复属于后续阶段。
 
 | 对象 | 职责 |
 |---|---|
-| `Flow` | 持久任务及其生命周期；拥有零或一个交付 PR |
-| `FlowExecution` | Flow 独占执行环境的绑定；首版持有 worker slot 和 repo identity 直到 Flow 终态 |
-| `FlowOrigin` | Flow 的创建来源；可以是 GitHub Issue、父 Flow 派生或未来其他入口 |
-| `Attempt` | 一个 Flow 的一次执行/恢复尝试；保存 session 和运行事实，引用 FlowExecution，不拥有 lease 或候选 PR |
+| `Flow` | 持久任务及其生命周期；重新开工仍沿用 Flow ID |
+| `FlowExecution`（设计名） | 独占工作区的绑定；业务归档与安全释放是不同事实 |
+| `FlowOrigin` | 当前来源为 GitHub Issue 或控制台；父 Flow 派生是拟新增的来源 |
+| `Attempt` | 同一 Flow 的一次开工，关联该次的分支、会话与交付 PR；重试与评审修订沿用当前 Attempt |
 | `Job` | 可领取的短期执行单元；由 lease、fencing 和 result inbox 保证安全重放 |
 | `FlowLink` | Flow 之间的派生、依赖和验收关系；保存 join 与 acceptance 状态 |
 | `ContextBundle` | 可移植的初始上下文和后续增量，包含来源、可见范围与内容摘要 |
@@ -43,18 +43,18 @@ Flow 全生命周期固定绑定，跨 worker/机器恢复属于后续阶段。
 派生关系形成有根树；额外的依赖和上下文引用可以形成 DAG，但 control plane 必须拒绝循环依赖。Flow ID
 是跨执行节点的稳定 handle，Agent/session/worker ID 不能替代它。
 
-GitHub Issue 只是 root Flow 的一种 origin，不是 Flow 身份本身。子 Flow 不需要伪造 Issue number；分支、
-tool authorization 和 delivery ownership 都以稳定 Flow ID 为键。
+GitHub Issue 只是 root Flow 的一种 origin，不是 Flow 身份本身。子 Flow 不需要伪造 Issue number。
+工具调用仍需核对本次执行权限，交付归属需同时识别 Flow 与 Attempt。
 
 ## 3. 状态分轴
 
-当前 `FlowState` 把执行和 GitHub 交付阶段压在同一个枚举中。可派生 Flow 需要把同时成立的事实分开：
+当前实现分别记录六态 Flow 生命周期、Job、执行绑定和 Attempt 交付。下表示意派生后的查询维度；示例值不代表现有数据库枚举，等待和验收表尚未实现：
 
 | 维度 | 示例状态 | 权威位置 |
 |---|---|---|
 | Flow 生命周期 | `active / succeeded / failed / cancelled` | `flows` |
-| 执行状态 | `queued / running / done / failed` | `jobs`、attempt lease |
-| PR 交付状态 | `none / opening / open / merged / closed` | flow-owned delivery |
+| 执行状态 | `queued / running / done / failed` | Job、assignment 与 lease |
+| PR 交付状态 | `none / opening / open / merged / closed` | Attempt 的交付记录与 PR 观察 |
 | 等待状态 | 等待哪些 Flow、`all / any` join | `flow_waits` |
 | 验收状态 | `pending / accepted / rejected` | `flow_links`，按父子关系记录 |
 
@@ -65,7 +65,7 @@ tool authorization 和 delivery ownership 都以稳定 Flow ID 为键。
 ### 3.1 与 Flow 事实账本的关系
 
 [Flow 事实账本](flow-ledger.md)已经实现：Flow 生命周期的每次变化同事务追加一条不可变事实，
-`flows` 是它的同事务状态表。它的首期范围只有上表的“Flow 生命周期”一行，其余四个维度继续以各自的表为权威。
+`flows` 是它的同事务状态表。该账本只重放 Flow 状态列；不能从中重建 Job、交付或拟议中的父子关系。
 
 本页的派生、等待与验收落地时，按同一规则扩展账本，不另建一套历史记录：
 
@@ -162,8 +162,7 @@ merge 或关闭 PR，这些仍遵循独立的仓库策略和人工审核流程�
 ## 8. 调度、权限与故障语义
 
 - scheduler 调度 Flow 的 job，不调度“人格化 Agent”；worker 依据 repo、skill manifest、容量和隔离要求匹配；
-- 首版 worker 是单槽：一个 Flow 首次启动即独占该 slot 和完整 repo 到 `succeeded / failed / cancelled /
-  archived`；没有 running job 或正在等待子 Flow 时也不释放；
+- 现有 worker 可提供多个 workspace；一个位置在安全释放前不能复用。提案要求等待子 Flow 时也保留父级位置，直到有可迁移的 checkpoint；
 - 同一 Flow 的 initial/continuation/revision job 串行进入同一 repo；不同 Flow 不能共享 working tree 或
   可写 `.git/.jj` metadata；
 - 同一可信 VM 可以运行多个使用不同目录的 worker；强文件系统/网络隔离和互不信任租户属于后续容器/
@@ -177,12 +176,9 @@ merge 或关闭 PR，这些仍遵循独立的仓库策略和人工审核流程�
 
 ## 9. 分阶段落地
 
-1. **单 Flow 能力地基（M1）**
-   - 固定“一 Flow = 一隔离执行环境 = 一独占 repo = 一 branch = 最多一 PR”，把 Attempt 收回为执行尝试；
-   - Flow 全生命周期独占单槽 worker；断线超时明确失败，不实现 checkpoint 或迁移；
-   - 分离 Flow 生命周期、job 执行和 PR delivery 状态；
-   - 建立通用 Flow tool RPC、fencing、幂等记录与 MCP broker；
-   - 以 `flow.open_pr` 作为第一个 tool，尚不实现 Flow 派生。
+1. **可复用的现有能力**
+   - 复用 workspace 绑定、Job 租约、Attempt 交付和 MCP 工具调用账本；不能把失联直接当作执行已停止，见[恢复决策](decisions.md)。
+   - `flow.open_pr`、`flow.request_user_input` 和仓库范围的 `flow.search_flows` 不建立父子关系。
 2. **持久 Flow 派生**
    - 实现 `FlowLink`、`flow.spawn/inspect/send/cancel` 和子 Flow 调度；
    - 子 Flow 在另一个匹配的空闲 slot 上，以独立 repo/session 启动。
@@ -195,7 +191,7 @@ merge 或关闭 PR，这些仍遵循独立的仓库策略和人工审核流程�
 
 ## 10. 非目标
 
-- 不把 Flow 当作常驻 Agent 进程；没有 job 时不占用 Codex 进程，但首版仍保留 worker execution slot 和 repo；
+- 不把 Flow 当作常驻 Agent 进程；没有 Job 时也可保留 workspace 绑定和 repo，但不需要常驻编码进程；
 - 不要求为 Agent 建人格、角色或长期身份；
 - 不让父 Agent选择具体 worker 或直接建立 Agent-to-Agent 网络连接；
 - 不让子 Flow共享父 Flow 的可写 repo；共享必须通过 commit、artifact 或显式 context；

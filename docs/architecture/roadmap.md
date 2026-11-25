@@ -2,126 +2,21 @@
 
 ## 8. 当前目录与里程碑
 
-```
-agentflow/
-  app/
-    domain/           # 领域事实、类型、端口与纯策略（无运行时 I/O）
-    contracts/        # 版本化 task/result/message 与冻结结果应用契约
-    persistence/      # PostgreSQL schema、事务仓储、指标查询与就绪探针
-      store.py        # CLI、live smoke 与测试使用的仓储聚合
-      database.py     # 共享连接池、事务上下文、时钟、共用锁及 schema 初始化
-      repository.py   # 保留具体类型的显式事务绑定
-      schema.py       # 按依赖顺序初始化的完整建表 SQL
-      records.py      # 原生行类型与必需记录回读校验
-      flows.py        # Flow/Attempt/执行绑定
-      deliveries.py   # 交付与 tool-call 账本
-      jobs.py         # Job 生命周期与原始结果 inbox
-      workers.py      # Worker 会话、库存与 drain
-      assignments.py  # 领取、租约、准备重试与到期恢复
-      inference.py    # 推理调用的入队、取消、结算与恢复
-      stops.py        # 停止意图、授权与回执
-      results.py      # 冻结结果计划与副作用回执
-      reviews.py      # 反馈版本、批次、上下文与线程事实
-      webhooks.py     # 持久 Webhook 消费与事件审计
-      reconciliation.py # PR/反馈对账进度
-      projects.py     # Projects 投影与同步检查点
-      activity.py     # console_activity：Flow 事实账本、时间线快照与版本对比
-      console.py      # 控制台卡片、详情与执行记录查询
-      console_sync.py # 控制台采集的来源 claim 与检查点
-      console_schema.py # 控制台投影、归档表与触发器
-      metrics.py      # 数据库指标读取
-      readiness.py    # 只读就绪探针
-    github/           # githubkit App 认证、GraphQL 分页与远端数据解码
-    controler/        # 控制服务端，根目录为 API、配置与运行时装配
-      events/         # 持久 webhook 消费与事件路由
-      workers/        # Worker 连接、派发通信与历史查询
-      workflow/       # Flow/Job 准备、交付转换、结果与副作用恢复
-      review/         # 审核上下文、反馈解释与 Judge
-      reconciliation/ # PR、反馈与 Projects 对账
-    worker/           # WS client、journal、CodingAgent、prompt、工作目录与 VCS
-    telemetry/        # 通用 logging 与控制端 metrics，分开依赖
-    cli.py            # admin CLI（§10-8）
-    live_smoke.py      # 真实闭环验收命令入口
-    plugins/          # 生命周期 hook 插件（§9-7）
-  tests/
-  pyproject.toml      # uv 管理
-  README.md
-```
+[组件职责](components.md)说明各包拥有的数据和允许的依赖；[运行走查](workflows.md)从用户操作追到实现和测试。阶段计划保留当时的设计和验收记录，不用阶段编号判断当前是否支持某个操作。
 
-包之间的依赖规则见[组件职责](components.md#包依赖边界)。包迁移不改变 CLI、数据库 schema
-或网络消息字段；内部 Python 导入使用新路径，不提供旧路径转发模块。
-
-- **M0（已验收）** 骨架 + webhook 验签 + SQLite（含 `jobs`）+ 配置 + worker / 崩溃恢复骨架；
-  19 个自动化测试、Ruff、Mypy、CLI 与 `/healthz` runtime smoke 全部通过（2026-08-26）；
-- **持久层替换（2026-08-27）** PostgreSQL 成为当前唯一运行时数据库；M0 的 SQLite 描述保留为历史验收事实；
-- **远程执行 Features 1–3（2026-09-02）** serve/worker 分离、多 worker 公平调度与 affinity、持久 lease、
-  同 identity 忙碌重连、serve 重启恢复和结果重放均已实现；跨 worker session 迁移与多 serve HA 不在范围内；
-- **M1（已实现并合并，真实 E2E 待验收）** 触发（含 allowlist）→ Flow 独占 worker/repo → codex 首轮 → 开 PR
-- **M2（已实现并合并，真实 E2E 待验收）** 语义 Triage（bub）门 + 回喂循环
-  （settle → revise/answer/wait/ignore + resume/兜底 + 保守 resolve）；F1–F4 对应 PR #19–#22。
-  同秒重复 webhook 重放已在 M4 F1 修复；合并证据与剩余验收见 [M2 状态与待办](README.md#m2-状态与待办)。
-- **M3（F1/F2/F3 已合并，真实闭环待验收）** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论；
-  拆为 F1 合并检测与任务收敛、F2 工作区清理与 worker 释放、F3 状态回写与闭环验收三个 PR，
-  [F3 实施与验收](../plan/m3-archive-status.md)记录增量回写、恢复操作及真实闭环待办。
-- **M4（实现已落地，真实验收待完成）** 恢复并发、已追踪 Flow 的 PR/反馈对账、
-  close/reopen、准备期有界重试与 Projects v2 同步已接入；阶段范围见
-  [M4 阶段计划](../plan/m4-stage.md)，当前实现以[状态表](README.md#当前实现状态)为准。
-- **M5（部署与运维实现已落地，环境验收待完成）** 持久 Webhook inbox、真实 smoke 入口、
-  Docker/Compose、结构化日志/指标、取消/drain/停机、Kubernetes 及运维恢复文档已提供；
-  真实模型闭环、镜像发布、目标集群与备份恢复仍待验收。每 Flow 动态容器/微 VM 和默认拒绝
-  egress 后置，见 [M5 阶段范围与记录](../plan/m5-stage.md)。
-- **2026-10-15 持久层简化** Runtime 管理共享 Database，服务自行创建所需仓储；Webhook 在
-  receipt 事务内直接构造服务/路由，保留仓储级显式事务绑定。见[实施记录](../plan/persistence-simplification.md)。
-
-上述实现状态不代表真实闭环或部署已经验收。当前事实见[架构入口](README.md#当前实现状态)，
-历史计划中的待合并/Draft 描述保留当时语境，不作为当前分支状态。
+| 历史阶段 | 今天从哪里核对 |
+|---|---|
+| [M0 骨架](../plan/m0-closeout.md) | 当时使用 SQLite；现有服务使用 PostgreSQL，Flow 事实与状态表在同一事务更新，范围见[事实账本](flow-ledger.md)。 |
+| M1 首轮交付、M2 评审修订 | [交付决策](decisions.md)说明 Attempt 与 PR 的归属；[评审循环](review-loop.md)说明反馈如何进入修订及如何保守处理线程。 |
+| [M3 归档](../plan/m3-archive-status.md)、[M4 对账](../plan/m4-stage.md) | 已追踪的 PR 通过 webhook 和主动观察收敛。归档、清理工作区与重新开工是不同操作，见[走查](workflows.md)。 |
+| [M5 部署与运维](../plan/m5-stage.md) | 仓库提供部署模板、恢复手册和 smoke 命令；目标部署的真实服务验收另记在[验收清单](../verification/m5-live-e2e.md)。 |
 
 ## 9. 未来方向（Roadmap）
 
-> 以下是 MVP 之后的方向，接口与类型在实际需要时扩展。GitHub 使用具体资源；
-> CodingAgent、Judge 和插件沿用各自已有职责。
-
-1. **Web 控制台后续能力** —— Kanban、持久混合时间线、同源 API 与单 owner Access 已实现。
-   - owner 可新建带图任务、追加指令、重试、归档及重新开工。控制台展示持久时间线、会话和登记的文件或图片，见[会话查询](conversation-api.md)。
-   - 追加任务按请求去重并排队；向正在生成的 CLI 实时注入指令、个人阅读状态仍属后续能力。
-   - 真实 GitHub App 全来源回填、Access 登录/MFA 与目标部署仍需验收。
-
-2. **可派生 Flow 编排** —— Flow 像持久化的分布式 subagent 一样 spawn/send/wait/inspect/accept 其他 Flow；
-   每个子 Flow 拥有自己的隔离执行环境、repo、干净上下文、skills、结果和最多一张 PR。
-   - **目标边界已定（2026-09-03）**：调度和协作的一等单位是 Flow，不是人格化 Agent；一 Flow = 一
-     隔离执行环境 = 一独占 repo = 一 branch = 最多一 PR，Attempt 只表示同一 Flow 的执行尝试。目标模型、
-     状态分轴、tool RPC、context/skill portability 和父级验收见[可派生 Flow 编排](derivable-flows.md)。
-   - 当前独占的是 worker 上的具体 workspace。已有仓库内只读搜索和默认指向自身的 `child_flow_id`；跨 Flow 派生、等待、父级验收及可迁移 checkpoint 仍未实现。
-
-3. **完善 GitHub 协作** —— 覆盖常见协作动作（reviewer 指派、draft PR、labels、Projects 联动、review 线程 resolve 等）。
-   - GitHub 使用具体资源对象，能力按真实需求添加到相应资源；control 同步使用实际接口。
-
-4. **Code Agent 标准接口** —— 把"与 code agent 交互"抽象成统一端口，方便接入新的底层 agent（不只 codex）。
-   - `CodingAgent` 已接入 Codex 和 Amp：启动、恢复与读取历史按后端实现，编码结果统一验证。实时 `inject` 和更多 adapter 属于后续扩展。
-
-5. **更强隔离** —— 每个 Flow 放进容器 / 微VM，隔离完整 repo、文件系统与网络。
-   - M1 full-access worker 必须先通过专用 OS account、容器或 VM 与 control secret 隔离；不同 Flow repo
-     目录只表达所有权。容器 / 微VM adapter 在 M5 接管 per-Flow FS、egress 和生命周期，支持互不信任租户。
-
-6. **多 Worker 调度与恢复** —— 多 identity、session affinity、公平调度、单机多 root、忙碌重连、
-   持久 lease 与 result replay 已完成。
-   - Flow 绑定具体 `(worker_id, workspace, generation)`。同一位置在安全释放前不复用，同一 worker 可在其他位置并发接单。
-   - 后续方向：可释放 checkpoint、跨 worker 重建 session/repo、多 serve leader election、外部副作用幂等键
-     及更完整的可观测性；当前结构化日志和指标已提供。
-
-7. **端口插件扩展** —— 在生命周期端口挂插件。
-   例：合并后总结插件——归纳上一段对话里的代码风格偏好、更新仓库的 skill 文件。
-   - **已接线（2026-08-02）**：五个生命周期 hook（`on_flow_start / on_pr_opened / on_review / on_merged / on_archived`）已在 engine 的对应状态转移处触发，插件可订阅；插件异常被隔离（不掀翻 core）。
-     待实现：示例插件 `post-merge-summary` 的插件体（读会话 + diff → 提炼风格偏好 → 提 PR 更新 repo 的 skill），目前只打日志。
-
-8. **Flow 事实账本** —— 以 `console_activity` 的 Flow 事实为 Flow 状态的唯一可信来源，`flows` 为同事务状态表。
-   - **已实现（2026-11-17，自动化验证）**：数据分类、事实目录、写入路径和重放校验见
-     [Flow 事实账本与状态表](flow-ledger.md)，实施记录见 [feature record](../plan/flow-activity-ledger.md)。
-   - 首期只覆盖 `flows` 表。事实引用 Job/PR、交付与 Job 的粗粒度事实、独立的事实表、停止生成触发器快照，
-     以及可派生 Flow 的关系与结果事实，均属后续计划。
-
-control 直接依赖具体 GitHub 资源，由 App/Installation 绑定身份并调用 Repository、Issue、PR、Thread 和 Project/Item。
-GitHub 不预留 adapter 或替代协议。`CodingAgent` / `Judge` 保留已有接口，插件使用生命周期 hooks；
-worker 执行器直接管理执行与工作区约束。
-**VCS 不是端口**：它由 Flow repo 准备、自探测 guidance 和只读事实核验函数组成（见 §4.6）。
-当前使用 Codex 或 Amp、可选的 bub 推理 worker、WebSocket、githubkit 和生命周期插件；真实外部服务的验收边界见[状态表](README.md#当前实现状态)。
+| 已有起点 | 尚未实现或仍待验收的部分 |
+|---|---|
+| worker 可提供多个 workspace；绑定包含 identity、位置和 generation，支持同 identity 重连和结果重放。 | 可释放 checkpoint、跨 worker 恢复 session/repo、多实例控制端的 leader election。 |
+| 现有 Flow 工具由控制端授权；提交修订沿用当前 Attempt 的交付。 | [派生编排提案](derivable-flows.md)：持久父子关系、spawn/send、等待、父级验收，以及派生深度、并发和预算限制。 |
+| 编码 worker 在独立目录中运行 Codex 或 Amp；控制台可以排队追加指令。 | 目录所有权不能隔离恶意进程。每个 Flow 的容器或微 VM、默认拒绝出站流量、向正在生成的 CLI 实时注入指令仍待实现。 |
+| [Flow 事实账本](flow-ledger.md)可重放 `flows` 的状态；生命周期插件可订阅既有 hook。 | 扩展到 Job、交付及父子关系的事实；让合并后总结插件实际生成并提交 skill 变更。 |
+| 控制台与 GitHub App 有自动化覆盖。 | 真实 App 授权、模型闭环、Access 登录/MFA、目标集群与备份恢复需要环境证据；见[运维手册](../operations/runbook.md)。 |

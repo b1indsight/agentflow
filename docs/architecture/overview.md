@@ -57,7 +57,7 @@ M0 已验收基础设施切片；M1–M4 功能及 M5 部署、接收、运维�
 - **Worker execution plane**负责编码 prompt、调用编码后端在分配的 workspace 改码/提交/push，以及执行停止、
   journal 重放和历史查询；不持有数据库、GitHub App 或 Judge 凭据；
 - 首轮编码由 control 指定交付分支，worker 回传执行结果。申请开 PR 时，worker 核验提交、工作区和远端分支，control 核对 GitHub ref 并负责创建或复用 PR。请求人工输入时，control 保存待办消息，保留会话和工作区绑定，不创建 PR。两条路径的可见结果见[端到端流程](workflows.md)；
-- 本地能力按 [Flow repo / execution policy / VCS](components.md) 分离（§4.6）：Agent 选择并操作
+- 本地能力按[工作区、执行策略与 VCS 的职责](components.md)分离：Agent 选择并操作
   Git/jj，worker 只验证事实。
 
 Runtime 创建并关闭共享 Database，装配共享的结果应用、effects、工具和 conversation broker。

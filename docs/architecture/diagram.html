@@ -274,8 +274,8 @@
     </article>
     <article class="node" data-status="done">
       <div class="node__top"><span class="node__name">ports</span><span class="pill">已定义</span></div>
-      <p class="node__role">CodingAgent / Judge 两个 Protocol · GitHub 使用具体资源 · 工作区策略与 VCS 使用普通函数</p>
-      <code class="node__file">app/domain/ports.py</code>
+      <p class="node__role">领域层定义 Judge 与推理契约；worker 的 CodingAgent 接口连接 Codex 和 Amp。</p>
+      <code class="node__file">app/domain/ports.py · app/worker/coding_agent.py</code>
     </article>
   </div>
 
@@ -453,8 +453,8 @@
         </article>
         <article class="node" data-status="future">
           <div class="node__top"><span class="node__name">可派生 Flow 编排</span><span class="pill">目标已定</span></div>
-          <p class="node__role">子 Flow 独占执行环境、repo、分支与最多一张 PR · Attempt 只记录执行尝试 · 派生、等待和父级验收待实现</p>
-          <span class="port-tag">derivable-flows.md · roadmap §9-2</span>
+          <p class="node__role">现有交付归 Attempt；拟议中的子 Flow 使用独立工作区。派生、等待和父级验收待实现。</p>
+          <span class="port-tag">derivable-flows.md</span>
         </article>
         <article class="node" data-status="future">
           <div class="node__top"><span class="node__name">CodingAgent 标准接口</span><span class="pill">端口已立</span></div>
@@ -580,12 +580,9 @@
 
   <!-- M0 acceptance result -->
   <div class="callout">
-    <h3>✓ M0 验收结果（2026-08-26）</h3>
+    <h3>验证范围</h3>
     <ul>
-      <li><b>自动化</b> —— 19 项覆盖配置/契约、SQLite、HMAC/路由、worker/恢复及 heartbeat 清理/重试；pytest、Ruff、Mypy 全绿。</li>
-      <li><b>运行时</b> —— <code>uv sync --locked</code>、CLI、真实 <code>agentflow serve</code> 与 <code>GET /healthz</code> 200 已验证。</li>
-      <li><b>M1/M2 已实现并合并、E2E 待验收</b> —— F1–F4 完整自动化 377 passed / 0 skipped（2026-09-07）；GitHub/Codex 使用替身，bub 连接假 provider。</li>
-      <li><b>最新完整回归记录</b> —— 2026-10-15 持久层简化：735 passed、无跳过；这是既有实施记录，见 <a href="../plan/persistence-simplification.md">验证与对照</a>。</li>
+      <li><b>自动化</b> —— PostgreSQL、control 和 worker 的交付与恢复见<a href="README.md#当前验证基线">行为测试</a>；各功能从入口到测试的路径见<a href="workflows.md">运行走查</a>。</li>
       <li><b>剩余工作</b> —— 真实 GitHub App/Codex/bub、镜像发布、目标集群与恢复演练待执行，见 <a href="README.md#当前实现状态">当前状态表</a> 和 <a href="../verification/m5-live-e2e.md">真实验收清单</a>。</li>
     </ul>
   </div>

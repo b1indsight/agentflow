@@ -79,34 +79,16 @@
 | F3 | [#21](https://github.com/b1indsight/agentflow/pull/21) | 同 repo/branch/PR 修订、交付核验与一次性 session 兜底 |
 | F4 | [#22](https://github.com/b1indsight/agentflow/pull/22) | 线程/comment 分页映射、原线程回复、保守 resolve 与持久恢复 |
 
-F4 于 **2026-09-08 00:02:45（Asia/Singapore）**合并，对应 UTC 2026-09-07 16:02:45，
-合并提交为 `5fd27f23584e`。[PR #22](https://github.com/b1indsight/agentflow/pull/22)
-记录修复 head `0294c003128b` 的 377 passed / 0 skipped，
-[对应 CI](https://github.com/b1indsight/agentflow/actions/runs/34140178991) 全部通过；这些结果覆盖自动化场景。
-
-剩余工作：
-
-- **真实验收**：GitHub App smoke、M1 Issue→PR 前置，以及两轮修订、answer/wait/ignore、session
-  兜底、重启恢复和真实线程回复/resolve 均缺少真实服务运行证据，按 [F4 验收矩阵](../plan/m2-review-resolution.md#6-自动化与真实-m2-验收)逐项完成。
-
-M4 F1 已修复同秒旧转换重放：历史中已表示的编辑及不能定序的后继保留待核对，只有新鲜
-远端观察推进重复转换。原复现、重启/回滚及并发回归见 [F1 实施记录](../plan/m4-feedback-replay.md)。
-[评审表合并](../plan/review-version-merge.md)后不再暂存不能定序的同秒编辑，改为直接丢弃，由下一次主动观察收敛。
+当前反馈版本、冻结批次、修订和线程回复的约束见[评审循环](review-loop.md)。不能定序的同秒编辑不暂存，由后续主动观察收敛，见[评审表合并记录](../plan/review-version-merge.md)。真实 App、模型和线程交互的验收场景保留在 [F4 验收矩阵](../plan/m2-review-resolution.md#6-自动化与真实-m2-验收)。
 
 ## 当前验证基线
 
-- pytest 覆盖协议、角色边界、远程执行闭环与真实 PostgreSQL 持久层场景；
-- 最近完整记录为 2026-10-15 持久层简化后的 **735 passed、无跳过**，Ruff、Mypy 通过；
-  这是既有实施记录，不代表本次文档更新重新运行了完整测试，见[验证与对照](../plan/persistence-simplification.md)；
-- PostgreSQL-backed `agentflow serve` 与两个 worker 在 CI 中独立启动，并在 serve 重启后自动重新注册；
-- 测试不访问真实 GitHub、Codex 或模型服务；Judge 契约测试运行真实 bub 库连接假模型端点。
+- [远程执行](../../tests/test_remote_e2e.py)覆盖 control、worker 和 PostgreSQL 间的交付；[结果恢复](../../tests/test_result_recovery.py)检查结果应用被中断后的行为。
+- [工作区库存](../../tests/test_workspace_inventory.py)与[执行权限](../../tests/test_execution_permissions.py)分别覆盖位置可用性和 worker 的执行限制；[控制台 API](../../tests/test_console_api.py)从用户入口检查状态和操作权限。
+- 按功能查找行为测试见[端到端走查](workflows.md)。测试使用的 GitHub、编码或模型替身不能验证线上凭据、服务可用性或真实模型输出。
 
 真实验收入口和待办见 [M5 E2E 清单](../verification/m5-live-e2e.md)；
 部署/恢复检查见[运维手册](../operations/runbook.md)。已有命令、清单和自动化不等于真实环境已通过。
-
-M0 在 2026-08-26 使用 SQLite 和 19 项测试完成原始验收；该记录保留在
-[`m0.md`](../plan/m0.md)与[`m0-closeout.md`](../plan/m0-closeout.md)。当前 PostgreSQL 替换不证明
-完整产品闭环。多 worker 恢复不等于跨 worker session 迁移或 control-plane HA；这两项仍属后续 feature。
 
 ## 阅读导航
 

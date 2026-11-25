@@ -107,7 +107,7 @@ Issue/PR 的 `fetch_comments(cursor, limit)`、PR 的 `fetch_reviews(cursor, lim
 thread 批次直接携带各 thread 已反序列化的首批最多 20 条评论，其 `comments` 也是
 `Batch[ReviewComment]`；评论续读使用该 thread 的 `fetch_comments(cursor, limit)`。
 批量大小范围为 1–100，两层游标各自属于对应列表；访问容器不会隐式请求下一批。
-持久轮询每次调度最多一个请求；`control.reconcile_feedback.ThreadScanState` 单独保存
+持久轮询每次调度最多一个请求；[反馈对账的 `ThreadScanState`](../../app/controler/reconciliation/feedback.py) 单独保存
 外层位置及未读完 thread 的元数据和评论游标，观察结果与进度仍在同一事务提交。
 完整线程读取器复用查询字段和解码，保留请求/字节预算、跨页去重及完整覆盖判断。
 PR 响应由资源私有工厂直接转换为实例，保留完整读取与部分响应的字段差异。
