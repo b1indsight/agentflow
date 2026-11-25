@@ -35,7 +35,7 @@ AgentFlow 把 GitHub Issue 或一段任务描述交给 Codex 或 Amp。Worker �
 
 首次编码推送分支后，agent 可用 `request_user_input(message)` 结束当前 Job，不创建 PR。Flow 在审核栏保留待处理说明；没有新输入就不再派发。可直接在控制台成功或废弃归档，也可通过现有输入入口提交新指令或受委托工作的结果：新 Job 会在原会话和工作区继续。该功能不授予其他 agent 跨 Flow 发消息的权限。升级时请一同更新 Control 和 Worker（通信协议 32）。
 
-**每个 Job 都会加载 `AGENTS.md` 吗？** Worker 为首次编码、普通修订或答疑构造提示时，会读取当前工作区根目录的 `AGENTS.md`，即使沿用原会话也会重读。只有该文件不存在时才读取同目录的 `CLAUDE.md`；两者都没有时，提示中不含仓库约定。首次编码 Job 内的自动纠错、显式重试修订 Job 都不会重新注入这些内容。这只描述 Worker 构造提示的行为，编码工具自身如何加载指令另算。
+**每个 Job 都会加载 `AGENTS.md` 吗？** Worker 不会把仓库指令文件的内容加入 Job 提示。文件由 [Codex](https://developers.openai.com/codex/guides/agents-md) 或 [Amp](https://ampcode.com/docs/customize/agents-md) 按各自的规则加载。如果仓库只用 `CLAUDE.md`，Codex 需要将它配置为备用文件名。
 
 本次升级前已归档的 Flow 保留原链接，详情标有「历史记录 · 只读」。升级后新建的 Flow 不受此限制，归档后仍可重新开工。
 
