@@ -12,6 +12,12 @@
 | 任务需要决定或人工操作，Agent 改用 `flow.request_user_input`，写明待办。 | 详情显示「编码已暂停」和待办消息。Flow 同样处于 `review`，但没有 PR。提交后续指令可在原会话继续交付；也可直接归档，保持无 PR。 | [`test_initial_yields_until_input_or_archive`](../../tests/test_remote_e2e.py#L248) |
 | 首次派发前远端已有同名分支。 | 准备失败，原分支保持不变，不会被当前 Flow 接管。 | [`test_existing_remote_branch_is_not_taken_over`](../../tests/test_remote_e2e.py#L326) |
 
+### 走查：续办、归档与重新开工
+
+1. 用 owner 账号打开已有 PR、可接收任务的 Flow，追加指令（可附图）。详情中的分支保持不变，指令进入当前 Attempt 的修订流程。用相同请求 ID 重试只留一条输入；同 ID 改正文返回 409。见[追加任务测试](../../tests/test_console_api.py#L396)。
+2. 合并当前 PR。详情进入 `archived`，结论为 `succeeded`，即使原 worker 尚未释放位置也可看到该结论；此时尝试重新开工返回 409。见[合并后待清理测试](../../tests/test_console_api.py#L744)。
+3. 对已满足重新开工条件的归档 Flow 提交 `resume`，指定当前 Attempt ID。Flow ID 不变，产生新 Attempt；`retry` 不能重新打开归档 Flow。见[归档与恢复测试](../../tests/test_console_api.py#L765)。
+
 ### Issue 交付 PR 后的审核与恢复
 
 ```text
@@ -22,7 +28,7 @@
   → worker 按仓库需求补充并登记 workspace，serve 领取具体 (worker_id, workspace)
   → FlowExecution 独占该位置与 generation，prepare 读取真实 Issue/default branch
   → Started / Heartbeat；INITIAL 获得临发 scoped push capability
-  → Codex commit/push → worker-local flow.open_pr MCP → control tool ledger
+  → Codex 或 Amp commit/push → worker-local flow.open_pr MCP → control tool ledger
   → worker 核验本地 VCS/remote；Result 与持久 tool outcome 核对
   → control 再核对 GitHub ref → find-or-open 唯一 PR → AcceptResultResponse；进入 review，保留原工作区
   → review/comment → 持久反馈与 settle → 冻结下一批
@@ -42,12 +48,12 @@
 
 1. 用户创建 issue 并添加 `flow` 标签；
 2. GitHub 发送 `issues.labeled` Webhook；
-3. control 派发 INITIAL task，worker 建立隔离工作区并启动 Codex 首轮编码；
+3. control 派发 INITIAL，worker 在独占 workspace 启动所配置的编码后端；
 4. Code Agent commit/push 后调用 `flow.open_pr`；worker 与 control 依次核验远端 SHA，先持久化
    PR 意图；INITIAL 终态结果核验成功后 control 才创建/复用唯一 PR、设置标签并请求审核；
 5. 用户在 GitHub 提交 review、inline comment 或对话评论；
 6. Event Router 持久化反馈，settle 后 Judge 选择答复、修订或等待等动作。answer 和 revise 都派发到原 Worker；answer 须确认本地提交和远端 PR head 未改动。授权 Request Changes 经 grace 可直达修订，见 [Review 循环](review-loop.md)；
-7. revise 由同一 worker 恢复 Codex 会话并 push，control 核验交付、处理线程，无未决反馈时重新请求审核；
+7. revise 由原 worker 在绑定位置恢复编码会话并 push；control 核验交付、处理线程，有新提交且无未决反馈时重新请求审核；
 8. 用户根据仓库自身 CI 和 review 在网页人工 Approve + Merge；
 9. Webhook 或对账确认当前 PR 已合并后，control 在同一事务中记录合并、成功归档、停止请求和通知意图；
 10. 原 Worker 确认执行已退出、远端操作结清后释放工作区绑定。GitHub 通知独立恢复；下一 INITIAL 独占目录后清理旧副本。原 Worker 离线或通知失败都不撤销归档，见[归档与资源回收](../operations/upgrade.md#合并归档与资源回收分离)。
@@ -96,7 +102,7 @@
 | 未授权派发的任务租约到期或被拒绝 | `assignment_requeued` | `queued` |
 | 已启动的执行无法确认结果 | `execution_uncertain` | `blocked` |
 | 结果失败或核验未通过 | `result_failed` | `blocked` |
-| PR 来源分支被改动 | `delivery_baseline_rejected` | `blocked` |
+| PR 交付基线不再满足核验条件（同一来源分支的外部 push 本身不构成拒绝） | `delivery_baseline_rejected` | `blocked` |
 | 显式 retry | `retry_requested` | `queued`，已有归档结论时 `finalizing` |
 | 取消、结束本次执行、`/flow stop`、未合并关闭 PR | `finalization_requested`，收尾完成后 `archive` | `archived` |
 | 显式恢复新 Attempt | `attempt_started` | `queued` |

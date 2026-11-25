@@ -238,17 +238,15 @@
       <div class="mark">🏗️</div>
       <div>
         <h1>AgentFlow</h1>
-        <p class="tagline">目标闭环 · GitHub issue 打 <code>flow</code> 标 → codex 编码 → PR → 审核回喂 → 人工合并 → 归档</p>
+        <p class="tagline">Issue 打 <code>flow</code> 标或控制台提交任务 → Codex / Amp 编码 → 等待输入或交付 PR → 审核修订 → 人工合并归档</p>
       </div>
     </div>
     <button class="theme" id="theme" aria-label="切换主题"><span id="theme-ico">◐</span> <span id="theme-txt">主题</span></button>
   </header>
 
   <div class="stats">
-    <div class="stat d"><b>12</b><span>已实现</span></div>
-    <div class="stat p"><b>7</b><span>部分</span></div>
-    <div class="stat s"><b>0</b><span>桩 stub</span></div>
-    <div class="stat m"><b>0</b><span>M0 缺失</span></div>
+    <div class="stat d"><b>PostgreSQL</b><span>control 持有业务状态</span></div>
+    <div class="stat p"><b>Workspace</b><span>worker 分配与隔离目录</span></div>
     <div class="stat"><b>M1–M5</b><span>实现已落地 · 环境待验</span></div>
   </div>
 
@@ -323,7 +321,7 @@
           <span class="arrow" aria-hidden="true">→</span>
           <article class="node" data-status="partial">
             <div class="node__top"><span class="node__name">Control Service + Coordinator</span><span class="pill">部分</span></div>
-            <p class="node__role">INITIAL 成功后创建 PR · 语义决策/交付核验 · 原线程回复/resolve · 结果计划与回执恢复 · 真实 E2E、冲突处理待完成</p>
+            <p class="node__role">INITIAL 核验后交付 PR 或等待输入 · 修订核验 · 原线程回复/resolve · 结果计划与回执恢复</p>
             <code class="node__file">app/controler/workflow/service.py · coordinator.py</code>
           </article>
         </div>
@@ -338,7 +336,7 @@
         </article>
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Protocol</span><span class="pill">已验证</span></div>
-          <p class="node__role">wire19 · typed call/result 列表 · 整批校验失败返回固定 error，无详情 · 控制 ACK 与业务接纳分离 · journal5 / inbox1</p>
+          <p class="node__role">serve / worker 必须匹配在线协议 · 控制 ACK 与业务接纳分离 · 持久 journal 和结果 inbox 各自版本化</p>
           <code class="node__file">app/contracts/protocol.py</code>
         </article>
         <article class="node" data-status="done">
@@ -367,8 +365,8 @@
         </article>
         <article class="node" data-status="done">
           <div class="node__top"><span class="node__name">Judge / Triage</span><span class="pill">adapter 自动化</span></div>
-          <p class="node__role">control 本地 bub 无工具子进程 · 冻结批次上下文 · revise/answer/wait/ignore · 仅 revise 创建 worker job · 真实 provider 待验</p>
-          <code class="node__file">app/controler/review/judge.py · runner.py</code>
+          <p class="node__role">冻结批次上下文 · 推理 Job 经 bub 或普通推理 worker 执行 · revise / answer 均派发修订任务，wait / ignore 不派发</p>
+          <code class="node__file">app/controler/review/judge.py</code>
         </article>
       </div>
     </div>
@@ -385,9 +383,9 @@
       <span class="plane-label">Remote Worker <small>Runtime 持有共享 Gateway / Session · 无数据库/GitHub App/Judge 凭据</small></span>
       <div class="grid">
         <article class="node" data-status="partial">
-          <div class="node__top"><span class="node__name">Codex Driver</span><span class="pill">部分</span></div>
-          <p class="node__role">codex exec / resume · 一次性 session 兜底 · output schema · 每轮短时 push 凭据 · 首轮 worker 内 HTTP MCP</p>
-          <code class="node__file">app/worker/execution/codex.py · V5/V6</code>
+          <div class="node__top"><span class="node__name">Codex / Amp</span><span class="pill">编码后端</span></div>
+          <p class="node__role">启动或恢复会话 · executor 校验终态结果和远端提交 · 首轮本地 MCP 支持仓库内搜索、交付或暂停</p>
+          <code class="node__file">app/worker/execution/</code>
         </article>
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">Execution Policy</span><span class="pill">部分</span></div>
@@ -395,9 +393,9 @@
           <code class="node__file">app/worker/config.py · runtime.py</code>
         </article>
         <article class="node" data-status="partial">
-          <div class="node__top"><span class="node__name">Flow repo + VCS 核验</span><span class="pill">部分</span></div>
-          <p class="node__role">Flow 独占 repo · Agent 自选 Git/jj · 首轮/修订核验 branch/commit/clean/remote SHA</p>
-          <code class="node__file">app/worker/execution/vcs.py · V8</code>
+          <div class="node__top"><span class="node__name">Workspace 与 VCS</span><span class="pill">交付核验</span></div>
+          <p class="node__role">每个 Flow 独占一个工作区 · 同一 worker 可并行接单 · 按 Agent 选择的 Git 或 jj 核验本地提交与远端 SHA</p>
+          <code class="node__file">app/worker/execution/vcs.py</code>
         </article>
         <article class="node" data-status="artifact">
           <div class="node__top"><span class="node__name">WorkerStateCallbacks + WorkerBusinessCallbacks</span></div>
@@ -415,6 +413,11 @@
     <div class="plane plane--edge">
       <span class="plane-label">外围 <small>CLI · 测试 · 插件</small></span>
       <div class="grid">
+        <article class="node" data-status="done">
+          <div class="node__top"><span class="node__name">Web 控制台</span><span class="pill">已实现</span></div>
+          <p class="node__role">单 owner Access · 新建和续办任务 · 会话与图片预览 · 归档和重新开工</p>
+          <code class="node__file">app/controler/web/ · console/</code>
+        </article>
         <article class="node" data-status="partial">
           <div class="node__top"><span class="node__name">CLI</span><span class="pill">部分验证</span></div>
           <p class="node__role">typer · serve / worker / flows / flow show / cancel / retry · worker-drain · inbox / project · live smoke 入口</p>
@@ -445,9 +448,8 @@
       <span class="plane-label">将来的模块 <small>边界与待办 · roadmap §9</small></span>
       <div class="grid">
         <article class="node" data-status="future">
-          <div class="node__top"><span class="node__name">Web 控制台 (Kanban)</span><span class="pill">未排期</span></div>
-          <p class="node__role">webapp 看板,每张卡 = 一条被追踪的对话,可点进去实时插话。与 GitHub 并列的第二入口 adapter（≠ M4 的 GitHub Projects 看板）</p>
-          <span class="port-tag">预留 · core→store+API 层 · Driver 留实时注入入口</span>
+          <div class="node__top"><span class="node__name">实时插话</span><span class="pill">未实现</span></div>
+          <p class="node__role">追加任务已支持持久排队；向正在生成的 CLI 立即注入消息仍需后端支持。</p>
         </article>
         <article class="node" data-status="future">
           <div class="node__top"><span class="node__name">可派生 Flow 编排</span><span class="pill">目标已定</span></div>
@@ -456,7 +458,7 @@
         </article>
         <article class="node" data-status="future">
           <div class="node__top"><span class="node__name">CodingAgent 标准接口</span><span class="pill">端口已立</span></div>
-          <p class="node__role">当前 CodingAgent 定义 start / resume，Codex 是首个 adapter；实时 inject、产物统一收集和其他 agent 后续扩展</p>
+          <p class="node__role">Codex 与 Amp 共用启动、恢复、历史读取契约；更多编码后端按需扩展</p>
           <span class="port-tag">port · ports.CodingAgent</span>
         </article>
         <article class="node" data-status="future">
@@ -546,12 +548,12 @@
         </article>
         <span class="arrow" aria-hidden="true">⇢</span>
         <article class="ms ms--future" style="--mc:var(--stub)">
-          <div class="ms__head"><span class="ms__id">◇</span><span class="ms__tag">未排期</span></div>
+          <div class="ms__head"><span class="ms__id">◇</span><span class="ms__tag">已实现</span></div>
           <div class="ms__title">Web 控制台 (Kanban)</div>
           <ul class="ms__list">
             <li>自建 webapp 看板</li>
-            <li>第二入口 adapter · 可实时插话</li>
-            <li>post-MVP · roadmap §9-1</li>
+            <li>授权仓库创建任务 · 持久追加指令</li>
+            <li>真实 Access 与部署待验收</li>
           </ul>
         </article>
       </div>
@@ -561,19 +563,18 @@
   <!-- state machine -->
   <section class="block">
     <h2>Flow 状态机 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">控制流有自动化 · 真实闭环待验收</span></h2>
-    <p class="sub">单 serve + 多个单槽 worker · 同 Flow 独占 worker/repo 并串行处理反馈批次</p>
+    <p class="sub">单 serve + 多个多工作区 worker · 每个 Flow 独占一个位置，交付分支与 PR 按 Attempt 保存</p>
     <div class="fsm">
-      <span class="state mid">ACTIVE</span>
-      <span class="cap">delivery: NONE → OPENING → OPEN → CLOSED / MERGED</span>
+      <span class="state mid">queued</span>
       <span class="to">→</span>
-      <span class="state">SUCCEEDED</span>
+      <span class="state mid">running</span>
+      <span class="to">→</span>
+      <span class="state">review</span>
+      <span class="cap">交付 PR 或等待输入；有后续任务时重新排队</span>
       <span class="brk"></span>
-      <span class="cap">可取消的未合并 Flow →</span>
-      <span class="state term">CANCELLED</span>
-      <span class="cap">持久停止握手 · 未确认不释放绑定</span>
-      <span class="cap" style="margin-left:8px">执行失败 →</span>
-      <span class="state term">FAILED</span>
-      <span class="cap">codex 报错 / 超最大修订轮</span>
+      <span class="state">blocked</span><span class="cap">失败或执行结果不明</span>
+      <span class="state">finalizing</span><span class="cap">收尾中</span>
+      <span class="state term">archived</span><span class="cap">结论为 succeeded 或 abandoned；确认合并可直接归档</span>
     </div>
   </section>
 
@@ -590,7 +591,7 @@
   </div>
 
   <footer>
-    <span>AgentFlow · 实现与验收分列 · 文档核对 2026-10-15</span>
+    <span>AgentFlow · 实现基线与验收范围见<a href="README.md">架构状态表</a></span>
     <span>docs/architecture/ · docs/plan/</span>
   </footer>
 

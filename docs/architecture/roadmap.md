@@ -82,8 +82,8 @@ agentflow/
 > CodingAgent、Judge 和插件沿用各自已有职责。
 
 1. **Web 控制台后续能力** —— Kanban、持久混合时间线、同源 API 与单 owner Access 已实现。
-   - cancelled Flow 支持手动展示归档，不改写生命周期、执行或交付事实，见[功能记录](../plan/cancelled-flow-archive.md)。
-   - 实时插话、个人阅读状态和工作流写操作仍待实现，需要明确授权、持久消息语义与 CodingAgent 实时注入契约。
+   - owner 可新建带图任务、追加指令、重试、归档及重新开工。控制台展示持久时间线、会话和登记的文件或图片，见[会话查询](conversation-api.md)。
+   - 追加任务按请求去重并排队；向正在生成的 CLI 实时注入指令、个人阅读状态仍属后续能力。
    - 真实 GitHub App 全来源回填、Access 登录/MFA 与目标部署仍需验收。
 
 2. **可派生 Flow 编排** —— Flow 像持久化的分布式 subagent 一样 spawn/send/wait/inspect/accept 其他 Flow；
@@ -91,15 +91,13 @@ agentflow/
    - **目标边界已定（2026-09-03）**：调度和协作的一等单位是 Flow，不是人格化 Agent；一 Flow = 一
      隔离执行环境 = 一独占 repo = 一 branch = 最多一 PR，Attempt 只表示同一 Flow 的执行尝试。目标模型、
      状态分轴、tool RPC、context/skill portability 和父级验收见[可派生 Flow 编排](derivable-flows.md)。
-   - M1 先让 Flow 全生命周期固定占用单槽 worker/repo，并以 `flow.open_pr` 验证通用 tool transport；
-     FlowLink、派生、durable join、result acceptance 和可释放的跨 worker checkpoint 后续分阶段实现。
+   - 当前独占的是 worker 上的具体 workspace。已有仓库内只读搜索和默认指向自身的 `child_flow_id`；跨 Flow 派生、等待、父级验收及可迁移 checkpoint 仍未实现。
 
 3. **完善 GitHub 协作** —— 覆盖常见协作动作（reviewer 指派、draft PR、labels、Projects 联动、review 线程 resolve 等）。
    - GitHub 使用具体资源对象，能力按真实需求添加到相应资源；control 同步使用实际接口。
 
 4. **Code Agent 标准接口** —— 把"与 code agent 交互"抽象成统一端口，方便接入新的底层 agent（不只 codex）。
-   - **当前接缝已就位**：`CodingAgent` port 已定义 `start / resume`，Codex 是第一个 adapter；实时
-     `inject`、统一日志/产物收集和其他 agent adapter 属于后续扩展。
+   - `CodingAgent` 已接入 Codex 和 Amp：启动、恢复与读取历史按后端实现，编码结果统一验证。实时 `inject` 和更多 adapter 属于后续扩展。
 
 5. **更强隔离** —— 每个 Flow 放进容器 / 微VM，隔离完整 repo、文件系统与网络。
    - M1 full-access worker 必须先通过专用 OS account、容器或 VM 与 control secret 隔离；不同 Flow repo
@@ -107,7 +105,7 @@ agentflow/
 
 6. **多 Worker 调度与恢复** —— 多 identity、session affinity、公平调度、单机多 root、忙碌重连、
    持久 lease 与 result replay 已完成。
-   - M1 先增加 Flow 生命周期固定 binding：一个 worker 同时服务一个 Flow，空闲 job 期间也不复用。
+   - Flow 绑定具体 `(worker_id, workspace, generation)`。同一位置在安全释放前不复用，同一 worker 可在其他位置并发接单。
    - 后续方向：可释放 checkpoint、跨 worker 重建 session/repo、多 serve leader election、外部副作用幂等键
      及更完整的可观测性；当前结构化日志和指标已提供。
 
@@ -126,4 +124,4 @@ control 直接依赖具体 GitHub 资源，由 App/Installation 绑定身份并�
 GitHub 不预留 adapter 或替代协议。`CodingAgent` / `Judge` 保留已有接口，插件使用生命周期 hooks；
 worker 执行器直接管理执行与工作区约束。
 **VCS 不是端口**：它由 Flow repo 准备、自探测 guidance 和只读事实核验函数组成（见 §4.6）。
-当前使用 codex、bub、WebSocket worker、githubkit 和插件集；外部契约校准情况由各组件的验收记录说明。
+当前使用 Codex 或 Amp、可选的 bub 推理 worker、WebSocket、githubkit 和生命周期插件；真实外部服务的验收边界见[状态表](README.md#当前实现状态)。

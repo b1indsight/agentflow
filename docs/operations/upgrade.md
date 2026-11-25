@@ -1,8 +1,8 @@
 # 当前版本部署与重启
 
-当前格式为 wire protocol v29、worker journal v5、执行 ResultInbox v1、Control 合并通知 inbox v3、workspace manifest v3。serve 和 worker 拒绝不匹配的在线协议；在维护窗口停止新分配，等待在途准备、推理、执行和已发远端操作收敛，再备份并协调更新两端。Worker MCP 的仓库内搜索无需数据库迁移或转换 journal。
+当前格式为 [wire protocol v33](../../app/contracts/protocol.py)、worker journal v5、执行 ResultInbox v1、Control 合并通知 inbox v3、workspace manifest v3。serve 和 worker 拒绝不匹配的在线协议；在维护窗口停止新分配，等待在途准备、推理、执行和已发远端操作收敛，再备份并协调更新两端。
 首次部署选择新数据库/schema 与新 worker root，serve/worker 固定到同一 commit/镜像 digest；
-服务只在空 schema 创建 v3；已有库启动时只读核对 v3 标记、所需表和视图、关键列及 Worker 主键。不在启动时改表、刷新历史卡片或补写账本。检查失败时先停写，在备份副本上按下节预检；不要手工补版本标记。前置的[多工作区并发版本](../plan/worker-workspace-concurrency.md)仍须独立核验 workers 结构及物理位置迁移。
+空 schema 初始化为 v3；已有 v3 库启动时校验结构、应用[声明的增量](../../app/persistence/schema.py)，并在更新控制台视图时刷新旧的 `unknown` 操作投影，不补写历史账本。应用账号需具备相应 DDL 权限。未标记旧库须离线迁移；不要手工补版本标记。前置的[多工作区并发版本](../plan/worker-workspace-concurrency.md)仍须独立核验 workers 结构及物理位置迁移。
 
 ## 将旧 Flow 保留为只读历史（数据库 schema v3）
 

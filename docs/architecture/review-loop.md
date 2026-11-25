@@ -40,8 +40,7 @@ edited 不产生新的强信号，approve/dismissed 不触发修订。空 Reques
 
 ## B.2 冻结批次与任务协议
 
-协议 v24 向 worker 下发 INITIAL、REVISION、ARCHIVE。triage 直接使用 ReviewBatch，
-上下文与 Judge 决策保存在批次内，没有 triage job 或本地终态协议。
+worker 可领取 INITIAL、REVISION、ARCHIVE 或 INFERENCE。triage 由 control 扫描 ReviewBatch；需要模型判断时提交 INFERENCE Job，批次保存上下文、推理关联和 Judge 决定。推理不占用 Flow 的编码绑定。
 REVISION 冻结原 PR、repo identity、head/base、session generation、原始任务和前轮未决点。
 RevisionTask.purpose 为 answer 或 revise；历史任务缺省为 revise。两者的结果都携带同一 batch ID 与精确 item/version 清单，control 校验所有权、当前 attempt 与快照。
 
@@ -57,9 +56,7 @@ control 读取当前 PR 标题正文、head/base SHA、冻结反馈和未决点�
 C 和新版 A 留到后续批次。模型已看到（relayed）、当前版本已消费（consumed）、远端 thread
 resolved 是不同事实；M2 F1 不把 addressed 写为 GitHub resolved。
 
-Flow 生命周期保持 `ACTIVE/SUCCEEDED/CANCELLED/FAILED`；PR delivery 独立保存
-`NONE/OPENING/OPEN/CLOSED/MERGED`。settling/waiting/running 从 buffer、batch 和 job 推导，
-不恢复旧的 `PR_OPEN/REVISING` Flow 枚举。
+Flow 的 `review` 表示等待审核或输入，不保证已有 PR。交付状态归当前 Attempt；是否正在合批、等待答复或执行修订，由 buffer、batch 和 job 判断。[领域枚举](../../app/domain/models.py)分别定义 Flow、Delivery 与 Job 状态。
 
 ## B.3 判定与反馈消费
 
@@ -100,7 +97,7 @@ worker 先 fetch 原分支，确认本地没有脏文件或无法证明已发布
 按任务用途重新核验（answer 比较本地提交，revise 只读复核已同步的本地基线、分支和 remote，不再次 fetch/移动工作区）后最多 start 一次；其他错误和不确定结果保留反馈并暂停。journal 在进程启动前记录
 resume/fallback 阶段、一次性兜底消耗和 invocation 结果。重启时没有 terminal 的 started job 不自动重跑。
 `Started` 与 revision_cycles 同事务提交，fallback/重放不增额度；新的显式 retry job 消耗新额度，保留原 worker binding。
-wire24 须协调升级，journal5/inbox1 保持不变。历史任务缺少 `previous_head_sha` 时按旧 expected head 解释；历史结果缺少 `baseline_sha` 时保持原 JSON/digest，新版 revise 成功结果不能省略该证据。升级前先收敛旧执行和未决回执，回滚前同样收敛新版任务；不自动重跑未知执行或恢复既有 BLOCKED Flow。旧执行/结果已收敛的 reopen 也允许同来源分支外部更新，正常关闭/合并/归档仍保持现有终态规则。
+历史任务缺少 `previous_head_sha` 时按旧 expected head 解释；历史结果缺少 `baseline_sha` 时保持原 JSON/digest，新版 revise 成功结果不能省略该证据。升级前先收敛旧执行和未决回执，回滚前同样收敛新版任务；不自动重跑未知执行或恢复既有 blocked Flow。
 成功接受新 session 后才更新 generation。每次 Amp/Codex 调用按 stdout/stderr 非空新读入
 刷新空闲期限（包括半行、工具调用/结果和进度）；连续无输出达到配置值才超时，没有修订外层总时限。
 心跳、历史查询和 EOF 不续期；静默工具仍可能超时，持续诊断也算活动。历史导出仍有 20 秒
@@ -139,23 +136,21 @@ GitHub 没有条件式 resolve 事务，刷新与 mutation 之间的竞态仍可
 
 ## B.5 取消、重试与恢复
 
-- Flow 终态时退休 buffer/活动批次，恢复 sweep 同时退休残留 queued jobs；取消仍不 kill 运行中的 agent。
+- Flow 终态时退休 buffer/活动批次，恢复 sweep 同时退休残留 queued jobs。取消通过持久 stop 请求通知原 worker 停止执行；未确认前保留绑定，见[停止确认](../operations/cancel-drain.md#停止确认)。
 - 显式 retry 先清理残留排队任务，仅重试当前失败任务，已被后续任务替换的历史失败不再作为候选。
   当前失败 review 将原冻结批次交给新的 job，保留后到的新版本；没有当前失败任务时走 INITIAL。
-- triage 不领取 job、不修改 worker 绑定；未完成的 ready 批次由下一轮继续处理，无需任务恢复。
+- triage 不修改编码绑定；扫描未完成的 ready 批次时复用已关联的推理 Job 和结果。
   判断返回后检查批次/attempt/PR 状态；head/base 变化时清除过期快照与决定，下轮重取上下文。
   ANSWER 保存决定及发送标记，回执不明时只查远端 marker；明确未发送/拒绝才可重新发送。
 - worker 的上下文读取和 capability 准备期间持续续租；冻结前验证任务所有权和租约，派发前再次验证 token/epoch。
   过期或已重新分配的准备结果不得冻结或派发；未开始执行的 worker 任务由正常恢复流程重新排队。
 - 已接收的结果依然通过原子结果应用与 GitHub effect ledger 恢复，不能因重放重复派生或消费。
 - 已核验修订遇到明确拒绝的 GitHub 通知时，保留未完成的结果计划、交付/session 事实及成功回执，
-  Flow 保持 ACTIVE；显式 retry 仅重新启用已确认未成功发送的通知，完成后统一提交结果，不创建新修订任务。
+  显式 retry 仅重新启用已确认未成功发送的通知，完成后统一提交结果，不创建新修订任务。
   取消后不能补发；状态不明或仍在执行的通知不得通过显式 retry 重发。
 - 修订准备阶段的 PR/ref/Issue 读取错误持久进入失败路径，包括临时 GitHub 故障；恢复后显式 retry，
   不因 worker 重连无限重排，也不在 Started 前消耗修订额度。
-- 只支持当前完整 schema、协议 v13 和 journal v3；首次运行使用新数据库与 worker root。
-  同版本的未开始任务、冻结 assignment、已接收结果和 effect 回执继续按持久事实恢复。
-  不导入旧 review_threads，不维护旧 ANSWER 任务或旧版本启动迁移分支。
+- 在线协议要求两端匹配；冻结 assignment、已接收结果和 effect 回执按持久事实恢复。磁盘格式和升级前置条件见[升级说明](../operations/upgrade.md)。
 
 ## B.6 参数与验证
 

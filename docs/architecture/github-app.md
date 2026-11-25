@@ -130,9 +130,9 @@ HTTP 200 的部分 mutation 保留不确定性；后续读取失败不能清除�
 - 通过公开 installation access-token endpoint 显式传入单仓库和 `contents: write`，并校验返回 scope；
 - authentication、permission、not found、conflict、validation、rate limit、transient 与异常响应分类；
 - capability 的 token 在 repr 和普通 JSON 序列化中脱敏。
-- capability 只在 assignment 临发时签发，通过 wire-only secret envelope 到 worker；Codex 的单次子进程以
+- push capability 只在 assignment 临发时签发，通过 wire-only secret envelope 到 worker；编码后端的单次子进程以
   环境 credential helper 使用 token，参数、result 和 worker journal 不保存 token；
-- control 的 `flow.open_pr` 在 GitHub ref SHA 与 worker 验证事实一致后才 find-or-open PR，并持久化调用结果供重放。
+- `flow.open_pr` 先核对 GitHub ref 与 worker 观察的 SHA，持久化 PR 意图。control 接受并核验 INITIAL 的终态结果后才创建或复用 PR。首轮若选择 `flow.request_user_input`，不会写 GitHub PR，见[首轮走查](workflows.md)。
 
 线程能力已由自动化覆盖：GraphQL reviewThreads/comments 独立分页、完整性与身份校验；
 REST 根评论回复、分页精确 marker 恢复、resolve 后远端复读及 GraphQL 部分错误分类。
@@ -199,10 +199,7 @@ F8 提供接口；F9 已接入独立持久的 Flow 状态同步与响应丢失�
 
 ### Projects 同步运维（F9）
 
-启用配置后，ACTIVE 或此后发生状态变化的 Flow 会被扫描；既有投影的 Done/Blocked 持续补偿。
-一 Issue 对应一张卡，重复 Flow 优先由当前 ACTIVE、否则最新 Flow 驱动；不批量导入既有历史终态。
-SUCCEEDED→Done，FAILED/CANCELLED/CLOSED 和明确人工阻塞→Blocked，MERGED 待归档→In Progress，
-未绑定 INITIAL→Todo，有排队/执行任务→In Progress，OPEN 空闲→In Review。
+每个 Issue 对应一张卡；同步读取持有该 Issue 且非只读历史的 Flow，无可写 owner 时保留原投影。状态取自与控制台相同的 `phase`：queued→Todo，running→In Progress，review→In Review，blocked→Blocked，archived→Done。归档原因不单独映射；没有 Issue 的文本任务不创建卡。见[投影查询](../../app/persistence/projects.py)。
 临时网络退避不会把 Flow 直接改为 Blocked，Projects 故障也不会阻止归档 ACK 和 worker 释放。
 
 用 `agentflow project status owner/repo` 查看最多 100 条（可用 `--limit` 调整），包含 item、

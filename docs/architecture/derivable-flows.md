@@ -2,8 +2,7 @@
 
 > 状态：未来目标设计，不代表当前实现 · 设计日期：2026-09-03。
 >
-> 当前系统只实现由 GitHub Issue 触发、由 job 驱动的单 Flow 路径；本页定义后续演进时必须保留的
-> 语义边界。阶段性落地顺序以[路线图](roadmap.md)和具体计划为准。
+> 当前 Flow 可从 GitHub Issue 或控制台创建。每次开工的交付归 Attempt；同一 worker 可在不同 workspace 运行不同 Flow。[Flow 模型](../../app/domain/models.py)的 `child_flow_id` 默认指向自身（含数据库 NULL），不是已派生子任务的证据。当前 MCP 支持仓库内搜索，没有 spawn、join 或父级验收；下文描述目标模型，不能用作当前 API 契约。
 
 ## 1. 目标与不变量
 

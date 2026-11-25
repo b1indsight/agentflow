@@ -32,10 +32,12 @@ PostgreSQL 仍是唯一运行时数据库。全部表按职责分为五类，每
 | Flow 状态表 | 账本的同事务投影，供判断、加锁和约束使用 | `flows` |
 | 业务状态与专用证据 | 各自领域的权威事实，账本只引用其 ID | `attempts`、`jobs`、`flow_executions`、`flow_tool_calls`、`execution_stops`、`result_applications`、`result_effects`、`events`、`review_versions`、`review_buffers`、`review_batches`、`runtime_settings`、`project_destinations`、`worker_file_links` |
 | 协调数据 | 谁占用什么、处理到哪里、下次何时处理；不是业务事实 | `workers`、`reconcile_checks`、`project_projections`、`console_sync`、`console_installation_backoff`，以及 `jobs` 的租约、心跳、准备和核验退避列、`events` 的消费 claim 列 |
-| 展示投影与采集归档 | 只为控制台读取服务，不参与业务判断 | `console_flows`，以及 `console_activity` 中的其余行 |
+| 展示投影与采集归档 | 看板与历史展示 | `console_flows`，以及 `console_activity` 中的展示快照和采集记录；待交付的用户指令除外 |
 
 几点说明：
 
+- [追加任务](../../app/persistence/agent_inputs.py)以 `console_activity.source='agent_task'` 记录原文和所属 Attempt，`awaiting_agent` 标记待交付。取走消息与冻结任务共用事务。这些行参与调度，但不属于 Flow 状态账本。`flow_input_images` 按 Flow 和内容引用保存输入图片；`worker_file_links` 是 worker 文件的登记，两者用途不同。
+- `amp_thread_archives` 按 worker/thread 保存归档请求，属于协调数据；请求不证明远端 thread 已归档。
 - `jobs` 同时含业务事实（种类、终态结果、接收与应用时间）和协调列（lease、heartbeat、
   assignment token）；`events` 同时含原始事件和消费 claim。两张表整体归“业务状态与专用证据”，
   其中的协调列按“协调数据”对待。
@@ -129,6 +131,8 @@ PR #171 已把 Flow 状态写入收拢到 `FlowStore.transition(flow, FlowEvent)
 | `updated_at` | 账本 | 最后一条状态转换事实的 `occurred_at`；`titled`、`merge`、`archive_correction` 不推进 |
 | `title_job_id` | 指针 | `FlowStore.set_title_job`，不由账本重建 |
 | `is_issue_owner` | Issue 展示归属 | 创建/恢复时选择，不由生命周期账本重放。 |
+| `history_only` | 迁移标识 | 旧 Flow 只读，不作为当前运行数据重放。 |
+| `child_flow_id` | Flow 引用 | NULL 或缺省在领域模型中解释为自身，不表示已经派生子任务，不参与状态重放。 |
 
 `delivery_*` 保存在各自的 Attempt 上。历史 PR 的合并证据可以更正原 Attempt 的结论，不会更新新 Attempt 的交付或 Flow 状态。
 控制台卡片的更新时间取多表最大值，已包含 `attempts.updated_at`。

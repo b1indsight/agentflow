@@ -59,7 +59,7 @@ Cf-Access-Jwt-Assertion: <Access 添加的已签名应用 JWT>
 
 角色为 `user`、`assistant`、`tool`、`system`、`developer`；类型为 `message`、`tool_call`、
 `tool_result`。工具调用与结果通过 `call_id` 对应，工具 arguments 保留历史中的字符串。
-`user` 指 Codex 收到的输入，可能是 agentflow 构造的任务/PR 反馈提示，并不等于 GitHub 评论作者。
+`user` 指编码后端收到的输入，可能是 AgentFlow 构造的任务/PR 反馈提示，并不等于 GitHub 评论作者。
 control 自己发出的 PR 评论、状态更新不会显示；不合并完整 GitHub 活动时间线。
 
 ## 分页与轮询
@@ -121,7 +121,7 @@ Registered 前合法 history 只借用请求 epoch 回包，不设置 ready；se
 页面/session 校验及 Flow/Attempt 归属留在业务层，通信匹配不表示执行结果已应用或授权释放 slot。
 已知环境凭据及常见 token 文本会脱敏，但不保证自动识别任意源码或文本中的所有秘密。
 
-本功能最初使用 wire protocol v11；当前整体协议为 v17，journal 为 v5。
+会话查询使用与执行任务相同的[在线协议](../../app/contracts/protocol.py)。Amp 的一次性推理 thread 在推理结束时归档；编码 thread 保留到所属 Attempt 结束。归档不删除会话历史，也不把 worker 本地的原始历史复制到 control。
 `worker.history` call/result 保留查询内容，以条目 message_id/reply_to 与原 Session epoch 关联。
 Broker 创建临时 Future，发送前经 Dispatcher.expect_reply 登记原调用；WorkerBusinessCallbacks
 按统一 register 格式注册 worker.history。历史页 512 KiB 限额按所选条目加共享头计算，
