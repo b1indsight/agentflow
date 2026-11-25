@@ -355,7 +355,7 @@ def test_expired_cancelled_executor_does_not_overwrite_cancelled_flow(store: Sto
     execution = store.flows.get_flow_execution(flow.id)
     assert execution is not None and execution.released_at is None
     cancelled = store.flows.get_flow(job.flow_id)
-    assert cancelled is not None and cancelled.state is FlowState.BLOCKED
+    assert cancelled is not None and cancelled.state is FlowState.ARCHIVED
     assert cancelled.archive_reason is ArchiveReason.ABANDONED
 
 

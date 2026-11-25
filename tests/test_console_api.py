@@ -870,7 +870,7 @@ def test_archive_refuses_empty_success_or_unmerged_pr_without_changes(console_ru
     console_runtime.gateway.wake_all.assert_not_called()
 
 
-def test_archive_request_reports_finalizing_until_stop_is_confirmed(console_runtime, store):
+def test_archive_request_reports_server_outcome_while_stop_is_pending(console_runtime, store):
     flow, job = running(store)
     with TestClient(create_app(console_runtime)) as client:
         response = client.post(
@@ -881,9 +881,9 @@ def test_archive_request_reports_finalizing_until_stop_is_confirmed(console_runt
         client.portal.call(lambda: None)
     assert response.status_code == 200
     body = response.json()
-    assert body["lifecycle"] == "finalizing" and body["phase"] == "running"
+    assert body["lifecycle"] == "archived" and body["phase"] == "archived"
     assert body["archive_reason"] == "abandoned" and body["archive_summary"] == "停止本次执行"
-    assert body["archived_at"] is None and body["current_attempt_id"] == flow.current_attempt_id
+    assert body["archived_at"] is not None and body["current_attempt_id"] == flow.current_attempt_id
     assert store.stops.pending("w").job_id == job.id
     assert store.flows.get_flow_execution(flow.id).released_at is None
     console_runtime.gateway.wake_all.assert_called_once_with()

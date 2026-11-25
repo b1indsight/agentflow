@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from datetime import datetime, timedelta
 
 from psycopg.rows import class_row
 
+from app.contracts.conversation import AMP_THREAD_PATTERN
 from app.domain.flow_policy import (
     LEDGER_COLUMNS,
     FlowEvent,
@@ -392,11 +394,11 @@ class FlowStore(Repository):
     def try_archive(self, flow_id: int) -> bool:
         """Finish a requested Attempt or settle its already-archived resources.
 
-        Merged business archival is independent of the original Worker's cleanup.
+        Business archival is independent of the original Worker's cleanup.
         Its stop/result callbacks still release that binding through the controller's
         fenced generation update. Call after result/stop markers, never before them.
         """
-        with self._db.transaction() as tx, tx.connection() as connection:
+        with self._db.transaction() as tx:
             flow = tx.lock_workflow(flow_id)
             if flow is not None and flow.state is FlowState.ARCHIVED:
                 return FlowStore(tx).release_flow_execution(flow_id)
@@ -407,37 +409,18 @@ class FlowStore(Repository):
             ):
                 return False
             delivery = DeliveryStore(tx).get_delivery(flow_id)
-            if (
-                connection.execute(
-                    "SELECT 1 FROM jobs WHERE flow_id=%s AND attempt_id=%s AND"
-                    " (state IN ('queued','running') OR (result_received_at IS NOT NULL AND result_applied_at IS NULL)"
-                    " OR (kind<>'inference' AND (started_at IS NOT NULL OR dispatch_authorized_at IS NOT NULL"
-                    " OR (kind='archive' AND payload->'archive' IS NOT NULL))"
-                    " AND result_received_at IS NULL AND NOT EXISTS (SELECT 1 FROM execution_stops s"
-                    " WHERE s.job_id=jobs.id AND s.assignment_token=jobs.assignment_token AND s.state='confirmed')))"
-                    " UNION ALL SELECT 1 FROM execution_stops WHERE flow_id=%s AND state<>'confirmed'"
-                    " UNION ALL SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
-                    " WHERE j.flow_id=%s AND j.attempt_id=%s AND ((e.state NOT IN ('succeeded','skipped')"
-                    " AND NOT (e.state='failed' AND e.dispatched_at IS NULL))"
-                    f" OR ({UNCONFIRMED_EFFECT_SQL})) LIMIT 1",
-                    (flow_id, flow.current_attempt_id, flow_id, flow_id, flow.current_attempt_id),
-                ).fetchone()
-                is not None
-            ):
-                return False
+            # A server-side PR creation may already have succeeded without a receipt.
+            # Settle that business outcome before freezing its PR identity in the ledger.
+            if delivery is not None and delivery.state is DeliveryState.OPENING and delivery.pr_number is None:
+                with tx.connection() as connection:
+                    if connection.execute(
+                        "SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
+                        " WHERE j.attempt_id=%s AND e.payload->>'kind'='pull_request' AND "
+                        f"{UNCONFIRMED_EFFECT_SQL} LIMIT 1", (flow.current_attempt_id,),
+                    ).fetchone():
+                        return False
             if delivery is not None and delivery.state is DeliveryState.MERGED:
                 if flow.archive_reason is not ArchiveReason.SUCCEEDED:
-                    return False
-                if (
-                    connection.execute(
-                        "SELECT 1 FROM jobs j JOIN result_applications r ON r.job_id=j.id"
-                        " WHERE j.flow_id=%s AND j.attempt_id=%s AND j.kind='archive' AND j.state='done'"
-                        " AND j.result_applied_at IS NOT NULL"
-                        " AND r.plan->'archive'->>'cleanup' IN ('removed','released','already_absent')",
-                        (flow_id, flow.current_attempt_id),
-                    ).fetchone()
-                    is None
-                ):
                     return False
             elif flow.archive_reason is ArchiveReason.SUCCEEDED and (
                 not (flow.archive_summary or "").strip()
@@ -445,13 +428,6 @@ class FlowStore(Repository):
             ):
                 return False
             flows = FlowStore(tx)
-            execution = flows.get_flow_execution(flow_id)
-            if (
-                execution is not None
-                and execution.released_at is None
-                and not flows.release_flow_execution(flow_id)
-            ):
-                return False
             flows.archive_attempt(flow, delivery)
             return True
 
@@ -481,6 +457,27 @@ class FlowStore(Repository):
             },
         )
         self.transition(flow, FlowEvent.ATTEMPT_ARCHIVED, now=flow.archived_at)
+        attempt = self.get_current_attempt(flow)
+        self.queue_thread_archive(self.session_worker(attempt.id), attempt.codex_session_id)
+        self.release_flow_execution(flow.id)
+
+    def queue_thread_archive(self, worker: str | None, session: str | None) -> None:
+        if worker and session and re.fullmatch(AMP_THREAD_PATTERN, session):
+            with self._db.connection() as connection:
+                connection.execute(
+                    "INSERT INTO amp_thread_archives(worker_id,thread_id) VALUES(%s,%s) ON CONFLICT DO NOTHING",
+                    (worker, session),
+                )
+
+    def take_thread_archives(self, worker: str, limit: int) -> list[str]:
+        """Consume best-effort commands on dispatch; no worker ACK gates business state."""
+        with self._db.connection() as connection:
+            rows = connection.execute(
+                "DELETE FROM amp_thread_archives WHERE worker_id=%s AND thread_id IN"
+                " (SELECT thread_id FROM amp_thread_archives WHERE worker_id=%s LIMIT %s FOR UPDATE SKIP LOCKED)"
+                " RETURNING thread_id", (worker, worker, limit),
+            ).fetchall()
+        return [row["thread_id"] for row in rows]
 
     def observe_archived_merge(
         self, flow_id: int, attempt_id: int, merge: PullRequestMerge, *, origin: str

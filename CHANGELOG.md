@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- Amp 推理结束后归档一次性 thread；Attempt 结束后通知原 worker 归档编码 thread。服务端归档状态不等待 worker 清理，工作区仍需安全释放后才能复用。Control 和 worker 需一起升级到协议 33。
+
 - Worker 支持独立判定路径读写权限及出站 TCP 规则。Codex 与 Amp 默认行为不变，构造时拒绝无法执行的受限策略。
 
 - 网页新建任务和追加输入可上拉增高、选择或拖入图片，发送前可预览及移除。图片随首轮和修订输入交给编码 Agent；serve 与 worker 需同时升级到 wire31。

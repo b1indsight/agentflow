@@ -19,6 +19,7 @@ from app.contracts.protocol import (
     AcceptResultResponse,
     AcceptStop,
     AcceptStopArguments,
+    ArchiveAmpThread,
     Assignment,
     CancelJob,
     ExecuteResult,
@@ -61,6 +62,7 @@ from app.contracts.protocol import (
 from app.contracts.validation import RejectedMessage
 from app.domain.inference_models import InferenceCapability
 from app.inference.transport import WorkerInferenceCallbacks
+from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.lifecycle import WorkerProtocolError
 from app.worker.execution.skills import clone_skills
 from app.worker.execution.workspaces import RepositoryProvisionError
@@ -124,6 +126,7 @@ class WorkerStateCallbacks:
         self._unmatched_error_logged = False
         self._recovery_required = False
         self._skill_clones: set[asyncio.Task[Path]] = set()
+        self._archives: set[asyncio.Task[None]] = set()
 
     def bind(self, routes: Dispatcher[ServerMessageUnion]) -> None:
         self.routes = routes
@@ -132,6 +135,7 @@ class WorkerStateCallbacks:
         routes.register("worker.reject_recovery", RecoveryRejected, self.on_reject)
         routes.register("worker.provision", RepositoryDemand, self.on_provision)
         routes.register("worker.sync_skills", SyncSkills, self.on_sync_skills)
+        routes.register("worker.archive_amp_thread", ArchiveAmpThread, self.on_archive_thread)
         routes.configure(
             opened=self.on_opened,
             message=self.on_message,
@@ -444,6 +448,13 @@ class WorkerStateCallbacks:
         if len(self._accepted) > MAX_PAYLOAD_ITEMS * 2:
             self._accepted.pop(next(iter(self._accepted)))
 
+    async def on_archive_thread(self, call: ArchiveAmpThread, message: ServerMessageUnion) -> None:
+        if not self.ready:
+            raise WorkerProtocolError("thread archival requires completed registration")
+        archive = asyncio.create_task(AmpCodingAgent.archive_thread(call.thread_id))
+        self._archives.add(archive)
+        archive.add_done_callback(self._archives.discard)
+
     async def on_sync_skills(self, call: SyncSkills, message: ServerMessageUnion) -> None:
         if not self.ready:
             raise WorkerProtocolError("skill synchronization requires completed registration")
@@ -499,6 +510,7 @@ class WorkerStateCallbacks:
             task.cancel()
         await asyncio.gather(*observers, return_exceptions=True)
         await asyncio.gather(*self._skill_clones, return_exceptions=True)
+        await asyncio.gather(*self._archives, return_exceptions=True)
 
     async def send_terminal(self, terminal: TerminalPayload) -> None:
         previous = self.expected_result.get(terminal.job_id)

@@ -260,8 +260,8 @@ async def test_failed_initial_attempt_stops_workspace_before_resume(
     for item in pool.inventory():
         assert store.workers.report_workspace("worker-a", "epoch", item)
     service.cancel(store.flows.get_flow(flow.id))
-    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
-    with pytest.raises(ValueError, match="archived"):
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
+    with pytest.raises(ValueError, match="not released"):
         service.resume(flow, expected_attempt_id=flow.required_attempt_id)
     stop = store.stops.pending("worker-a")
     owner = WorkerExecution(worker_id="worker-a", executor=executor, state=state)

@@ -300,7 +300,4 @@ def record_merge(
     assignments.retire_queued_work(flow.id, reason="PR merged; queued work retired")
     jobs.record_merge_notice(flow, delivery)
     flows.archive_attempt(flow, delivery)
-    # This can release a never-dispatched preparation immediately. Real execution
-    # remains pinned by the unchanged stop/result/ACK preconditions.
-    flows.release_flow_execution(flow.id)
     return True

@@ -279,6 +279,9 @@ class ResultApplication:
                 # Preserve the frozen plan/receipts as history; only execution facts survive merge.
                 if plan.archive_notice is None:
                     plan = self._retired_plan(current, plan.attempt_id)
+                # An INITIAL can first report its thread after the Attempt already ended.
+                if plan.run is not None and (flow.state is FlowState.ARCHIVED or current.attempt_id != flow.current_attempt_id):
+                    self.flows.using(tx).queue_thread_archive(current.assigned_worker_id, plan.run.session_id)
                 failure = None
             state = JobState.FAILED if failure else plan.state
             if flow.state not in TERMINAL_STATES and not retired:

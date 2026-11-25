@@ -1,7 +1,6 @@
 from datetime import timedelta
 
 import pytest
-from psycopg.errors import UniqueViolation
 
 from app.contracts.protocol import ExecutionStopped, Failed
 from app.contracts.result_models import EffectState, PullRequestEffect, ResultPlan
@@ -128,10 +127,8 @@ async def test_merge_during_cancel_retains_binding_until_original_stop_settles(s
     assert (archived.state, archived.archive_reason) == (FlowState.ARCHIVED, ArchiveReason.SUCCEEDED)
     assert store.stops.pending("w") == stop
     assert store.flows.get_flow_execution(flow.id) == binding
-    notice = store.jobs.list_jobs(flow.id)[-1]
-    assert notice.kind is JobKind.ARCHIVE and notice.state is JobState.RUNNING
-    assert notice.assigned_worker_id is None and notice.assignment_token is None
-    assert notice.result_payload["terminal"]["type"] == "merge_archive"
+    # The merge corrects an already archived attempt, without scheduling work.
+    assert store.jobs.list_jobs(flow.id)[-1].id == job.id
     successor = store.flows.create_flow(flow.repo, 2, 1)
     queued = enqueue_job(store, successor.id, JobKind.INITIAL)
     assert store.assignments.assign_job("w", "before-stop", "epoch") is None
@@ -146,8 +143,6 @@ async def test_merge_during_cancel_retains_binding_until_original_stop_settles(s
     assert replacement is not None and replacement.id == queued.id
     job = store.jobs.get_job(job.id)
     assert replacement.workspace == job.workspace and replacement.generation == job.generation + 1
-    # Notification delivery never owns this slot or gates the next generation.
-    assert store.jobs.get_job(notice.id) == notice
     assert store.flows.get_flow(flow.id) == archived
 
 
@@ -200,7 +195,7 @@ def test_stopped_writer_does_not_block_its_pending_terminal_application(store):
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
 
 
-async def test_finalizing_flow_reserves_issue_until_late_merge_cleanup_settles(store):
+async def test_finished_flow_releases_issue_while_workspace_waits_for_stop(store):
     flow, _job = running(store)
     delivery = store.deliveries.get_or_create_delivery(flow.required_attempt_id, "flow/1")
     delivery.state, delivery.pr_number = DeliveryState.OPEN, 17
@@ -208,8 +203,8 @@ async def test_finalizing_flow_reserves_issue_until_late_merge_cleanup_settles(s
     ControlService(
         database=store.database,
     ).cancel(flow)
-    with pytest.raises(UniqueViolation):
-        store.flows.create_flow(flow.repo, flow.issue_number, flow.installation_id)
+    assert store.flows.get_active_flow(flow.repo, flow.issue_number) is None
+    assert store.flows.get_flow_execution(flow.id).released_at is None
     await route_merge(store, flow)
     stop = store.stops.pending("w")
     assert store.stops.confirm(

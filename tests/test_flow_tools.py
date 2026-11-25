@@ -164,7 +164,7 @@ async def test_cancel_during_remote_verification_cannot_prepare_delivery(
     )
     assert response.error_kind is FlowToolErrorKind.STALE_ASSIGNMENT
     current = store.flows.get_flow(flow.id)
-    assert current.state is FlowState.FINALIZING and current.archive_reason is ArchiveReason.ABANDONED
+    assert current.state is FlowState.ARCHIVED and current.archive_reason is ArchiveReason.ABANDONED
     assert store.deliveries.get_delivery(flow.id) == before
     assert store.deliveries.get_tool_call(fresh_tool_request.arguments.call_id).response is None
 
