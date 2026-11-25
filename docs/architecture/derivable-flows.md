@@ -1,198 +1,50 @@
-# 可派生 Flow 编排
+# 设计提案：一个 Flow 如何委派任务并验收结果
 
-> 状态：未来目标设计，不代表当前实现 · 设计日期：2026-09-03。
->
-> 当前 Flow 可从 GitHub Issue 或控制台创建。每次开工的交付归 Attempt；同一 worker 可在不同 workspace 运行不同 Flow。[Flow 模型](../../app/domain/models.py)的 `child_flow_id` 默认指向自身（含数据库 NULL），不是已派生子任务的证据。当前 MCP 支持仓库内搜索，没有 spawn、join 或父级验收；下文描述目标模型，不能用作当前 API 契约。
+**状态：未实现。** 假设一个 Flow 在修改解析器，希望另一个 Flow 独立准备兼容性样例，最后由前者检查样例是否覆盖旧格式。这要求系统能回答三个问题：谁委派给谁？父任务退出后，谁记得它还在等什么？它验收的是哪一版样例？本文讨论这些问题。要使用今天的功能，请看[功能走查](../feature-walkthroughs/README.md)。
 
-## 1. 目标与不变量
+## 当前能复用的边界
 
-AgentFlow 将 **Flow** 提升为持久、可调度、可派生、可通信、可等待和可验收的第一公民。它借鉴 Codex
-subagent 的 `spawn / send / wait / inspect` 协作方式，但编排状态保存在 control plane。首版先采用
-Flow 全生命周期固定绑定，跨 worker/机器恢复属于后续阶段。
+Flow 可以源自 GitHub Issue，也可以来自控制台。它有稳定的 ID；重新开工产生新的 Attempt，重试和修订则沿用当次 Attempt 的交付分支和 PR。`FlowExecution` 记录工作区绑定，Job 记录本次调度的工作。[现有模型](../../app/domain/models.py)中的 `child_flow_id` 在未指定时取自身 ID，数据库的 NULL 也按此解释。不能据此判断一个 Flow 已经派生了子任务。
 
-派生设计沿用当前交付边界，并增加父子协作约束：
+首轮编码时，Agent 可以通过本地工具搜索同仓库的 Flow、请求用户补充信息或准备交付 PR。控制端依据当前任务和连接校验远程请求。[工作端 MCP](../../app/worker/transport/mcp.py)、[控制端工具](../../app/controler/workflow/tools.py)和[首轮结果处理](../../app/controler/workflow/initial.py)定义了今天的路径。请求用户输入可能使交付进入 `waiting`；这不涉及另一个 Flow。**下面的派生、等待和验收操作都是拟议能力，没有可调用的 API。**
 
-- 同次开工的修订沿用该 Attempt 的 branch 和 PR。派生并行任务时，子 Flow 需要独立的可写 repo；
-  这里的“逻辑隔离”表示调度和目录所有权，
-  不表示抵御同 VM 上恶意代码的安全边界；
-- Flow 是任务、上下文、依赖、结果和交付物的持久所有者；
-- Agent run 与 worker 只是 Flow 的临时执行载体，不是可持久寻址的协作者身份；
-- Flow 可以要求 control plane 创建子 Flow，但只有 control plane 能持久化关系和安排执行；
-- 父子 Flow 不共享可写 repo；首版分别固定在各自 worker execution slot，未来可以跨进程、跨 worker、
-  跨机器恢复；
-- 父 Flow 注入的上下文与 skills 是显式、版本化、可审计的执行输入；
-- 子 Flow 执行成功与父 Flow 验收成功是两个不同事实；
-- PR、评论、labels、reviewers 等 GitHub 副作用始终由 control plane 校验并执行，Agent 只调用受约束的
-  环境工具。
+## 提案一：把委派关系存入控制端
 
-## 2. 领域对象
+父 Flow 将目标、所需样例和验收条件交给控制端。拟议的 `spawn` 应在一个事务中写入子 Flow、父子关系 `FlowLink`、初始上下文、所需 skill 清单和首个 Job。返回子 Flow ID 只说明任务已经入库；没有匹配的空闲工作区时，子任务仍需排队。相同请求在响应丢失后重送，应得到同一个子 Flow。
 
-| 对象 | 职责 |
-|---|---|
-| `Flow` | 持久任务及其生命周期；重新开工仍沿用 Flow ID |
-| `FlowExecution`（设计名） | 独占工作区的绑定；业务归档与安全释放是不同事实 |
-| `FlowOrigin` | 当前来源为 GitHub Issue 或控制台；父 Flow 派生是拟新增的来源 |
-| `Attempt` | 同一 Flow 的一次开工，关联该次的分支、会话与交付 PR；重试与评审修订沿用当前 Attempt |
-| `Job` | 可领取的短期执行单元；由 lease、fencing 和 result inbox 保证安全重放 |
-| `FlowLink` | Flow 之间的派生、依赖和验收关系；保存 join 与 acceptance 状态 |
-| `ContextBundle` | 可移植的初始上下文和后续增量，包含来源、可见范围与内容摘要 |
-| `SkillManifest` | 子 Flow 需要启用的 skill 名称、版本、digest 与策略决定 |
-| `FlowResult` | 版本化结果 envelope：总结、结构化输出、证据和 artifact 引用 |
-| `FlowWait` | 父 Flow 的持久 join 条件；满足后由 control plane 创建 continuation job |
+父 Flow 持有经授权的子 Flow ID，可据此查看进度（`inspect`）、补发输入（`send`）或请求取消（`cancel`）。子任务的来源指向父 Flow，无需虚构 Issue；派生关系形成树，附加依赖不能构成循环。调度仍由控制端负责，Agent 不指定工作机器，不直接连接另一个 Agent，也不获得任意仓库的操作权。
 
-派生关系形成有根树；额外的依赖和上下文引用可以形成 DAG，但 control plane 必须拒绝循环依赖。Flow ID
-是跨执行节点的稳定 handle，Agent/session/worker ID 不能替代它。
+解析器和样例可以并行修改，因此必须分别使用独占工作区，包括各自的可写 Git 或 jj 元数据。同一 Flow 的执行、续办和修订应串行进入自己的目录。分目录约束写入归属；隔离不可信代码还需要独立的进程权限和网络边界。
 
-GitHub Issue 只是 root Flow 的一种 origin，不是 Flow 身份本身。子 Flow 不需要伪造 Issue number。
-工具调用仍需核对本次执行权限，交付归属需同时识别 Flow 与 Attempt。
+## 提案二：把等待条件与执行进程分开
 
-## 3. 状态分轴
+如果父任务还需要一份性能报告，它可以声明“样例和报告都到齐”（`all`）或“任一结果到达”（`any`）。拟议的 `wait` 分四步完成：
 
-当前实现分别记录六态 Flow 生命周期、Job、执行绑定和 Attempt 交付。下表示意派生后的查询维度；示例值不代表现有数据库枚举，等待和验收表尚未实现：
+1. 控制端持久化 `FlowWait`：父 Flow、依赖的子 Flow、满足条件的规则。保存后当前 Job 可以结束。
+2. 子 Flow 发布版本化结果或状态变化后，控制端重新求值。多个通知同时到达或控制端重启时，只能为同一次满足条件的等待创建一个续办 Job。
+3. 续办 Job 取得相关结果版本和等待期间尚未消费的输入。首版设想仍回到父 Flow 的原工作区，无需让原编码进程或 WebSocket 请求一直挂起。
+4. 只有具备可验证的 checkpoint、可恢复的仓库和会话，并确认旧执行权失效后，才考虑释放父工作区或迁到别处。按[现有恢复策略](../../app/domain/recovery_policy.py)，断线或超时不足以证明旧执行已停止。
 
-| 维度 | 示例状态 | 权威位置 |
-|---|---|---|
-| Flow 生命周期 | `active / succeeded / failed / cancelled` | `flows` |
-| 执行状态 | `queued / running / done / failed` | Job、assignment 与 lease |
-| PR 交付状态 | `none / opening / open / merged / closed` | Attempt 的交付记录与 PR 观察 |
-| 等待状态 | 等待哪些 Flow、`all / any` join | `flow_waits` |
-| 验收状态 | `pending / accepted / rejected` | `flow_links`，按父子关系记录 |
+首版保留父工作区有实际代价：如果唯一位置已经被父任务占用，子任务就无法启动。调度方案需要在接受派生前核对容量，或明确报告无法推进；不能向调用者保证“排队后一定会完成”。
 
-例如一个父 Flow 可以同时满足“PR 已打开”“当前没有运行 job”“等待两个子 Flow”“其中一个结果尚未验收”。
-这些事实不能继续编码成互斥的 `PR_OPEN_WAITING_CHILDREN` 一类组合状态；面向用户的单一 status 应由上述
-事实派生。
+## 提案三：按结果版本验收
 
-### 3.1 与 Flow 事实账本的关系
+子 Flow 发布不可变的 `FlowResult`，其中包含结果版本、摘要、结构化输出和证据引用。比如样例 v1 缺少空文件用例，父任务可以拒绝 **v1** 并给出理由；控制端向同一个子 Flow 排修订 Job，沿用该次交付。v2 到达后再验收，旧决定不会自动套到新结果上。若证据不足，也可以暂不决定。
 
-[Flow 事实账本](flow-ledger.md)已经实现：Flow 生命周期的每次变化同事务追加一条不可变事实，
-`flows` 是它的同事务状态表。该账本只重放 Flow 状态列；不能从中重建 Job、交付或拟议中的父子关系。
+`accept` 和 `reject` 拟记录在 `FlowLink` 上：一个成功结束的子 Job，其结果仍可能待验收。父级接受样例只表示依赖满足，不会替 GitHub 用户批准、合并或关闭 PR。因此，Flow 生命周期、Job 执行状态、Attempt 交付、等待条件和关系上的验收结论必须分开查询。
 
-本页的派生、等待与验收落地时，按同一规则扩展账本，不另建一套历史记录：
+## 重启后，应从哪里取回输入和证据？
 
-- 派生关系的建立、`FlowResult` 新版本的发布、父级的 accept / reject 是带版本的业务事实，
-  适合作为新的事实种类，由父 Flow 或子 Flow 的账本记录并引用对方的 Flow ID；
-- `FlowWait` 的求值进度、continuation Job 的租约属于协调数据，不进入账本；
-- ContextBundle、SkillManifest 和 artifact 的正文留在各自的存储，事实只保存引用与 digest。
+| 拟保存的内容 | 格式和恢复要求 |
+| --- | --- |
+| `ContextBundle`：任务上下文 | 保存小段文本或附来源、访问范围和摘要指纹的引用，例如提交、PR 和产物地址；追加内容按版本消费，重送不重复应用。裸本地路径无法跨机器使用。 |
+| `SkillManifest`：执行能力要求 | 声明名称、版本、来源、摘要指纹和是否必需。控制端先校验策略，工作端报告实际启用版本；缺少必需能力应等待匹配或明确失败。 |
+| 结果和产物 | 大段 diff、测试日志和构建产物另存，结果只引用所验版本。子结果发布、委派成立和父级决定适合作为新的业务事实；等待求值进度和租约是调度数据。 |
 
-这些种类不属于账本首期的承诺范围，需要在派生功能自己的计划中定义。
+当前[事实账本](flow-ledger.md)只重放 Flow 状态列，不能据此重建父子关系。若扩展账本，应同时确定每种新事实由哪个 Flow 记录、如何引用对方和结果版本；控制端重启后从持久记录恢复等待、未消费输入和验收决定。
 
-## 4. Agent 环境工具
+## 落地顺序与停止条件
 
-CodingAgent 看到的是 Flow 语义工具，不是 control 数据库、worker 管理接口或 GitHub credential：
-
-```text
-flow.spawn(task, context, skills, result_contract, relation) -> child_flow
-flow.send(target_flow, context_delta)                       -> accepted
-flow.wait(flow_handles, condition)                          -> suspended
-flow.inspect(target_flow)                                   -> snapshot/result
-flow.accept(target_flow, result_version, note)               -> accepted
-flow.reject(target_flow, result_version, feedback)           -> revision queued
-flow.cancel(target_flow, reason)                              -> requested
-```
-
-GitHub 协作走同一能力通道，例如 `flow.open_pr`、`flow.comment` 和 `flow.request_review`；control plane
-根据调用者绑定的 Flow 推导 repo、branch 和允许操作的 PR，Agent 不能用参数越权到任意仓库或 PR。
-
-工具调用路径为：
-
-```text
-CodingAgent
-  -> worker-local Flow tool broker（MCP）
-  -> 已认证、可复用的 worker/control 通道
-  -> control command handler + Store
-  -> durable effect / scheduler / GitHub adapter
-  -> tool response
-```
-
-broker 只转发调用，不持有业务状态。每次请求由 worker 附加 `flow_id / job_id / assignment_token /
-connection_epoch / call_id`，control plane 做 fencing、权限检查和幂等处理；这些控制字段不由模型自由填写。
-
-## 5. Spawn、等待与恢复
-
-`flow.spawn` 成功返回前，control plane 必须在一个事务中保存子 Flow、`FlowLink`、初始 context、skill
-manifest 和首个 job。返回成功意味着派生事实已经持久化，不意味着已有 worker 开始执行。
-
-`flow.wait` 不允许长期占住 Codex 进程或 WebSocket handler：
-
-1. 父 Agent声明 child handles 和 `all / any` 条件；
-2. control plane 保存 `FlowWait`，当前 job 以 `waiting` outcome 安全结束；
-3. 子 Flow 产生新结果或状态变化时，control plane 重新求值 join；
-4. 条件满足后只创建一个父 Flow continuation job；
-5. continuation 注入相关结果版本和等待期间的 context delta。
-
-首版中，父 job 结束不等于释放执行环境：父 Flow 仍独占原 worker slot 和 repo，continuation 只回到该
-worker。父 Flow 派生子 Flow 时，子 Flow 必须取得另一个 slot 和自己的 repo；没有空闲 slot 时排队。
-worker 断线只允许同一 identity 在 recovery grace 内接回原目录，超时后 Flow 明确失败，不迁移。
-
-后续引入 checkpoint/artifact 后，才允许释放 slot 并在其他 worker 上重建干净 session。该阶段的可迁移
-语义不能只依赖某台机器上的 `codex_session_id` 或裸本地路径。
-
-## 6. 上下文、skills 与 artifacts
-
-跨机器 Flow 不能传递裸本地路径。ContextBundle 只携带内联小文本或可寻址引用，例如 commit、PR、Store
-snapshot 和 artifact URI；引用必须有 digest、来源 Flow 和访问范围。
-
-父 Flow 可以在 spawn 时提供最小上下文，也可以在子 Flow 运行期间追加 delta。control plane 按事件顺序
-保存增量；子 Flow 的下一次 start/resume 收到尚未消费的版本，重复投递必须幂等。
-
-SkillManifest 表达任务需要的执行能力，不表达 Agent 人格：
-
-```text
-name + version + digest + source + required/optional
-```
-
-control plane 先按仓库和系统策略校验，再选择已经具备这些 skills 的 worker，或下发经过验证的不可变 bundle。
-worker 必须回报实际启用的 manifest；缺少 required skill 时 job 保持不可调度或明确失败，不能静默降级。
-
-大结果、diff、测试日志和构建产物进入 artifact store；`FlowResult` 只保存结构化摘要和引用，避免把原始日志
-灌入父 Agent 上下文。
-
-## 7. 结果与父级验收
-
-子 Flow 完成执行后发布不可变、递增版本的 `FlowResult`，进入 `result_ready`。父 Flow 被唤醒后可以 inspect
-结果、PR diff 和验证证据，然后：
-
-- `accept`：把对应 `FlowLink` 的 result version 标为 accepted，满足依赖；
-- `reject`：保存反馈并给同一子 Flow 排 revision job，不创建第三个 Flow 或第二张 PR；
-- 暂不决定：继续保持 pending，父 Flow 可以再次 wait。
-
-验收属于父子边，因此子 Flow 可以保持“自身执行成功，但仍待父 Flow 验收”。验收不等于 GitHub approve、
-merge 或关闭 PR，这些仍遵循独立的仓库策略和人工审核流程。
-
-## 8. 调度、权限与故障语义
-
-- scheduler 调度 Flow 的 job，不调度“人格化 Agent”；worker 依据 repo、skill manifest、容量和隔离要求匹配；
-- 现有 worker 可提供多个 workspace；一个位置在安全释放前不能复用。提案要求等待子 Flow 时也保留父级位置，直到有可迁移的 checkpoint；
-- 同一 Flow 的 initial/continuation/revision job 串行进入同一 repo；不同 Flow 不能共享 working tree 或
-  可写 `.git/.jj` metadata；
-- 同一可信 VM 可以运行多个使用不同目录的 worker；强文件系统/网络隔离和互不信任租户属于后续容器/
-  微 VM 阶段；
-- 父 Flow 只能操作 control plane 授予的相关 Flow handle，不能枚举或控制无关 Flow；
-- spawn/send/accept/reject 都需要稳定 idempotency key，断线重试不得产生重复子 Flow或重复 revision；
-- 配置最大派生深度、单 Flow fan-out、root Flow 总并发、预算和 artifact 配额；
-- 父取消默认向尚未验收的子树传播，但已产生外部 PR 的 Flow 进入显式 cancel/cleanup 流程；
-- 子 Flow失败不会隐式覆盖父 Flow；`FlowLink` 的策略决定 fail-fast、等待人工处理或允许父级继续；
-- control plane 重启后必须能从 Store 重建 wait/join、未消费 context、tool call 和 acceptance 状态。
-
-## 9. 分阶段落地
-
-1. **可复用的现有能力**
-   - 复用 workspace 绑定、Job 租约、Attempt 交付和 MCP 工具调用账本；不能把失联直接当作执行已停止，见[恢复决策](decisions.md)。
-   - `flow.open_pr`、`flow.request_user_input` 和仓库范围的 `flow.search_flows` 不建立父子关系。
-2. **持久 Flow 派生**
-   - 实现 `FlowLink`、`flow.spawn/inspect/send/cancel` 和子 Flow 调度；
-   - 子 Flow 在另一个匹配的空闲 slot 上，以独立 repo/session 启动。
-3. **等待与验收**
-   - 实现 `FlowWait`、durable join、父 Flow continuation 和版本化 `FlowResult`；
-   - 实现 `accept/reject` 及 revision feedback。
-4. **完整可移植执行**
-   - ContextBundle、SkillManifest 和 artifact 分发生产化；
-   - 增加可释放的 checkpoint、跨 worker 重建、旧 lease fencing、配额、审计和故障恢复。
-
-## 10. 非目标
-
-- 不把 Flow 当作常驻 Agent 进程；没有 Job 时也可保留 workspace 绑定和 repo，但不需要常驻编码进程；
-- 不要求为 Agent 建人格、角色或长期身份；
-- 不让父 Agent选择具体 worker 或直接建立 Agent-to-Agent 网络连接；
-- 不让子 Flow共享父 Flow 的可写 repo；共享必须通过 commit、artifact 或显式 context；
-- 不因父 Flow验收而自动 merge GitHub PR。
+1. **先做独立委派。** 引入关系、授权和按稳定调用标识去重。限制派生深度、单父任务的子任务数、根任务总并发、预算和产物配额。收到重复派生请求时只有一个子任务，未授权的 Flow 无法被操作，才具备开放委派的条件。
+2. **再做持久等待和验收。** 验证重启后只唤醒一次、拒绝同一版本不会重复排修订。父取消时默认传给未验收子树；若已产生 PR，须显式处理停止与清理。子任务失败时，由关系策略决定停止、交给人或允许父级继续。
+3. **最后做可移植执行。** 先验证输入和产物可独立取回、旧执行不能再写，再开放跨 worker 重建。今天的同身份重连不提供这一能力；其他扩展见[路线图](roadmap.md)。

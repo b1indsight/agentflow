@@ -1,132 +1,64 @@
-# Flow 会话查询
+# Flow 会话查询：按执行归属读取编码记录
 
-`GET /api/flows/{flow_id}/conversation` 按需代理对应 worker 读取编码会话历史。
-此接口本身仅查询现有 flow、attempt、session 和 worker 归属，不保存会话内容，也不维护队列。
-Web 控制台的独立同步器会主动复用该服务，将展示正文归档到本地 Flow 时间线；
-控制台 `/activity` 读取本地快照，不等同于此处的实时 Worker 代理读取。
-
-worker 每次只接收 `session_id`、`cursor`、`limit`，由 `HistoryQuery` 校验后交给对应后端：
-Codex 读取 rollout 文件，Amp 导出 thread。返回的 `HistoryPage` 只含该会话的记录、状态及续读位置。
-Flow/Attempt 归属和多会话顺序由 control 处理；无独立 SessionRef、HistoryCursor 或 spec 转换层。
-
-**执行过程和交付摘要分开读取。** Codex 的 `--json` 和 Amp 的 `--stream-json` 用于传输 CLI 事件；
-编码任务的 JSON Schema 只约束最终答复。首轮编码和评审修订的提示要求助手在关键节点简短说明调查结论、当前进度和下一步。
-这些说明出现在会话中，无需逐条写进最终 `summary`。要看具体调用和结果，可在控制台展开「工具活动」。
+要核对「Agent 看到了哪条评审意见，又调用了什么工具」，需要找到执行那轮任务的编码后端。`GET /api/flows/{flow_id}/conversation` 让客户端只凭 Flow ID 就能查询：control 负责找出会话和 Worker，Worker 负责读记录。这个 GET 不保存正文、不发送任务，也不改变 [Flow 账本](flow-ledger.md)。日常在网页上读到的「会话」则来自 control 已经采集的活动快照；两处内容可能暂时不同。[实时路由](../../app/controler/api.py#L139-L171) · [控制台活动路由](../../app/controler/console/api.py#L394-L422)
 
 ## 配置与请求
 
-在 control 配置 `AGENTFLOW_ACCESS_ISSUER`、`AGENTFLOW_ACCESS_AUDIENCE` 和唯一的
-`AGENTFLOW_ACCESS_OWNER_EMAIL`，通过 Cloudflare Access 完成 GitHub 登录和 MFA。
-后端仅接受 `Cf-Access-Jwt-Assertion`，独立验签并限制 owner 邮箱；不接受旧共享 Bearer Token、
-邮箱 header 或直接传入的 Cookie。三项均未配置时返回 503，部分配置时启动失败。
-所有 API 响应带 `Cache-Control: no-store`。配置、公钥缓存和真实验收见
-[单账号 Access 部署](../deployment/access.md)。
+请求经 Cloudflare Access 登录后到达 control。control 验证 `Cf-Access-Jwt-Assertion` 的签名和应用身份，并检查唯一 owner 邮箱；仅有邮箱请求头、Cookie 或普通 Bearer Token 不能直接通过后端验证。`AGENTFLOW_ACCESS_ISSUER`、`AGENTFLOW_ACCESS_AUDIENCE`、`AGENTFLOW_ACCESS_OWNER_EMAIL` 须一起配置；缺一部分会导致配置校验失败，全部未设时接口返回 503。API 响应标记 `Cache-Control: no-store`。[部署设置](../deployment/access.md) · [鉴权测试](../../tests/test_conversation_api.py#L28-L84)
 
 ```http
-GET /api/flows/42/conversation?limit=100
-Cf-Access-Jwt-Assertion: <Access 添加的已签名应用 JWT>
+GET /api/flows/42/conversation?limit=1
 ```
 
-参数：`flow_id` 为正整数；`limit` 默认 100，范围 1–500；`cursor` 为上次返回的
-`next_cursor`（最长 2048 字符）。首次请求不传 cursor。
+将 `42` 换成正整数 Flow ID。`limit` 默认 100，可取 1–500；首次不要传 `cursor`，续读时原样传回服务返回的 `next_cursor`（1–2048 字符）。下面是响应形状示例，游标是占位符。[路由参数](../../app/controler/api.py#L139-L149) · [响应合同](../../app/contracts/conversation.py#L55-L104)
 
 ```json
 {
   "flow_id": 42,
   "items": [{
     "id": "019eac3b-a60c-7a93-a442-3718f660fc8c:1024",
-    "attempt_id": 3,
-    "session_id": "019eac3b-a60c-7a93-a442-3718f660fc8c",
-    "session_generation": 0,
-    "timestamp": "2026-09-30T08:00:00Z",
-    "role": "assistant",
-    "kind": "tool_call",
-    "call_id": "call-1",
-    "content": {"text": "", "name": "exec_command", "arguments": "{\"cmd\":\"pytest\"}"},
-    "truncated": false
+    "attempt_id": 3, "session_id": "019eac3b-a60c-7a93-a442-3718f660fc8c", "session_generation": 0,
+    "timestamp": null, "role": "assistant", "kind": "tool_call", "call_id": "call-1",
+    "content": {"text": "", "name": "exec_command", "arguments": "{\"cmd\":\"pytest\"}"}, "truncated": false
   }],
   "sessions": [{
-    "attempt_id": 3,
-    "session_id": "019eac3b-a60c-7a93-a442-3718f660fc8c",
-    "session_generation": 0,
-    "status": "available"
+    "attempt_id": 3, "session_id": "019eac3b-a60c-7a93-a442-3718f660fc8c", "session_generation": 0,
+    "status": "available", "starts_at_beginning": true, "reached_end": true
   }],
-  "next_cursor": "<opaque-cursor>",
-  "has_more": false,
-  "unavailable_reason": null
+  "next_cursor": "<opaque-cursor>", "has_more": false, "unavailable_reason": null
 }
 ```
 
-角色为 `user`、`assistant`、`tool`、`system`、`developer`；类型为 `message`、`tool_call`、
-`tool_result`。工具调用与结果通过 `call_id` 对应，工具 arguments 保留历史中的字符串。
-`user` 指编码后端收到的输入，可能是 AgentFlow 构造的任务/PR 反馈提示，并不等于 GitHub 评论作者。
-control 自己发出的 PR 评论、状态更新不会显示；不合并完整 GitHub 活动时间线。
+`items` 按源记录顺序返回，`kind` 是 `message`、`tool_call` 或 `tool_result`，可用 `call_id` 配对工具调用与结果。`role` 可为 `user`、`assistant`、`tool`、`system`、`developer`；其中 `user` 表示编码后端收到的输入，可能是一段由系统整理的任务提示，不足以识别 GitHub 评论作者。`truncated` 提醒调用者正文或参数被截短，不应当作完整原文。[条目定义](../../app/contracts/conversation.py#L66-L96) · [角色与工具记录测试](../../tests/test_conversation_history.py#L37-L68)
+
+## 谁找到原来的 Worker？
+
+`ConversationService` 先查 Flow 和执行绑定，再按 Attempt 的创建时间、ID 排序，从 `codex_session_id` 取会话（该字段也承载 Amp thread ID），对相同 session 保留首次归属，最多 128 个。读每一页前，它按该 Attempt 最近一次有 Worker 的 `initial` / `revision` 作业选 Worker。于是即使重新开工时换了机器，也不会向新机器索取旧轮次的历史。[归属查询](../../app/persistence/flows.py#L273-L289) · [两台 Worker 的行为测试](../../tests/test_single_session_history.py#L39-L105)
+
+`ConversationBroker` 在这台 Worker 的在线连接上发送一次 `worker.history`：只交给后端 `session_id`、`cursor` 和 `limit`。回复要匹配本次调用和连接，Broker 还检查会话 ID、条目数、ID 前缀和续读位置。只有 control 能给结果附上 `attempt_id`、`session_id`、`session_generation`。断连不会把旧请求改投另一台机器；查询取消或超时会释放名额。[请求与回包校验](../../app/controler/workers/conversation.py#L39-L110) · [标注与翻页](../../app/controler/workers/conversation.py#L179-L227)
+
+| Worker 上的读取器 | 读什么、何时返回不完整结果 |
+|---|---|
+| [Codex](../../app/worker/execution/codex.py#L315-L398) | 在执行所用的 `CODEX_HOME`（默认 `~/.codex`）先查 `sessions` 再查 `archived_sessions`，验证 rollout 文件身份和 `session_meta.id`。按 JSONL 行提取公开 `response_item` 消息和工具操作，跳过重复事件及内部推理；末尾尚未写完的一行留待下次查询。目录最多检查 50,000 项，单页扫描预算 8 MiB，单条记录上限 256 KiB。 |
+| [Amp](../../app/worker/execution/amp_agent.py#L580-L638) | 在 Worker 上用 `amp threads export` 读取指定 thread 的公开消息块。导出上限 2 MiB、超时 20 秒，短暂缓存 2 秒（最多 16 个会话）；已读前缀被编辑时原游标失效。[限制常量](../../app/worker/execution/amp_agent.py#L52-L61) |
+
+两端读取器的条目页预算为 256 KiB，文本和工具参数最多 8,192 字符；已知凭据会脱敏，但不要把响应当作已排除所有秘密的公开日志。Broker 限全局 64 个、每连接 4 个待响应查询；回复条目加共享协议头上限 512 KiB，单次往返预算 30 秒。工具或结果处理占用连接时会拖慢历史查询，查询超时不说明编码任务失败。[Codex 测试](../../tests/test_conversation_history.py#L136-L160) · [Amp 测试](../../tests/test_conversation_history.py#L247-L275) · [慢回调测试](../../tests/test_conversation_e2e.py#L104-L145)
 
 ## 分页与轮询
 
-先按 attempt 排序、去重 session；每个 HTTP 页只查询一个 session，页内按源文件顺序返回。
-`sessions` 仅报告本页实际检查的会话状态。即使 limit 尚有余量，也通过下一页切换会话。
-control 的外层游标绑定 flow、有序会话及代次；worker 的内层游标仅绑定 session 与文件位置。
-旧版多会话游标返回 `409 cursor_invalid`，应不带 cursor 重新加载。条目 ID 由 session 与源
-字节位置组成，可用于去重；不要自行解析或构造 cursor。`has_more=true` 时继续请求下一页，
-即使 items 为空也应推进 cursor（该页可能只扫描了非展示记录）。`has_more=false` 时可保存
-cursor，稍后轮询新增完整记录，不代表 agent 执行结束。
-
-文件尾部尚未完成的 JSONL 行留到下一次读取。session 集合/代次变化、文件被替换或已读取位置
-失效会返回 409，需要清空分页状态并从头查询。历史被移动到 Codex archived_sessions 且
-文件身份不变时可继续读取。完整性不作保证：`available` 表示源存在，`unsupported` 表示本页
-遇到不支持的展示记录或内容块，`not_found` 表示对应历史文件不存在。
+每个 HTTP 页最多检查一个 session。内层游标指向该源记录的位置；外层游标绑定 Flow、有序会话及代次。`sessions` 只描述本页：`starts_at_beginning` 表示是否从该会话开头查起，`reached_end` 表示返回的源页已无下一页。最后一条记录来自旧 session 时，可以同时看到 `reached_end: true` 和 `has_more: true`，此时下一次 GET 会切换到另一个 session。最终 `has_more: false` 表示本次已经追到尾部；保留 EOF 游标稍后再查，可以读到新追加的记录。[续读实现](../../app/controler/workers/conversation.py#L141-L227) · [跨轮续读测试](../../tests/test_conversation_e2e.py#L119-L145)
 
 ## 错误与边界
 
-错误 JSON 为 `{"detail": "<code>"}`；参数错误 422 使用 FastAPI 标准校验响应。
+看到空 `items` 时，先读同一响应的状态。有 Flow 但无执行绑定或无会话 ID，首次请求返回 200、`unavailable_reason: no_worker` 或 `no_session`。查到了会话但找不到源记录会标 `sessions[].status: not_found`；`unsupported` 表示有无法识别的内容。旧会话的 Worker 不可用且后面还有会话，则返回 `worker_unavailable` 的空页并允许继续；最后一个会话的 Worker 不可用才返回 HTTP 503。`reached_end` 不能单独证明整段历史完整。[空页与归属处理](../../app/controler/workers/conversation.py#L120-L151) · [旧会话缺失/离线测试](../../tests/test_single_session_history.py#L82-L105)
 
-| HTTP | code / 情况 |
-| --- | --- |
-| 401 | `unauthorized` |
-| 403 | `forbidden`（其他邮箱、非用户身份或非应用 token） |
-| 404 | `flow_not_found` |
-| 409 | `cursor_invalid` |
-| 422 | 非法 flow_id、limit 或 cursor 长度 |
-| 502 | `history_unreadable`、`history_limit`、`invalid_response` |
-| 503 | `conversation_api_disabled`、`access_keys_unavailable`、`worker_unavailable`、`query_busy`、`database_unavailable` |
-| 504 | `query_timeout`（单次 worker 查询 30 秒超时，包含 Amp 导出及进程清理预算） |
+| HTTP | `detail` 或响应 | 如何处理 |
+|---|---|---|
+| 401 / 403 | `unauthorized` / `forbidden` | 重新登录或检查 owner、应用身份，避免原样反复请求。 |
+| 404 / 422 | `flow_not_found` / FastAPI 参数校验详情 | 核对 ID、limit 和 cursor 长度。 |
+| 409 | `cursor_invalid` / `flow_read_only` | 前者清空旧分页状态，从首屏重读；后者是只读历史 Flow，改读已经保存的活动。 |
+| 502 | `history_unreadable`、`history_limit`、`invalid_response` | 分别检查源格式/权限、读取上限或 Worker 返回的页面；单纯增加重试次数不能修复坏文件。 |
+| 503 | `conversation_api_disabled`、`access_keys_unavailable`、`database_unavailable`、`worker_unavailable`、`query_busy` | 配置缺失先修配置；依赖恢复或并发下降后可重试同页。 |
+| 504 | `query_timeout` | 稍后用原游标重读；不必因此重开任务。 |
 
-已有 flow 尚无 worker/session 时返回 200、空 items、`unavailable_reason: no_worker/no_session`。
-部分文件不存在时逐 session 标记，其他 session 仍可读取。已归档 flow 使用保存的原 worker
-绑定查询，但 worker 离线或本地历史清理后无法恢复内容。执行结果尚未回传的首次 session、
-被 fallback 覆盖的旧 session ID 可能无法定位；本版不新增采集/索引来补齐。
-
-worker 使用执行 Codex 时相同的 `CODEX_HOME`（默认 `~/.codex`），读取 `sessions` 与
-`archived_sessions` 中的 rollout JSONL，核验 session_meta.id。仅映射公开 response_item
-消息与 function/custom tool 调用、结果；跳过重复 event_msg、reasoning 和 analysis 记录。
-依据本地 Codex 0.155.1 历史结构验证适配，不执行 Codex 命令或读取全局 history.jsonl。
-
-每页最多扫描 8 MiB 完整记录；单行超过 256 KiB 返回 history_limit，文本/arguments 超过
-8192 字符截断并标记，items 序列化预算为 256 KiB。control 每个 flow 最多关联 128 个 session，
-每个 HTTP 请求仅发起一次 worker 查询。目录发现最多
-50000 个条目；先查 sessions，再查 archived_sessions，找到即返回。两处均有副本时优先使用
-活动目录；候选文件的符号链接和普通文件检查统一在打开时执行。control 全局最多 64 个
-待响应查询、每连接 4 个，由 Broker 计数；worker 在唯一 driver 串行处理 history，Codex 读取器仍有并发上限。
-Broker 通过共享 Gateway 选择一次配对的 Session/Dispatcher；替换期间未发布的候选不可查询，旧连接查询
-失败后不自动改投新连接。Gateway 不保存查询 Future，也不持有执行或历史业务状态。
-两端共用 Session 的单一持续接收器，所有请求、回复和验证拒收按 FIFO 进入共同 driver；
-控制与 history 同属一条 message 时先由控制 owner 校验，再逐项分派。
-准备任务、工具、结果应用及停止清理等慢回调会延迟 history，history 读取也会延迟后续业务；
-独立执行 Task、传输 ACK 与周期 heartbeat 可继续运行。连接内最多缓冲 32 条 message、32 个业务条目与
-16 MiB；超限使连接失败。无 history handler/busy 旁路。查询的 30 秒预算包括等待发送锁、写入和等回复；
-取消/超时/断连立即归还临时配额，旧连接或旧 epoch 回复不能完成新请求，不持久化或跨连接重放。
-实际关闭及时失败查询；EOF 先排空已收到的 FIFO 回复或拒收，再失败其余等待者。
-Registered 前合法 history 只借用请求 epoch 回包，不设置 ready；server 收 history 不刷新执行存活期限。
-页面/session 校验及 Flow/Attempt 归属留在业务层，通信匹配不表示执行结果已应用或授权释放 slot。
-已知环境凭据及常见 token 文本会脱敏，但不保证自动识别任意源码或文本中的所有秘密。
-
-会话查询使用与执行任务相同的[在线协议](../../app/contracts/protocol.py)。Amp 的一次性推理 thread 在推理结束时归档；编码 thread 保留到所属 Attempt 结束。归档不删除会话历史，也不把 worker 本地的原始历史复制到 control。
-`worker.history` call/result 保留查询内容，以条目 message_id/reply_to 与原 Session epoch 关联。
-Broker 创建临时 Future，发送前经 Dispatcher.expect_reply 登记原调用；WorkerBusinessCallbacks
-按统一 register 格式注册 worker.history。历史页 512 KiB 限额按所选条目加共享头计算，
-不把同一 message 中的无关业务算入页大小。控制 ACK 不表示查询或执行业务成功。
-已完成握手且关联头有效的坏 payload 返回同方法的 `tool_result.error`，仅含固定
-`code=validation_error` 与 `message=message payload failed validation`。坏回复也失败原查询为
-`invalid_response`；不等待超时、不重放查询。整批失败不执行合法兄弟项，不对畸形 error 再回 error。
-control 和 worker 必须协调升级；不能把网络协议版本不兼容当成可恢复的会话查询失败。
+业务错误通常为 `{"detail":"<code>"}`。HTTP 客户端主动断开时，路由取消未完成的查询；本次 GET 不留下待交付的业务任务。需要对照网页和原始分页结果时，见[会话走查](../feature-walkthroughs/conversation.md)。[错误映射](../../app/controler/api.py#L139-L171) · [断连测试](../../tests/test_conversation_api.py#L181-L215)

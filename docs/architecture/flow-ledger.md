@@ -1,234 +1,70 @@
 # Flow 事实账本与状态表
 
-> 状态：已实现（自动化验证），真实部署待验收 · 设计 2026-11-15，实现 2026-11-17。
->
-> `flows` 的每次业务列变化都在同一事务内追加一条 Flow 事实；`agentflow flow verify` 重放事实并与
-> `flows` 比较。实施过程、取舍和验证见 [feature record](../plan/flow-activity-ledger.md)。
+一个 Flow 是一项任务；一次 Attempt 是这项任务的一轮执行。假设一项任务已经归档，后来又重新开工：调度器需要立刻知道该派发哪一轮，排查问题的人却需要看到上一轮为什么结束。前者读 PostgreSQL 的 `flows` 当前行，后者读同一 Flow 按版本追加的事实。重新开工会改变当前行，原来的归档事实仍属于原 Attempt。[创建与状态转换](../../app/persistence/flows.py#L62-L91) · [重新开工后保留原归档的测试](../../tests/test_console_archive.py#L219-L269)
 
-## 1. 目标与范围
+## 一条状态、一本账、几种不同的历史
 
-目标是让每个 Flow 的业务事实只有一个可信来源：
-
-- **账本**：`console_activity` 中由业务事务写入的 Flow 事实行，只追加、不可改；
-- **状态表**：`flows`，是账本在同一事务内更新的投影，业务判断、加锁和唯一约束继续读它；
-- **其他状态**：Job、当前交付、反馈、Worker、对账进度等由各自的仓储维护，不由账本重建。
-
-范围只覆盖 `flows` 这一张表。按顺序重放某个 Flow 的事实，得到与 `flows` 当前行在比较列上一致的结果。
-
-不在范围内：
-
-- 重建当前交付或 `jobs`、`review_*`、`workers` 等表；
-- 把租约、心跳、claim、分页游标、退避时间写入账本；
-- 把账本当作灾难恢复手段。其他表丢失后，只凭账本无法恢复执行与交付；
-- 改变控制台时间线、HTTP API、Worker 协议或 GitHub 行为。
-
-## 2. 数据分类
-
-PostgreSQL 仍是唯一运行时数据库。全部表按职责分为五类，每张表只属于一类：
-
-| 类别 | 含义 | 表 |
-|---|---|---|
-| Flow 事实账本 | 只追加的业务事实，Flow 状态的唯一可信来源 | `console_activity` 中 `source='flow'` 且 `kind` 属于[事实目录](#6-事实目录)的行 |
-| Flow 状态表 | 账本的同事务投影，供判断、加锁和约束使用 | `flows` |
-| 业务状态与专用证据 | 各自领域的权威事实，账本只引用其 ID | `attempts`、`jobs`、`flow_executions`、`flow_tool_calls`、`execution_stops`、`result_applications`、`result_effects`、`events`、`review_versions`、`review_buffers`、`review_batches`、`runtime_settings`、`project_destinations`、`worker_file_links` |
-| 协调数据 | 谁占用什么、处理到哪里、下次何时处理；不是业务事实 | `workers`、`reconcile_checks`、`project_projections`、`console_sync`、`console_installation_backoff`，以及 `jobs` 的租约、心跳、准备和核验退避列、`events` 的消费 claim 列 |
-| 展示投影与采集归档 | 看板与历史展示 | `console_flows`，以及 `console_activity` 中的展示快照和采集记录；待交付的用户指令除外 |
-
-几点说明：
-
-- [追加任务](../../app/persistence/agent_inputs.py)以 `console_activity.source='agent_task'` 记录原文和所属 Attempt，`awaiting_agent` 标记待交付。取走消息与冻结任务共用事务。这些行参与调度，但不属于 Flow 状态账本。`flow_input_images` 按 Flow 和内容引用保存输入图片；`worker_file_links` 是 worker 文件的登记，两者用途不同。
-- `amp_thread_archives` 按 worker/thread 保存归档请求，属于协调数据；请求不证明远端 thread 已归档。
-- `jobs` 同时含业务事实（种类、终态结果、接收与应用时间）和协调列（lease、heartbeat、
-  assignment token）；`events` 同时含原始事件和消费 claim。两张表整体归“业务状态与专用证据”，
-  其中的协调列按“协调数据”对待。
-- 协调数据并非都可以随意丢弃。例如 `workers` 的 generation 参与派发围栏。它们不进入账本的原因是
-  不描述 Flow 的业务进展，而且写入频繁。
-- `events`、`jobs.result_payload`、`result_applications`、`result_effects`、`flow_tool_calls`、
-  `review_versions` 已经是各自领域的只追加证据。Flow 事实只保存它们的 ID，不复制正文，
-  避免同一事实存两份。
-- `console_activity` 是混合表。本设计只把其中一部分行定义为账本，其余行的写入与读取保持不变，
-  见[第 3 节](#3-账本之前的实现)。
-
-## 3. 账本之前的实现
-
-实施前，`console_activity` 有四类行，依据见[建表脚本](../../app/persistence/console_schema.py)、
-[ActivityStore](../../app/persistence/activity.py)和[推理通知](../../app/persistence/inference_notices.py)：
-
-| 行 | `source` / `kind` | 写入方 | 性质 |
-|---|---|---|---|
-| Flow 证据 | `flow` / `archive`、`merge`、`archive_correction` | 业务事务调用 `ActivityStore.append_flow` | 不可变事实；触发器拒绝更新与删除，每个 Attempt 每种至多一条 |
-| 状态快照 | `flow` / `state`、`baseline` | 数据库触发器 `console_refresh` | 展示数据；正文是 `console_facts` 视图的前后快照 |
-| 推理通知 | `flow` / `inference_exhausted` | `InferenceNoticeStore.append` | 按批次保留最新版本的通知 |
-| 采集内容 | `issue.*`、`pr.*`、`worker` 等 | 控制台同步器与 webhook 观察 | GitHub 与 Worker 内容的展示版本，按 digest 去重 |
-
-PR #171 已把 Flow 状态写入收拢到 `FlowStore.transition(flow, FlowEvent)`，合法转换由领域函数
-`decide_flow_state` 决定；但除归档外，转换只更新 `flows`，记录仍由触发器事后生成的 `state` 快照代替，
-不知道是哪个事件引起变化。标题、命名 Job 指针和 attempt 指针仍由各处直接 `UPDATE flows`。
-
-其他相关事实：
-
-- 每个 Flow 的行按 `version` 严格递增。`version` 在锁住 `console_flows` 对应行后分配，
-  与该行的 `activity_version` 同事务更新。
-- `console_activity.flow_id` 的外键指向 `console_flows`。`flows` 插入时，触发器在同一事务内
-  创建 `console_flows` 行，所以新 Flow 的第一条事实可以紧跟插入写入。
-- 控制台时间线查询排除 `source='flow'` 的全部行。
-
-## 4. 账本
-
-### 4.1 哪些行是账本
-
-账本是 `console_activity` 中 `source='flow'`、且 `kind` 不是 `state`、`baseline`、`inference_exhausted`
-的行。种类有四组：
-
-- **起点**：`created`（新 Flow）、`snapshot`（账本之前的存量 Flow）；
-- **状态转换**：`FlowEvent` 的值，如 `job_enqueued`、`result_failed`、`attempt_started`；
-  其中 `ATTEMPT_ARCHIVED` 由已有的 `archive` 证据行记录，不另写一行；
-- **归档后证据**：`merge`、`archive_correction`；
-- **标题**：`titled`。
-
-`FlowEvent` 的值因此是持久化的种类名，不能改名。
-
-### 4.2 行格式
-
-事实沿用表的现有列，不新增列：
-
-| 列 | 事实行中的含义 |
+| 想知道什么 | 应该读哪里 |
 |---|---|
-| `flow_id`、`version` | 所属 Flow 与该 Flow 内的严格递增序号；重放顺序即 `version` 顺序 |
-| `attempt_id` | 事实所属 Attempt；`attempt_started` 属于它开启的新 Attempt |
-| `key` | 事实身份：`archive`、`merge`、`archive_correction`、`attempt_started` 为 `flow:<id>:attempt:<id>:<kind>`；起点为 `flow:<id>:<kind>`；其余为 `flow:<id>:fact:<version>` |
-| `kind` | 事实种类，决定如何改变 `flows` 行 |
-| `occurred_at` | 业务时间：即该次写入的 `updated_at`；`archive` 的该值同时是 `archived_at` |
-| `observed_at` | 数据库写入时间 |
-| `author` | 固定为 `AgentFlow` |
-| `title` | 供 CLI 阅读的固定中文标题，不参与重放 |
-| `body` | 空。任务原文只在详情中读取，不进入活动正文；起点事实用 `task_digest` 记录它的 SHA-256 |
-| `metadata` | 该种类的结构化字段，见[第 6 节](#6-事实目录) |
-| `digest` | 内容摘要，沿用现有计算方式 |
+| 任务现在能不能继续？当前执行是哪一轮？ | `flows.state` 和 `flows.current_attempt_id`。工作流在事务里锁住当前行后作决定。 |
+| 哪个业务事件改变了任务状态？ | `console_activity` 中 `source='flow'` 的事实行，排除 `state`、`baseline`（展示快照）和 `inference_exhausted`（推理通知）。 |
+| 哪个 PR 属于这轮执行？作业失败的原始结果是什么？ | 交付字段归 `attempts`，派发和终态结果归 `jobs`。心跳、租约、同步游标用于协调工作，不参与 Flow 重放。 |
+| 用户和 Agent 说了什么？ | 控制台读已采集的活动正文，实时编码记录从 [Worker 会话 API](conversation-api.md) 读取。待交付的追加任务也保存在活动表中，但由[追加任务存储](../../app/persistence/agent_inputs.py)负责交付。 |
 
-事件名本身就是起因，所以不再单独记录 `cause`。首期不记录 `job_id`、`pr_number`、webhook 投递 ID
-或操作者，理由见 feature record。
+表名中的 `console_` 容易让人误以为整张表都能重建。实际上，`console_flows` 是看板投影；`console_activity` 混存不可变事实、展示快照和从外部采集的记录。应按 `source` 和 `kind` 判断一行的用途。[事实筛选与历史读取](../../app/persistence/activity.py#L150-L186) · [数据库约束](../../app/persistence/console_schema.py#L72-L92)
 
-### 4.3 约束
+<a id="5-状态表-flows"></a>
 
-- **不可变**：触发器 `console_preserve_evidence` 拒绝更新和删除任一账本行；判断方式与
-  `ActivityStore` 一致，按“除展示快照和通知外的 `source='flow'` 行”识别。
-- **唯一性**：`created`、`snapshot` 每个 Flow 合计至多一条（`ux_console_flow_origin`）；
-  `attempt_started` 每个 Attempt 至多一条（`ux_console_flow_attempt_start`）；`archive`、`merge`、
-  `archive_correction` 沿用每个 Attempt 至多一条的既有索引。其余转换一轮内可以出现多次。
-- **不需要幂等键**：事实只在持有 Flow 行锁、条件更新成功后写入，与状态同事务提交。
+## 当前行中哪些字段能由账本解释？
 
-## 5. 状态表 `flows`
+`created` 给出 `repo`、`issue_number`、`installation_id`，选中首个 Attempt，并以发生时间确定 `created_at`。直接创建的任务另有 `task_content`；事实只存其 SHA-256 摘要 `task_digest`，校验时仍需提供原文。`titled` 给出 `title`。状态转换决定 `state`、`archive_reason`、`archive_summary` 和 `updated_at`；`archive` 设置 `archived_at`，保留当前 Attempt；`attempt_started` 选中新 Attempt 并清空归档字段。`titled`、`merge`、`archive_correction` 不推进生命周期的 `updated_at`。[比较列与重放规则](../../app/domain/flow_policy.py#L85-L185)
 
-| 列 | 归属 | 由哪种事实改变 |
-|---|---|---|
-| `id` | 身份 | 插入时由数据库分配 |
-| `repo`、`issue_number`、`task_content`、`installation_id`、`created_at` | 账本 | `created`；存量 Flow 为 `snapshot` |
-| `state`、`archive_reason`、`archive_summary` | 账本 | 状态转换事实；`archive_correction` 更正结论 |
-| `current_attempt_id` | 账本 | `created` 选中首次 Attempt；`attempt_started` 切换到新 Attempt；归档不清空 |
-| `archived_at` | 账本 | `archive` 设置，`attempt_started` 清空 |
-| `title` | 账本 | `titled` |
-| `updated_at` | 账本 | 最后一条状态转换事实的 `occurred_at`；`titled`、`merge`、`archive_correction` 不推进 |
-| `title_job_id` | 指针 | `FlowStore.set_title_job`，不由账本重建 |
-| `is_issue_owner` | Issue 展示归属 | 创建/恢复时选择，不由生命周期账本重放。 |
-| `history_only` | 迁移标识 | 旧 Flow 只读，不作为当前运行数据重放。 |
-| `child_flow_id` | Flow 引用 | NULL 或缺省在领域模型中解释为自身，不表示已经派生子任务，不参与状态重放。 |
+`id` 是数据库分配的身份。命名作业指针 `title_job_id`、Issue 展示归属 `is_issue_owner`、历史只读标志 `history_only` 和 Flow 引用 `child_flow_id` 都不在比较列里。因此 `verify` 成功只证明账本解释了指定字段，不能用它证明 Worker、PR 或展示同步正常。[校验实现](../../app/persistence/flows.py#L209-L232)
 
-`delivery_*` 保存在各自的 Attempt 上。历史 PR 的合并证据可以更正原 Attempt 的结论，不会更新新 Attempt 的交付或 Flow 状态。
-控制台卡片的更新时间取多表最大值，已包含 `attempts.updated_at`。
+<a id="6-事实目录"></a>
 
-表上的约束全部保留。投影更新违反约束时整个事务回滚，事实也不会留下。
+## 事实目录：每个种类记录了什么？
 
-## 6. 事实目录
+| `kind` | `metadata` 的关键字段与含义 |
+|---|---|
+| `created` | `repo`、`issue_number`、`installation_id`、`task_digest`；从 `queued` 开始。`snapshot` 是重放器兼容的另一种起点，携带比较列（原文用摘要代替）。当前服务不会补造缺失的起点。 |
+| `job_enqueued`、`job_claimed`、`assignment_requeued`、`execution_uncertain`、`result_failed`、`delivery_baseline_rejected`、`delivery_applied`、`finalization_requested`、`cleanup_applied`、`retry_requested` | 保存写入后的 `state`、`archive_reason`、`archive_summary`。合法的前置状态由领域规则决定。 |
+| `attempt_started` | 同上，但 `attempt_id` 指向新开的一轮。 |
+| `archive` | `repo`、`pr_number`、`archive_reason`、`archive_summary`、`merged_at`、`merge_commit_sha`。它本身就是 `attempt_archived` 的证据，不另写同义行。 |
+| `merge` | `repo`、`pr_number`、`merged_at`、`merge_commit_sha`、`origin`；补记已归档 PR 的合并证据，不改变 Flow 状态。 |
+| `archive_correction` | 合并证据加 `before`、`after`、`archived_at`。对仍为当前且已归档的 Attempt，更正当前行的归档原因。 |
+| `titled` | `title`、`job_id`；仅采纳仍属于当前 Attempt 的指定命名作业的结果。 |
 
-| `kind` | `metadata` | 对 `flows` 的改变 | 写入方 |
-|---|---|---|---|
-| `created` | `repo`、`issue_number`、`installation_id`、`task_digest` | 插入行：`queued`、首个 Attempt | `FlowStore.create_flow` |
-| `snapshot` | 除 `task_content` 外账本拥有的全部列，以及 `task_digest` | 无；存量 Flow 的重放起点 | schema 初始化的最后一步 |
-| `FlowEvent` 的值（`attempt_archived` 除外） | `state`、`archive_reason`、`archive_summary`（写入后的值） | 按 `decide_flow_state`；`updated_at=occurred_at` | `FlowStore.transition` |
-| `attempt_started` | `state` | 选中新 Attempt，清空归档字段 | `FlowStore.transition` |
-| `archive` | 现有字段：`repo`、`pr_number`、`archive_reason`、`archive_summary`、`merged_at`、`merge_commit_sha` | `archived`，`archived_at=occurred_at` | `FlowStore.archive_attempt` |
-| `merge` | 现有字段 | 无 | `FlowStore.observe_archived_merge` |
-| `archive_correction` | 现有字段 | 该 Attempt 仍为当前执行且已归档时 `archive_reason=succeeded` | `FlowStore.observe_archived_merge` |
-| `titled` | `title`、`job_id` | `title` | `FlowStore.set_title` |
+[事件与状态规则](../../app/domain/flow_policy.py#L13-L93) · [转换字段](../../app/persistence/flows.py#L177-L207) · [归档证据](../../app/persistence/flows.py#L434-L463) · [迟到合并与更正](../../app/persistence/flows.py#L482-L550)
 
-各事件的合法来源状态见 [`flow_policy.py`](../../app/domain/flow_policy.py)；状态转换事实只保存结果列，
-来源状态由重放时的前一状态给出。
+每行有 `flow_id`、`attempt_id`、`kind` 和该 Flow 的活动 `version`。**重放按版本，不按时间**：`occurred_at` 是业务发生时间，迟到的合并证据可以比已写入的归档更早；`observed_at` 是观察时间。`author` 固定为 `AgentFlow`，`title` 用于展示，`body` 不存任务原文，`digest` 是活动内容摘要，重放读取结构化的 `metadata`。[事实的构造与排序](../../app/persistence/activity.py#L105-L160)
 
-## 7. 写入路径
+`key` 有三种形状：起点为 `flow:<id>:<kind>`，`attempt_started` / `archive` / `merge` / `archive_correction` 为 `flow:<id>:attempt:<id>:<kind>`，可重复的转换为 `flow:<id>:fact:<version>`。同一 Flow 至多一个起点；上述四种按 Attempt 标识的事实每轮每种至多一条。数据库拒绝修改、删除事实；同一轮同种事实重复追加时，时间和元数据相同则不再写，不同则报冲突。[写入去重](../../app/persistence/activity.py#L116-L149) · [索引与触发器](../../app/persistence/console_schema.py#L72-L92)
 
-`flows` 的写入全部位于 [`app/persistence/flows.py`](../../app/persistence/flows.py)，由边界测试检查：
+<a id="7-写入路径"></a>
 
-```text
-FlowStore.transition(flow, event)          调用方已持有 lock_workflow
-1. state = decide_flow_state(...)           None：守卫空操作，不写任何行
-2. 条件 UPDATE flows                        行数不符：报错，事务回滚
-3. append_flow(kind=event, metadata=结果)   锁 console_flows → 分配 version → 插入
+## 一次状态变化如何落库？
+
+1. 工作流持有 Flow 行锁，把业务事件交给 `FlowStore.transition`。`decide_flow_state` 区分三件事：非法转换报错，守卫判定无动作则原样返回，合法事件即使目标状态同名也会写入并更新时间。[三种情况的测试](../../tests/test_flow_states.py#L36-L106)
+2. 存储层以当前状态和 Attempt 为条件更新 `flows`，再由 `ActivityStore.append_flow` 锁住 `console_flows` 的版本头，追加事实。事务失败时两者一起回滚；不会留下只有状态没有解释的提交。[普通转换](../../app/persistence/flows.py#L123-L186)
+3. 创建时先拿到 Flow 和首个 Attempt 的 ID 才能写 `created`。归档顺序相反：先写带结论的 `archive`，再用同一业务时间推进当前状态。归档证明业务已结束，不能据此推断 Worker 已经完成清理。[归档事务](../../app/persistence/flows.py#L434-L463) · [归档证据失败时回滚](../../tests/test_flow_archive_activity.py#L182-L218)
+
+例如，迟到的 webhook 表明一条此前判为 `abandoned` 的 PR 其实在归档前已合并。系统按原仓库、PR、合并时间和提交核对证据；只有 `merged_at + 1 秒 < archived_at` 才据此更正原结论。如果用户已经重新开工，旧轮次保留 `merge` 和 `archive_correction`，新轮次的状态、交付不受影响。冲突的合并证据不能覆盖旧行。[按实际合并时间判断的测试](../../tests/test_flow_archive_activity.py#L100-L180)
+
+<a id="8-重放与校验"></a>
+
+## 排查：先看历史，再校验当前行
+
+```sh
+agentflow flow history 42
+agentflow flow verify 42
 ```
 
-- **先状态、后事实**：条件更新成功后才追加事实，所以调用方捕获“状态已变化”错误时不会留下孤立事实。
-  两者同事务提交，顺序不影响一致性。
-- **创建**：`flows` 的 ID 由数据库分配，同一事务内先插入行，再追加 `created`。
-- **归档**：`archive_attempt` 先追加 `archive`，再以同一时间调用 `transition(ATTEMPT_ARCHIVED)`。
-- **标题与指针**：`set_title` 在条件更新成功后追加 `titled`；`set_current_attempt`、`set_title_job`
-  只改指针列，不产生事实。
-- **锁顺序不变**：Worker 行 → `flows` 行 → `console_flows` 行。
-- **同事务多条事实**：如合并时先 `finalization_requested` 再 `archive`，两条事实的 `version` 连续。
+`history` 按版本列出跨 Attempt 的事件摘要，也会包含快照和通知。`verify` 则在共享锁下取出当前行，只把事实交给 `replay_flow`：从起点核对任务摘要，依序检查 Attempt 归属和状态转换是否合法，再比较上文列出的字段。省略 ID 会检查全部 Flow；有差异或无法重放时以非零退出，只报告不修复。`history_only` 的旧 Flow 单独报告为跳过，不计入通过数。[CLI](../../app/cli.py#L410-L453) · [重放函数](../../app/domain/flow_policy.py#L117-L185)
 
-## 8. 重放与校验
+<a id="12-代价与边界"></a>
+<a id="13-后续方向"></a>
 
-领域层的纯函数 `replay_flow(flow_id, facts, task_content=...)` 从最后一条起点开始依次应用事实。
-`task_content` 由调用方传入当前行的值，重放先核对它的摘要与起点的 `task_digest` 一致。状态转换事实用
-`decide_flow_state` 重新判断：前一状态下该事件必须生效，且结果等于记录的 `state`，否则报错。
+## 读不到的证据不能从状态反推
 
-`FlowStore.verify(flow_id)` 在 `FOR SHARE` 锁住 `flows` 行后读取事实并重放，返回以下列中不一致的项：
-`repo`、`issue_number`、`task_content`、`installation_id`、`title`、`state`、`current_attempt_id`、
-`archive_reason`、`archive_summary`、`archived_at`、`created_at`、`updated_at`。
-
-`agentflow flow verify [FLOW_ID]` 不带参数时检查所有新版 Flow，遇到差异以非零状态退出，不自动修复。迁移时已核对旧库账本并保留原始事件格式；命令会逐条说明跳过的只读 Flow，不把它们计入重放成功数。测试夹具对新版 Flow 运行同一校验。
-
-## 9. 存量数据
-
-更早的版本曾为存量 Flow 补写 `snapshot` 作为账本起点。当前服务不再根据 `flows` 行生成历史证据；新版 Flow 缺少起点时，重启后 `flow verify` 仍报告错误。旧库的账本由[离线迁移](../operations/upgrade.md)在切换前核对。
-
-- 重放从 `snapshot` 开始；它之前的状态变化不可还原，与现有 `baseline` 行的说明一致。
-- 已有的 `archive`、`merge`、`archive_correction` 事实保持原样，仍用于历史 PR 归属和归档检查。
-- 回滚到旧版本后，旧代码继续写 `flows` 而不写事实；再次升级时这些 Flow 已有起点，不会重新补录，
-  `flow verify` 会报告差异。处理方式见 feature record。
-
-## 10. 读路径
-
-读路径不变：
-
-- 调度、对账、API 和 CLI 继续读 `flows`；
-- 控制台卡片继续读 `console_flows.facts`，时间线继续排除 `source='flow'` 的行；
-- `agentflow flow history <id>` 按版本顺序列出该 Flow 的事件摘要，包括重新开工前后的事实、状态快照和通知；不输出内部执行编号或原始快照 JSON。
-
-## 11. 不变量
-
-1. `flows` 的账本列只经写入口改变；每次改变恰好对应一条事实，两者同事务提交。
-2. 事实行不可更新、不可删除。
-3. 同一 Flow 的事实 `version` 严格递增，重放顺序唯一。
-4. 从起点重放得到的结果与 `flows` 行在比较列上一致。
-5. 守卫空操作不写事实；账本里没有“什么都没改变”的行。
-6. 事实只引用其他表的 ID，不复制 Job 结果、PR 正文或反馈内容。
-7. 协调数据不进入账本。
-
-## 12. 代价与边界
-
-- 每次状态转换多写一行事实。触发器的 `state` 展示行暂时保留，所以一次转换写两行；
-  停止生成 `state` 行属于后续工作。
-- 账本表名带 `console_` 前缀，外键指向投影表 `console_flows`；`FlowStore` 通过
-  `ActivityStore` 写账本，而该模块同时引用控制台合同。这些是复用现有表的代价，
-  拆成独立表属于后续工作。
-- 事实的 `metadata` 永久保留。字段含义以后需要变化时只能新增种类或字段，旧行由读取方兼容。
-- 账本不记录 Job、交付和反馈的内部变化。“为什么进入 blocked”的完整答案仍需要读 `jobs`。
-
-## 13. 后续方向
-
-以下各项需要各自的计划，不属于本设计的承诺范围：
-
-- 停止生成触发器 `state` 行，或在控制台“执行记录”中展示事实；
-- 把交付（PR 打开、关闭、合并）和 Job 的粗粒度节点（入队、结果接收、结果应用）纳入账本；
-- 把 Flow 事实迁到独立的表，改名并让外键指向 `flows`；
-- 为[可派生 Flow](derivable-flows.md) 的 `FlowLink`、`FlowWait`、`FlowResult` 增加事实种类。
+账本可以解释为什么 Flow 进入某个状态，却无法从任务摘要恢复丢失的正文，也不能重建 Worker 上的工具输出。若缺少起点，重启不会用当前状态伪造一段历史；若怀疑作业错误，继续查对应 Attempt 的 `jobs`，若想看 Agent 当时的对话，转到[会话走查](../feature-walkthroughs/conversation.md)。[缺失起点的回归测试](../../tests/test_flow_states.py#L319-L337)
