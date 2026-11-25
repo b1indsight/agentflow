@@ -271,6 +271,9 @@ async def test_initial_corrects_completion_in_original_session(
         journal.assignment.task, assignment_secret(), tool_caller=Caller(),
     )
     assert len(agent.started) == 1
+    # The agent can discover the checkout's instructions without a second copy in its prompt.
+    prompt, workspace = agent.started[0]
+    assert (workspace / "AGENTS.md").read_text() not in prompt
     assert not agent.schema.exists()
     if repair_base == "captured" and problem != "changed-after-delivery":
         assert result.exit_code == 0 and result.pushed and result.open_pr_call_id

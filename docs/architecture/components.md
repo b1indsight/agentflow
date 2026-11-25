@@ -481,7 +481,7 @@ Project 状态更新由独立 ProjectSync 投影循环负责，远端失败不�
 
 当前 `ContextBuilder` 是纯字符串组件：
 
-- initial prompt 包含 issue 标题/正文、首个 `AGENTS.md` 或 `CLAUDE.md`、VCS 指引和硬约束；
+- initial prompt 包含任务正文、VCS 指引和硬约束；仓库指令文件由编码工具自行加载；
 - revision prompt 包含 Judge instruction、冻结批次的 item/version、inline path/diff hunk/original commit id、
   原 Issue、交付基线、此前 summary/open_points、VCS 指引和 `RevisionCodingOutput` 输出约定；有冻结 PR context 时一并传入。
 

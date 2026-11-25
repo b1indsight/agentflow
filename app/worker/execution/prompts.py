@@ -46,13 +46,10 @@ _INITIAL_OUTPUT_INSTRUCTION = (
 )
 
 
-def build_initial_prompt(
-    task_content: str, repo_conventions: str, vcs_guidance: str
-) -> str:
+def build_initial_prompt(task_content: str, vcs_guidance: str) -> str:
     """Render the supplied task without assuming a GitHub Issue source."""
     parts = [
         f"# Task\n{task_content}\n",
-        f"# Repo conventions\n{repo_conventions or '(none provided)'}\n",
         f"# VCS guidance\n{vcs_guidance}\n",
         _HARD_CONSTRAINTS,
         _PROGRESS_INSTRUCTION,
@@ -120,16 +117,13 @@ def build_revision_retry_prompt(status: str, instruction: str) -> str:
     return "\n\n".join(parts)
 
 
-def build_revision_prompt(
-    task: RevisionTask, repo_conventions: str, *, baseline_sha: str | None,
-) -> str:
+def build_revision_prompt(task: RevisionTask, *, baseline_sha: str | None) -> str:
     """Supply enough frozen context to resume or rebuild a session in the original repo."""
     if task.purpose == "revise" and baseline_sha is None:
         raise ValueError("revise prompt requires the fetched coding baseline")
     feedback = "\n".join(_format_item(i) for i in task.feedback) or "(no inline items)"
     parts = [
         f"# Original task\n{task.task_content}\n",
-        f"# Repo conventions\n{repo_conventions}\n",
         (f"# Delivery\n{task.repo} PR #{task.pr_number}; branch {task.branch}; "
         f"base {task.base_branch}; PR observed head: {task.expected_head_sha}\n"),
         f"# Previous summary\n{task.previous_summary}\n",

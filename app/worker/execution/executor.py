@@ -169,7 +169,6 @@ class WorkerExecutor:
             return _vcs_failure(task.resume_session_id, "", "bootstrap", "repository filesystem preparation failed")
         prompt = build_initial_prompt(
             task.task_content,
-            self._repo_conventions(workspace),
             (f"{pending_work}Continue on the existing pushed branch {task.branch}. Push any new changes; "
              "if no changes are needed, keep the current commit." if task.previous_head_sha
              else agent_guidance(task.branch, remote=task.remote)),
@@ -340,9 +339,7 @@ class WorkerExecutor:
             if task.retry_status is not None:
                 prompt = build_revision_retry_prompt(task.retry_status, task.instruction)
             else:
-                prompt = build_revision_prompt(
-                    task, self._repo_conventions(workspace), baseline_sha=result.baseline_sha,
-                )
+                prompt = build_revision_prompt(task, baseline_sha=result.baseline_sha)
             schema_path = _write_output_schema(RevisionCodingOutput)
             run = None
             if task.session_id:
@@ -413,14 +410,6 @@ class WorkerExecutor:
             if schema_path is not None:
                 schema_path.unlink(missing_ok=True)
         return result
-
-    @staticmethod
-    def _repo_conventions(workspace: Path) -> str:
-        for name in ("AGENTS.md", "CLAUDE.md"):
-            path = workspace / name
-            if path.exists():
-                return path.read_text()
-        return ""
 
 
 def _github_capability(secret: AssignmentSecret | None, repository: str) -> GitHubCapability:
