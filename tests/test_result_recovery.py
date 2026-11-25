@@ -155,7 +155,7 @@ async def test_cancel_before_terminal_keeps_executor_slot_until_result_ack(scena
     assert store.jobs.get_job(job.id).state is JobState.RUNNING
     assert store.stops.has_pending(job.flow_id)
     assert await apply_result(coordinator(store, github), job, result) is JobState.DONE
-    assert store.flows.get_flow(job.flow_id).state is FlowState.FINALIZING
+    assert store.flows.get_flow(job.flow_id).state is FlowState.ARCHIVED
     assert store.jobs.get_job(job.id).result_applied_at is not None
     assert store.flows.get_flow_execution(job.flow_id).released_at is None
     assert store.stops.has_pending(job.flow_id)
@@ -282,7 +282,7 @@ async def test_closed_pr_after_lost_creation_response_finishes_without_new_write
     assert await apply_result(subject, job, result) is JobState.DONE
     assert store.deliveries.get_delivery(job.flow_id).state is DeliveryState.CLOSED
     assert store.jobs.get_job(job.id).result_applied_at is not None
-    assert store.flows.get_flow(job.flow_id).state is FlowState.FINALIZING
+    assert store.flows.get_flow(job.flow_id).state is FlowState.ARCHIVED
     assert store.stops.has_pending(job.flow_id)
     assert store.flows.get_flow_execution(job.flow_id).released_at is None
     assert len(github.opened) == 1
@@ -394,9 +394,7 @@ async def test_retired_result_reconciles_dispatched_comment_without_resending(
         [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION, JobKind.ARCHIVE] if transition == "merge"
         else [JobKind.INITIAL, JobKind.INFERENCE, JobKind.REVISION]
     )
-    assert store.flows.get_flow(job.flow_id).state is (
-        FlowState.ARCHIVED if transition == "merge" else FlowState.FINALIZING
-    )
+    assert store.flows.get_flow(job.flow_id).state is FlowState.ARCHIVED
     assert store.flows.get_flow_execution(job.flow_id).released_at is None
 
 
@@ -460,7 +458,7 @@ async def test_cancel_during_remote_lookup_does_not_authorize_a_comment(
         await apply_result(coordinator(store, github), job, result)
     assert store.stops.has_pending(job.flow_id)
     await apply_result(coordinator(store, github), job, result)
-    assert store.flows.get_flow(job.flow_id).state is FlowState.FINALIZING
+    assert store.flows.get_flow(job.flow_id).state is FlowState.ARCHIVED
     assert github.comments == []
     assert store.jobs.get_job(job.id).result_applied_at is not None
     assert store.stops.has_pending(job.flow_id)

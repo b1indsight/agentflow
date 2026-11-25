@@ -270,9 +270,13 @@ def test_resume_starts_new_attempt_without_overwriting_archive_or_conversation(s
     assert second_archive is not None and second_archive.metadata["archive_reason"] == "abandoned"
 
 
-def test_finalizing_waits_for_stop_receipt_before_archiving_and_releasing_issue(store):
+def test_archive_is_visible_before_stop_receipt_and_only_original_worker_gets_thread(store):
     # Cancelling an in-flight executor retains its slot until a real stop receipt arrives.
     flow, job = running(store)
+    attempt = store.flows.get_current_attempt(flow)
+    thread = "T-01a15d70-eb3d-722c-9f6d-563dd65eb0a8"
+    attempt.codex_session_id = thread
+    store.flows.update_attempt(attempt)
     control = ControlService(database=store.database)
     control.cancel(flow)
     stop = store.stops.pending("w")
@@ -280,16 +284,18 @@ def test_finalizing_waits_for_stop_receipt_before_archiving_and_releasing_issue(
     job_before = store.jobs.get_job(job.id)
     console = ConsoleStore(store.database)
     detail = console.detail(flow.id)
-    assert detail.lifecycle is FlowState.FINALIZING and detail.phase == "running"
-    assert detail.archived_at is None
-    assert ActivityStore(store.database).archived(flow.id, flow.required_attempt_id) is None
-    assert store.flows.get_active_flow(flow.repo, flow.issue_number).id == flow.id
-    assert [item.id for item in console.flows(q="is:active").items] == [flow.id]
+    assert detail.lifecycle is FlowState.ARCHIVED and detail.phase == "archived"
+    assert detail.archived_at is not None and binding.released_at is None
+    assert store.flows.get_active_flow(flow.repo, flow.issue_number) is None
+    assert console.flows(q="is:active").items == []
+    assert store.flows.take_thread_archives("another-worker", 1) == []
+    assert store.flows.take_thread_archives("w", 1) == [thread]
     control.cancel(store.flows.get_flow(flow.id))
+    assert store.flows.take_thread_archives("w", 1) == []
     assert store.stops.pending("w") == stop
     assert store.flows.get_flow_execution(flow.id) == binding
     assert store.jobs.get_job(job.id) == job_before
-    with pytest.raises(ValueError, match="awaiting confirmed stop"):
+    with pytest.raises(ValueError, match="explicit resume"):
         control.retry(store.flows.get_flow(flow.id))
     receipt = ExecutionStopped(**stop.fence().model_dump(), execution_nonce="owned")
     assert store.stops.confirm("w", receipt, "epoch")

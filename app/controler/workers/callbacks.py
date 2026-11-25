@@ -17,6 +17,7 @@ from app.contracts.protocol import (
     AcceptResultRequest,
     AcceptResultResponse,
     AcceptStop,
+    ArchiveAmpThread,
     Assignment,
     AssignmentArguments,
     CancelJob,
@@ -312,6 +313,8 @@ class ServerCallbacks:
         for stop in self.stops.pending_for_worker(self.worker_id):
             if stop.job_id not in self.starting:
                 await self._begin_stop(stop)
+        for thread in self.coordinator.flows.take_thread_archives(self.worker_id, 1):
+            await self._send(ArchiveAmpThread(**call_header(), method="worker.archive_amp_thread", thread_id=thread))
         for job_id, (job, token, task) in list(self.preparing.items()):
             # Claim release precedes the journal ACK. Keep same-Flow dispatch behind
             # that ACK on this connection's ordered writer, without holding a workspace.

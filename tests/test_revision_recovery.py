@@ -366,7 +366,7 @@ async def test_cancel_during_remote_verification_prevents_effects_and_commit(
 
     monkeypatch.setattr(Repository, "fetch_ref", cancel)
     await subject.results.apply(job.id)
-    assert store.flows.get_flow(flow.id).state is FlowState.FINALIZING
+    assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert github.comments == [] and github.review_requests == []
     assert store.deliveries.get_delivery(flow.id).head_sha == "baseline"
 

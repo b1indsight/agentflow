@@ -64,6 +64,7 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
 
     async def execute(args, *, cwd, env, input_text, **kwargs):
         assert cwd == tmp_path
+        assert "--no-archive-after-execute" in args
         assert "bot-secret" not in " ".join(args) and "broker-secret" not in input_text
         assert "caller_owned" in input_text and "task" in input_text
         assert Path(input_text.splitlines()[-1]).read_bytes() == base64.b64decode(PNG_IMAGE.split(",")[1])
@@ -240,6 +241,25 @@ def test_environment_keeps_amp_login_but_excludes_ambient_credentials():
     assert environment["OPENAI_API_KEY"] == "other" and environment["AMP_URL"] == "https://amp.example"
     assert not {"GH_TOKEN", "AGENTFLOW_WORKER_TOKEN", "GIT_CONFIG_PARAMETERS",
                 "SSH_AUTH_SOCK", "AMP_CURRENT_THREAD_ID"} & environment.keys()
+
+
+async def test_interrupted_inference_archives_only_its_initialized_thread(monkeypatch, tmp_path):
+    # A killed execute process cannot reach its native auto-archive step.
+    binary = tmp_path / "amp"
+    init = stream().splitlines()[0].decode()
+    binary.write_text(f'''#!{sys.executable}
+import pathlib, sys, time
+if sys.argv[1:3] == ["threads", "archive"]:
+    pathlib.Path({str(tmp_path / "archived")!r}).write_text(sys.argv[3])
+    sys.exit(1)  # Cleanup failure must not replace the inference timeout.
+assert "--no-archive-after-execute" not in sys.argv
+print({init!r}, flush=True)
+time.sleep(30)
+''')
+    binary.chmod(0o700)
+    monkeypatch.setattr("app.worker.execution.amp_agent.AMP_BIN", str(binary))
+    result = await AmpCodingAgent(trusted_host=True, timeout=1).start("infer", tmp_path)
+    assert result.failure_kind == "timeout" and (tmp_path / "archived").read_text() == THREAD
 
 
 async def test_process_supervisor_drains_both_pipes_and_bounds_output(monkeypatch, tmp_path):

@@ -297,6 +297,19 @@ class AmpCodingAgent(CodingAgent):
         return await attachment.read(root)
 
     @staticmethod
+    async def archive_thread(thread_id: str) -> None:
+        """Hide the specified Amp thread without changing an execution's result."""
+        try:
+            result = await AmpCodingAgent.run_process(
+                ["threads", "archive", thread_id, "--log-file", os.devnull], timeout=20,
+            )
+            if not (result.exit_code or result.timed_out or result.overflow):
+                return
+        except OSError:
+            pass  # Missing CLI or unavailable host: cleanup remains best effort.
+        logger.warning("Could not archive Amp thread {}", thread_id)
+
+    @staticmethod
     async def run_process(
         args: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
         input_text: str | None = None, timeout: float = 1200,
@@ -353,7 +366,7 @@ class AmpCodingAgent(CodingAgent):
                  asyncio.create_task(read(proc.stderr, stderr)),
                  asyncio.create_task(feed()), asyncio.create_task(proc.wait())]
         io = asyncio.gather(*tasks)
-        timed_out = overflow = False
+        timed_out = overflow = cancelled = False
 
         async def cleanup() -> None:
             for task in tasks:
@@ -388,17 +401,26 @@ class AmpCodingAgent(CodingAgent):
             timed_out = True
         except _OutputLimit:
             overflow = True
+        except asyncio.CancelledError:
+            cancelled = True
         finally:
             stopping = asyncio.create_task(cleanup())
-            cancelled = False
             while not stopping.done():
                 try:
                     await asyncio.shield(stopping)
                 except asyncio.CancelledError:
                     cancelled = True
             stopping.result()
-            if cancelled:
-                raise asyncio.CancelledError
+        if ("--execute" in args and args[:2] != ["threads", "continue"]
+                and (cancelled or ("--no-archive-after-execute" not in args
+                                   and (timed_out or overflow or proc.returncode)))):
+            # A killed CLI cannot finish auto-archiving; a cancelled start never returns its ID.
+            init = bytes(stdout.partition(b"\n")[0])
+            thread = _outcome(AmpProcessResult(init, b"", 1), None, timeout).session_id
+            if thread:
+                await AmpCodingAgent.archive_thread(thread)
+        if cancelled:
+            raise asyncio.CancelledError
         return AmpProcessResult(bytes(stdout), bytes(stderr), proc.returncode or 0, timed_out, overflow)
 
     async def _run(
@@ -441,8 +463,11 @@ class AmpCodingAgent(CodingAgent):
             args = (["threads", "continue", session_id] if session_id else []) + [
                 "--mcp-config", json.dumps(mcp), "--executor", "local",
                 "--visibility", "private", "--no-ide", "--no-notifications",
-                "--execute", "--stream-json", "--no-archive-after-execute", "--log-file", os.devnull,
+                "--execute", "--stream-json", "--log-file", os.devnull,
             ]
+            # Only coding assignments need to keep their native thread open across jobs.
+            if context is not None or session_id is not None:
+                args.append("--no-archive-after-execute")
             # Native continuation owns its model; only new threads use current settings.
             if session_id is None:
                 args.extend(["--model", model] if model is not None else ["--mode", "low"])

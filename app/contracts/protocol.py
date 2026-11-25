@@ -25,7 +25,7 @@ from pydantic import (
 
 from app.contracts.catalog import CatalogModel
 from app.contracts.console import Phase
-from app.contracts.conversation import ConversationError, HistoryPage, SessionId
+from app.contracts.conversation import AMP_THREAD_PATTERN, ConversationError, HistoryPage, SessionId
 from app.contracts.files import MAX_FILE_BASE64, FileError, FileId
 from app.contracts.input_images import InputImage
 from app.domain.context_models import ReviewContext
@@ -44,7 +44,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[32] = 32
+PROTOCOL_VERSION: Literal[33] = 33
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -505,6 +505,11 @@ class SyncSkills(ToolCall):
     source: SkillRepositorySource | None
 
 
+class ArchiveAmpThread(ToolCall):
+    method: Literal["worker.archive_amp_thread"]
+    thread_id: str = Field(pattern=AMP_THREAD_PATTERN)
+
+
 class RepositoryDemand(ToolCall):
     """Level-triggered capacity request; it grants no job or Flow ownership."""
 
@@ -675,7 +680,7 @@ class FlowToolResponse(ToolResult):
 # the only list of its members; directional parsing and _FIXED_METHODS derive from them.
 type WorkerCalls = (
     Assignment | StopExecution | ConversationQuery | FileQuery | InferenceRequest
-    | RecoveryRejected | RepositoryDemand | CatalogQuery | SyncSkills
+    | RecoveryRejected | RepositoryDemand | CatalogQuery | SyncSkills | ArchiveAmpThread
 )
 type WorkerResults = (
     ExecuteResult | StopResult | ConversationResult | FileResult | InferenceResult | ProvisionResult
@@ -749,7 +754,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[32]
+    protocol_version: Literal[33]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -956,7 +961,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[32]
+    protocol_version: Literal[33]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool
