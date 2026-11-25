@@ -4058,6 +4058,8 @@ test("conversation images load inline and fit the body on desktop and mobile", a
     "[普通文档](https://example.test/guide?file=sample.png)",
     "`https://images.example.test/code.png`",
     `![私有图片](/api/files/${privateId}#name=private.png)`,
+    // Worker rewrites a screenshot link to an opaque ID; only its fragment retains the extension.
+    `[卡片显示“编码已暂停”](/api/files/${privateId}#name=%E6%88%AA%E5%9B%BE.PNG)`,
     "图片随正文列宽调整。",
   ].join("\n\n");
   const referrers: (string | undefined)[] = [];
@@ -4121,7 +4123,9 @@ test("conversation images load inline and fit the body on desktop and mobile", a
     "naturalWidth",
     300,
   );
-  await expect(images).toHaveCount(5);
+  const screenshot = row.getByRole("link", { name: "卡片显示“编码已暂停”" });
+  await expect(screenshot.locator("img")).toHaveJSProperty("naturalWidth", 300);
+  await expect(images).toHaveCount(6);
   await expect(row.getByRole("img", { name: "运行截图" })).toHaveAttribute(
     "title",
     "运行截图",
@@ -6393,7 +6397,7 @@ for (const width of [1440, 390]) {
   test(`worker files open named editor tabs safely at ${width}px`, async ({
     page,
   }) => {
-    // File links, including links to bitmaps, stay inert until explicitly opened.
+    // Only image links are read before a file tab is explicitly opened.
     await page.setViewportSize({ width, height: 900 });
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -6484,18 +6488,6 @@ for (const width of [1440, 390]) {
                 : source,
       });
     });
-    await page.goto("/console/#flow/42/conversation");
-    await page.evaluate(() => {
-      // Vite removes the production CSP for HMR; retain its image restriction in this regression.
-      const policy = document.createElement("meta");
-      policy.httpEquiv = "Content-Security-Policy";
-      policy.content = "img-src 'self' data:";
-      document.head.append(policy);
-    });
-    await expect(
-      page.getByRole("tab", { name: "文件", exact: true }),
-    ).toHaveCount(0);
-    const fileTab = page.getByRole("tab", { name: names[0], exact: true });
     png = Buffer.from(
       await page.evaluate(() => {
         const canvas = document.createElement("canvas");
@@ -6511,6 +6503,18 @@ for (const width of [1440, 390]) {
       }),
       "base64",
     );
+    await page.goto("/console/#flow/42/conversation");
+    await page.evaluate(() => {
+      // Vite removes the production CSP for HMR; retain its image restriction in this regression.
+      const policy = document.createElement("meta");
+      policy.httpEquiv = "Content-Security-Policy";
+      policy.content = "img-src 'self' data:";
+      document.head.append(policy);
+    });
+    await expect(
+      page.getByRole("tab", { name: "文件", exact: true }),
+    ).toHaveCount(0);
+    const fileTab = page.getByRole("tab", { name: names[0], exact: true });
     const message = page.locator('[data-entry="file-message-4"]');
     await message
       .getByRole("link", { name: "源码", exact: true })
@@ -6537,7 +6541,10 @@ for (const width of [1440, 390]) {
     await message
       .getByRole("link", { name: "源码", exact: true })
       .click({ button: "middle" });
-    expect(reads).toEqual([]);
+    expect(new Set(reads)).toEqual(new Set([paths[1], paths[3]]));
+    await expect(
+      message.getByRole("link", { name: "伪装图片" }).locator("img"),
+    ).toHaveCount(0);
     await message.getByRole("link", { name: "源码", exact: true }).focus();
     const root = page.locator(".detail-body");
     const noOverflow = async () => {
@@ -6715,7 +6722,11 @@ for (const width of [1440, 390]) {
       page.getByRole("tab", { name: "会话", exact: true }),
     ).toHaveAttribute("aria-selected", "true");
     await expect(page).toHaveURL(/#flow\/42\/conversation$/);
-    expect(reads).toHaveLength(readCount);
+    expect(
+      reads
+        .slice(readCount)
+        .every((path) => path === paths[1] || path === paths[3]),
+    ).toBe(true);
     expect(page.context().pages()).toHaveLength(1);
     expect(errors).toEqual([]);
   });
