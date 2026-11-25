@@ -504,7 +504,7 @@ async def test_rejected_revision_notification_keeps_verified_result_recoverable(
         return
     if transition == "cancel":
         service.cancel(flow)
-        with pytest.raises(ValueError, match="pending result"):
+        with pytest.raises(ValueError, match="archived Flow"):
             service.retry(flow)
         await restarted.results.apply(job.id)
         assert github.review_requests == []

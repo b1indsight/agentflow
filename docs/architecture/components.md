@@ -62,8 +62,8 @@ Flow 持久化 `queued/running/review/blocked/finalizing/archived`，所有看�
 这个字段；finalizing 合并到进行中。失败为 blocked，继续占用 Issue；归档结果只有 succeeded/abandoned。
 `POST /api/flows/{id}/archive` 接受 `{reason,summary,expected_attempt_id}`，复用单 owner Access
 验签及同源检查，通过现有 ControlService 请求收尾。无 PR 的成功调查必须提供非空结论。
-停止、结果、已派发副作用与工作区处置均确认后，事务内释放绑定、追加归档 activity 并写 archived。
-弃置/调查保留工作区；合并交付继续要求原 worker 的 ArchiveResult。
+服务端确认业务结论后，在同一事务写入归档 activity 与 archived，不等待 worker 回执。
+若旧执行或已发出的外部操作尚未结清，保留工作区绑定；确认可安全复用后再释放。
 `POST /api/flows/{id}/resume` 接受 `{expected_attempt_id}`，检查 Issue 冲突并开启同一 Flow 的新 Attempt。
 旧 PR、Job 与反馈不授权新 Attempt 工作；分页游标重新开始，activity 历史保留。
 Job 和执行活动通过 `attempt_id` 关联到当时开工的 Attempt。归档 activity 保留原始结果、时间和 PR 身份。
@@ -145,7 +145,7 @@ M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线�
 - 同秒已出现的编辑转换不重复回放，无法定序的同秒编辑直接丢弃；新鲜观察可推进，见 [M4 F1](../plan/m4-feedback-replay.md)；
 - 冻结上下文尚不包含 CI 状态；
 - cancel 持久化停止意图，worker 取消执行并回收持有的进程组；未知旧执行和未决 effects
-  保留绑定，无强制释放。cancel 不撤销已发生的 push/PR/评论；确认停止后保留工作区并归档；
+  保留绑定，无强制释放。cancel 不撤销已发生的 push/PR/评论，停止回执不改变已归档的业务状态；
 - 未合并 close 结束本次执行，reopen 只记事实；显式 resume 创建新 Attempt。修订拒绝远端 head 漂移，
   人工 push 的自动接纳、rebase/冲突处理尚未实现。
 
@@ -258,6 +258,7 @@ Codex 选择通过原生 `--model` 与 `-c model_reasoning_effort="..."` 传入�
   不运行 orb、runner 或 SDK。worker 镜像固定 CLI 为
   `0.0.1794672034-g01d6fa`，页面提供具体模型下拉列表，不开放插件模式或实时权限探测。
   原生登录或 `AMP_API_KEY` 归专用 worker 账户。
+- 一次性推理结束时归档原生 thread；编码 thread 保留到对应 Attempt 结束。服务端只向所属 worker 发送指定 ID 的归档命令，不等待执行结果，不删除会话历史。
 - 使用原生 user/workspace settings；每轮仅通过 `--mcp-config` 覆盖保留名称 `flow`。
   INITIAL 配置当前 WorkerMCP，REVISION 用不可连接的 loopback 端口零替换旧 broker，不带旧 token；
   该路径不设置原生 `disabled`，会报告连接错误，其他 MCP 保留。Git helper 和 `gh` 临时环境
