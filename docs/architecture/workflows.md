@@ -2,6 +2,18 @@
 
 ## 当前自动化覆盖的切片
 
+### 走查：首轮编码交付 PR 或等待输入
+
+前提：仓库已授权，有可领取任务的 worker。给 Issue 加 `flow` 标签，或在控制台选择仓库并提交任务。打开该 Flow 的详情；首轮任务结束后，按以下结果判断：
+
+| 操作 | 应看到的结果 | 行为测试 |
+|---|---|---|
+| 编码 Agent 提交并推送，调用 `flow.open_pr`。 | control 核对远端提交和终态回执后，Flow 进入 `review`，关联一张 PR；PR head 与交付提交一致。 | [`test_control_gateway_and_worker_client_complete_one_remote_job`](../../tests/test_remote_e2e.py#L167) |
+| 任务需要决定或人工操作，Agent 改用 `flow.request_user_input`，写明待办。 | 详情显示「编码已暂停」和待办消息。Flow 同样处于 `review`，但没有 PR。提交后续指令可在原会话继续交付；也可直接归档，保持无 PR。 | [`test_initial_yields_until_input_or_archive`](../../tests/test_remote_e2e.py#L248) |
+| 首次派发前远端已有同名分支。 | 准备失败，原分支保持不变，不会被当前 Flow 接管。 | [`test_existing_remote_branch_is_not_taken_over`](../../tests/test_remote_e2e.py#L326) |
+
+### Issue 交付 PR 后的审核与恢复
+
 ```text
 签名正确的 Webhook
   → FastAPI 持久化 webhook inbox 并返回 202

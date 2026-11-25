@@ -6,7 +6,17 @@
 本目录是 AgentFlow 架构的唯一入口。代码、测试、配置示例和已执行的运行验证是“当前实现”的事实
 来源；目标流程不会因为已经写入设计文档就被视为可用。
 
-## 如何阅读
+## 如何阅读与维护
+
+按[工作流 skill 的文档规则](https://github.com/b1indsight/skills/blob/d56afec6c820b33a0ab44673aa280d0fb820603a/plan-first-workflow/references/feature-record.md)区分三种内容：
+
+| 要回答的问题 | 维护位置 |
+|---|---|
+| 谁负责、依赖谁、跨边界传什么？ | [总览](overview.md)和[组件职责](components.md)。模块职责或契约变化时随实现更新；私有算法留在代码中。 |
+| 从哪里触发、经过哪些步骤、如何判断成功或需要重试？ | [端到端流程](workflows.md)是功能走查入口。可见行为变化时更新对应路径，链接验证该行为的测试。 |
+| 这次改动提议了什么、为什么选择这个方案？ | 在[计划目录](../plan/README.md)的单个功能记录中写验收示例和预期结果、受影响的跨模块契约、放弃的方案和原因。链接上述长期文档；保留初稿，按时间追加实质修订。验证命令、结果与局限放在 PR。 |
+
+计划阶段在功能记录中说明拟改动的页面；实现时再更新模块图和走查，避免把提案写成当前行为。
 
 - 本页的状态表描述当前实现，是架构文档中的 current truth；
 - [会话查询 API](conversation-api.md)描述按 flow 读取 worker Codex 历史的接口、分页与可用性边界；
@@ -36,7 +46,7 @@
 | 合并与清理 | 已实现、有自动化覆盖 | 确认当前 PR 已合并即成功归档；原 Worker 的停止与工作区释放、GitHub 通知独立收尾。真实闭环待验收，见[端到端流程](workflows.md) |
 | Control/Worker 边界 | 已验证（Features 1–3） | 多 worker 鉴权/调度、Flow 生命周期 binding、tool multiplex、busy reconnect、result replay 与 journal secret 负向覆盖 |
 | Worker workspace 并发 | 本地实现、自动化验证 | workers 复合主键，一 Flow 独占一个位置；按需求补充库存，worker 可在不同 workspace 并行执行；默认无仓库推理目录、逐 job ACK/停止/恢复；旧数据库物理身份迁移仍是部署前置条件，见[实施记录](../plan/worker-workspace-concurrency.md) |
-| Control Service / Job Coordinator | 部分 | Issue 或持久任务输入/default branch prepare、原子创建、tool fencing、INITIAL 成功后创建 PR、原线程回复/保守 resolve 与持久恢复已接线；冲突自动处理与真实副作用 E2E 未完成 |
+| Control Service / Job Coordinator | 部分 | Issue 或持久任务输入/default branch prepare、原子创建、tool fencing、INITIAL 交付 PR 或暂停等待输入、原线程回复/保守 resolve 与持久恢复已接线；冲突自动处理与真实副作用 E2E 未完成 |
 | Codex / Context / Sandbox / VCS | 部分 | Flow repo、临时凭据、首轮 MCP、修订 resume/一次性 fallback、Git/jj clean/remote/lineage 双端核验有自动化；GitHub-only egress 与真实多轮 run 未验证 |
 | GitHub Client | 部分 | githubkit 0.16 App/installation 认证、Issue/repository/ref/PR、单仓库 Contents capability 与错误映射有隔离测试；M2 线程分页、回复、resolve 及竞态恢复有自动化；真实 App smoke 待验证 |
 | Judge / 通用推理 | 已验证（adapter / Job 自动化） | 推理 Job 复用统一领取、结果与恢复；Judge 按相关 PR、反馈线程和引用片段判定 answer/revise/wait/ignore，不生成最终答复。优先由 controller 托管的 bub mini worker 推理，否则使用普通 worker 的独立推理会话；真实 provider smoke 待执行。见 [Review 循环](review-loop.md) |

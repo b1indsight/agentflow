@@ -58,7 +58,7 @@ M0 已验收基础设施切片；M1–M4 功能及 M5 部署、接收、运维�
 - **Control plane**负责 Webhook、持久化、状态机、Judge 决策和 GitHub API，是唯一数据库权威；
 - **Worker execution plane**负责编码 prompt、Codex 与 Flow repo 内的改码/提交/push，以及执行停止、
   journal 重放和历史查询；不持有数据库、GitHub App 或 Judge 凭据；
-- control 只确定分支名并在 worker 完成 push 后创建 PR，不直接执行本地版本控制；
+- 首轮编码由 control 指定交付分支，worker 回传执行结果。申请开 PR 时，worker 核验提交、工作区和远端分支，control 核对 GitHub ref 并负责创建或复用 PR。请求人工输入时，control 保存待办消息，保留会话和工作区绑定，不创建 PR。两条路径的可见结果见[端到端流程](workflows.md)；
 - 本地能力按 [Flow repo / execution policy / VCS](components.md) 分离（§4.6）：Agent 选择并操作
   Git/jj，worker 只验证事实。
 
