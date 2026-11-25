@@ -4,7 +4,7 @@ Triggers cover canonical writers (including recovery), rather than relying on ev
 service remembering an outbox call. Only explicit display facts enter this archive.
 """
 
-CONSOLE_SCHEMA = """
+CONSOLE_FACTS_VIEW = """
 CREATE OR REPLACE VIEW console_facts AS
 SELECT f.id, f.repo, f.issue_number, f.state AS lifecycle, f.created_at,
  GREATEST(f.updated_at,COALESCE(a.delivery_updated_at,f.updated_at),
@@ -41,7 +41,9 @@ LEFT JOIN attempts a ON a.id=f.current_attempt_id
 LEFT JOIN LATERAL (SELECT candidate.*
  FROM jobs candidate WHERE flow_id=f.id AND attempt_id=f.current_attempt_id
  AND kind<>'inference' ORDER BY id DESC LIMIT 1) j ON TRUE;
+"""
 
+CONSOLE_SCHEMA = CONSOLE_FACTS_VIEW + """
 CREATE TABLE IF NOT EXISTS console_flows (
  flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
  facts JSONB NOT NULL, title TEXT, title_updated_at TIMESTAMPTZ,
