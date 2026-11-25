@@ -22,6 +22,7 @@ from app.controler.workflow.service import ControlService
 from app.domain.delivery_models import OpenedDelivery
 from app.domain.flow_policy import FlowEvent
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState
+from app.persistence.console import ConsoleStore
 from app.persistence.store import Store
 from tests.flow_fixtures import apply_flow_event, enqueue_job
 from tests.workspace_fixtures import register_worker, report_settled
@@ -58,6 +59,21 @@ def test_startup_adds_skill_repository_to_existing_v3_settings(store):
         assert connection.execute("SELECT codex_model, revision, skill_repository FROM runtime_settings WHERE id=1").fetchone() == {
             "codex_model": "existing", "revision": 7, "skill_repository": None,
         }
+
+
+def test_startup_repairs_waiting_actions_on_existing_v3(store):
+    # An older view keeps publishing unknown after the worker starts supporting pauses.
+    with store.connection() as connection:
+        definition = connection.execute("SELECT pg_get_viewdef('console_facts'::regclass) AS sql").fetchone()["sql"]
+        connection.execute("CREATE OR REPLACE VIEW console_facts AS " + definition.replace("'awaiting_input'", "'unknown'"))
+    flow = store.flows.create_flow("owner/paused", 1, None)
+    store.deliveries.get_or_create_delivery(flow.current_attempt_id, "fix/paused")
+    with store.connection() as connection:
+        connection.execute("UPDATE attempts SET delivery_state='waiting' WHERE id=%s", (flow.current_attempt_id,))
+    console = ConsoleStore(store.database)
+    assert console.detail(flow.id).action == "unknown"
+    store.init_db()
+    assert console.detail(flow.id).action == "awaiting_input"
 
 
 def test_current_schema_restarts_in_a_read_only_transaction(store):

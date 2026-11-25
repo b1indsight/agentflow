@@ -1446,6 +1446,28 @@ for (const width of [1440, 390]) {
   });
 }
 
+test("overview identifies coding paused without a PR", async ({ page }) => {
+  await mockFlows(page, () => [
+    {
+      ...flow,
+      lifecycle: "review",
+      phase: "review",
+      pr_number: null,
+      pr_url: null,
+      action: "awaiting_input",
+      reason: "编码已暂停，未创建 PR",
+      next_condition: "有新内容时继续编码，也可以直接归档；不要求回复",
+      sources: [],
+    },
+  ]);
+  await page.goto("/#flow/42/overview");
+  const card = page.locator(".execution-summary");
+  await expect(card.getByRole("heading")).toHaveText("编码已暂停");
+  await card.screenshot({
+    path: "../../../.amp/in/artifacts/paused-action.png",
+  });
+});
+
 test("detail reads synchronize sidebar and board without reloading the page", async ({
   page,
 }) => {

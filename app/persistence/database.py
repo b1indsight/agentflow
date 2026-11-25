@@ -13,6 +13,7 @@ from psycopg.rows import class_row, dict_row
 from psycopg_pool import ConnectionPool
 
 from app.domain.models import Flow, Job, utcnow
+from app.persistence.console_schema import CONSOLE_FACTS_VIEW
 from app.persistence.records import Row
 from app.persistence.schema import COLUMN_ADDITIONS, SCHEMAS
 
@@ -66,8 +67,8 @@ def require_worker_key(connection: Connection[Row]) -> None:
         )
 
 
-def _pending_column_additions(connection: Connection[Row], relations: dict[str, str]) -> list[str]:
-    """Validate the v3 baseline before selecting any additive DDL for this installation."""
+def _pending_schema_updates(connection: Connection[Row], relations: dict[str, str]) -> list[str]:
+    """Validate the v3 baseline before selecting updates for this installation."""
     tables = {name for name, kind in relations.items() if kind in ("r", "p")}
     if (
         FLOW_TABLES | {"flowtool_schema_version"} <= tables
@@ -92,14 +93,23 @@ def _pending_column_additions(connection: Connection[Row], relations: dict[str, 
             "SELECT version FROM flowtool_schema_version"
         ).fetchall() == [{"version": 3}]:
             require_worker_key(connection)
-            return [ddl for column, ddl in COLUMN_ADDITIONS.items() if column not in columns]
+            updates = [ddl for column, ddl in COLUMN_ADDITIONS.items() if column not in columns]
+            if connection.execute(
+                "SELECT 1 WHERE strpos(pg_get_viewdef('console_facts'::regclass), quote_literal('awaiting_input')) = 0"
+            ).fetchone():
+                updates.append(CONSOLE_FACTS_VIEW)
+                updates.append(
+                    "SELECT console_refresh(flow_id) FROM console_flows WHERE facts->>'action'='unknown'"
+                    " AND facts->>'delivery_state'='waiting' AND NOT (facts->>'history_only')::boolean ORDER BY flow_id"
+                )
+            return updates
     raise ValueError(
         "expected Flow schema v3; inspect the database offline with scripts.migrate_flow_attempts"
     )
 
 
 def require_current_schema(connection: Connection[Row], relations: dict[str, str]) -> None:
-    if pending := _pending_column_additions(connection, relations):
+    if pending := _pending_schema_updates(connection, relations):
         raise ValueError(f"pending schema update: {pending[0]}")
 
 
@@ -249,10 +259,10 @@ class Database:
         ).fetchall()
 
     def init_db(self) -> None:
-        """Apply all schema declarations on bootstrap, or only missing additions on v3."""
+        """Apply all schema declarations on bootstrap, or only pending updates on v3."""
         with self.connection() as connection:
             relations = schema_relations(connection)
-            statements = _pending_column_additions(connection, relations) if relations else SCHEMAS
+            statements = _pending_schema_updates(connection, relations) if relations else SCHEMAS
             for schema in statements:
                 connection.execute(schema)
 

@@ -33,5 +33,6 @@ export function actionLabel(flow: FlowSummary): string {
   if (flow.lifecycle === "finalizing") return "正在收尾（finalizing）";
   const { action } = flow;
   if (action === "archive_blocked") return "收尾受阻";
+  if (action === "awaiting_input") return "编码已暂停";
   return action;
 }
