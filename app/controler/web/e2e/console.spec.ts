@@ -4058,6 +4058,8 @@ test("conversation images load inline and fit the body on desktop and mobile", a
     "[普通文档](https://example.test/guide?file=sample.png)",
     "`https://images.example.test/code.png`",
     `![私有图片](/api/files/${privateId}#name=private.png)`,
+    // Worker rewrites a screenshot link to an opaque ID; only its fragment retains the extension.
+    `[卡片显示“编码已暂停”](/api/files/${privateId}#name=%E6%88%AA%E5%9B%BE.PNG)`,
     "图片随正文列宽调整。",
   ].join("\n\n");
   const referrers: (string | undefined)[] = [];
@@ -4121,7 +4123,9 @@ test("conversation images load inline and fit the body on desktop and mobile", a
     "naturalWidth",
     300,
   );
-  await expect(images).toHaveCount(5);
+  const screenshot = row.getByRole("link", { name: "卡片显示“编码已暂停”" });
+  await expect(screenshot.locator("img")).toHaveJSProperty("naturalWidth", 300);
+  await expect(images).toHaveCount(6);
   await expect(row.getByRole("img", { name: "运行截图" })).toHaveAttribute(
     "title",
     "运行截图",

@@ -75,6 +75,7 @@ function WorkerImage({
   fileId,
   alt,
   title,
+  children,
 }: { fileId: string } & ComponentProps<"img">) {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
@@ -90,7 +91,7 @@ function WorkerImage({
       });
     return () => controller.abort();
   }, [fileId]);
-  return <MarkdownImage src={src ?? undefined} alt={alt} title={title} />;
+  return src ? <MarkdownImage src={src} alt={alt} title={title} /> : children;
 }
 
 function MarkdownLink({
@@ -221,7 +222,9 @@ export function ActivityMarkdown({
                 fileId={node.properties["data-worker-file-id"]}
                 alt={alt}
                 title={title}
-              />
+              >
+                图片：{alt || "查看图片"}
+              </WorkerImage>
             ) : (
               <>图片：{alt || "查看图片"}</>
             )}
@@ -259,15 +262,28 @@ export function ActivityMarkdown({
               onAuxClick={(event) => event.preventDefault()}
             />
           );
-        const image =
+        const hasImage = node?.children.some(
+          (child) => child.type === "element" && child.tagName === "img",
+        );
+        const fileId = node?.properties["data-worker-file-id"];
+        const name = node?.properties["data-worker-file-name"];
+        let preview;
+        if (!hasImage && typeof fileId === "string") {
+          if (
+            typeof name === "string" &&
+            /\.(?:gif|jpe?g|png|webp)$/i.test(name)
+          )
+            preview = <WorkerImage key={fileId} fileId={fileId} alt="" />;
+        } else if (
+          !hasImage &&
           href &&
           /^https?:/i.test(href) &&
-          !node?.children.some(
-            (child) => child.type === "element" && child.tagName === "img",
-          ) &&
           /\.(?:apng|avif|bmp|gif|ico|jpe?g|png|svg|webp)$/i.test(
             new URL(href).pathname,
-          );
+          )
+        ) {
+          preview = <MarkdownImage src={href} alt="" />;
+        }
         return (
           <MarkdownLink
             {...props}
@@ -276,7 +292,7 @@ export function ActivityMarkdown({
             onFileOpen={onFileOpen}
           >
             {props.children}
-            {image && <MarkdownImage src={href} alt="" />}
+            {preview}
           </MarkdownLink>
         );
       },
