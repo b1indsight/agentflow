@@ -622,3 +622,12 @@ Ruff、全局 Mypy、控制台格式检查及测试、控制台构建和 wheel/s
 #### 验证
 
 本地独立 PostgreSQL 全量 pytest、Ruff、Mypy 通过；没有真实外部模型调用、部署或生产数据库操作。
+
+### [009] — 2026-11-25 — 在推理或 Attempt 结束时归档 Amp thread（待确认）
+
+归档指从 Amp 的线程列表隐藏 thread，不删除历史，也不清空 Attempt 的 session ID。推理调用结束后不再使用其 thread；编码 thread 则要跨 initial、修正、revision 和 retry 复用，直到所属 Attempt 结束。
+
+- **推理：** [worker 推理入口](../../app/worker/runtime.py)明确标记一次性调用，让 [Amp 后端](../../app/worker/execution/amp_agent.py)使用新 thread 的原生 execute 自动归档。编码调用保留 `--no-archive-after-execute`。验证异常、超时和取消时的 CLI 行为；若进程被终止而没有自行归档，按本次 init 已返回的 ID 补做。没有 ID 不猜最近 thread。
+- **Attempt：** 在 [Attempt 提交归档事实](../../app/persistence/flows.py)的事务里记录待归档的 Attempt、所属 worker 和 Amp thread ID。原 worker 在线时处理，离线时待重连补做。执行 `amp threads archive <thread-id>`，成功后确认；失败可重试，不改变 Attempt 的业务结论。只处理 Amp ID，不让迟到的清理按 Flow 查询新 Attempt 的 session。
+- **为什么不复用 workspace 清理：** [ArchiveTask](../../app/controler/workflow/archive.py)要求已合并的交付和原 worker 绑定；[无 PR 成功结束、主动放弃](../../app/controler/workflow/service.py)都可以不满足这些条件。thread 归档不能依赖 workspace 是否释放。
+- **验收：** 用可记录归档目标的假 Amp CLI 检查推理成功、失败和取消；检查编码重试不提前归档，合并、无 PR 结束和放弃各能触发归档。让原 worker 在同一 Flow 重新开工后重连，重复派发旧清理，只能归档旧 ID。保留按 ID 查询历史的能力。Codex 和没有 thread 的 Attempt 不应发出 Amp 命令。
