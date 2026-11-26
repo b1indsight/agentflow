@@ -14,6 +14,7 @@ from app.github import (
     GitHubApp,
     GitHubError,
     GitHubErrorKind,
+    Installation,
     Issue,
     PullRequest,
     PushCapability,
@@ -72,12 +73,14 @@ def record_call(repo: Repository, operation: str, **identity: Any) -> RecordingG
     return state
 
 
+async def record_fetch_repository(installation: Installation, full_name: str) -> Repository:
+    repo = Repository(installation, full_name, default_branch="trunk", archived=False)
+    record_call(repo, "fetch_repository")
+    return repo
+
+
 class RecordingRepository(Repository):
     """Repository operations with production signatures and real parent identities."""
-
-    async def refetch(self) -> Repository:
-        record_call(self, "fetch_repository")
-        return Repository(self.installation, self.full_name, default_branch="trunk", archived=False)
 
     async def create_push_capability(self) -> PushCapability:
         record_call(self, "create_push_capability")

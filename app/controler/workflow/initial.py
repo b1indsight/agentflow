@@ -96,9 +96,9 @@ class InitialPreparation:
             delivery = deliveries_tx.get_delivery(fresh.id)
             flow = fresh
         try:
-            repo = self._github.installation(installation_id).repository(flow.repo)
-            task_content = await self._reads.task_content(job, flow, repo)
-            repository = await self._reads.read(job, repo.refetch)
+            installation = self._github.installation(installation_id)
+            repository = await self._reads.read(job, lambda: installation.fetch_repository(flow.repo))
+            task_content = await self._reads.task_content(job, flow, repository)
         except GitHubError as exc:
             raise PreparationReadFailure(exc) from exc
         if repository.full_name != flow.repo:
@@ -118,7 +118,7 @@ class InitialPreparation:
             branch = delivery.branch
         if delivery is None or delivery.base_branch is None:
             try:
-                await self._reads.read(job, lambda: repo.fetch_ref(branch))
+                await self._reads.read(job, lambda: repository.fetch_ref(branch))
             except GitHubError as error:
                 if error.kind is not GitHubErrorKind.NOT_FOUND:
                     raise PreparationReadFailure(error) from error

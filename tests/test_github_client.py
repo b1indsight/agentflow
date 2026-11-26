@@ -283,7 +283,7 @@ async def test_fetches_issue_repository_and_remote_ref(
     install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
     observed_issue = await github.installation(42).repository("octo/repo").fetch_issue(7)
-    observed_repository = await github.installation(42).repository("octo/repo").refetch()
+    observed_repository = await github.installation(42).fetch_repository("octo/repo")
     remote_ref = await github.installation(42).repository("octo/repo").fetch_ref("topic")
 
     assert observed_issue.model_dump() == {
@@ -304,23 +304,24 @@ async def test_fetches_issue_repository_and_remote_ref(
 
 
 @pytest.mark.parametrize("full_name", ["other/repo", "OCTO/REPO"])
-async def test_repository_refetch_keeps_identity_and_observed_casing(tmp_path, monkeypatch, full_name):
+async def test_fetch_repository_keeps_identity_and_observed_casing(tmp_path, monkeypatch, full_name):
     # A redirected response must not retarget a resource; casing remains an observed fact.
     endpoint = AsyncEndpoint(response(SimpleNamespace(full_name=full_name, default_branch="trunk", archived=False)))
     sdk = SimpleNamespace(rest=SimpleNamespace(repos=SimpleNamespace(async_get=endpoint)))
     install_client(monkeypatch, lambda _, **kwargs: sdk)
     installation = GitHubApp(settings(tmp_path)).installation(42)
-    before = Repository(installation, "octo/repo", default_branch="main")
     if full_name == "other/repo":
         with pytest.raises(GitHubError) as caught:
-            await before.refetch()
+            await installation.fetch_repository("octo/repo")
         assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
         assert caught.value.endpoint == "get_repository"
     else:
-        after = await before.refetch()
-        assert after.full_name == full_name and after.default_branch == "trunk"
-    assert before.full_name == "octo/repo" and before.default_branch == "main"
-    assert endpoint.calls == [(("octo", "repo"), {})]
+        observed = await installation.fetch_repository("octo/repo")
+        assert observed.installation is installation
+        endpoint.result.parsed_data.default_branch = "next"
+        latest = await installation.fetch_repository(observed.full_name)
+        assert latest.default_branch == "next"
+        assert observed.full_name == full_name and observed.default_branch == "trunk"
 
 
 @pytest.mark.parametrize("state,merged", [("open", False), ("closed", False), ("closed", True)])

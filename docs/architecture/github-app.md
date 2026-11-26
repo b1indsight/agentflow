@@ -17,6 +17,8 @@ Control 使用 `AGENTFLOW_GITHUB_APP_ID` 和 `AGENTFLOW_GITHUB_PRIVATE_KEY_PATH`
 
 对于标签触发的 Flow，[路由器](../../app/controler/events/router.py)从事件取 `installation.id`，和仓库、Issue 一起交给 control。此后 GitHub 请求沿 `GitHubApp → Installation → Repository → Issue / PullRequest` 找到操作对象。绑定资源时还没联网；持有一个 PR 编号也不等于知道它是否仍开放。[PR 资源](../../app/github/pull_requests.py)将已读取的事实与未读取的字段区分开；交付前仍需复读 PR 和分支。
 
+只需绑定仓库时用 `installation.repository(full_name)`。需要最新默认分支或归档状态时，直接调用 [`await installation.fetch_repository(full_name)`](../../app/github/apps.py#L128-L139)：它以该安装身份读取 GitHub，返回新的 `Repository`，不修改之前取得的对象。
+
 以安装 42 下的 `octo/repo` 为例：前两行选择对象，`await` 所在行向 GitHub 请求推送凭据，最后检查凭据属于哪个仓库。示例假设调用方已经按服务配置构建 `github`，且位于异步函数内：
 
 ```python

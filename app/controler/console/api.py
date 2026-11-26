@@ -178,10 +178,10 @@ async def update_skill_repository(request: Request, body: UpdateSkillRepositoryR
     runtime: ServerRuntime = request.app.state.runtime
     repo = None
     if body.target is not None:
-        target = runtime.github.installation(body.target.installation_id).repository(body.target.repo)
+        installation = runtime.github.installation(body.target.installation_id)
         try:
-            await target.verify_installation()
-            repository = await target.refetch()
+            await installation.repository(body.target.repo).verify_installation()
+            repository = await installation.fetch_repository(body.target.repo)
         except GitHubError as error:
             raise _github_failure(error) from error
         if repository.archived:
@@ -228,7 +228,7 @@ async def create_flow(request: Request, body: CreateFlowRequest) -> FlowDetail:
     runtime: ServerRuntime = request.app.state.runtime
     try:
         # Keep these read-only checks aligned with the admin CLI's flow create command.
-        repository = await runtime.github.installation(body.installation_id).repository(body.repo).refetch()
+        repository = await runtime.github.installation(body.installation_id).fetch_repository(body.repo)
         if repository.archived:
             raise ConsoleFailure("repository_archived")
         if body.issue_number is not None:

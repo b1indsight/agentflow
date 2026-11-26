@@ -164,16 +164,8 @@ def test_invalid_settings_never_write(console_runtime, changes):
     "\n完整内容 α\r\n第二行 β\n",
     "中" * 10922 + "ab",
 ], ids=["exact-text", "32-kib"])
-def test_manual_creation_without_issue_is_atomic_visible_and_owner_only(console_runtime, store, monkeypatch, task):
-    from app.github import Repository
-    from tests.github import RecordingGitHub
-
+def test_manual_creation_without_issue_is_atomic_visible_and_owner_only(console_runtime, store, recording_resources, task):
     console_runtime.github = RecordingGitHub()
-
-    async def refetch(repo):
-        return repo.model_copy(update={"default_branch": "main", "archived": False})
-
-    monkeypatch.setattr(Repository, "refetch", refetch)
     payload = {
         "repo": "owner/new-repo", "installation_id": 42,
         "task_content": task,
@@ -238,23 +230,22 @@ def test_manual_creation_invalid_input_never_writes(console_runtime, store, chan
 
 @pytest.mark.parametrize("target_state,status", [("archived", 409), ("permission", 403), ("not_found", 404), ("pull_request", 422)])
 def test_manual_creation_rechecks_remote_access_before_writing(console_runtime, store, monkeypatch, target_state, status):
-    from app.github import GitHubError, GitHubErrorKind, Installation, Repository
+    from app.github import GitHubError, GitHubErrorKind, Installation
     from tests.github import RecordingGitHub
 
     console_runtime.github = RecordingGitHub()
 
-    async def refetch(repo):
-        if target_state in {"permission", "not_found"}:
-            raise GitHubError(GitHubErrorKind(target_state), "get_repository")
-        return repo.model_copy(update={"default_branch": "main", "archived": target_state == "archived"})
-
     # GitHub's Issues endpoint also returns PRs; reject before creating any Flow or INITIAL.
     sdk = Mock()
+    sdk.rest.repos.async_get = AsyncMock(return_value=SimpleNamespace(parsed_data=SimpleNamespace(
+        full_name="owner/repo", default_branch="main", archived=target_state == "archived",
+    )))
+    if target_state in {"permission", "not_found"}:
+        sdk.rest.repos.async_get.side_effect = GitHubError(GitHubErrorKind(target_state), "get_repository")
     sdk.rest.issues.async_get = AsyncMock(return_value=SimpleNamespace(parsed_data=SimpleNamespace(
         number=7, title="Source PR", body="", state="open", pull_request={"url": "https://example.test/pulls/7"},
     )))
     monkeypatch.setattr(Installation, "_client", lambda *args, **kwargs: sdk)
-    monkeypatch.setattr(Repository, "refetch", refetch)
     payload = {"repo": "owner/repo", "installation_id": 42,
                **({"issue_number": 7} if target_state == "pull_request" else {"task_content": "拒绝任务"})}
     with TestClient(create_app(console_runtime)) as client:

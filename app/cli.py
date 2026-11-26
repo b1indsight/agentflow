@@ -182,7 +182,7 @@ def flow_create(
 
     async def target() -> github.Repository:
         # Same read-only target checks as console/api.py; never hold a DB transaction over I/O.
-        repository = await github.GitHubApp(settings).installation(request.installation_id).repository(request.repo).refetch()
+        repository = await github.GitHubApp(settings).installation(request.installation_id).fetch_repository(request.repo)
         if repository.archived:
             raise github.GitHubError(github.GitHubErrorKind.VALIDATION, "repository_archived")
         if request.issue_number is not None:

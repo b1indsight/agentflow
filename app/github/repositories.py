@@ -80,7 +80,7 @@ def _permissions(value: Any) -> dict[str, Literal["read", "write"]]:
 
 
 class Repository(BaseModel):
-    """Bind locally with ``Repository(installation, 'owner/name')``; refetch is explicit."""
+    """Bind locally; use ``installation.fetch_repository('owner/name')`` to read metadata."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     full_name: str
@@ -106,7 +106,7 @@ class Repository(BaseModel):
     def __getattribute__(self, name: str) -> Any:
         if (name in type(self).model_fields
                 and name not in object.__getattribute__(self, "__pydantic_fields_set__")):
-            raise AttributeError(f"{name} has not been observed; call refetch()")
+            raise AttributeError(f"{name} has not been observed; call installation.fetch_repository()")
         return super().__getattribute__(name)
 
     @property
@@ -130,18 +130,6 @@ class Repository(BaseModel):
             grant = (await client.rest.apps.async_get_repo_installation(self.owner, self.name)).parsed_data
             if grant.id != self.installation.installation_id or grant.suspended_at is not None:
                 raise GitHubError(GitHubErrorKind.PERMISSION, "get_repo_installation")
-
-    async def refetch(self) -> Repository:
-        client = self.installation._client(auto_retry=False)
-
-        with translate_errors("get_repository"):
-            data = (await client.rest.repos.async_get(self.owner, self.name)).parsed_data
-            if data.full_name.casefold() != self.full_name.casefold():
-                raise ValueError("repository response does not match its bound identity")
-            return Repository(
-                self.installation, data.full_name, default_branch=data.default_branch,
-                archived=data.archived,
-            )
 
     async def fetch_issue(self, number: int) -> Issue:
         return await Issue(self, number).refetch()

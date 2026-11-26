@@ -128,6 +128,16 @@ class Installation(BaseModel):
     def repository(self, full_name: str) -> Repository:
         return Repository(self, full_name)
 
+    async def fetch_repository(self, full_name: str) -> Repository:
+        """Fetch a fresh repository bound to this installation."""
+        owner, name = split_repo(full_name)
+        client = self._client(auto_retry=False)
+        with translate_errors("get_repository"):
+            data = (await client.rest.repos.async_get(owner, name)).parsed_data
+            if data.full_name.casefold() != full_name.casefold():
+                raise ValueError("repository response does not match its requested identity")
+            return Repository(self, data.full_name, default_branch=data.default_branch, archived=data.archived)
+
     async def fetch_repositories(self, *, page: int = 1) -> Batch[Repository]:
         """Read one page of granted repositories, omitting archived repositories."""
         client = self._client(auto_retry=False)
