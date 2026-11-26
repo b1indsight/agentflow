@@ -374,10 +374,16 @@ async def test_cancel_during_remote_verification_prevents_effects_and_commit(
 async def test_revision_limit_applies_to_strong_signals(store, pending_revision):
     _, job, task, _, subject = pending_revision
     attempt = store.flows.get_attempt(task.attempt_id)
+    # A request for changes can start round 21 when the operator raises the limit.
+    subject.settings.max_revision_cycles = 21
     attempt.revision_cycles = 20
     store.flows.update_attempt(attempt)
+    assert isinstance(await subject.prepare(job), RevisionTask)
+    attempt.revision_cycles = 21
+    store.flows.update_attempt(attempt)
     assert await subject.prepare_for_assignment(job, "worker-a", "token", "epoch") is JobState.FAILED
-    assert store.flows.get_attempt(task.attempt_id).revision_cycles == 20
+    assert store.flows.get_attempt(task.attempt_id).revision_cycles == 21
+    assert "AGENTFLOW_MAX_REVISION_CYCLES=21" in store.jobs.get_job(job.id).last_error
     assert store.reviews.pending(job.flow_id)
 
 

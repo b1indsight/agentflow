@@ -83,7 +83,7 @@ async def prepare_revision(
     purpose = payload.get("purpose", "revise")
     retry_status = payload.get("retry_status") if purpose == "revise" else None
     if attempt.revision_cycles + 1 > settings.max_revision_cycles:
-        await fail(job, "已达最大修订轮数，暂停。")
+        await fail(job, f"本次尝试已达修订上限（AGENTFLOW_MAX_REVISION_CYCLES={settings.max_revision_cycles}），暂停。")
         return JobState.FAILED
     execution = flows.get_flow_execution(flow.id)
     if execution is None or execution.released_at is not None:
