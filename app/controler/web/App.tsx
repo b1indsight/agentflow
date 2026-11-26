@@ -1191,25 +1191,37 @@ function Conversation({
   const automaticBoundary = useRef<string | null>(null);
   const [jumping, setJumping] = useState(false);
   useEffect(() => {
-    if (!jumping || state.busy) return;
-    if (state.has_more && !state.error) {
-      load();
+    const viewport = root.current;
+    if (!jumping || !viewport) return;
+    const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+    const more = state.has_more && !state.error;
+    if (reducedMotion.matches && more) {
+      if (!state.busy) load();
       return;
     }
-    const viewport = root.current;
-    if (!viewport) return;
-    // Virtual rows acquire their real heights after scrolling mounts them.
+    // Follow the growing list; its normal prefetch starts the next page as we approach it.
+    let previous = performance.now();
     let settled = 0;
     let frame: number;
-    const align = () => {
+    const advance = (now: number) => {
       const remaining =
         viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
-      settled = remaining <= 1 ? settled + 1 : 0;
-      viewport.scrollTop = viewport.scrollHeight;
-      if (settled >= 2) setJumping(false);
-      else frame = requestAnimationFrame(align);
+      if (remaining > 1) {
+        // Limit travel per frame and ease into the tail as virtual rows settle.
+        const elapsed = Math.min(now - previous, 32);
+        const speed = Math.min(viewport.clientHeight / 80, remaining / 100);
+        viewport.scrollTop += reducedMotion.matches
+          ? remaining
+          : Math.min(remaining, Math.max(1, speed * elapsed));
+        settled = 0;
+      } else if (++settled >= 2) {
+        if (!more && !state.busy) setJumping(false);
+        return; // A pending page will restart the animation when it arrives.
+      }
+      previous = now;
+      frame = requestAnimationFrame(advance);
     };
-    align();
+    frame = requestAnimationFrame(advance);
     return () => cancelAnimationFrame(frame);
   }, [
     jumping,

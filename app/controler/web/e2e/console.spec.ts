@@ -2642,7 +2642,7 @@ for (const width of [1440, 390]) {
   });
 }
 
-test("jump to latest reads all remaining pages of the current snapshot", async ({
+test("jump to latest scrolls through replies as the current snapshot loads", async ({
   page,
 }) => {
   // A long first page keeps automatic prefetch out of reach until the user jumps.
@@ -2653,14 +2653,14 @@ test("jump to latest reads all remaining pages of the current snapshot", async (
   }));
   const cursors: string[] = [];
   let release!: () => void;
-  const lastPage = new Promise<void>((resolve) => {
+  const secondPage = new Promise<void>((resolve) => {
     release = resolve;
   });
   await page.route("**/api/flows/42/activity?**", async (route) => {
     const params = new URL(route.request().url()).searchParams;
     const start = Number(params.get("cursor"));
     if (start) cursors.push(`${start}:${params.get("snapshot")}`);
-    if (start === 60) await lastPage;
+    if (start === 20) await secondPage;
     return route.fulfill({
       json: activityPage(items.slice(start, start + 20), start, items.length),
     });
@@ -2669,22 +2669,42 @@ test("jump to latest reads all remaining pages of the current snapshot", async (
   const jump = page.getByRole("button", { name: "跳到最新回复" });
   await expect(jump).toBeInViewport();
   await expect(jump).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  const positions = await page
+    .locator(".detail-body")
+    .evaluateHandle((root) => {
+      root.scrollTop = root.clientHeight;
+      const from = root.scrollTop;
+      const end = root.scrollHeight - root.clientHeight;
+      const intermediate = new Set<number>();
+      root.addEventListener("scroll", () => {
+        if (root.scrollTop > from && root.scrollTop < end - 1)
+          intermediate.add(root.scrollTop);
+      });
+      return intermediate;
+    });
   expect(cursors).toEqual([]);
   await jump.click();
   await expect(jump).toHaveText("");
   await expect(jump).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   const spinner = jump.locator("svg");
   await expect(spinner).toHaveCSS("animation-name", "spin");
+  // A slow next page must not freeze the viewport or teleport it to the loaded tail.
+  await expect
+    .poll(() => positions.evaluate((seen) => seen.size))
+    .toBeGreaterThan(2);
+  await expect.poll(() => cursors).toEqual(["20:2"]);
   await page.screenshot({
     path: "../../../.amp/in/artifacts/conversation-jump-pending.png",
   });
   await page.emulateMedia({ reducedMotion: "reduce" });
   await expect(spinner).toHaveCSS("animation-name", "none");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
   release();
   await expect(page.getByText("回复 60", { exact: true })).toBeInViewport();
   await expect(
     page.getByRole("button", { name: "已到当前本地快照末尾 · 点击刷新" }),
   ).toBeInViewport();
+  await expect(jump).toBeEnabled();
   expect(cursors).toEqual(["20:2", "40:2", "60:2"]);
 });
 
