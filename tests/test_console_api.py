@@ -37,7 +37,7 @@ from tests.github import RecordingGitHub
 from tests.test_cancel_drain import running
 from tests.test_coordinator import apply_result, coordinator, prepare_initial
 from tests.test_merge import route_merge
-from tests.test_revision_delivery import verified_result
+from tests.test_revision_delivery import revision_output, verified_result
 from tests.test_workflow_transactions import accepted_coding
 from tests.workspace_fixtures import register_worker, report_settled
 
@@ -393,8 +393,9 @@ def flow_ready_for_agent_task(store):
 
 
 @pytest.mark.parametrize("request_key", ["agent_task_request_id", "console_request_id"])
+@pytest.mark.parametrize("questions", [[], ["Which shortcut?"]])
 async def test_append_agent_task_uses_revision_pipeline_and_records_input_once(
-    console_runtime, store, flow_ready_for_agent_task, recording_resources, request_key
+    console_runtime, store, flow_ready_for_agent_task, recording_resources, request_key, questions
 ):
     # A lost response must not duplicate work, including after the ordinary revision completes.
     flow = flow_ready_for_agent_task
@@ -446,8 +447,18 @@ async def test_append_agent_task_uses_revision_pipeline_and_records_input_once(
     assert task.feedback == [] and task.purpose == "revise"
     assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-1", "next-token", "epoch")
     subject.mark_started(assigned, task, "worker-1")
-    assert await apply_result(subject, assigned, verified_result(task)) is JobState.DONE
-    assert store.reviews.for_job(job).state is BatchState.COMPLETED
+    # A console result stays in the Flow even when it delivers code or asks a follow-up.
+    github.pull_request = github.pull_request.model_copy(update={"head_sha": "new"})
+    github.refs = {task.branch: "new"}
+    output = revision_output(summary="Keyboard navigation added", needs_clarification=questions)
+    result = verified_result(task, commit_sha="new", remote_sha="new", output=output)
+    assert await apply_result(subject, assigned, result) is JobState.DONE
+    assert github.comments == github.thread_replies == github.review_requests == github.labels == []
+    assert store.flows.get_current_attempt(flow).last_revision_summary == output.summary
+    assert store.deliveries.get_delivery(flow.id).head_sha == "new"
+    batch = store.reviews.for_job(job)
+    assert batch.open_points == questions
+    assert batch.state is (BatchState.WAITING if questions else BatchState.COMPLETED)
     assert store.flows.get_flow(flow.id).state is FlowState.REVIEW
     assert store.flows.get_current_attempt(flow).codex_session_id == "original-session"
     if request_key == "console_request_id":

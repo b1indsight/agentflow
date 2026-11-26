@@ -15,23 +15,23 @@
 
 本文讨论已交付 PR 的评审；从 GitHub 观察一次问答和改码的完整步骤，见[在同一张 PR 上提问，再要求改代码](../feature-walkthroughs/review.md)。
 
-## 在 Flow 网页追加一句话，为什么会在 PR 上收到回复？
+## 在 Flow 网页追加一句话，结果会发到哪里？
 
-`REVISION` 是接着当前 PR 执行的一轮作业。它有两个入口：GitHub 评审带来一批需要逐项处理的反馈；Flow 网页的「追加任务」则直接提供指令。两者复用原工作区、分支和会话，也复用同一套结果发布规则。
+`REVISION` 是接着当前 PR 执行的一轮作业。GitHub 评审和 Flow 网页的「追加任务」都能使用原工作区、分支和会话。单独从网页追加时，摘要和待澄清问题只显示在 [Flow 的结果消息](../../app/persistence/activity.py#L53-L72)中；即使交付了新提交，也不在 PR 发评论、加评审标签或请求复审。
 
 例如，在已有开放 PR 的 Flow 里输入「请说明为什么重试三次」：[网页提交](../../app/controler/web/api.ts)调用 `POST /api/flows/{id}/agent-tasks`，control 先把原文记为当前 Attempt 的用户消息。可以派发新作业时，[`_queue_agent_inputs`](../../app/controler/workflow/service.py#L344-L378)创建 `trigger="strong"`、`feedback=[]` 的批次，把原文放进 `instruction`，直接派 `purpose=revise`，不经 Judge。即使是问句也走这条路径。作业忙时消息先保留；交付状态为 `WAITING` 时则续派 `INITIAL`。[控制台集成测试](../../tests/test_console_api.py#L396-L455)分别检查了活动里的用户原文、worker 收到的指令和空反馈清单。
 
 [worker 提示词](../../app/worker/execution/prompts.py#L120-L149)在两种入口下都把任务指令放在 `instruction (synthesized from review)` 标题下，后面才列出真正的 `Review feedback`。网页原文因此可能看起来像评审意见，但提交网页消息本身不会创建 GitHub 评论。
 
-worker 交回结构化结果，由 control 核验并发布。具体发到哪里，取决于**结果字段和原反馈的位置**：
+worker 交回结构化结果后，control 仍会核验交付、保存摘要及未决问题。[`revision_plan`](../../app/controler/workflow/revisions.py)只在冻结批次包含 GitHub 反馈时安排下列 PR 写入。判断依据是本轮批次，不是最初任务来自网页还是 Issue，也不是指令里有没有网页追加的话。
 
 | 核验通过的内容 | 发布位置 |
 |---|---|
-| 每轮必填的 `summary` | [`revision_plan`](../../app/controler/workflow/revisions.py#L298-L322)为当前 PR 安排一条普通会话评论。`answer` 加前缀「问题答复」，`revise` 加「修订交付」并注明有无新提交。此处不判断指令来自网页还是 GitHub，所以空反馈、无新提交也会有摘要。 |
+| 每轮必填的 `summary` | 为当前 PR 安排一条普通会话评论。`answer` 加前缀「问题答复」，`revise` 加「修订交付」并注明有无新提交。 |
 | `addressed.note`、`deferred.reason` | [逐项回复规则](../../app/controler/review/resolution.py)把普通评论和 review 正文的处理说明汇总到 PR 会话；行内意见能唯一定位到线程和根评论时，才回复原线程。同线程的多项合为一条，无法定位的保留待处理。 |
 | `needs_clarification` | 整批只涉及一个已映射的行内线程时，问题随线程回复；其他情况放在 PR 会话。 |
 
-所以在上面的例子里，PR 上通常出现一条「修订交付（无新提交）：…」，内容是 worker 的总结；网页消息不会因此多出一条行内回复。两类写入在[发布器](../../app/controler/workflow/effects.py#L364-L390)里分别调用 `issue.comment`（以 PR 编号写普通评论）和 `thread.reply`（回复已有行内线程），都不需要提交一份新的 GitHub review。
+所以同样是「为什么重试三次」，从 Flow 单独追加时，在 Flow 看结果；从 GitHub 行内提问时，逐项答复可以回到原线程，摘要另发到 PR 会话。两类 GitHub 写入在[发布器](../../app/controler/workflow/effects.py#L364-L390)里分别调用 `thread.reply` 和 `issue.comment`，都不需要提交一份新的 GitHub review。
 
 ## B.1 反馈入口与持久 settle
 
