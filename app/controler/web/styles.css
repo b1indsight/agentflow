@@ -1732,8 +1732,10 @@ svg {
   min-width: 44px;
   height: 44px;
   padding: 8px 10px;
-  background: var(--selected);
   color: var(--accent);
+}
+.jump-to-latest:disabled {
+  background: transparent;
 }
 .jump-to-latest svg {
   width: 24px;

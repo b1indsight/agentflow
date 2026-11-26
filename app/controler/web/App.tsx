@@ -1468,17 +1468,15 @@ function Conversation({
             className="btn jump-to-latest"
             aria-label="跳到最新回复"
             title="跳到最新回复"
+            aria-busy={jumping}
             disabled={jumping}
             onClick={() => setJumping(true)}
           >
             {jumping ? (
-              <>
-                <LoaderCircle
-                  className="motion-safe:animate-spin"
-                  aria-hidden="true"
-                />
-                正在翻页…
-              </>
+              <LoaderCircle
+                className="motion-safe:animate-spin"
+                aria-hidden="true"
+              />
             ) : (
               <ArrowDownToLine aria-hidden="true" />
             )}

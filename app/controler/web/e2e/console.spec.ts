@@ -2668,9 +2668,11 @@ test("jump to latest reads all remaining pages of the current snapshot", async (
   await page.goto("/#flow/42/conversation");
   const jump = page.getByRole("button", { name: "跳到最新回复" });
   await expect(jump).toBeInViewport();
+  await expect(jump).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   expect(cursors).toEqual([]);
   await jump.click();
-  await expect(jump).toHaveText("正在翻页…");
+  await expect(jump).toHaveText("");
+  await expect(jump).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   const spinner = jump.locator("svg");
   await expect(spinner).toHaveCSS("animation-name", "spin");
   await page.screenshot({
