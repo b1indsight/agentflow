@@ -9,9 +9,11 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   Archive,
   ArrowDown,
+  ArrowDownToLine,
   ArrowLeft,
   ChevronDown,
   FileText,
@@ -575,6 +577,9 @@ function DetailPanel({
     [jobMore, setJobMore] = useState(true),
     [jobError, setJobError] = useState("");
   const detail = useRef<HTMLDivElement>(null);
+  const [conversationNav, setConversationNav] = useState<HTMLDivElement | null>(
+    null,
+  );
   const jobsRequest = useRef<AbortController | null>(null);
   const jobsBusy = useRef(false);
   useLayoutEffect(() => {
@@ -1044,6 +1049,7 @@ function DetailPanel({
                           key={id}
                           id={id}
                           root={detail}
+                          navigation={conversationNav}
                           refresh={
                             flow.history_only ? null : refresh + acceptedInputs
                           }
@@ -1114,6 +1120,7 @@ function DetailPanel({
             </section>
           </TabsContent>
         </div>
+        {selectedTab === "conversation" && <div ref={setConversationNav} />}
         {freshFlow && !flow.history_only && (
           <AgentTaskInput
             busy={pending !== null}
@@ -1161,11 +1168,13 @@ function DetailPanel({
 function Conversation({
   id,
   root,
+  navigation,
   refresh,
   lastRefresh,
 }: {
   id: number;
   root: React.RefObject<HTMLElement | null>;
+  navigation: HTMLElement | null;
   refresh: number | null;
   lastRefresh: React.RefObject<number>;
 }) {
@@ -1177,6 +1186,37 @@ function Conversation({
   );
   const sentinel = useRef<HTMLDivElement>(null);
   const automaticBoundary = useRef<string | null>(null);
+  const [jumping, setJumping] = useState(false);
+  useEffect(() => {
+    if (!jumping || state.busy) return;
+    if (state.has_more && !state.error) {
+      load();
+      return;
+    }
+    const viewport = root.current;
+    if (!viewport) return;
+    // Virtual rows acquire their real heights after scrolling mounts them.
+    let settled = 0;
+    let frame: number;
+    const align = () => {
+      const remaining =
+        viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
+      settled = remaining <= 1 ? settled + 1 : 0;
+      viewport.scrollTop = viewport.scrollHeight;
+      if (settled >= 2) setJumping(false);
+      else frame = requestAnimationFrame(align);
+    };
+    align();
+    return () => cancelAnimationFrame(frame);
+  }, [
+    jumping,
+    state.busy,
+    state.has_more,
+    state.error,
+    state.next_cursor,
+    load,
+    root,
+  ]);
   const rows = useMemo(
     () => buildConversationRows(state.records, expanded),
     [state.records, expanded],
@@ -1416,6 +1456,23 @@ function Conversation({
           {state.busy ? "正在检查更新…" : "已到当前本地快照末尾 · 点击刷新"}
         </button>
       )}
+      {navigation &&
+        state.records.length > 0 &&
+        !state.error &&
+        createPortal(
+          <button
+            type="button"
+            className="btn jump-to-latest"
+            aria-label="跳到最新回复"
+            title="跳到最新回复"
+            disabled={jumping}
+            onClick={() => setJumping(true)}
+          >
+            <ArrowDownToLine aria-hidden="true" />
+            {jumping && "正在翻页…"}
+          </button>,
+          navigation,
+        )}
     </>
   );
 }

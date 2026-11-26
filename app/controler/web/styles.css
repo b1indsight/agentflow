@@ -125,6 +125,7 @@ svg {
   --icon-span: 20;
 }
 .lucide-refresh-cw,
+.lucide-arrow-down-to-line,
 .lucide-panel-left-close,
 .lucide-panel-left-open,
 .lucide-save,
@@ -1720,6 +1721,10 @@ svg {
 }
 .new-records {
   margin: 12px 0;
+}
+.jump-to-latest {
+  width: 100%;
+  color: var(--accent);
 }
 .load-sentinel {
   text-align: center;
