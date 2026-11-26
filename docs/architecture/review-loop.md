@@ -63,6 +63,23 @@ Judge 交回的结构化判定 [`TriageVerdict`](../../app/domain/models.py#L395
 
 给 worker 的协议中，`batch_id` 和 `feedback` 共同限定了任务范围；`repo`、`branch`、`pr_number` 和 `base_branch` 指明要回到哪个交付现场；`session_id` 配合 `session_generation` 识别应该接续的会话。`purpose` 则决定可以做哪些动作，取值只有 `answer` 和 `revise`。例如，显式编码重试要传 `retry_status`，如果同时把 `purpose` 填成 `answer`，[任务模型](../../app/contracts/protocol.py#L94-L124)会在校验时拒绝。靠任务标题写「只回答」不能取代协议字段。
 
+### REVISION 的 prompt 在哪里初始化？
+
+控制端先准备数据，worker 再生成文本。派发前，[`prepare_revision`](../../app/controler/workflow/revisions.py#L51-L176)核对当前 Attempt、批次、worker 绑定和开放的 PR，将交付信息、原会话 ID 与代次、批次反馈和 Job 的 `instruction` 装入 `RevisionTask`。首次冻结 `revise` 时，还可把等待派发的网页消息追加到指令末尾。[`freeze_revision`](../../app/persistence/reviews.py#L581-L591)把任务写入 `job.payload["revision"]`；同一 Job 再次准备时复用已冻结的值。
+
+worker 在绑定的工作区里调用 [`build_revision_prompt`](../../app/worker/execution/prompts.py#L94-L160)。普通修订按以下顺序拼接，已有会话和新会话使用同一份文本：
+
+| 段落（出现顺序） | 从哪里来，怎么读 |
+|---|---|
+| `Original task` → `Delivery` | [原任务](../../app/controler/workflow/preparation.py#L75-L82)取 Flow 保存的正文；Issue 任务没有这份正文时，读取 Issue 当时的标题和正文。交付段列出仓库、PR、源分支、目标分支和 control 观察到的 PR head。 |
+| `Previous summary` → `Coding start` → `Unresolved questions` | 分别是当前 Attempt 的上次修订摘要、worker 实际同步到的编码基线、批次遗留问题。普通 `revise` 必须有编码基线，不能拿较早观察到的 PR head 代替；`answer` 只查本地提交，没有 `Coding start`。摘要和遗留问题可以为空。 |
+| `Answer/Revise instruction (synthesized from review)` → `Review feedback` | 前者是本轮要做什么，后者是本轮认领了哪些反馈版本。每项带 `item_id`、`version`、`comment_id`、作者和正文；有 diff 片段的行内意见还带文件、原提交和片段。网页单独追加任务时，问题出现在指令段，反馈段显示 `(no inline items)`。 |
+| `Rules` → 输出要求 → 可选的 `Frozen PR context` | `answer` 只查证，不改码、不推送；`revise` 在原分支交付，并要求在编码里程碑报告进展。两者都要求返回 `summary`、`vcs_backend_used`、`addressed`、`deferred`、`needs_clarification`。只有任务带评审快照时才追加其 JSON。 |
+
+[执行器](../../app/worker/execution/executor.py#L321-L371)把 prompt、工作目录和 `RevisionCodingOutput` 的 JSON Schema 一起交给编码后端；图片通过执行上下文传入。[Codex](../../app/worker/execution/codex.py#L197-L200)用 `--output-schema` 传文件，[Amp](../../app/worker/execution/amp_agent.py#L455-L457)则把 schema 附在 prompt 末尾。这就是 Amp 消息最后还有一段 `Return exactly one JSON value…` 的原因。普通修订优先 `resume` 原会话；没有会话 ID，或后端明确报告会话不可用且工作区复核通过时，才用同一 prompt `start` 新会话。
+
+**显式编码重试例外。** 有 `retry_status` 时，worker 用[短重试模板](../../app/worker/execution/prompts.py#L108-L117)，只给出上次状态、保留本地和远端工作的要求，以及可选的新指令；不重放原任务、评审快照或编码基线。输出仍受同一 schema 约束。这条路径必须续接原会话，会话缺失或不可用就失败，不另开会话。[重试与会话缺失用例](../../tests/test_revision_delivery.py#L190-L263)
+
 ## B.3 判定与反馈消费
 
 | 判断 | 对这一批反馈做什么 |
