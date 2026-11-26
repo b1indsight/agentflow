@@ -1,19 +1,25 @@
 import { ApiError } from "./api";
+import { jsonCacheBytes, SessionCache } from "./sessionCache";
 
 const FILE_BYTES = 512 * 1024;
 const fileId = /^[0-9a-f]{32}$/;
 
 export type WorkerFile = { id: string; name: string | null };
 
-export type Preview =
+type Preview =
   | { kind: "text"; text: string }
   | { kind: "image"; url: string }
   | { kind: "binary" };
 
+export type FilePreview = { preview: Preview; size: number };
+const previews = new SessionCache<string, FilePreview & { etag: string }>(
+  32,
+  4 * 1024 * 1024,
+  jsonCacheBytes,
+);
+
 /** Only signed, decodable raster formats become images. Everything else is escaped UTF-8 or a download. */
-export async function previewFile(
-  bytes: Uint8Array<ArrayBuffer>,
-): Promise<Preview> {
+async function previewFile(bytes: Uint8Array<ArrayBuffer>): Promise<Preview> {
   const begins = (...signature: number[]) =>
     signature.every((byte, i) => bytes[i] === byte);
   const header = new TextDecoder("ascii").decode(bytes.subarray(0, 12));
@@ -76,19 +82,23 @@ export function workerFileLink(
   }
 }
 
-/** Read the existing authenticated attachment endpoint, bounding actual bytes rather than trusting headers. */
+/** Only reuse a decoded preview after the authenticated endpoint confirms its contents. */
 export async function readFile(
   linkId: string,
   signal: AbortSignal,
-): Promise<Uint8Array<ArrayBuffer>> {
+): Promise<FilePreview> {
   if (linkId.length !== 32 || !fileId.test(linkId))
     throw new TypeError("Invalid file ID");
+  const cached = previews.get(linkId);
   const response = await fetch(`/api/files/${linkId}`, {
     credentials: "same-origin",
     cache: "no-store",
+    headers: cached && { "If-None-Match": cached.etag },
     redirect: "error",
     signal,
   });
+  const etag = response.headers.get("ETag");
+  if (response.status === 304 && cached && cached.etag === etag) return cached;
   if (!response.ok) {
     let code = `请求失败 (${response.status})`;
     try {
@@ -99,6 +109,15 @@ export async function readFile(
     }
     throw new ApiError(code, response.status);
   }
+  const bytes = await readBytes(response, signal);
+  const result = { preview: await previewFile(bytes), size: bytes.byteLength };
+  signal.throwIfAborted();
+  if (etag) previews.set(linkId, { ...result, etag });
+  return result;
+}
+
+/** Bound actual bytes rather than trusting Content-Length. */
+async function readBytes(response: Response, signal: AbortSignal) {
   if (Number(response.headers.get("Content-Length")) > FILE_BYTES) {
     await response.body?.cancel();
     throw new ApiError("file_too_large", 413);

@@ -7002,11 +7002,18 @@ for (const width of [1440, 390]) {
       }),
     );
     const reads: string[] = [];
+    const unchanged: string[] = [];
     let version = 1;
     await page.route("**/api/files/*", (route) => {
       const id = route.request().url().slice(-32);
       reads.push(id);
-      return route.fulfill({ body: `source ${id} v${version}` });
+      const revision = id === ids[1] ? version : 1;
+      const headers = { ETag: `"${id}:${revision}"` };
+      if (route.request().headers()["if-none-match"] === headers.ETag) {
+        unchanged.push(id);
+        return route.fulfill({ status: 304, headers });
+      }
+      return route.fulfill({ headers, body: `source ${id} v${revision}` });
     });
     await page.goto("/console/#flow/42/conversation");
     const conversation = page.getByRole("tab", { name: "会话", exact: true });
@@ -7066,7 +7073,9 @@ for (const width of [1440, 390]) {
     expect(reads).toEqual([...initialReads, ids[1]]);
     await conversation.click();
     await page.getByRole("link", { name: "打开0", exact: true }).click();
-    await expect(panel).toContainText(`source ${ids[0]} v2`);
+    // Closing discarded the tab, but a 304 can still restore its decoded preview.
+    await expect(panel).toContainText(`source ${ids[0]} v1`);
+    expect(unchanged).toContain(ids[0]);
     await expect(page.getByRole("tab")).toHaveCount(6);
     await second.click();
     // Closing an inactive file must not switch the current document.

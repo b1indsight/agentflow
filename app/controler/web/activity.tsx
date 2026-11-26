@@ -26,12 +26,7 @@ import Markdown, {
 import remarkGfm from "remark-gfm";
 import { getContent, getDiff, getThread } from "./api";
 import { DiffWindow } from "./DiffWindow";
-import {
-  previewFile,
-  readFile,
-  workerFileLink,
-  type WorkerFile,
-} from "./files";
+import { readFile, workerFileLink, type WorkerFile } from "./files";
 import type {
   ActivityIdentity,
   ActivityItem,
@@ -81,8 +76,7 @@ function WorkerImage({
   useEffect(() => {
     const controller = new AbortController();
     void readFile(fileId, controller.signal)
-      .then(previewFile)
-      .then((preview) => {
+      .then(({ preview }) => {
         if (!controller.signal.aborted && preview.kind === "image")
           setSrc(preview.url);
       })

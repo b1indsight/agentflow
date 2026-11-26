@@ -2,14 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, RefreshCw } from "lucide-react";
 import { ApiError } from "./api";
 import { Button } from "./components/ui/button";
-import { previewFile, readFile, type Preview } from "./files";
+import { readFile, type FilePreview } from "./files";
 import { parseSource, sourceLines } from "./fileSyntax";
 import { CODE_LINES, textEnd, WindowList } from "./windowing";
 
 type FileState =
   | { kind: "loading" }
   | { kind: "error"; error: Error }
-  | { kind: "ready"; preview: Preview; size: number };
+  | ({ kind: "ready" } & FilePreview);
 
 function failureMessage(error: Error) {
   if (error instanceof ApiError) {
@@ -121,10 +121,8 @@ export default function FileViewer({
     const request = new AbortController();
     setState({ kind: "loading" });
     void readFile(linkId, request.signal)
-      .then(async (bytes) => {
-        const preview = await previewFile(bytes);
-        if (!request.signal.aborted)
-          setState({ kind: "ready", preview, size: bytes.byteLength });
+      .then((file) => {
+        if (!request.signal.aborted) setState({ kind: "ready", ...file });
       })
       .catch((error: Error) => {
         if (!request.signal.aborted) setState({ kind: "error", error });
