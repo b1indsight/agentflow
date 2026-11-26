@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from app.contracts.protocol import RevisionTask, RevisionTaskResult, Succeeded
 from app.contracts.receipts import decode_result_inbox
 from app.contracts.result_models import CommentEffect, ResultPending, ResultPlan, RunUpdate
-from app.controler.review.resolution import plan_resolution
+from app.controler.review.resolution import ResolutionNotes, plan_resolution
 from app.controler.workflow.plans import (
     failed_plan,
     installation_id,
@@ -296,17 +296,18 @@ def revision_plan(
     )
     unresolved = (len(consumed) != len(batch.feedback)
                   or bool(result.output.needs_clarification))
-    notes = plan_resolution(flow, number, batch, result,
-                            reviews.addressed(flow.id, attempt.id), purpose=task.purpose)
-    blocked = {(f.item_id, f.version) for f in notes.blocked}
-    consumed = [f for f in consumed if (f.item_id, f.version) not in blocked]
-    unresolved |= bool(notes.problems)
-    effects = notes.effects
-    new_commit = task.purpose == "revise" and result.commit_sha != (
-        result.baseline_sha or task.expected_head_sha
-    )
-    if result.output.summary:
-        effects.append(
+    notes = ResolutionNotes()
+    # Console-only revisions have no GitHub feedback to reply to.
+    if batch.feedback:
+        notes = plan_resolution(flow, number, batch, result,
+                                reviews.addressed(flow.id, attempt.id), purpose=task.purpose)
+        blocked = {(f.item_id, f.version) for f in notes.blocked}
+        consumed = [f for f in consumed if (f.item_id, f.version) not in blocked]
+        unresolved |= bool(notes.problems)
+        new_commit = task.purpose == "revise" and result.commit_sha != (
+            result.baseline_sha or task.expected_head_sha
+        )
+        notes.effects.append(
             CommentEffect(
                 key="summary",
                 installation_id=installation_id(flow),
@@ -316,11 +317,11 @@ def revision_plan(
                 f"修订交付（{'已核验新提交' if new_commit else '无新提交'}）：{result.output.summary}",
             )
         )
-    if not unresolved and new_commit:
-        effects.extend(review_effects(flow, number, in_review_label=in_review_label, reviewers=reviewers))
+        if not unresolved and new_commit:
+            notes.effects.extend(review_effects(flow, number, in_review_label=in_review_label, reviewers=reviewers))
     return base.model_copy(
         update={
-            "effects": effects,
+            "effects": notes.effects,
             "delivery": delivery,
             "revision": result,
             "revision_purpose": task.purpose,

@@ -3880,6 +3880,63 @@ test("multi-file diff labels files and keeps oversized lines local to their rows
   }
 });
 
+test("paged revision context folds without hiding the current request", async ({
+  page,
+}) => {
+  const file = `/api/files/${"a".repeat(32)}`;
+  const prefix = `<agentflow_context>\n<![CDATA[\n# Previous summary\n说明评论路由。\n\n![上轮截图](${file}#name=preview.png)\n]]>\n</agentflow_`;
+  await page.route(`**${file}`, (route) =>
+    route.fulfill({
+      body: Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR4nGP4X+Uupe8AAAprAkohTMgDAAAAAElFTkSuQmCC",
+        "base64",
+      ),
+      contentType: "application/octet-stream",
+    }),
+  );
+  const tail = "context>\n\n# Current request\n请将本轮要求放在最后。";
+  const item = {
+    ...activity,
+    key: "revision-prompt",
+    source: "worker",
+    kind: "message",
+    author: "user",
+    body: prefix,
+    body_length: prefix.length + tail.length,
+  };
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({ json: activityPage([item], 0, 1) }),
+  );
+  await page.route("**/api/flows/42/activity/content?**", (route) =>
+    route.fulfill({
+      json: {
+        key: item.key,
+        version: item.version,
+        text: tail,
+        next_offset: null,
+        total: item.body_length,
+      },
+    }),
+  );
+  await page.goto("/#flow/42/conversation");
+  const row = page.locator("article[data-entry='revision-prompt']");
+  const request = row.getByText("请将本轮要求放在最后。");
+  const context = row.getByText("说明评论路由。");
+  await expect(request).toBeVisible();
+  await expect(context).toBeHidden();
+  await row.getByRole("button", { name: "修订上下文" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(context).toBeVisible();
+  await expect
+    .poll(() =>
+      row
+        .getByRole("img", { name: "上轮截图" })
+        .evaluate((img) => (img as HTMLImageElement).naturalWidth),
+    )
+    .toBe(2);
+  await expect(request).toBeVisible();
+});
+
 test("consecutive authors share identity while conversation bodies render safe Markdown", async ({
   page,
 }) => {

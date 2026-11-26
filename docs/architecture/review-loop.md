@@ -15,6 +15,24 @@
 
 本文讨论已交付 PR 的评审；从 GitHub 观察一次问答和改码的完整步骤，见[在同一张 PR 上提问，再要求改代码](../feature-walkthroughs/review.md)。
 
+## 在 Flow 网页追加一句话，结果会发到哪里？
+
+`REVISION` 是接着当前 PR 执行的一轮作业。GitHub 评审和 Flow 网页的「追加任务」都能使用原工作区、分支和会话。单独从网页追加时，摘要和待澄清问题只显示在 [Flow 的结果消息](../../app/persistence/activity.py#L53-L72)中；即使交付了新提交，也不在 PR 发评论、加评审标签或请求复审。
+
+例如，在已有开放 PR 的 Flow 里输入「请说明为什么重试三次」：[网页提交](../../app/controler/web/api.ts)调用 `POST /api/flows/{id}/agent-tasks`，control 先把原文记为当前 Attempt 的用户消息。可以派发新作业时，[`_queue_agent_inputs`](../../app/controler/workflow/service.py#L344-L378)创建 `trigger="strong"`、`feedback=[]` 的批次，把原文放进 `instruction`，直接派 `purpose=revise`，不经 Judge。即使是问句也走这条路径。作业忙时消息先保留；交付状态为 `WAITING` 时则续派 `INITIAL`。[控制台集成测试](../../tests/test_console_api.py#L396-L455)分别检查了活动里的用户原文、worker 收到的指令和空反馈清单。
+
+[worker 提示词](../../app/worker/execution/prompts.py)在两种入口下都把本轮指令放在末尾的 `Current request`。原任务、评审反馈和执行规则用 `<agentflow_context>` 标记，在会话里默认折叠为「修订上下文」。展开可以查阅模型收到的背景；未标记的历史消息按原样显示。
+
+worker 交回结构化结果后，control 仍会核验交付、保存摘要及未决问题。[`revision_plan`](../../app/controler/workflow/revisions.py)只在冻结批次包含 GitHub 反馈时安排下列 PR 写入。判断依据是本轮批次，不是最初任务来自网页还是 Issue，也不是指令里有没有网页追加的话。
+
+| 核验通过的内容 | 发布位置 |
+|---|---|
+| 每轮必填的 `summary` | 为当前 PR 安排一条普通会话评论。`answer` 加前缀「问题答复」，`revise` 加「修订交付」并注明有无新提交。 |
+| `addressed.note`、`deferred.reason` | [逐项回复规则](../../app/controler/review/resolution.py)把普通评论和 review 正文的处理说明汇总到 PR 会话；行内意见能唯一定位到线程和根评论时，才回复原线程。同线程的多项合为一条，无法定位的保留待处理。 |
+| `needs_clarification` | 整批只涉及一个已映射的行内线程时，问题随线程回复；其他情况放在 PR 会话。 |
+
+所以同样是「为什么重试三次」，从 Flow 单独追加时，在 Flow 看结果；从 GitHub 行内提问时，逐项答复可以回到原线程，摘要另发到 PR 会话。两类 GitHub 写入在[发布器](../../app/controler/workflow/effects.py#L364-L390)里分别调用 `thread.reply` 和 `issue.comment`，都不需要提交一份新的 GitHub review。
+
 ## B.1 反馈入口与持久 settle
 
 [事件路由](../../app/controler/events/router.py)识别三种来源：Issue/PR 讨论区评论、review 正文、diff 行上的 inline 评论。它按仓库与编号寻找对应 Flow，过滤本 App 和其他 bot 的反馈。[评审存储](../../app/persistence/reviews.py)以 `(kind, github_id)` 标识评论，对每次有效变化保存版本和所属 attempt（本次执行）。这样不同类别里的同号评论不会串在一起；同一 Issue 上旧 Flow 已见过、此后未改动的评论也不会变成新任务。
@@ -44,6 +62,24 @@ Judge 交回的结构化判定 [`TriageVerdict`](../../app/domain/models.py#L395
 时间边界也适用于同一线程的旁证。冻结时知道评论 500，随后在 GitHub 读线程时看到 499、500、501。如果 501 在截止时间之后发布，上下文可以把 499 作为背景，保留 500 作为本轮输入，却不能绕过截止时间把 501 塞回背景。否则 Judge 会看见 worker 无权消费的意见。[截止时间用例](../../tests/test_review_context.py#L318-L336)分别断言 `feedback` 和 `discussions` 的 ID，检查的正是这个区别。
 
 给 worker 的协议中，`batch_id` 和 `feedback` 共同限定了任务范围；`repo`、`branch`、`pr_number` 和 `base_branch` 指明要回到哪个交付现场；`session_id` 配合 `session_generation` 识别应该接续的会话。`purpose` 则决定可以做哪些动作，取值只有 `answer` 和 `revise`。例如，显式编码重试要传 `retry_status`，如果同时把 `purpose` 填成 `answer`，[任务模型](../../app/contracts/protocol.py#L94-L124)会在校验时拒绝。靠任务标题写「只回答」不能取代协议字段。
+
+### REVISION 的 prompt 在哪里初始化？
+
+控制端先准备数据，worker 再生成文本。派发前，[`prepare_revision`](../../app/controler/workflow/revisions.py#L51-L176)核对当前 Attempt、批次、worker 绑定和开放的 PR，将交付信息、原会话 ID 与代次、批次反馈和 Job 的 `instruction` 装入 `RevisionTask`。首次冻结 `revise` 时，还可把等待派发的网页消息追加到指令末尾。[`freeze_revision`](../../app/persistence/reviews.py#L581-L591)把任务写入 `job.payload["revision"]`；同一 Job 再次准备时复用已冻结的值。
+
+worker 在绑定的工作区里调用 [`build_revision_prompt`](../../app/worker/execution/prompts.py#L154-L193)。普通修订按以下顺序拼接，已有会话和新会话使用同一份文本：
+
+| 段落（出现顺序） | 从哪里来，怎么读 |
+|---|---|
+| `Original task` → `Delivery` | [原任务](../../app/controler/workflow/preparation.py#L75-L82)取 Flow 保存的正文；Issue 任务没有这份正文时，读取 Issue 当时的标题和正文。交付段列出仓库、PR、源分支、目标分支和 control 观察到的 PR head。 |
+| `Previous summary` → `Coding start` → `Unresolved questions` | 分别是当前 Attempt 的上次修订摘要、worker 实际同步到的编码基线、批次遗留问题。普通 `revise` 必须有编码基线，不能拿较早观察到的 PR head 代替；`answer` 只查本地提交，没有 `Coding start`。摘要和遗留问题可以为空。 |
+| `Review feedback` | 本轮认领的反馈版本。每项带 `item_id`、`version`、`comment_id`、作者和正文；有 diff 片段的行内意见还带文件、原提交和片段。网页单独追加任务时，此段显示 `(no inline items)`。 |
+| `Rules` → 输出要求 → 可选的 `Frozen PR context` | `answer` 只查证，不改码、不推送；`revise` 在原分支交付，并要求在编码里程碑报告进展。两者都要求返回 `summary`、`vcs_backend_used`、`addressed`、`deferred`、`needs_clarification`。只有任务带评审快照时才追加其 JSON。 |
+| `Current request` | 本轮要做什么，取 `RevisionTask.instruction`。这段在上下文标记外，始终可见。 |
+
+[执行器](../../app/worker/execution/executor.py#L321-L371)把 prompt、工作目录和 `RevisionCodingOutput` 的 JSON Schema 一起交给编码后端；图片通过执行上下文传入。[Codex](../../app/worker/execution/codex.py#L197-L200)用 `--output-schema` 传文件，[Amp](../../app/worker/execution/amp_agent.py)把 schema 和附件说明放进折叠的上下文。普通修订优先 `resume` 原会话；没有会话 ID，或后端明确报告会话不可用且工作区复核通过时，才用同一 prompt `start` 新会话。
+
+**显式编码重试例外。** 有 `retry_status` 时，worker 用[短重试模板](../../app/worker/execution/prompts.py#L144-L151)，把上次状态和保留本地、远端工作的要求放进上下文。有新指令才在末尾显示 `Current request`；不重放原任务、评审快照或编码基线。输出仍受同一 schema 约束。这条路径必须续接原会话，会话缺失或不可用就失败，不另开会话。[重试与会话缺失用例](../../tests/test_revision_delivery.py#L190-L263)
 
 ## B.3 判定与反馈消费
 

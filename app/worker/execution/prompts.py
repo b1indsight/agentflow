@@ -105,6 +105,62 @@ def _format_item(item: ReviewFeedback) -> str:
             f"{item.author} says: {item.body}")
 
 
+_CONTEXT_START = "<agentflow_context>\n<![CDATA[\n"
+_CONTEXT_END = "\n]]>\n</agentflow_context>"
+
+
+def _context_text(text: str) -> str:
+    return text.replace("]]>", "]]]]><![CDATA[>")
+
+
+def _revision_message(context: str, instruction: str) -> str:
+    message = _CONTEXT_START + _context_text(context) + _CONTEXT_END
+    return message + (f"\n\n# Current request\n{instruction}" if instruction else "")
+
+
+def revision_markdown_parts(prompt: str) -> list[tuple[str, range | list[int]]]:
+    """Return each rendered Markdown document and its character positions in the native prompt."""
+    if not prompt.startswith(_CONTEXT_START):
+        return [(prompt, range(len(prompt)))]
+    context, end, request = prompt[len(_CONTEXT_START):].partition(_CONTEXT_END)
+    if not end:
+        return [(prompt, range(len(prompt)))]
+    # A quoted ]]> spans two CDATA nodes. Drop the intervening XML, not its literal characters.
+    parts = context.split("]]]]><![CDATA[>")
+    positions: list[int] = []
+    offset = len(_CONTEXT_START)
+    for index, part in enumerate(parts):
+        if index:
+            positions.extend((offset, offset + 1, offset + len("]]]]><![CDATA[")))
+            offset += len("]]]]><![CDATA[>")
+        positions.extend(range(offset, offset + len(part)))
+        offset += len(part)
+    return [("]]>".join(parts), positions), (request, range(len(prompt) - len(request), len(prompt)))]
+
+
+def add_backend_instructions(prompt: str, extra: str) -> str:
+    """Keep backend-specific instructions inside a revision's foldable context."""
+    if prompt.startswith(_CONTEXT_START):
+        context, end, request = prompt.partition(_CONTEXT_END)
+        if end:
+            return context + _context_text(extra) + end + request
+    return prompt + extra
+
+
+def history_text(value: str, *, user_message: bool = False) -> tuple[str, bool]:
+    """Bound native history fields, reserving room for a revision's current request."""
+    limit = 8192
+    if len(value) <= limit:
+        return value, False
+    if user_message and value.startswith(_CONTEXT_START):
+        context, end, request = value.partition(_CONTEXT_END)
+        if end:
+            keep = max(len(_CONTEXT_START), limit - len(end) - len(request) - 1)
+            if keep < len(context):
+                value = context[:keep] + "…" + end + request
+    return value[:limit], True
+
+
 def build_revision_retry_prompt(status: str, instruction: str) -> str:
     """Continue the original conversation without replaying Judge or repository snapshots."""
     parts = [
@@ -112,9 +168,7 @@ def build_revision_retry_prompt(status: str, instruction: str) -> str:
         ("Continue this revision in the existing checkout and PR. Preserve local and remote work "
          "and reconcile any differences before an ordinary push. Do not force-push."),
     ]
-    if instruction:
-        parts.append(f"User instructions:\n{instruction}")
-    return "\n\n".join(parts)
+    return _revision_message("\n\n".join(parts), instruction)
 
 
 def build_revision_prompt(task: RevisionTask, *, baseline_sha: str | None) -> str:
@@ -128,7 +182,6 @@ def build_revision_prompt(task: RevisionTask, *, baseline_sha: str | None) -> st
         f"base {task.base_branch}; PR observed head: {task.expected_head_sha}\n"),
         f"# Previous summary\n{task.previous_summary}\n",
         f"# Unresolved questions\n{chr(10).join(task.open_points)}\n",
-        f"# {task.purpose.title()} instruction (synthesized from review)\n{task.instruction}\n",
         f"# Review feedback\n{feedback}\n",
         ("Rules: This task is answer-only, overriding earlier coding or delivery instructions. "
         "Do not modify code, commit or push. Read the existing repository to answer every question, "
@@ -157,4 +210,4 @@ def build_revision_prompt(task: RevisionTask, *, baseline_sha: str | None) -> st
                      "above is an earlier metadata snapshot, not the coding baseline.\n")
     if task.context is not None:
         parts.append(f"# Frozen PR context\n{task.context.model_dump_json()}")
-    return "\n".join(parts)
+    return _revision_message("\n".join(parts), task.instruction)

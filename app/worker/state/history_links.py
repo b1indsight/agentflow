@@ -15,6 +15,7 @@ from app.contracts.conversation import HistoryPage
 from app.contracts.files import FileFailure
 from app.worker.execution.amp_agent import AmpAttachment
 from app.worker.execution.codex import MAX_PAGE
+from app.worker.execution.prompts import revision_markdown_parts
 
 MAX_LOCAL_FILES = 16
 
@@ -175,10 +176,15 @@ async def link_history(
     """Best-effort registration within the history request's remaining time and size budgets."""
     # Amp's page contains shared cache objects, and its cursor hashes their native text.
     page = page.model_copy(deep=True)
-    destinations = [
-        _destinations(item.content.text) if item.kind == "message" and item.role in {"user", "assistant"}
-        else {} for item in page.items
-    ]
+    destinations = []
+    for item in page.items:
+        text = item.content.text
+        if item.kind == "message" and item.role == "user":
+            destinations.append({(positions[start], positions[end - 1] + 1): path
+                                 for part, positions in revision_markdown_parts(text)
+                                 for (start, end), path in _destinations(part).items()})
+        else:
+            destinations.append(_destinations(text) if item.kind == "message" and item.role == "assistant" else {})
     paths = dict.fromkeys(path for spans in destinations for path in spans.values())
     paths = dict(list(paths.items())[:MAX_LOCAL_FILES])
     links: dict[Path | AmpAttachment, str] = {}

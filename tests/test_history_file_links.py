@@ -14,6 +14,7 @@ from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent, AmpProcessResult
+from app.worker.execution.prompts import build_revision_retry_prompt
 from app.worker.runtime import WorkerRuntime
 from tests.test_conversation_history import AMP_SESSION, SESSION, message, rollout
 from tests.test_remote_e2e import remote_connection
@@ -132,6 +133,19 @@ async def test_private_amp_images_register_without_downloading_or_trusting_sourc
     )
     assert page.next_cursor == native.next_cursor
     assert native.items[0].content.text == text
+
+
+async def test_revision_context_and_request_register_only_rendered_images(worker, tmp_path, monkeypatch):
+    url = "https://ampcode.com/user-content/temporary-files/" + "b" * 64 + "-preview.png"
+    # A literal CDATA terminator in a fenced example must not end the fold or register the example.
+    background = f"Review the example:\n\n```md\n]]>\n![example](/private/example)\n```\n\n![previous]({url})"
+    prompt = build_revision_retry_prompt(background, f"![current]({url})")
+    rollout(tmp_path / "codex", [message("user", prompt)])
+    register = AsyncMock(return_value=LINK)
+    monkeypatch.setattr(worker, "register_file", register)
+    page = await worker.read_history(HistoryQuery(session_id=SESSION))
+    assert page.items[0].content.text == prompt.replace(url, f"{LINK}#name=preview.png")
+    register.assert_awaited_once_with(url, "amp")
 
 
 async def test_registration_deadline_and_failure_keep_partial_text(worker, tmp_path, monkeypatch):

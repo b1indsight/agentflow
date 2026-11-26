@@ -46,6 +46,7 @@ from app.worker.execution.permissions import (
     PermissionProfile,
     require_supported_permissions,
 )
+from app.worker.execution.prompts import add_backend_instructions, history_text
 from app.worker.model_catalog import read_model_catalog
 from app.worker.state.file_links import FileLinks
 
@@ -447,19 +448,21 @@ class AmpCodingAgent(CodingAgent):
         # broker or its token; it preserves the existing no-broker behavior.
         mcp = {"flow": ({"url": url, "headers": {"Authorization": "Bearer ${AGENTFLOW_MCP_TOKEN}"}}
                         if url is not None else {"url": "http://127.0.0.1:0/mcp"})}
+        extra = ""
         if context is not None or session_id is not None:
-            prompt += ("\n\nFor this worker thread, opt out of automatic GitHub follow-ups. "
+            extra += ("\n\nFor this worker thread, opt out of automatic GitHub follow-ups. "
                        "Do not subscribe this thread to PR or CI events; AgentFlow delivers review feedback "
                        "as a separate assignment. If an existing subscription sends an event, continue the "
                        "current assignment. If you already returned its result, repeat that result unchanged.")
         if output_schema is not None:
-            prompt += ("\n\nReturn exactly one JSON value matching this JSON Schema as your final answer. "
+            extra += ("\n\nReturn exactly one JSON value matching this JSON Schema as your final answer. "
                        "Do not wrap it in Markdown or add explanatory text.\n" + output_schema.read_text())
         with tempfile.TemporaryDirectory(prefix="agentflow-amp-") as directory:
             run_directory = Path(directory)
             if context and context.images:
                 paths = write_images(context.images, run_directory)
-                prompt += "\n\nView the attached task images with view_media:\n" + "\n".join(map(str, paths))
+                extra += "\n\nView the attached task images with view_media:\n" + "\n".join(map(str, paths))
+            prompt = add_backend_instructions(prompt, extra)
             environment = amp_environment(context=context)
             if context and context.github:
                 environment.update(github_environment(context.github, run_directory, environment))
@@ -681,12 +684,13 @@ class AmpHistory:
                 continue
             item_id = f"{session_id}:{message_id}:{block_index}"
             if kind == "text" and isinstance(block.get("text"), str):
-                text, truncated = self._text(redact_amp_text(block["text"], secrets))
+                text, truncated = history_text(redact_amp_text(block["text"], secrets),
+                                               user_message=role == "user" and not automated)
                 items.append(HistoryItem(id=item_id, timestamp=timestamp,
                                          role="system" if automated else role, kind="message",
                                          content=ConversationContent(text=text), truncated=truncated))
             elif kind == "tool_use" and isinstance(block.get("name"), str):
-                arguments, truncated = self._text(redact_amp_json(block.get("input", {}), secrets))
+                arguments, truncated = history_text(redact_amp_json(block.get("input", {}), secrets))
                 call_id = block.get("id")
                 if not isinstance(call_id, str):
                     unsupported = True
@@ -700,14 +704,10 @@ class AmpHistory:
                     unsupported = True
                     continue
                 result = run.get("result", {})
-                text, truncated = self._text(redact_amp_json(result, secrets))
+                text, truncated = history_text(redact_amp_json(result, secrets))
                 items.append(HistoryItem(id=item_id, timestamp=timestamp, role="tool", kind="tool_result",
                                          call_id=block["toolUseID"], content=ConversationContent(text=text),
                                          truncated=truncated))
             else:
                 unsupported = True
         return items, unsupported
-
-    @staticmethod
-    def _text(value: str) -> tuple[str, bool]:
-        return value[:8192], len(value) > 8192
