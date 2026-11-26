@@ -2671,9 +2671,13 @@ test("jump to latest reads all remaining pages of the current snapshot", async (
   expect(cursors).toEqual([]);
   await jump.click();
   await expect(jump).toHaveText("正在翻页…");
+  const spinner = jump.locator("svg");
+  await expect(spinner).toHaveCSS("animation-name", "spin");
   await page.screenshot({
     path: "../../../.amp/in/artifacts/conversation-jump-pending.png",
   });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(spinner).toHaveCSS("animation-name", "none");
   release();
   await expect(page.getByText("回复 60", { exact: true })).toBeInViewport();
   await expect(

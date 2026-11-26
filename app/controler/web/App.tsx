@@ -18,6 +18,7 @@ import {
   ChevronDown,
   FileText,
   Inbox,
+  LoaderCircle,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
@@ -1120,7 +1121,9 @@ function DetailPanel({
             </section>
           </TabsContent>
         </div>
-        {selectedTab === "conversation" && <div ref={setConversationNav} />}
+        {selectedTab === "conversation" && (
+          <div className="conversation-nav" ref={setConversationNav} />
+        )}
         {freshFlow && !flow.history_only && (
           <AgentTaskInput
             busy={pending !== null}
@@ -1468,8 +1471,17 @@ function Conversation({
             disabled={jumping}
             onClick={() => setJumping(true)}
           >
-            <ArrowDownToLine aria-hidden="true" />
-            {jumping && "正在翻页…"}
+            {jumping ? (
+              <>
+                <LoaderCircle
+                  className="motion-safe:animate-spin"
+                  aria-hidden="true"
+                />
+                正在翻页…
+              </>
+            ) : (
+              <ArrowDownToLine aria-hidden="true" />
+            )}
           </button>,
           navigation,
         )}
