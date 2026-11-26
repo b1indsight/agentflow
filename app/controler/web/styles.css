@@ -125,6 +125,7 @@ svg {
   --icon-span: 20;
 }
 .lucide-refresh-cw,
+.lucide-arrow-down-to-line,
 .lucide-panel-left-close,
 .lucide-panel-left-open,
 .lucide-save,
@@ -1720,6 +1721,25 @@ svg {
 }
 .new-records {
   margin: 12px 0;
+}
+.conversation-nav {
+  position: relative;
+}
+.jump-to-latest {
+  position: absolute;
+  right: clamp(16px, 2vw, 24px);
+  bottom: 16px;
+  min-width: 44px;
+  height: 44px;
+  padding: 8px 10px;
+  color: var(--accent);
+}
+.jump-to-latest:disabled {
+  background: transparent;
+}
+.jump-to-latest svg {
+  width: 24px;
+  height: 24px;
 }
 .load-sentinel {
   text-align: center;

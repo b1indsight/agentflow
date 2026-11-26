@@ -2642,6 +2642,52 @@ for (const width of [1440, 390]) {
   });
 }
 
+test("jump to latest reads all remaining pages of the current snapshot", async ({
+  page,
+}) => {
+  // A long first page keeps automatic prefetch out of reach until the user jumps.
+  const items = Array.from({ length: 61 }, (_, i) => ({
+    ...activity,
+    key: `jump-${i}`,
+    body: [`回复 ${i}`, ...Array(8).fill("会话正文")].join("\n\n"),
+  }));
+  const cursors: string[] = [];
+  let release!: () => void;
+  const lastPage = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/flows/42/activity?**", async (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    const start = Number(params.get("cursor"));
+    if (start) cursors.push(`${start}:${params.get("snapshot")}`);
+    if (start === 60) await lastPage;
+    return route.fulfill({
+      json: activityPage(items.slice(start, start + 20), start, items.length),
+    });
+  });
+  await page.goto("/#flow/42/conversation");
+  const jump = page.getByRole("button", { name: "跳到最新回复" });
+  await expect(jump).toBeInViewport();
+  await expect(jump).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  expect(cursors).toEqual([]);
+  await jump.click();
+  await expect(jump).toHaveText("");
+  await expect(jump).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  const spinner = jump.locator("svg");
+  await expect(spinner).toHaveCSS("animation-name", "spin");
+  await page.screenshot({
+    path: "../../../.amp/in/artifacts/conversation-jump-pending.png",
+  });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(spinner).toHaveCSS("animation-name", "none");
+  release();
+  await expect(page.getByText("回复 60", { exact: true })).toBeInViewport();
+  await expect(
+    page.getByRole("button", { name: "已到当前本地快照末尾 · 点击刷新" }),
+  ).toBeInViewport();
+  expect(cursors).toEqual(["20:2", "40:2", "60:2"]);
+});
+
 test("conversation keeps loading when fast pages extend the same collapsed tool group", async ({
   page,
 }) => {
