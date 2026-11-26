@@ -8,6 +8,8 @@
 
 真正组合这些能力的是[控制端 `controler`](../../app/controler)。它一侧依赖[持久层](../../app/persistence)提交本地事务，另一侧依赖[GitHub 客户端](../../app/github)访问安装了 App 的仓库。[工作端 `worker`](../../app/worker)隔着连接接任务，不直接改业务表。这个分工也由[包依赖测试](../../tests/test_boundaries.py)约束。
 
+哪些模块还不能按「高层导入底层」排列，见[反向导入清单](import-direction-audit.md)。
+
 ### 跟踪一张任务卡，应该记住哪些编号？
 
 先记 **Flow ID**，再分清要查的是哪次开工、哪份作业或哪张 PR。Issue 编号帮助定位仓库里的输入；控制台也能直接用一段文字创建 Flow，此时没有 Issue 编号。[Flow 的输入检查](../../app/domain/models.py#L118-L149)要求 Issue 编号和直接任务正文恰好二选一。两种入口都可以产生后续交付，届时从交付记录读取 PR 编号即可。
