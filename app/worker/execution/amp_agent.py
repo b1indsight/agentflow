@@ -447,6 +447,11 @@ class AmpCodingAgent(CodingAgent):
         # broker or its token; it preserves the existing no-broker behavior.
         mcp = {"flow": ({"url": url, "headers": {"Authorization": "Bearer ${AGENTFLOW_MCP_TOKEN}"}}
                         if url is not None else {"url": "http://127.0.0.1:0/mcp"})}
+        if context is not None or session_id is not None:
+            prompt += ("\n\nFor this worker thread, opt out of automatic GitHub follow-ups. "
+                       "Do not subscribe this thread to PR or CI events; AgentFlow delivers review feedback "
+                       "as a separate assignment. If an existing subscription sends an event, continue the "
+                       "current assignment. If you already returned its result, repeat that result unchanged.")
         if output_schema is not None:
             prompt += ("\n\nReturn exactly one JSON value matching this JSON Schema as your final answer. "
                        "Do not wrap it in Markdown or add explanatory text.\n" + output_schema.read_text())
