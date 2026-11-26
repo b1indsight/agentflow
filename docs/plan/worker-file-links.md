@@ -346,3 +346,24 @@ Worker 必须能以其自身 Amp 身份访问附件；本机下载成功不代�
 已通过真实 PostgreSQL 下历史改写、文件登记与读取、文件代理、Amp 进程、原生会话历史、会话 API 及控制台同步回归，并通过完整前端单测、Playwright、格式、类型检查，以及 Ruff、应用与测试 Mypy。未重跑未受影响的全量后端套件。标准控制台构建和 wheel／sdist 打包成功，核对 wheel 静态资源与本地构建一致、Worker 附件源码与当前文件一致。构建仍只有既有非阻断 chunk 大小提示。证据为 `.amp/in/artifacts/amp-worker-only-{before,history,backend,types,build}.log` 和 `amp-worker-only-playwright.json`；浏览器完整复现命令为 `CI=1 PLAYWRIGHT_PORT=5192 npm run test:e2e -- --workers=2`，工作目录为 `app/controler/web`。
 
 **真实附件与交付状态。** 复用 013 的隔离 PostgreSQL、双端 Session fixture 和本地签名 owner assertion 验证方法，用正式 `link_history` 将测试线程的真实 Amp PNG 转成标准文件链接。真实 Worker CLI 认证下载后，经未修改的 owner HTTP 文件接口返回，SHA-256 与先前独立下载的原图一致；生产构建的原有文件查看器在桌面／手机均成功解码 1440 × 1200 图片，并通过比例、无横向溢出、正确文件名页签和文件接口 200 断言。打开前没有文件读取，浏览器没有 Amp Cookie，也未向 Amp 发图片请求；读取后临时目录为空。截图 `amp-worker-only-preview-{1440,390}.png` 已实际查看，HTTP 与浏览器记录为 `amp-worker-only-real-http.log`、`amp-worker-only-real-browser.json`。临时验收脚本保留在 HTTP 日志中，执行后删除。此检查未 mock 下载或 API 响应，仍不等于生产 Access、公网 WebSocket 或部署 Worker 验收。本轮修改仅在本地，尚未提交、推送、合并或部署，PR #179 仍为上一版。
+
+### 017 — 在会话旁打开文件页签（提案，待批准）
+
+读到会话里的文件链接时，用户可以边看文件边读原消息。[现有文件链接](../../app/controler/web/README.md#页面与读取语义)的点击和 Enter 保持原样，仍在主区打开。提议在 **Flow 详情区可用宽度 ≥ 960 CSS px** 时，给同一个链接增加独立的「在侧边打开」按钮，键盘也能操作。按扣除任务导航栏后的宽度判断，使会话和文件各有约 480 px 可读空间；窄屏、只读历史和普通外链不增加按钮。
+
+- **在侧边打开：** 主区仍显示原消息，保留阅读锚点和 URL。右侧有独立滚动区和文件名页签栏；按 ID 去重，重复打开聚焦已有页签，选中其他文件不会重读。按 Delete 或点关闭时选中相邻文件，关闭最后一个则收起右栏、把焦点交还主区。
+- **改在主区看：** 普通点击始终在主区查看。如果文件已经打开，则沿用同一个读取结果，不重复保留一份。详情区缩窄到阈值以下时，右侧文件并入主区页签栏，保留会话选中状态和已打开文件；再次变宽不自动弹出右栏。
+- **范围：** 详情决定文件显示在哪一侧；两边使用相同的文件查看器、错误提示、重读和关闭规则。文件链接识别、下载权限、Worker API、hash 格式均不变。不按宽度自动接管普通点击，不记全局偏好，也不引入可拖动分栏。实现时在[会话走查](../feature-walkthroughs/conversation.md)补上操作入口。
+
+**验收示例（预期，未运行）：** 在 1440 px 宽的浏览器里，进入带 `report.md` 链接的 Flow 42 会话，滚到链接所在消息后执行：
+
+```ts
+const open = page.getByRole("button", { name: "在侧边打开 report.md" });
+await open.press("Enter");
+const side = page.getByRole("tablist", { name: "侧边文件" });
+await expect(side.getByRole("tab", { name: "report.md" })).toBeFocused();
+await expect(page.getByRole("tab", { name: "会话" })).toHaveAttribute("aria-selected", "true");
+await expect(page).toHaveURL(/#flow\/42\/conversation$/);
+```
+
+用两份同名但 ID 不同的文件验证切换、关闭和读请求次数；滚动长文件时，原消息仍在会话可视区。再把详情宽度从 960 调到 959，检查侧边入口消失、文件仍可从主区打开且不重读。在 390 px 手机上直接点击文件仍进入原文件页签，页面无横向溢出。
