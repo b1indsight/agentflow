@@ -420,25 +420,55 @@ function MessageBody({
       });
     return () => controller.abort();
   }, [started, page.next, error, flowId, entry.key, entry.version]);
-  const partial = page.next !== null && !page.text.endsWith("\n");
+  const start = "<agentflow_context>\n<![CDATA[\n";
+  const end = "\n]]>\n</agentflow_context>";
+  let context: string | null = null;
+  let body = page.text;
+  if (
+    entry.source === "worker" &&
+    entry.author === "user" &&
+    entry.kind === "message" &&
+    body.startsWith(start)
+  ) {
+    const at = body.indexOf(end, start.length);
+    if (at !== -1 || page.next !== null) {
+      context = body
+        .slice(start.length, at === -1 ? undefined : at)
+        .replaceAll("]]]]><![CDATA[>", "]]>");
+      body = at === -1 ? "" : body.slice(at + end.length);
+    }
+  }
+  const onFileOpen =
+    entry.source === "worker" && typeof openFile === "function"
+      ? openFile
+      : undefined;
+  const partial = page.next !== null && !body.endsWith("\n");
   return (
     <div ref={root}>
+      {context !== null && (
+        <SavedDetails
+          className="tool"
+          stateKey={`${flowId}-${entry.key}-${entry.version}-context`}
+        >
+          <summary>
+            <ChevronRight className="tool-chevron" aria-hidden="true" />
+            修订上下文
+          </summary>
+          <ActivityMarkdown
+            text={context}
+            url={entry.url}
+            onFileOpen={onFileOpen}
+          />
+        </SavedDetails>
+      )}
       <MessageDiff
         value={{
           key: `${flowId}-${entry.key}-${entry.version}`,
-          partialEnd: partial ? page.text.length : undefined,
-          tail: partial ? page.text.slice(page.text.lastIndexOf("\n") + 1) : "",
+          partialEnd: partial ? body.length : undefined,
+          tail: partial ? body.slice(body.lastIndexOf("\n") + 1) : "",
         }}
       >
-        <ActivityMarkdown
-          text={page.text}
-          url={entry.url}
-          onFileOpen={
-            entry.source === "worker" && typeof openFile === "function"
-              ? openFile
-              : undefined
-          }
-        />
+        <ActivityMarkdown text={body} url={entry.url} onFileOpen={onFileOpen} />
       </MessageDiff>
       {error && <BodyReadError error={error} retry={() => setError("")} />}
     </div>

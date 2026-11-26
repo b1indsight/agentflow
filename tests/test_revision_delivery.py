@@ -584,6 +584,7 @@ async def test_fallback_only_when_execution_is_known_not_to_have_started(
     assert agent.efforts == (["xhigh"] if "start" in expected else [])
     assert all(call[1].mcp_url is None and call[1].mcp_token is None for call in agent.calls)
     assert all(task_content in call[2] for call in agent.calls)
+    assert all(call[2].endswith(f"</agentflow_context>\n\n# Current request\n{task.instruction}") for call in agent.calls)
     if expected[-1] == "start":
         assert result.session_id == "new-session"
         assert result.session_generation == 1

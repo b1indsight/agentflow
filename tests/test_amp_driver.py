@@ -15,6 +15,7 @@ from pydantic import SecretStr
 from app.domain.models import CodingExecutionContext, GitHubCapability
 from app.worker.execution.amp_agent import AmpCodingAgent, AmpProcessResult, amp_environment
 from app.worker.execution.git_identity import configure_git_identity
+from app.worker.execution.prompts import build_revision_retry_prompt
 from tests.flow_fixtures import PNG_IMAGE
 
 THREAD = "T-01a15d70-eb3d-722c-9f6d-563dd65eb0a8"
@@ -68,7 +69,9 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
         assert "bot-secret" not in " ".join(args) and "broker-secret" not in input_text
         assert "caller_owned" in input_text and "task" in input_text
         assert "opt out of automatic GitHub follow-ups" in input_text
-        assert Path(input_text.splitlines()[-1]).read_bytes() == base64.b64decode(PNG_IMAGE.split(",")[1])
+        instructions, _, request = input_text.partition("\n]]>\n</agentflow_context>")
+        assert request == ("\n\n# Current request\ntask" if resume else "")
+        assert Path(instructions.splitlines()[-1]).read_bytes() == base64.b64decode(PNG_IMAGE.split(",")[1])
         assert env["GH_TOKEN"] == env["AGENTFLOW_PUSH_TOKEN"] == "bot-secret"
         assert env["EXAMPLE_MCP_TOKEN"] == "custom-mcp-token"
         assert env["AMP_SETTINGS_FILE"] == str(tmp_path / "user.jsonc")
@@ -104,7 +107,7 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
     monkeypatch.setattr("app.worker.execution.amp_agent.github_environment", github)
     monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(execute))
     agent = AmpCodingAgent(trusted_host=True)
-    result = (await agent.resume(THREAD, "task", cwd=tmp_path, output_schema=schema, context=context,
+    result = (await agent.resume(THREAD, build_revision_retry_prompt("retry", "task"), cwd=tmp_path, output_schema=schema, context=context,
                                  model=model, effort=effort)
               if resume else await agent.start("task", tmp_path, output_schema=schema, context=context,
                                               model=model, effort=effort))

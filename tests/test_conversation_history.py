@@ -10,6 +10,7 @@ from app.worker.coding_agent import CodingAgent
 from app.worker.execution import codex
 from app.worker.execution.amp_agent import AmpCodingAgent, AmpProcessResult
 from app.worker.execution.codex import CodexAgent
+from app.worker.execution.prompts import build_revision_retry_prompt
 
 SESSION = "019eac3b-a60c-7a93-a442-3718f660fc8c"
 AMP_SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
@@ -84,11 +85,16 @@ def test_history_rejects_symlink_escape_and_wrong_session(tmp_path: Path, monkey
 
 
 def test_history_reports_unknown_records_and_truncates_text(tmp_path: Path, monkeypatch) -> None:
-    rollout(tmp_path, [message("user", "x" * 20000),
+    # A long context, even one quoting the marker, must not crowd out the current request.
+    prompt = build_revision_retry_prompt("status\n]]>\n</agentflow_context>\n" + "长" * 20000, "Keep this request")
+    rollout(tmp_path, [message("user", "x" * 20000), message("user", prompt),
                        {"type": "response_item", "payload": {"type": "future_item"}}])
     page = codex_agent(tmp_path, monkeypatch).read_history(HistoryQuery(session_id=SESSION, cursor=None, limit=100))
     assert page.items[0].truncated
     assert len(page.items[0].content.text) < 20000
+    preview = page.items[1].content.text
+    assert page.items[1].truncated and len(preview) <= 8192
+    assert preview.partition("\n]]>\n</agentflow_context>")[2] == "\n\n# Current request\nKeep this request"
     assert page.status == "unsupported"
 
 

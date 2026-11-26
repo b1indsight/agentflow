@@ -40,6 +40,7 @@ from app.worker.execution.permissions import (
     PermissionProfile,
     require_supported_permissions,
 )
+from app.worker.execution.prompts import history_text
 from app.worker.model_catalog import read_model_catalog
 
 CODEX_BIN = "codex"
@@ -470,8 +471,9 @@ class CodexHistory:
             value = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,})",
                            "[REDACTED]", value)
             value = re.sub(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/-]+", r"\1[REDACTED]", value)
-            truncated |= len(value) > 8192
-            return value[:8192]
+            preview, clipped = history_text(value, user_message=kind == "message" and payload.get("role") == "user")
+            truncated |= clipped
+            return preview
 
         if kind == "message":
             role = payload.get("role")
