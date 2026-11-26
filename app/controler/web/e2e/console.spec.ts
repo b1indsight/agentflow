@@ -7026,6 +7026,20 @@ for (const width of [1440, 390]) {
     await page.goto("/console/#flow/42/conversation");
     const conversation = page.getByRole("tab", { name: "会话", exact: true });
     if (width === 1440) {
+      // A failed refresh replaces the detail header even though the Flow data is retained.
+      await expect(conversation).toBeVisible();
+      await page.route(
+        "**/api/flows/42",
+        (route) => route.fulfill({ status: 503 }),
+        { times: 1 },
+      );
+      const refresh = page.getByRole("button", { name: "刷新当前视图" });
+      await refresh.click();
+      await expect(
+        page.getByText("无法读取 Flow", { exact: true }),
+      ).toBeVisible();
+      await refresh.click();
+      await expect(conversation).toBeVisible();
       // Measure the detail, not the viewport: the task rail takes part of the width.
       const rail = await page
         .locator(".rail")
@@ -7076,6 +7090,9 @@ for (const width of [1440, 390]) {
       await resize(959);
       await expect(source(0)).toHaveCount(0);
       await expect(link(0)).toBeInViewport();
+      await page.screenshot({
+        path: "../../../.amp/in/artifacts/side-preview-recovered-959.png",
+      });
       await resize(1440);
       await expect(page.getByRole("tabpanel")).toHaveCount(1);
       await link(2).click();

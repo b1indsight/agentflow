@@ -475,6 +475,7 @@ function DetailPanel({
     [error, setError] = useState("");
   // A previously visited conversation can mount while its mutable detail revalidates.
   const flow = freshFlow ?? (tab === "conversation" ? summary : null);
+  const showDetail = !!flow && !error;
   const [pending, setPending] = useState<
     "archive" | "resume" | "retry" | "agent-task" | null
   >(null);
@@ -558,7 +559,7 @@ function DetailPanel({
     });
     observer.observe(head.current);
     return () => observer.disconnect();
-  }, [Boolean(flow)]);
+  }, [showDetail]);
   const focusTab = useRef<string | null>(null);
   const compactOnFileOpen = useRef(false);
   const openFile = useCallback(
@@ -764,7 +765,7 @@ function DetailPanel({
     if (tab === "jobs") moreJobs(true);
     return () => jobsRequest.current?.abort();
   }, [id, tab, refresh]);
-  if (error || !flow)
+  if (!showDetail)
     return (
       <main className="detail">
         <div className="empty-state">
