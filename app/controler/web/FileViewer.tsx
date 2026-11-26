@@ -105,13 +105,15 @@ function FileSource({
   );
 }
 
-/** Only the active document is read; switching or retrying aborts and fences previous reads/decodes. */
+/** Keep the read with its open tab; mount the preview UI only while selected. */
 export default function FileViewer({
   linkId,
   filename,
+  active,
 }: {
   linkId: string;
   filename: string | null;
+  active: boolean;
 }) {
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<FileState>({ kind: "loading" });
@@ -129,6 +131,7 @@ export default function FileViewer({
       });
     return () => request.abort();
   }, [linkId, attempt]);
+  if (!active) return null;
   const authError =
     state.kind === "error" &&
     state.error instanceof ApiError &&
@@ -142,7 +145,7 @@ export default function FileViewer({
       <div className="file-toolbar">
         <div
           className="file-status"
-          title="读取 Worker 当前内容，需在线；上限 512 KiB。HTML 和 SVG 仅显示源码。"
+          title="显示上次读取的内容，重新读取需要 Worker 在线。上限 512 KiB。HTML 和 SVG 仅显示源码。"
         >
           <span>只读</span>
           {state.kind === "ready" && (

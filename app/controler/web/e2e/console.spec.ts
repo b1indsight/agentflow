@@ -6746,12 +6746,8 @@ for (const width of [1440, 390]) {
 
     const open = async (label: string, index: number) => {
       await message.getByRole("link", { name: label, exact: true }).click();
-      await expect(
-        page.getByRole("tab", { name: names[index], exact: true }),
-      ).toHaveAttribute("aria-selected", "true");
-      await expect(
-        page.getByRole("tab", { name: names[index], exact: true }),
-      ).toHaveCount(1);
+      // Returning to an already scrolled file can collapse the mobile tab strip.
+      await expect(panel).toHaveAccessibleName(names[index]);
     };
     const conversation = async () => {
       const expand = page.getByRole("button", { name: "展开详情标题" });
@@ -6759,7 +6755,7 @@ for (const width of [1440, 390]) {
       await page.getByRole("tab", { name: "会话", exact: true }).click();
     };
     await open("源码", 0);
-    await expect(page.getByRole("tab")).toHaveCount(4);
+    await expect(page.getByRole("tab", { includeHidden: true })).toHaveCount(4);
     await conversation();
     await open("位图", 1);
     const image = panel.getByRole("img", { name: "文件图片预览" });
@@ -7005,9 +7001,13 @@ for (const width of [1440, 390]) {
         ),
       }),
     );
-    await page.route("**/api/files/*", (route) =>
-      route.fulfill({ body: `source ${route.request().url().slice(-32)}` }),
-    );
+    const reads: string[] = [];
+    let version = 1;
+    await page.route("**/api/files/*", (route) => {
+      const id = route.request().url().slice(-32);
+      reads.push(id);
+      return route.fulfill({ body: `source ${id} v${version}` });
+    });
     await page.goto("/console/#flow/42/conversation");
     const conversation = page.getByRole("tab", { name: "会话", exact: true });
     const panel = page.getByRole("tabpanel");
@@ -7031,6 +7031,9 @@ for (const width of [1440, 390]) {
     await page.screenshot({
       path: `../../../.amp/in/artifacts/editor-file-tabs-${width}.png`,
     });
+    // Open tabs keep the version already read, even if the Worker file changes.
+    const initialReads = [...reads];
+    version++;
     await conversation.click();
     await page.getByRole("link", { name: "打开0", exact: true }).click();
     await expect(page.getByRole("tab")).toHaveCount(6);
@@ -7045,7 +7048,10 @@ for (const width of [1440, 390]) {
     await expect(first).toBeFocused();
     await first.press("ArrowRight");
     await expect(second).toBeFocused();
-    await expect(panel).toContainText(`source ${ids[1]}`);
+    await expect(panel).toContainText(`source ${ids[1]} v1`);
+    expect(reads).toEqual(initialReads);
+    await panel.getByRole("button", { name: "重新读取" }).click();
+    await expect(panel).toContainText(`source ${ids[1]} v2`);
     await page.goBack();
     await expect(first).toHaveAttribute("aria-selected", "true");
     await page.goForward();
@@ -7056,9 +7062,11 @@ for (const width of [1440, 390]) {
     await expect(
       page.getByRole("tab", { name: "README.md", exact: true }),
     ).toBeFocused();
-    await expect(panel).toContainText(`source ${ids[1]}`);
+    await expect(panel).toContainText(`source ${ids[1]} v2`);
+    expect(reads).toEqual([...initialReads, ids[1]]);
     await conversation.click();
     await page.getByRole("link", { name: "打开0", exact: true }).click();
+    await expect(panel).toContainText(`source ${ids[0]} v2`);
     await expect(page.getByRole("tab")).toHaveCount(6);
     await second.click();
     // Closing an inactive file must not switch the current document.
@@ -7086,11 +7094,13 @@ for (const width of [1440, 390]) {
   });
 }
 
-test("worker file requests cancel on tab changes and cannot overwrite a later file", async ({
+test("pending worker file reads survive switching tabs and cancel on close", async ({
   page,
 }) => {
   const ids = ["a".repeat(32), "b".repeat(32)];
-  const body = ids.map((id, i) => `[文件${i}](/api/files/${id})`).join("\n\n");
+  const body = ids
+    .map((id, i) => `[文件${i}](/api/files/${id}#name=file-${i})`)
+    .join("\n\n");
   await page.route("**/api/flows/42/activity?**", (route) =>
     route.fulfill({
       json: activityPage(
@@ -7113,9 +7123,11 @@ test("worker file requests cancel on tab changes and cannot overwrite a later fi
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
+  let rereading = false;
   let pending = 0;
   let completed = 0;
   await page.route(`**/api/files/${ids[0]}`, async (route) => {
+    if (!rereading) return route.fulfill({ body: "original response" });
     pending++;
     await gate;
     try {
@@ -7130,19 +7142,27 @@ test("worker file requests cancel on tab changes and cannot overwrite a later fi
     route.fulfill({ body: "current response" }),
   );
   await page.goto("/console/#flow/42/conversation");
-  const started = page.waitForRequest(`**/api/files/${ids[0]}`);
   await page.getByRole("link", { name: "文件0", exact: true }).click();
-  const request = await started;
   const viewer = page.getByRole("region", { name: "文件查看器" });
+  await expect(viewer).toContainText("original response");
+  rereading = true;
+  const started = page.waitForRequest(`**/api/files/${ids[0]}`);
+  await viewer.getByRole("button", { name: "重新读取" }).click();
+  const request = await started;
   await expect(viewer.getByRole("status")).toContainText("正在读取文件");
   await page.getByRole("tab", { name: "会话", exact: true }).click();
-  await expect.poll(() => request.failure()?.errorText).toBeTruthy();
   await page.getByRole("link", { name: "文件1", exact: true }).click();
   await expect(page.getByLabel("文件源码", { exact: true })).toHaveText(
     "current response",
   );
+  await page.getByRole("tab", { name: "file-0", exact: true }).click();
+  await expect(viewer.getByRole("status")).toContainText("正在读取文件");
+  expect(request.failure()).toBeNull();
+  await page.getByRole("button", { name: "关闭 file-0" }).click();
+  await expect.poll(() => request.failure()?.errorText).toBeTruthy();
   release();
   await expect.poll(() => completed).toBe(pending);
+  expect(pending).toBe(1);
   await expect(page.getByLabel("文件源码", { exact: true })).toHaveText(
     "current response",
   );

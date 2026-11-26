@@ -885,15 +885,17 @@ function DetailPanel({
         <div className="detail-body" data-scroll-root ref={detail}>
           <TabsContent value={selectedTab} asChild>
             <section className={`content${activeFile ? " file-content" : ""}`}>
-              {activeFile ? (
-                <Suspense fallback={<p role="status">正在加载文件查看器…</p>}>
+              <Suspense fallback={<p role="status">正在加载文件查看器…</p>}>
+                {files.map((file) => (
                   <FileViewer
-                    key={activeFile.id}
-                    linkId={activeFile.id}
-                    filename={activeFile.name}
+                    key={file.id}
+                    linkId={file.id}
+                    filename={file.name}
+                    active={file === activeFile}
                   />
-                </Suspense>
-              ) : (
+                ))}
+              </Suspense>
+              {!activeFile &&
                 (
                   {
                     overview: freshFlow && (
@@ -1119,8 +1121,7 @@ function DetailPanel({
                       </>
                     ),
                   } satisfies Record<typeof baseTab, ReactNode>
-                )[baseTab]
-              )}
+                )[baseTab]}
             </section>
           </TabsContent>
         </div>
