@@ -2,6 +2,16 @@
 
 假设 Agent 已经开始处理一项任务，你想先看它试过什么，再告诉它「添加键盘导航，保留现有行为」。在控制台打开这个 Flow 的「会话」即可。这里有两个不同的确认点：看见一条用户消息，说明 control 已经保存它；要确认 Agent 做了什么，还得看对应执行的回复、工具活动或结果。[消息保存与修订任务的行为测试](../../tests/test_console_api.py#L396-L451)
 
+## 这页由谁提供内容，谁接收你的输入？
+
+先把 Flow 理解成一项持续跟踪的任务，Attempt 是任务的一轮执行，Job 是这轮中某一次可调度的工作。看会话时可以往回读旧轮次；发消息时，服务端按**提交当时的当前轮次**记录。下面的步骤会用到三处，认清它们后更容易判断一次操作有没有成功。
+
+| 模块 | 你会在什么时候用到它 |
+|---|---|
+| 浏览器里的「会话」和 control 的活动接口 | 打开 Flow、滚动、展开工具结果时。它们展示已保存的活动，可以同时读到 GitHub 讨论、用户补充要求和 Worker 的公开记录。只读已发布的快照，即使别处正同步新资料，翻这一页仍有明确的版本范围。[本地分页](../../app/persistence/activity.py#L303-L338) |
+| 后台采集器与执行机上的编码后端 | 核对来源是否齐全时。采集器按来源取下一页，Worker 能提供指定 session 的编码记录，GitHub 提供评论等其他资料；一次 Worker 读取成功不代表 GitHub 也同步好了。读 Worker 的实时接口可以单独核对一段。[分来源采集](../../app/controler/console/sync.py#L102-L145) |
+| 输入存储与工作流服务 | 点击「发送」时。服务先确保消息在当前 Flow 下只记录一次，再判断当前轮次是否可以开始工作。Agent 的工作结果沿作业和采集链路返回，输入框收到的响应本身不含一次新的 Agent 答复。[消息记录](../../app/persistence/agent_inputs.py#L41-L67) · [派发判断](../../app/controler/workflow/service.py#L309-L375) |
+
 ## 进入条件
 
 用配置好的 [Access owner 账号](../deployment/access.md) 登录，选中已有 Flow。读先前保存的内容不要求 Worker 此刻在线，也不要求任务已有 PR。要查 Worker 的最新原始记录，则需要该轮已有会话 ID、能定位到负责的 Worker，且源文件或 thread 仍可读。已经归档的任务可以阅读；收尾中的任务可以留言，归档后不能再追加。[无 PR 时的采集测试](../../tests/test_console_sync.py#L70-L85) · [收尾与归档的界面测试](../../app/controler/web/e2e/console.spec.ts#L586-L655)
@@ -14,6 +24,14 @@
 
 翻页和刷新在[活动接口 `activity`](../../app/controler/console/api.py#L395-L420)分开：有 `refresh` 时先登记要同步这个 Flow，再调用 [`ActivityStore.page`](../../app/persistence/activity.py#L303-L338)。它用 Flow ID、页大小、快照版本和游标读出 `ActivityPage`；首次读取以已提交的活动版本为上限，续页沿用游标中的版本。后台稍后领取同步任务，[`ConsoleSynchronizer.sync`](../../app/controler/console/sync.py#L102-L121)用另一套游标向 worker 读一页，将记录、下一游标和缺口说明交给 [`ConsoleSyncStore.finish`](../../app/persistence/console_sync.py#L98-L144)。后者在事务内核对自己仍有权发布本页，再写活动；旧任务迟到会返回 `False`。[未提交页面对读者不可见的测试](../../tests/test_console_sync.py#L700)解释了为什么同一页不会显示一半新、一半旧的同步结果。
 
+### 实例：刷新之前和之后各看什么
+
+假设第一次打开页面时已经有「修复键盘导航」这段讨论，但没有测试输出。先记下你查看的是哪个 Flow、哪次执行以及来源提示。如果状态是「尚无执行会话」，即使 GitHub 评论已经可见，采集器也还拿不到编码记录；如果是「会话读取超时」，说明最近一次读取没有按时完成。两种情况都可以继续读已保存的评论，不要先重发任务来试探 Agent 是否在线。[来源状态与已存正文的界面断言](../../app/controler/web/e2e/console.spec.ts#L2137-L2165)
+
+若要看浏览器到底在等谁，可以在已经通过 owner 认证的同源页面查看网络请求。以 `GET /api/flows/42/activity?refresh=true&limit=20` 为例，`refresh=true` 登记一次后台同步需求；响应仍是从活动存储读出的页面。比如发布版本停在 12，本次返回完全可以仍是版本 12。在这一快照里续页时，后台即使已经提交了版本 13，续页也沿用原版本。下一次不带旧游标读取已提交的新快照，才有机会看到新采集的内容。这里的 12、13 是说明读法的假设值，并非每次点击都会增加版本。[活动路由参数](../../app/controler/console/api.py#L394-L420) · [快照上限校验](../../app/persistence/activity.py#L303-L338)
+
+如果旧快照的工具调用没有结果，先展开同一执行里相邻的工具活动，确认缺的是结果还是折叠的正文。若只有较长正文加载失败，点正文自己的重试；若当前已发布页本身没有后续记录，看来源状态并刷新。两个操作影响的范围不同：前者尝试读回已存的文字，后者让后台有机会发现新的来源内容。若仍有缺口，再用第三节的方法查原 session。[工具折叠行为](../../app/controler/web/e2e/console.spec.ts#L2645-L2699) · [重试读取正文](../../app/controler/web/e2e/console.spec.ts#L3580-L3650)
+
 ## 二、把补充要求送给这一轮执行
 
 在「与 Agent 交流」输入框写下要求并发送；也可以用 `Ctrl+Enter`。页面发出 `POST /api/flows/{id}/agent-tasks`，携带本次的 `request_id`。成功后输入框清空，状态显示「消息已记录」，会话中增加一条 `source=agent_task` 的用户消息。它和 Worker 后续回传的 `user` 输入属于不同来源。[界面发送与确认测试](../../app/controler/web/e2e/console.spec.ts#L536-L577) · [服务端记录归属](../../tests/test_console_api.py#L401-L435)
@@ -23,6 +41,29 @@
 接下来取决于 Flow 的状态。在一个已有可继续评审的 PR、Worker 和原会话的例子里，这条要求会形成修订作业，继续使用原分支、PR 和 session。若尚未首次执行，control 可以先保存多条要求，等首次准备任务时按接收顺序交付。若正在运行或收尾，保存成功也不代表立刻并行派发第二份作业。[原会话修订](../../tests/test_console_api.py#L428-L451) · [只记录、不触发不安全派发](../../tests/test_console_api.py#L473-L514) · [首次执行的消息顺序](../../tests/test_console_api.py#L516-L532)
 
 **如果发送后断网，使用「重试发送」。** 页面保留原输入、附件和请求 ID；同一个 ID 携带相同内容再次提交，只会记录一次。不要改一个新 ID 来试探上次是否成功；同一 ID 改了内容则会收到 `409 agent_task_request_conflict`。刷新会话或重试读取是读操作，都不会替你重发这条消息。[客户端重用原请求](../../app/controler/web/e2e/console.spec.ts#L541-L562) · [服务端去重与冲突测试](../../tests/test_console_api.py#L398-L427)
+
+### 在网络面板核对一次发送
+
+以下示例只展示已认证、同源请求的业务字段。假设 Flow 42 有一个仍打开的 PR，当前轮次处于评审阶段，有可继续的执行绑定，无等待中的作业、停止请求或活动评审批次。用户输入两行文字并发送：
+
+```http
+POST /api/flows/42/agent-tasks
+Content-Type: application/json
+
+{"request_id":"12d32941-85ef-4b1c-bbbd-25b710b9e577","instruction":"添加键盘导航\n保留现有行为"}
+```
+
+这次操作可以分三步核对。**接收：**返回 200，响应是 Flow 详情；在具备修订条件的测试里 `phase` 变成 `queued`，原分支未变。**记录：**随后从 `/api/flows/42/activity` 可以读到一条 `source=agent_task`、`author=user`、正文为那两行文字的消息，`attempt_id` 属于当前执行。**交付：**等 Worker 领取并准备修订作业，任务指令才包含这条消息；在测试用的 `flow/7` 分支、PR 17 上，准备结果仍指向原来的分支、PR 和 session。即使前两个确认点都满足，也不代表修订已通过测试或推送到远端。[HTTP、活动与准备结果的连续断言](../../tests/test_console_api.py#L401-L451)
+
+对于新发的一句话，界面应生成新的 `request_id`；对于同一次发送的网络重试，则始终用原 UUID。举例说，上面请求在服务端已经写成功，只是用户关掉了网络：再提交完全相同的 JSON 应返回 200，读活动仍然只有一条，这项请求也只会安排一次修订。若同一 ID 的正文改为「只做鼠标交互」，返回 409，原要求不会被覆盖。如果确实要变更指令，应把变更作为新的消息说明清楚，让旧消息与新决定都可追溯。[重复、冲突与并发请求测试](../../tests/test_console_api.py#L411-L432) · [两个并发提交](../../tests/test_console_api.py#L603-L619)
+
+收到 422 则先查输入。`instruction` 会去首尾空白，最多 16,000 字符，不能含空字符；没有图片时必须有实际文字。可选 `images` 最多四项，传空字符串作为指令且有合法图片与发送一条什么都没有的消息不同。请求 ID 必须是 UUID；不能自行加 `author` 指定发送人。未认证、非 owner 或跨来源写请求还有各自的认证与来源检查，修正文案不会解决这些问题。[请求字段与非空规则](../../app/contracts/console.py#L124-L142) · [拒绝示例](../../tests/test_console_api.py#L585-L601)
+
+### 同一句话何时才会交给 Agent？
+
+- **还没开始首次执行。** 即使没有 Worker 或 PR，先后发来的 `First note` 与 `Second note` 也可以记录。Worker 第一次准备任务时会在原要求后按顺序附上它们；同一次准备重放时仍得到同样内容，不会把两句再附一遍。这种情况下等原任务开始即可，不需要额外建立一个 PR。[首次执行及重复准备](../../tests/test_console_api.py#L516-L532)
+- **已有作业排队、正在运行或停止尚未确认。** 服务会保存可接受的消息，但不会为它立刻再启动一个冲突作业。之后工作流可以重新检查当前轮次待交付的输入，领取时按活动版本顺序取出；是否能继续仍取决于那时的状态。看到「消息已记录」后等当前工作处理完，比点第二次「发送」更能保留清晰的请求记录。[不安全派发的反例](../../tests/test_console_api.py#L473-L514) · [补派条件](../../app/controler/workflow/service.py#L336-L367)
+- **正在收尾或已经归档。** 收尾中若已有 `archive_reason`，可以留下这次执行的说明，但消息不会标记为等 Agent 处理；即使随后重新开工，取待处理项时也只取新 Attempt 的记录。归档完成后发**新**请求得到 `409 agent_task_unavailable`，活动中不会因此多出一条。需要后续工作时先确认是否真的要重新开工，阅读旧记录不需要这个写操作。[待处理标记与按轮次领取](../../app/persistence/agent_inputs.py#L56-L85) · [归档拒绝](../../app/controler/workflow/service.py#L318-L334)
 
 ## 三、网页缺一段时，按原会话核对
 

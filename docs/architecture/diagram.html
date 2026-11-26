@@ -31,6 +31,12 @@
     ol, ul { margin: 0; padding-left: 1.45em }
     li { margin: .4em 0 }
     a { color: #20526e; text-underline-offset: .2em }
+    .casebook { margin: 30px 0; max-width: 88ch }
+    .casebook > p { margin: 8px 0 16px }
+    .casebook details { margin: 10px 0; border: 1px solid #b4c4c9; background: white; padding: 12px 16px }
+    .casebook summary { cursor: pointer; font-weight: 650; color: #244d60 }
+    .casebook details p { margin-top: 10px }
+    .casebook pre { background: #eff3f3; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere }
     footer { border-top: 1px solid #aabdc2; margin-top: 22px; padding-top: 12px; display: flex; flex-wrap: wrap; gap: 8px 24px }
     @media (max-width: 840px) {
       main { padding: 18px 16px }
@@ -87,5 +93,36 @@
       <li><strong>工作流按已保存的证据交付。</strong> <a href="../../app/controler/workflow/results.py#L112-L133">ResultApplication.apply</a> 接收 Job ID，核验并应用结果。远端操作还需确认时，由恢复循环继续处理这个 Job；完成后返回数据库里的工作状态，不再调用一次编码后端。</li>
     </ol>
   </figure>
+  <section class="casebook" aria-labelledby="casebook-title">
+    <span class="label">03 / 对照实例</span>
+    <h2 id="casebook-title">同一项需求，在三端分别能看到什么？</h2>
+    <p>假设你提交了「导出报表时支持按日期筛选」。任务编号是 42，首轮编码交给工作端 A。下面四个片段分别截取这次工作在不同条件下的一个时刻，编号和仓库内容都是示例。展开片段，可以看到应以哪一侧的记录为准，以及另一侧为什么可能暂时没有结果。</p>
+    <details open>
+      <summary>控制台已经返回任务编号，GitHub 上还没有 PR</summary>
+      <p><strong>先看控制端。</strong>浏览器向控制台提交任务，控制端重新核对 GitHub 安装和目标仓库，再让工作流服务登记 Flow、首次开工和编码作业。这些记录在同一笔数据库事务里提交。此时页面可以展示任务；即使工作端 A 正在忙，用户也不需要重复创建它。</p>
+      <pre aria-label="任务详情的示例字段"><code>GET /api/flows/42
+id: 42          lifecycle: queued
+pr_number: null</code></pre>
+      <p>这里只摘取详情响应的三个字段，并非完整的 JSON。编号指向可以继续查询的业务记录；排队表示控制端仍在安排工作。创建任务与打开 PR 发生在不同阶段，因此没有 PR 编号不能说明创建失败。若要知道 A 是否已经领到作业，应查看这个 Flow 的 Job 记录。</p>
+    </details>
+    <details>
+      <summary>工作端已经推送提交，评审者在哪里找 PR？</summary>
+      <p><strong>先区分 Git 推送和 PR 创建。</strong>工作端在已绑定目录里运行编码工具，修改和测试通过后可以把版本推到目标分支。GitHub 此时已经能展示分支差异；评审者通常需要的却是带标题、说明和讨论记录的 PR。这是后来由控制端负责的另一项操作。</p>
+      <p>首轮编码工具向控制端提出 <code>flow.open_pr</code> 请求时，工作流先核对推送的分支并保存交付意图。工作端随后交回与这次意图相符的执行结果，控制端核验后才向 GitHub 创建或认领 PR。若创建请求已经送达但应答丢失，直接重发可能产生重复的远端操作。控制端要先按仓库和分支核对远端状态，不能凭本机进程已经退出就向用户报告成功。</p>
+      <p><strong>读者可以这样核对：</strong>从任务详情里的交付链接打开当前 Attempt 对应的 PR；若只能看到分支，先确认结果是否已由控制端接收。手动新建一张同名 PR 会改变核对现场，不能作为排查的第一步。</p>
+    </details>
+    <details>
+      <summary>控制端重启，工作端 A 上的编码进程还在运行</summary>
+      <p><strong>先保留原执行现场。</strong>WebSocket 断开只切断了两台机器的消息传输。本机工作区仍可能有未提交的修改，编码进程也可能正等一个工具回复。新的控制端能从数据库读出原 Job 的分配，但不能从一条离线状态推断进程已经停止。</p>
+      <p>原工作端重连后会报告自己保留的执行记录。控制端核对 Job、工作端身份和分配凭据；若原执行还活着，就让它接回通信。若原执行已经结束并留下最终结果，就让它补传结果。另一个工作端 B 即便能克隆同一仓库，也没有 A 的分配凭据和本地记录。让 B 重新编码既可能覆盖未交付的工作，也不能解释 A 稍后交回的结果。</p>
+      <p>对照图 02：如果断点位于第一与第二个确认点之间，A 应补传本机保存的结果；若数据库早已收妥结果，控制端可以继续核验交付。两条恢复路径处理的都是原 Job。<a href="../../tests/test_controller_update_boundary.py#L38-L96">控制端替换测试</a>让连接在编码期间真实断开，再检查同一个编码调用最终只交付一张 PR。</p>
+    </details>
+    <details>
+      <summary>已经进入 review，为什么任务仍在等我回答？</summary>
+      <p><strong>看交付状态和问题正文。</strong>编码工具可能已经理解了「按日期筛选」，但无法自行决定以用户时区还是 UTC 划分一天。这时可以请求人工输入。控制端记下问题，保留 Flow 及本次开工的归属，供用户回到详情里回答。进入需要评审或人工参与的阶段，并不要求仓库里已经有一张 PR。</p>
+      <p>假设你回答「全部使用 UTC，以跨午夜的一条记录做测试」。控制端可以先把这句话保存下来。页面显示消息已记录，说明网络请求成功传到了控制端；原工作端是否已经收到、编码工具是否采用要求、GitHub 是否已经出现新的测试，分别要从后续的作业、会话和提交核对。只见到第一项时，重复发送同一句话不能证明后面三项已经完成。</p>
+      <p>如果后来要追查「哪一次开工回答了这个问题」，使用 Flow 编号查整项工作，再对照当前 Attempt 与 PR。重新开工会保留同一个 Flow 的历史，但产生新的一次执行归属。旧 PR 上已有的答复有助于理解背景，不能替代新一轮交付记录。</p>
+    </details>
+  </section>
   <footer><a href="../feature-walkthroughs/README.md">逐项功能走查</a><a href="../../app/controler/workflow/initial.py">首轮交付核验</a><a href="../../app/domain/recovery_policy.py">恢复判定源码</a><a href="roadmap.md">现状与演进边界</a></footer>
 </main></body></html>
