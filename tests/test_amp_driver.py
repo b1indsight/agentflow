@@ -67,6 +67,7 @@ async def test_amp_uses_current_capabilities_and_raw_caller_schema(monkeypatch, 
         assert "--no-archive-after-execute" in args
         assert "bot-secret" not in " ".join(args) and "broker-secret" not in input_text
         assert "caller_owned" in input_text and "task" in input_text
+        assert "opt out of automatic GitHub follow-ups" in input_text
         assert Path(input_text.splitlines()[-1]).read_bytes() == base64.b64decode(PNG_IMAGE.split(",")[1])
         assert env["GH_TOKEN"] == env["AGENTFLOW_PUSH_TOKEN"] == "bot-secret"
         assert env["EXAMPLE_MCP_TOKEN"] == "custom-mcp-token"
