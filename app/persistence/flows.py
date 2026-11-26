@@ -130,8 +130,6 @@ class FlowStore(Repository):
         decision still writes, while a guarded no-op leaves timestamps untouched.
         Every write appends its ledger fact in the same transaction.
         """
-        from app.persistence.reviews import ReviewStore
-
         if self._db._bound_connection is None:
             raise RuntimeError("Flow transition requires a workflow transaction")
         if flow.history_only:
@@ -170,8 +168,6 @@ class FlowStore(Repository):
             # archive_attempt already appended the archive evidence that records archival.
             if event is not FlowEvent.ATTEMPT_ARCHIVED:
                 self._record(flow, event)
-            if state in {FlowState.FINALIZING, FlowState.ARCHIVED}:
-                ReviewStore(self._db).cancel(flow.id)
         return flow
 
     def _record(self, flow: Flow, event: FlowEvent) -> None:

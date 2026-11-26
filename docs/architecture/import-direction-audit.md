@@ -1,14 +1,15 @@
 # 哪些模块还不能按单向依赖排列？
 
-在 [审计基线](https://github.com/b1indsight/agentflow/commit/0cdf36620564ccee971e0e7f7f89f0ba2ef278b3) 上，**Python 模块顶层的显式导入没有环；计入函数内的 `import` 后，有两组模块无法排序。** 此外，worker 自更新会动态导入 CLI 入口；即使消除这些文件环，按包看也还有双向依赖。本次只列现状，不改导入、事务或协议。
+在 [审计基线](https://github.com/b1indsight/agentflow/commit/0cdf36620564ccee971e0e7f7f89f0ba2ef278b3) 上，Python 模块顶层的显式导入没有环；计入函数内的 `import` 后，仓储和 GitHub 资源各有一组环。**仓储环已解除，剩余的显式导入环在 GitHub 资源组。** 此外，worker 自更新会动态导入 CLI 入口；按包看也还有双向依赖。
 
 下文 `A → B` 表示 A 导入 B。判断高低层以职责为准：[控制端](../../app/controler/runtime.py#L12-L46)装配业务服务、仓储和 GitHub 适配器；[工作端](../../app/worker/runtime.py#L48-L64)装配传输、执行器和本地状态。两端共用的方向是 [通信 → 契约](../../app/communication/session.py#L17-L18)、[契约 → 领域模型](../../app/contracts/protocol.py#L26-L45)。入口调用下层、下层返回结果，本身不构成反向导入。
+
+已解除：[`reviews → jobs`](../../app/persistence/reviews.py#L34-L35) 和 [`jobs → flows`](../../app/persistence/jobs.py#L19) 保留，`FlowStore.transition()` 不再回引 `ReviewStore`。正常收尾时由 [`retire_queued_work()`](../../app/persistence/assignments.py#L689-L697) 在原事务内取消审核；收尾重试若仍有遗留批次，由[审核扫描](../../app/persistence/reviews.py#L265-L287)清理。
 
 ## 具体文件已经成环
 
 | 范围 | 闭合路径和反向导入的位置 |
 | --- | --- |
-| PostgreSQL 仓储（3 个模块） | `reviews → jobs → flows`，且 `reviews → flows`（[reviews](../../app/persistence/reviews.py#L33-L35)、[jobs](../../app/persistence/jobs.py#L19)）。反向边是 [`FlowStore.transition → ReviewStore`](../../app/persistence/flows.py#L123-L135)：[取消审核](../../app/persistence/flows.py#L174)须随状态转换一起提交。[现有测试](../../tests/test_boundaries.py#L151-L162)明确保留这一例外。 |
 | GitHub 资源（6 个模块） | 父资源导入子资源，构造子资源时又局部导入父类型做校验。互引对：[`apps → repositories`](../../app/github/apps.py#L13-L14) ↔ [回引 `Installation`](../../app/github/repositories.py#L91-L100)；[`repositories → issues / pull_requests`](../../app/github/repositories.py#L13-L14) ↔ [Issue](../../app/github/issues.py#L151-L159) 和 [PR](../../app/github/pull_requests.py#L110-L118) 回引 `Repository`；[`pull_requests → review_threads`](../../app/github/pull_requests.py#L24-L25) ↔ [回引 `PullRequest`](../../app/github/review_threads.py#L58-L67)。另外，[`threads → review_threads`](../../app/github/threads.py#L13) ↔ `review_threads → threads` 用于[重读线程](../../app/github/review_threads.py#L114-L118)和[读取评论](../../app/github/review_threads.py#L131-L136)。这些互引连成一组。 |
 | Worker 自更新（动态导入，另计） | [`app.cli → worker.cli`](../../app/cli.py#L23) → [`worker.self_update`](../../app/worker/cli.py#L19-L23)。安装校验用 [`importlib.import_module`](../../app/worker/self_update.py#L158-L163) 反过来加载 `app.cli` 和 `app.worker.cli`，核对实际文件与 wheel 的 `RECORD`。这是更新路径的回引，不是启动时的递归调用。 |
 
