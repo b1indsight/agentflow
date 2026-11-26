@@ -11,7 +11,8 @@ from githubkit import GitHub
 from app.controler.api import create_app
 from app.controler.reconciliation.labels import LabelSynchronizer
 from app.controler.runtime import ServerRuntime
-from app.github import Batch, GitHubApp, GitHubError, GitHubErrorKind, Installation, Repository
+from app.github import Batch, GitHubApp, GitHubError, GitHubErrorKind, Repository
+from app.github import repositories as repo_api
 from app.github.repositories import LabelDefinition
 from tests.test_github_client import (
     AsyncEndpoint,
@@ -78,7 +79,7 @@ async def test_label_bootstrap_reads_all_pages_and_only_creates_missing_definiti
         LabelDefinition(name="flow", color="5319e7", description="new text"),
         LabelDefinition(name="custom:review", color="fbca04", description="review"),
     )
-    repo = github.installation(42).repository("owner/repo")
+    repo = Repository(github.installation(42), "owner/repo")
     assert await repo.ensure_labels(definitions) == ("custom:review",)
     existing.append(SimpleNamespace(name="custom:review"))
     assert await repo.ensure_labels(definitions) == ()
@@ -102,7 +103,7 @@ async def test_duplicate_create_requires_positive_label_evidence(tmp_path, monke
         async_create_label=create, async_get_label=get,
     )))
     install_client(monkeypatch, lambda _, **kwargs: client)
-    repo = GitHubApp(settings(tmp_path)).installation(42).repository("owner/repo")
+    repo = Repository(GitHubApp(settings(tmp_path)).installation(42), "owner/repo")
     definitions = (LabelDefinition(name="flow", color="5319e7", description="start"),)
     if found:
         assert await repo.ensure_labels(definitions) == ()
@@ -120,10 +121,10 @@ def remote_inventory(monkeypatch, github, names):
         return Batch(items=(installation,))
 
     async def repositories(self, *, page=1):
-        return Batch(items=tuple(self.repository(name) for name in names))
+        return Batch(items=tuple(Repository(self, name) for name in names))
 
     monkeypatch.setattr(GitHubApp, "fetch_installations", installations)
-    monkeypatch.setattr(Installation, "fetch_repositories", repositories)
+    monkeypatch.setattr(repo_api, "fetch_repositories", repositories)
 
 
 async def test_scan_cadence_retries_failures_and_rescans_after_restart(tmp_path, monkeypatch):
@@ -191,7 +192,7 @@ async def test_lost_creation_response_is_recovered_by_listing_without_repeating_
         return GitHub("test-token", auto_retry=False, async_transport=httpx.MockTransport(transport))
 
     install_client(monkeypatch, client)
-    repo = GitHubApp(settings(tmp_path)).installation(42).repository("owner/repo")
+    repo = Repository(GitHubApp(settings(tmp_path)).installation(42), "owner/repo")
     definitions = (LabelDefinition(name="flow", color="5319e7", description="start"),)
     with pytest.raises(GitHubError) as caught:
         await repo.ensure_labels(definitions)
@@ -202,7 +203,7 @@ async def test_lost_creation_response_is_recovered_by_listing_without_repeating_
 
 @pytest.mark.parametrize("target,method,kind,status", [
     (GitHubApp, "fetch_installations", GitHubErrorKind.RATE_LIMITED, 429),
-    (Installation, "fetch_repositories", GitHubErrorKind.TRANSIENT, 503),
+    (repo_api, "fetch_repositories", GitHubErrorKind.TRANSIENT, 503),
     (Repository, "ensure_labels", GitHubErrorKind.RATE_LIMITED, 429),
 ])
 async def test_run_honors_retry_after_without_requesting_another_repository(

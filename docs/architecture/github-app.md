@@ -17,7 +17,7 @@ Control 使用 `AGENTFLOW_GITHUB_APP_ID` 和 `AGENTFLOW_GITHUB_PRIVATE_KEY_PATH`
 
 对于标签触发的 Flow，[路由器](../../app/controler/events/router.py)从事件取 `installation.id`，和仓库、Issue 一起交给 control。此后 GitHub 请求沿 `GitHubApp → Installation → Repository → Issue / PullRequest` 找到操作对象。绑定资源时还没联网；持有一个 PR 编号也不等于知道它是否仍开放。[PR 资源](../../app/github/pull_requests.py)将已读取的事实与未读取的字段区分开；交付前仍需复读 PR 和分支。
 
-只需绑定仓库时用 `installation.repository(full_name)`。需要最新默认分支或归档状态时，调用 [`await installation.fetch_repository(full_name)`](../../app/github/apps.py#L158-L166) 取得新的 `Repository`。只查分支的 SHA 时，直接调用 [`await installation.fetch_ref(full_name, branch)`](../../app/github/apps.py#L168-L175)，无需先读取仓库信息。
+调用方用 `Repository(installation, full_name)` 或 `Project(installation, config)` 本地绑定资源。需要最新默认分支或归档状态时，调用 [`await fetch_repository(installation, full_name)`](../../app/github/repositories.py#L191-L199) 取得新的 `Repository`。只查分支的 SHA 时，直接调用 [`await fetch_ref(installation, full_name, branch)`](../../app/github/repositories.py#L215-L224)，无需先读取仓库信息。两个函数均位于 `app.github.repositories`。
 
 以安装 42 下的 `octo/repo` 为例，调用方通过安装实例为指定仓库申请推送凭据：
 
@@ -86,11 +86,11 @@ assert capability.repository == "octo/repo"
 
 ## A.5 密钥管理
 
-App 私钥和验签 secret 留在 control。临近下发编码任务时，control 单独为这次 assignment 请求**指定仓库的 `contents: write`**，并核对返回的仓库、权限（允许附带隐式 `metadata: read`）和 bot 身份。短期令牌只随私密 assignment 字段传输；worker 给单次进程配置 Git credential helper、bot 身份的 `gh` 环境和临时配置目录，不将 token 写入任务结果或 journal。凭据过期后不会为正在运行的进程自动续签。[签发与校验](../../app/github/apps.py#L177-L201) · [worker 环境测试](../../tests/test_worker_github_environment.py)
+App 私钥和验签 secret 留在 control。临近下发编码任务时，control 单独为这次 assignment 请求**指定仓库的 `contents: write`**，并核对返回的仓库、权限（允许附带隐式 `metadata: read`）和 bot 身份。短期令牌只随私密 assignment 字段传输；worker 给单次进程配置 Git credential helper、bot 身份的 `gh` 环境和临时配置目录，不将 token 写入任务结果或 journal。凭据过期后不会为正在运行的进程自动续签。[签发与校验](../../app/github/apps.py#L159-L183) · [worker 环境测试](../../tests/test_worker_github_environment.py)
 
 因此 worker 可以推分支，却不需要持有 control 用于写 PR 的凭据。首轮工具 `flow.open_pr` 只记录经远端 ref 核验的开 PR 意图；control 收到并接受终态结果后才创建或复用 PR。反过来，GitHub 收到了写请求却没返回响应，本地超时也不能证明远端没有执行：写评论要先按本 App 作者和精确标记找回，不能直接发送第二条。[工具服务](../../app/controler/workflow/tools.py) · [外部写入处理](../../app/controler/workflow/effects.py)
 
-派发时有两种 token：[JobCoordinator.prepare_for_assignment](../../app/controler/workflow/coordinator.py#L138-L180) 收到的 `token` 标识这次 Job 分配，和 worker、连接代次一起用来核对领取权。另一个 token 由 control 按 Flow 保存的 installation ID 和仓库名调用 [Installation.create_push_capability](../../app/github/apps.py#L177-L201) 换取；返回的 `PushCapability` 才含 GitHub 凭据、有效期及 bot 身份。[协调器](../../app/controler/workflow/coordinator.py#L256-L271)只为首轮和修订任务装配这个私密字段。签发失败且领取仍有效，由 control 将 Job 记为失败；签发期间领取权已变化，则丢弃本次准备结果，不交给旧 worker。
+派发时有两种 token：[JobCoordinator.prepare_for_assignment](../../app/controler/workflow/coordinator.py#L138-L180) 收到的 `token` 标识这次 Job 分配，和 worker、连接代次一起用来核对领取权。另一个 token 由 control 按 Flow 保存的 installation ID 和仓库名调用 [Installation.create_push_capability](../../app/github/apps.py#L159-L183) 换取；返回的 `PushCapability` 才含 GitHub 凭据、有效期及 bot 身份。[协调器](../../app/controler/workflow/coordinator.py#L256-L271)只为首轮和修订任务装配这个私密字段。签发失败且领取仍有效，由 control 将 Job 记为失败；签发期间领取权已变化，则丢弃本次准备结果，不交给旧 worker。
 
 `AGENTFLOW_GITHUB_REQUEST_TIMEOUT_SECONDS` 默认 30，须为正有限数；修改后重启 serve。它限制连接、读、写和连接池等待等单个网络阶段，不限制整轮分页或恢复的总时长。[错误分类](../../app/github/errors.py)区分临时故障与有证据的未发送或拒绝；即使 HTTP 200，GraphQL 写入也可能部分成功且附带 errors。[客户端契约测试](../../tests/test_github_client.py)
 

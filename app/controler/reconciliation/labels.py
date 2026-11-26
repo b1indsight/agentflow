@@ -16,6 +16,7 @@ from app.github import (
     Installation,
     retry_delay,
 )
+from app.github import repositories as repo_api
 from app.github.repositories import LabelDefinition
 
 PENDING_INTERVAL = 300
@@ -72,7 +73,7 @@ class LabelSynchronizer:
     async def _scan_installation(self, installation: Installation) -> None:
         page = 1
         while True:
-            repositories = await installation.fetch_repositories(page=page)
+            repositories = await repo_api.fetch_repositories(installation, page=page)
             for repo in repositories.items:
                 identity = (installation.installation_id, repo.full_name.casefold())
                 if self._confirmed.get(identity, 0) > monotonic():

@@ -24,6 +24,7 @@ from app.github import (
     PushCapability,
     Repository,
 )
+from app.github import repositories as repo_api
 
 
 class AsyncEndpoint:
@@ -99,8 +100,8 @@ async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, mo
 
     install_client(monkeypatch, installation)
     identity = app.installation(42)
-    read = (identity.repository("owner/repo").fetch_issue(7) if method == "fetch_issue"
-            else identity.fetch_ref("owner/repo", "flow/7"))
+    read = (Repository(identity, "owner/repo").fetch_issue(7) if method == "fetch_issue"
+            else repo_api.fetch_ref(identity, "owner/repo", "flow/7"))
     with pytest.raises(GitHubError) as caught:
         await asyncio.wait_for(read, 1)
     assert caught.value.kind is GitHubErrorKind.RATE_LIMITED
@@ -120,7 +121,7 @@ async def test_revision_lineage_requires_github_fast_forward(
     client = SimpleNamespace(rest=SimpleNamespace(repos=SimpleNamespace(async_compare_commits=endpoint)))
     app = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda _, **kwargs: client)
-    assert await app.installation(1).repository("owner/repo").compare_commits("base", "head") is expected
+    assert await Repository(app.installation(1), "owner/repo").compare_commits("base", "head") is expected
     assert endpoint.calls == [(("owner", "repo", "base...head"), {"per_page": 1})]
 
 
@@ -141,7 +142,7 @@ async def test_review_files_preserve_facts_and_page_requests(tmp_path, monkeypat
 
     app = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, installed)
-    pr = PullRequest(app.installation(1).repository("owner/repo"), 17)
+    pr = PullRequest(Repository(app.installation(1), "owner/repo"), 17)
     result = [item async for item in pr.list_files()]
     assert calls == [
         (("owner", "repo", 17), {"per_page": 20, "page": 1}),
@@ -176,7 +177,7 @@ async def test_inline_comments_preserve_bodies_and_page_requests(tmp_path, monke
 
     app = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, installed)
-    pr = PullRequest(app.installation(1).repository("owner/repo"), 17)
+    pr = PullRequest(Repository(app.installation(1), "owner/repo"), 17)
     result = [item async for item in pr.list_review_comments()]
     assert calls == [
         ("inline", ("owner", "repo", 17), {"per_page": 10, "page": 1}),
@@ -285,9 +286,9 @@ async def test_fetches_issue_repository_and_remote_ref(
     github = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
-    observed_issue = await github.installation(42).repository("octo/repo").fetch_issue(7)
-    observed_repository = await github.installation(42).fetch_repository("octo/repo")
-    remote_ref = await github.installation(42).fetch_ref("octo/repo", "refs/heads/topic")
+    observed_issue = await Repository(github.installation(42), "octo/repo").fetch_issue(7)
+    observed_repository = await repo_api.fetch_repository(github.installation(42), "octo/repo")
+    remote_ref = await repo_api.fetch_ref(github.installation(42), "octo/repo", "refs/heads/topic")
 
     assert observed_issue.model_dump() == {
         "number": 7,
@@ -315,14 +316,14 @@ async def test_fetch_repository_keeps_identity_and_observed_casing(tmp_path, mon
     installation = GitHubApp(settings(tmp_path)).installation(42)
     if full_name == "other/repo":
         with pytest.raises(GitHubError) as caught:
-            await installation.fetch_repository("octo/repo")
+            await repo_api.fetch_repository(installation, "octo/repo")
         assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
         assert caught.value.endpoint == "get_repository"
     else:
-        observed = await installation.fetch_repository("octo/repo")
+        observed = await repo_api.fetch_repository(installation, "octo/repo")
         assert observed.installation is installation
         endpoint.result.parsed_data.default_branch = "next"
-        latest = await installation.fetch_repository(observed.full_name)
+        latest = await repo_api.fetch_repository(installation, observed.full_name)
         assert latest.default_branch == "next"
         assert observed.full_name == full_name and observed.default_branch == "trunk"
 
@@ -346,7 +347,7 @@ async def test_full_pr_read_preserves_merge_sha_even_when_sdk_schema_omits_it(tm
 
     sdk = GitHub("test-token", auto_retry=None, async_transport=httpx.MockTransport(handler))
     install_client(monkeypatch, lambda _, **kwargs: sdk)
-    repo = GitHubApp(settings(tmp_path)).installation(42).repository("octo/repo")
+    repo = Repository(GitHubApp(settings(tmp_path)).installation(42), "octo/repo")
     observed = await repo.fetch_pull_request(17)
     assert observed.state == state and observed.merged is merged
     assert observed.merge_commit_sha == "c" * 40
@@ -400,7 +401,7 @@ def test_bound_resources_serialize_and_restore_inside_standard_container(tmp_pat
         pull_request: PullRequest
 
     # Default nested serialization must omit unknown sentinels and all authentication references.
-    repository = GitHubApp(settings(tmp_path)).installation(42).repository("octo/repo")
+    repository = Repository(GitHubApp(settings(tmp_path)).installation(42), "octo/repo")
     document = Document(
         repository=repository, issue=Issue(repository, 7), pull_request=PullRequest(repository, 17),
     )
@@ -528,9 +529,9 @@ async def test_finds_and_opens_pull_requests_and_skips_empty_reviewers(
     github = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
-    found = await github.installation(42).repository("octo/repo").find_pull_request_by_head("topic")
-    opened = await github.installation(42).repository("octo/repo").open_pull_request("new-topic", "trunk", "Title", "Body")
-    await PullRequest(github.installation(42).repository("octo/repo"), 10).request_reviewers([])
+    found = await Repository(github.installation(42), "octo/repo").find_pull_request_by_head("topic")
+    opened = await Repository(github.installation(42), "octo/repo").open_pull_request("new-topic", "trunk", "Title", "Body")
+    await PullRequest(Repository(github.installation(42), "octo/repo"), 10).request_reviewers([])
 
     assert found is not None and found.number == 9
     assert found.head_branch == "topic"
@@ -597,9 +598,9 @@ async def test_comment_recovery_checks_author_and_paginates(tmp_path, monkeypatc
         rest=SimpleNamespace(apps=SimpleNamespace(async_get_authenticated=get_app)),
     ))
     install_client(monkeypatch, lambda _, **kwargs: client)
-    assert await PullRequest(github.installation(42).repository("octo/repo"), 10).find_comment(marker) == 700
+    assert await PullRequest(Repository(github.installation(42), "octo/repo"), 10).find_comment(marker) == 700
     assert pages == [1, 2]
-    assert await PullRequest(github.installation(42).repository("octo/repo"), 10).comment("Another comment") == 701
+    assert await PullRequest(Repository(github.installation(42), "octo/repo"), 10).comment("Another comment") == 701
 
 
 @pytest.mark.asyncio
@@ -639,7 +640,7 @@ async def test_reviewer_reconciliation_includes_completed_reviews_across_pages(
     )
     github = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda _, **kwargs: client)
-    assert await PullRequest(github.installation(42).repository("octo/repo"), 10).fetch_reviewers(since=since) == {"requested", "finished"}
+    assert await PullRequest(Repository(github.installation(42), "octo/repo"), 10).fetch_reviewers(since=since) == {"requested", "finished"}
     assert pages == [1, 2]
 
 
@@ -672,7 +673,7 @@ async def test_maps_github_failures_without_response_bodies(
     install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
     with pytest.raises(GitHubError) as captured:
-        await github.installation(42).repository("octo/repo").fetch_issue(7)
+        await Repository(github.installation(42), "octo/repo").fetch_issue(7)
 
     error = captured.value
     assert error.kind is kind
@@ -699,7 +700,7 @@ async def test_maps_real_githubkit_transport_wrappers_as_transient(
     install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
     with pytest.raises(GitHubError) as captured:
-        await github.installation(42).repository("octo/repo").fetch_issue(7)
+        await Repository(github.installation(42), "octo/repo").fetch_issue(7)
 
     assert captured.value.kind is GitHubErrorKind.TRANSIENT
     assert captured.value.retryable is True

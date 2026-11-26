@@ -41,7 +41,7 @@ async def revision_current(repo: Repository, plan: ResultPlan, number: int, *, j
     task = frozen_revision(job)
     effect = plan.effects[0]
     # Revision authorization retains the first frozen effect's identity, even on recovery.
-    target = repo.installation.app.installation(effect.installation_id).repository(effect.repo)
+    target = Repository(repo.installation.app.installation(effect.installation_id), effect.repo)
     current = await target.fetch_pull_request(number)
     head = task.expected_head_sha if plan.revision_purpose == "answer" else plan.revision.commit_sha
     return (current.repo == effect.repo and current.number == task.pr_number == number

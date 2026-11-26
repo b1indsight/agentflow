@@ -5,7 +5,14 @@ import httpx
 import pytest
 from githubkit import GitHub
 
-from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequest, ReviewThread
+from app.github import (
+    GitHubApp,
+    GitHubError,
+    GitHubErrorKind,
+    PullRequest,
+    Repository,
+    ReviewThread,
+)
 from tests.test_github_client import install_client, settings
 from tests.test_github_feedback import adapter
 
@@ -40,7 +47,7 @@ async def test_all_thread_reads_preserve_the_same_comment_identity(tmp_path, mon
     client = Client(outer(thread), {"node": thread}, outer(thread))
     install_client(monkeypatch, lambda *args, **kwargs: client)
 
-    pr = PullRequest(app.installation(42).repository("owner/repo"), 17)
+    pr = PullRequest(Repository(app.installation(42), "owner/repo"), 17)
     full = await pr.list_review_threads()
     single = await ReviewThread(pr, "T1").refetch()
     page = await pr.fetch_threads(limit=1)

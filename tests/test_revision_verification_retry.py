@@ -10,8 +10,9 @@ from githubkit import GitHub as SDK
 from app.contracts.result_models import ResultPending
 from app.domain.models import JobState
 from app.github import GitHubApp, Installation, PullRequest
+from app.github import repositories as repo_api
 from app.persistence.store import Store
-from tests.github import NATIVE_INSTALLATION_FETCH_REF, NATIVE_PULL_REQUEST_REFETCH
+from tests.github import NATIVE_FETCH_REF, NATIVE_PULL_REQUEST_REFETCH
 from tests.test_coordinator import coordinator
 from tests.test_github_client import settings
 from tests.test_revision_delivery import verified_result
@@ -41,7 +42,7 @@ async def test_result_verification_honors_retry_after_across_restart(store, pend
     before = store.now()
     with monkeypatch.context() as native:
         native.setattr(PullRequest, "refetch", NATIVE_PULL_REQUEST_REFETCH)
-        native.setattr(Installation, "fetch_ref", NATIVE_INSTALLATION_FETCH_REF)
+        native.setattr(repo_api, "fetch_ref", NATIVE_FETCH_REF)
         with pytest.raises(ResultPending):
             await asyncio.wait_for(subject.results.apply(job.id), 1)
     pending = store.jobs.get_job(job.id)

@@ -8,7 +8,8 @@ from githubkit import GitHub as SDK
 
 from app.controler.workflow.tools import FlowToolService
 from app.github import GitHubApp, Installation
-from tests.github import NATIVE_INSTALLATION_FETCH_REF
+from app.github import repositories as repo_api
+from tests.github import NATIVE_FETCH_REF
 from tests.test_github_client import settings
 
 
@@ -40,7 +41,7 @@ async def test_open_pr_ref_recovers_within_the_same_tool_call(
         "test-token", async_transport=httpx.MockTransport(transport), **options,
     ))
     monkeypatch.setattr("githubkit.core.anyio.sleep", sleep)
-    monkeypatch.setattr(Installation, "fetch_ref", NATIVE_INSTALLATION_FETCH_REF)
+    monkeypatch.setattr(repo_api, "fetch_ref", NATIVE_FETCH_REF)
     service = FlowToolService(app, database=store.database)
     invocation = request.model_copy(
         update={

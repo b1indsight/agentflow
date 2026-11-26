@@ -6,11 +6,13 @@
 
 已解除：[`reviews → jobs`](../../app/persistence/reviews.py#L34-L35) 和 [`jobs → flows`](../../app/persistence/jobs.py#L19) 保留，`FlowStore.transition()` 不再回引 `ReviewStore`。正常收尾时由 [`retire_queued_work()`](../../app/persistence/assignments.py#L689-L697) 在原事务内取消审核；收尾重试若仍有遗留批次，由[审核扫描](../../app/persistence/reviews.py#L265-L287)清理。
 
+GitHub 认证层的环也已解除：[调用方](../../app/controler/reconciliation/projects.py#L90-L92)把 `Installation` 传给 `Repository` 和 `Project`；[仓库读取函数](../../app/github/repositories.py#L191-L224)也显式接收安装实例。[`github.apps`](../../app/github/apps.py) 不再导入资源模块或控制端配置，连类型注解也不依赖它们。
+
 ## 具体文件已经成环
 
 | 范围 | 闭合路径和反向导入的位置 |
 | --- | --- |
-| GitHub 资源（6 个模块） | 父资源导入子资源，构造子资源时又局部导入父类型做校验。互引对：[`apps → repositories`](../../app/github/apps.py#L15) ↔ [回引 `Installation`](../../app/github/repositories.py#L68-L72)；[`repositories → issues / pull_requests`](../../app/github/repositories.py#L12-L13) ↔ [Issue](../../app/github/issues.py#L151-L159) 和 [PR](../../app/github/pull_requests.py#L110-L118) 回引 `Repository`；[`pull_requests → review_threads`](../../app/github/pull_requests.py#L24-L25) ↔ [回引 `PullRequest`](../../app/github/review_threads.py#L58-L67)。另外，[`threads → review_threads`](../../app/github/threads.py#L13) ↔ `review_threads → threads` 用于[重读线程](../../app/github/review_threads.py#L114-L118)和[读取评论](../../app/github/review_threads.py#L131-L136)。这些互引连成一组。 |
+| GitHub 资源（5 个模块） | 父资源导入子资源，构造子资源时又局部导入父类型做校验。互引对：[`repositories → issues / pull_requests`](../../app/github/repositories.py#L14-L16) ↔ [Issue](../../app/github/issues.py#L151-L159) 和 [PR](../../app/github/pull_requests.py#L110-L118) 回引 `Repository`；[`pull_requests → review_threads`](../../app/github/pull_requests.py#L24-L25) ↔ [回引 `PullRequest`](../../app/github/review_threads.py#L58-L67)。另外，[`threads → review_threads`](../../app/github/threads.py#L13) ↔ `review_threads → threads` 用于[重读线程](../../app/github/review_threads.py#L114-L118)和[读取评论](../../app/github/review_threads.py#L131-L136)。这些互引连成一组。 |
 | Worker 自更新（动态导入，另计） | [`app.cli → worker.cli`](../../app/cli.py#L23) → [`worker.self_update`](../../app/worker/cli.py#L19-L23)。安装校验用 [`importlib.import_module`](../../app/worker/self_update.py#L158-L163) 反过来加载 `app.cli` 和 `app.worker.cli`，核对实际文件与 wheel 的 `RECORD`。这是更新路径的回引，不是启动时的递归调用。 |
 
 ## 按包分层仍会遇到的反向边
@@ -27,10 +29,10 @@
 
 ## 仅在类型检查时闭环
 
-- **GitHub → 控制端配置。** [`github.apps`](../../app/github/apps.py#L16-L31) 导入 `ServerSettings` 作为构造参数类型；[`controler.config`](../../app/controler/config.py#L13) 又从 [GitHub 包入口](../../app/github/__init__.py#L6-L15) 导入 `ProjectConfig`。GitHub 内部还有仅靠类型回引的关系：[projects → apps / repositories](../../app/github/projects.py#L26-L28)、[issues → pull_requests](../../app/github/issues.py#L14-L16)、[threads → pull_requests](../../app/github/threads.py#L15-L16)。
+- **GitHub 资源。** [issues → pull_requests](../../app/github/issues.py#L14-L16) 和 [threads → pull_requests](../../app/github/threads.py#L15-L16) 仍有类型回引。
 - **Worker 传输 → 装配入口。** [`runtime`](../../app/worker/runtime.py#L62-L64) 导入回调；[transport.business](../../app/worker/transport/business.py#L28-L42) 和 [transport.state](../../app/worker/transport/state.py#L70-L71) 都为参数导入 `WorkerRuntime`。反向 *import* 不执行，但回调运行时确实使用传入的对象，例如[读取历史](../../app/worker/transport/business.py#L89)。
 
-[边界测试](../../tests/test_boundaries.py#L59-L76)有意忽略 `TYPE_CHECKING`。例如叶模块 [`workflow.preparation → controler.config`](../../app/controler/workflow/preparation.py#L15-L16) 也是源代码依赖，在[禁止该叶模块依赖 controler 的运行时检查](../../tests/test_boundaries.py#L106-L111)中被排除；它本身没有形成文件环。
+[边界测试](../../tests/test_boundaries.py)默认检查运行时导入，对认证模块 `github.apps` 也检查 `TYPE_CHECKING`。例如叶模块 [`workflow.preparation → controler.config`](../../app/controler/workflow/preparation.py#L15-L16) 的类型导入不在该叶模块的运行时检查范围内；它本身没有形成文件环。
 
 ## 检查范围
 

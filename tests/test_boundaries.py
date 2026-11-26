@@ -56,7 +56,7 @@ def test_worker_data_paths_do_not_load_control_plane_dependencies(operation: str
     )
 
 
-def imported_modules(package: Path) -> set[str]:
+def imported_modules(package: Path, *, include_types: bool = False) -> set[str]:
     modules: set[str] = set()
     paths = [package] if package.is_file() else package.rglob("*.py")
     for path in paths:
@@ -64,7 +64,7 @@ def imported_modules(package: Path) -> set[str]:
         # Configuration types can be referenced across packages without loading
         # those packages at runtime; retain the check on executable imports.
         for node in ast.walk(tree):
-            if (isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+            if (not include_types and isinstance(node, ast.If) and isinstance(node.test, ast.Name)
                     and node.test.id == "TYPE_CHECKING"):
                 node.body = []
         for node in ast.walk(tree):
@@ -96,6 +96,7 @@ _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
                    "app.telemetry", "psycopg", "githubkit", "fastapi"}),
     ("persistence", {"app.controler", "app.worker", "githubkit"}),
     ("github", {"app.controler", "app.worker", "app.persistence", "psycopg"}),
+    ("github/apps.py", {"app.github.repositories", "app.github.projects", "app.controler"}),
     ("controler", {"app.worker"}),
     ("worker", {"app.controler", "app.persistence", "app.github", "app.telemetry.metrics",
                 "psycopg", "githubkit", "bub", "app.contracts.control"}),
@@ -121,8 +122,12 @@ _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
     }),
 ])
 def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[str]) -> None:
-    modules = imported_modules(Path("app") / package)
+    auth_layer = package == "github/apps.py"
+    modules = imported_modules(Path("app") / package, include_types=auth_layer)
     assert modules, f"No imports found in {package}; check the package path"
+    if auth_layer:
+        # The public facade also re-exports the higher-level resources.
+        assert "app.github" not in modules
     if package == "controler/workflow/initial.py":
         # INITIAL owns preparation and plans; neither leaf may depend on orchestration.
         leaves = {"app.controler.workflow.preparation", "app.controler.workflow.plans"}

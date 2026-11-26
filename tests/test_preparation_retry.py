@@ -11,6 +11,7 @@ from app.controler.workflow.lifecycle import pause_delivery
 from app.controler.workflow.preparation import PreparationStale
 from app.domain.models import JobKind, JobState
 from app.github import GitHubError, GitHubErrorKind, Installation
+from app.github import repositories as repo_api
 from app.persistence.assignments import AssignmentStore
 from tests.flow_fixtures import enqueue_job
 from tests.test_revision_recovery import (
@@ -96,12 +97,12 @@ async def test_cancelling_preparation_joins_capability_io(store, pending_revisio
 
 async def test_transient_read_requeues_and_recovers_without_a_revision_cycle(store, pending_revision, monkeypatch, preparation):
     flow, job, task, _github, _subject = pending_revision
-    original = Installation.fetch_ref
+    original = repo_api.fetch_ref
 
     async def unavailable(installation, full_name, branch, *, retry_transient=False):
         raise GitHubError(GitHubErrorKind.TRANSIENT, "get_ref", status_code=503)
 
-    monkeypatch.setattr(Installation, "fetch_ref", unavailable)
+    monkeypatch.setattr(repo_api, "fetch_ref", unavailable)
     prepared = await preparation._prepare_assignment(job, "token")
     assert prepared is JobState.QUEUED
     pending = store.jobs.get_job(job.id)
@@ -112,7 +113,7 @@ async def test_transient_read_requeues_and_recovers_without_a_revision_cycle(sto
     assert store.assignments.assign_job("worker-a", "too-early", "epoch") is None
     future = pending.prepare_next_at + timedelta(seconds=1)
     monkeypatch.setattr(store._db, "_clock", lambda: future)
-    monkeypatch.setattr(Installation, "fetch_ref", original)
+    monkeypatch.setattr(repo_api, "fetch_ref", original)
     retry = store.assignments.assign_job("worker-a", "retry", "epoch")
     prepared = await preparation._prepare_assignment(retry, "retry")
     assert (
@@ -132,7 +133,7 @@ async def test_retry_after_and_count_survive_restart(store, pending_revision, mo
     async def limited(installation, full_name, branch, *, retry_transient=False):
         raise GitHubError(GitHubErrorKind.RATE_LIMITED, "get_ref", retry_after="120")
 
-    monkeypatch.setattr(Installation, "fetch_ref", limited)
+    monkeypatch.setattr(repo_api, "fetch_ref", limited)
     await preparation._prepare_assignment(job, "token")
     pending = store.jobs.get_job(job.id)
     assert pending.prepare_next_at >= pending.prepare_first_failed_at + timedelta(seconds=120)
@@ -156,7 +157,7 @@ async def test_failure_or_time_budget_stops_without_early_retry(store, pending_r
     async def unavailable(installation, full_name, branch, *, retry_transient=False):
         raise GitHubError(GitHubErrorKind.RATE_LIMITED, "get_ref", retry_after=header)
 
-    monkeypatch.setattr(Installation, "fetch_ref", unavailable)
+    monkeypatch.setattr(repo_api, "fetch_ref", unavailable)
     prepared = await preparation._prepare_assignment(job, "token")
     assert prepared is JobState.FAILED
     failed = store.jobs.get_job(job.id)
@@ -200,7 +201,7 @@ async def test_close_wins_over_a_read_failure(store, pending_revision, monkeypat
             )
         raise GitHubError(GitHubErrorKind.TRANSIENT, "get_ref")
 
-    monkeypatch.setattr(Installation, "fetch_ref", close)
+    monkeypatch.setattr(repo_api, "fetch_ref", close)
     prepared = await preparation._prepare_assignment(job, "token")
     assert prepared is JobState.DONE
     assert store.jobs.get_job(job.id).prepare_next_at is None
@@ -228,7 +229,7 @@ async def test_expired_window_stops_before_another_github_request(store, pending
         calls.append(branch)
         raise GitHubError(GitHubErrorKind.TRANSIENT, "get_ref")
 
-    monkeypatch.setattr(Installation, "fetch_ref", unavailable)
+    monkeypatch.setattr(repo_api, "fetch_ref", unavailable)
     await preparation._prepare_assignment(job, "token")
     first = store.jobs.get_job(job.id).prepare_first_failed_at
     monkeypatch.setattr(store._db, "_clock", lambda: first + timedelta(seconds=901))
@@ -281,7 +282,7 @@ async def test_a_slow_retry_read_cannot_run_beyond_the_window(store, pending_rev
     async def slow(installation, full_name, branch, *, retry_transient=False):
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(Installation, "fetch_ref", slow)
+    monkeypatch.setattr(repo_api, "fetch_ref", slow)
     prepared = await preparation._prepare_assignment(retry, "slow")
     assert prepared is JobState.FAILED
     assert "window" in store.jobs.get_job(job.id).last_error

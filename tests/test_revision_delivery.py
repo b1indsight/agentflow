@@ -42,7 +42,6 @@ from app.domain.models import (
 from app.domain.review_models import FeedbackUpdate
 from app.github import (
     Batch,
-    Installation,
     PullRequest,
     RemoteRef,
     Repository,
@@ -50,6 +49,7 @@ from app.github import (
     ReviewThread,
     ReviewThreads,
 )
+from app.github import repositories as repo_api
 from app.persistence.activity import ActivityStore
 from app.worker.execution import vcs
 from app.worker.execution.executor import WorkerExecutor
@@ -759,7 +759,7 @@ async def test_answer_publication_checks_pr_head_not_worker_delivery(revision_co
 
     monkeypatch.setattr(PullRequest, "refetch", changed_pr)
     # No ref fetch, clean-tree claim or worker SHA/remote SHA equality is required for answer.
-    monkeypatch.setattr(Installation, "fetch_ref", AsyncMock(side_effect=AssertionError("answer read a ref")))
+    monkeypatch.setattr(repo_api, "fetch_ref", AsyncMock(side_effect=AssertionError("answer read a ref")))
     item = task.feedback[0]
     result = verified_result(task, commit_sha="local-jj-working-commit", remote_sha=None,
                              branch=None, clean_worktree=False, output=revision_output(addressed=[
@@ -929,7 +929,7 @@ async def test_verified_partial_delivery_waits_without_rereview(revision_control
         return True
 
     monkeypatch.setattr(PullRequest, "refetch", current_pr)
-    monkeypatch.setattr(Installation, "fetch_ref", ref)
+    monkeypatch.setattr(repo_api, "fetch_ref", ref)
     monkeypatch.setattr(Repository, "compare_commits", compare)
     item = task.feedback[0]
     identity = {"item_id": item.item_id, "version": item.version, "comment_id": item.github_id}

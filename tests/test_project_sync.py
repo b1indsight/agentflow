@@ -36,7 +36,6 @@ from app.github import (
     ProjectItem,
     ProjectItemsPage,
     ProjectTarget,
-    Repository,
 )
 from app.persistence.activity import ActivityStore
 from app.persistence.store import Store
@@ -159,7 +158,7 @@ class RemoteProjectItem(ProjectItem):
 
 
 class RemoteInstallation(Installation):
-    """Only the concrete binders exercised by projection recovery tests."""
+    """The installation selected for this projection's remote state."""
 
     _remote: Any = PrivateAttr()
 
@@ -170,13 +169,6 @@ class RemoteInstallation(Installation):
     @property
     def remote(self):
         return self._remote
-
-    def repository(self, full_name):
-        return Repository(self, full_name)
-
-    def project(self, config):
-        assert config.installation_id == self.installation_id
-        return self.remote
 
 
 class RemoteApp:
@@ -190,11 +182,16 @@ class RemoteApp:
 
 @pytest.fixture
 def remote_app(monkeypatch):
+    def project(installation, config):
+        assert config.installation_id == installation.installation_id
+        return installation.remote
+
     async def content_id(issue):
         return await issue.repository.installation.remote.fetch_content_id(
             issue.repository.full_name, issue.number,
         )
 
+    monkeypatch.setattr("app.controler.reconciliation.projects.Project", project)
     monkeypatch.setattr(Issue, "fetch_content_id", content_id)
     return RemoteApp
 
@@ -470,7 +467,7 @@ async def test_discovered_archived_card_recovers_after_restore_and_restart(store
     monkeypatch.setattr(Installation, "_client", lambda self, **options: SDK(
         "test-token", async_transport=httpx.MockTransport(transport), **options,
     ))
-    monkeypatch.setattr(remote, "list_items_page", app.installation(42).project(config()).list_items_page)
+    monkeypatch.setattr(remote, "list_items_page", Project(app.installation(42), config()).list_items_page)
     monkeypatch.setattr(remote, "add_issue", unexpected_add)
     await sync.sweep()
     assert state(store).item_id == "ITEM" and state(store).blocked
@@ -556,7 +553,7 @@ async def test_definite_add_rejection_can_retry_after_restart(store, projection,
     ))
 
     async def add(content):
-        receipt = await app.installation(42).project(config()).add_issue(content)
+        receipt = await Project(app.installation(42), config()).add_issue(content)
         remote.item = ProjectItem.model_validate(receipt.model_dump())
         return receipt
 

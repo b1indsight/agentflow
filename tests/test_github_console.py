@@ -9,7 +9,7 @@ import pytest
 from githubkit import GitHub
 from pydantic import BaseModel
 
-from app.github import GitHubApp, GitHubError, GitHubErrorKind
+from app.github import GitHubApp, GitHubError, GitHubErrorKind, Repository
 from app.github.console import read_source, sources, webhook_observations
 from tests.test_github_client import AsyncEndpoint, install_client, response, settings
 
@@ -33,7 +33,7 @@ def adapter(tmp_path, monkeypatch, handler):
     app = GitHubApp(settings(tmp_path))
     sdk = GitHub("test-token", auto_retry=None, async_transport=httpx.MockTransport(handler))
     install_client(monkeypatch, lambda _, **kwargs: sdk)
-    return app.installation(42).repository("owner/repo")
+    return Repository(app.installation(42), "owner/repo")
 
 
 async def test_sdk_comments_full_body_paging_and_webhook_identity(tmp_path, monkeypatch):
@@ -144,7 +144,7 @@ async def test_check_workflows_use_suite_identity_and_deduplicate_reads(tmp_path
         actions=SimpleNamespace(async_list_workflow_runs_for_repo=workflows),
     ))
     install_client(monkeypatch, lambda _, **kwargs: client)
-    repo = GitHubApp(settings(tmp_path)).installation(42).repository("owner/repo")
+    repo = Repository(GitHubApp(settings(tmp_path)).installation(42), "owner/repo")
     page = await read_source(repo, 7, 17, "commit.check_runs:" + "a" * 40)
     assert [item.metadata["workflow_name"] for item in page.items] == [
         "CI" if suite == 11 else "Release" for suite in suites
@@ -171,7 +171,7 @@ async def test_workflow_lookup_failure_keeps_check_rows_and_their_status(tmp_pat
         actions=SimpleNamespace(async_list_workflow_runs_for_repo=workflows),
     ))
     install_client(monkeypatch, lambda _, **kwargs: client)
-    repo = GitHubApp(settings(tmp_path)).installation(42).repository("owner/repo")
+    repo = Repository(GitHubApp(settings(tmp_path)).installation(42), "owner/repo")
     page = await read_source(repo, 7, 17, "commit.check_runs:" + "a" * 40)
     assert len(page.items) == 2
     for item in page.items:

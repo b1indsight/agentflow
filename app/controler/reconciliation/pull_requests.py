@@ -16,7 +16,14 @@ from app.controler.workflow.lifecycle import (
 from app.controler.workflow.service import ControlService
 from app.domain.flow_policy import FlowEvent
 from app.domain.models import TERMINAL_STATES, DeliveryState, FlowState
-from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequestMerge, retry_delay
+from app.github import (
+    GitHubApp,
+    GitHubError,
+    GitHubErrorKind,
+    PullRequestMerge,
+    Repository,
+    retry_delay,
+)
 from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
@@ -127,7 +134,7 @@ class Reconciler:
                 coding = jobs_tx.lifecycle_job(flow.id)
                 blocked = jobs_tx.reopen_blocked(flow.id)
             installation = self.github.installation(flow.installation_id)
-            remote = await installation.repository(flow.repo).fetch_pull_request(delivery.pr_number)
+            remote = await Repository(installation, flow.repo).fetch_pull_request(delivery.pr_number)
             if (remote.repo != flow.repo or remote.number != delivery.pr_number
                     or remote.head_repository != flow.repo):
                 raise ValueError("PR observation identity mismatch")

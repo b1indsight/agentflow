@@ -15,7 +15,7 @@ from app.domain.context_models import MAX_CONTEXT_BYTES, ReviewContext
 from app.domain.inference_models import InferenceOutput
 from app.domain.models import Flow, FlowState, ReviewItemKind, Verdict
 from app.domain.review_models import BatchState, ReviewBatch, ReviewFeedback
-from app.github import GitHubApp, GitHubError, GitHubErrorKind, ReviewThreads
+from app.github import GitHubApp, GitHubError, GitHubErrorKind, Repository, ReviewThreads
 from tests.review_memory import review_context
 from tests.test_github_client import install_client, response, settings
 
@@ -103,7 +103,7 @@ def remote(tmp_path, monkeypatch):
         return client
 
     install_client(monkeypatch, installed)
-    repo = GitHubApp(settings(tmp_path)).installation(42).repository("owner/repo")
+    repo = Repository(GitHubApp(settings(tmp_path)).installation(42), "owner/repo")
     return repo, client, events
 
 

@@ -18,6 +18,7 @@ from app.github import (
     GitHubErrorKind,
     Installation,
     PullRequest,
+    Repository,
     retry_delay,
 )
 from app.persistence.activity import ActivityStore
@@ -299,7 +300,7 @@ async def test_status_adapter_reads_by_number_and_keeps_merge_sha(tmp_path, monk
     client = SimpleNamespace(rest=SimpleNamespace(pulls=SimpleNamespace(async_get=endpoint)))
     app = GitHubApp(settings(tmp_path))
     monkeypatch.setattr(Installation, "_client", lambda self, **kwargs: client)
-    repo = app.installation(42).repository("owner/repo")
+    repo = Repository(app.installation(42), "owner/repo")
     result = await repo.fetch_pull_request(17)
     assert endpoint.calls == [(("owner", "repo", 17), {})]
     assert result.title == "PR" and result.body == ""

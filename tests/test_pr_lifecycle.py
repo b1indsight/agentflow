@@ -15,7 +15,16 @@ from app.domain.delivery_models import PreparedDelivery
 from app.domain.flow_policy import FlowEvent
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState, VcsKind
 from app.domain.review_models import BatchState
-from app.github import GitHubError, GitHubErrorKind, Installation, Issue, PullRequest, RemoteRef
+from app.github import (
+    GitHubError,
+    GitHubErrorKind,
+    Installation,
+    Issue,
+    PullRequest,
+    RemoteRef,
+    Repository,
+)
+from app.github import repositories as repo_api
 from app.persistence.activity import ActivityStore
 from app.persistence.assignments import AssignmentStore
 from tests.flow_fixtures import apply_flow_event, enqueue_job
@@ -67,11 +76,11 @@ def lifecycle_resources(recording_resources, monkeypatch):
         return PullRequest(pr.repository, **state.remote.model_dump(exclude_unset=True))
 
     async def fetch_ref(installation, full_name, branch, *, retry_transient=False):
-        state = record_call(installation.repository(full_name), "fetch_ref", branch=branch)
+        state = record_call(Repository(installation, full_name), "fetch_ref", branch=branch)
         return RemoteRef(branch=branch, sha=state.remote.head_sha)
 
     monkeypatch.setattr(PullRequest, "refetch", refetch)
-    monkeypatch.setattr(Installation, "fetch_ref", fetch_ref)
+    monkeypatch.setattr(repo_api, "fetch_ref", fetch_ref)
 
 
 async def check(store, flow, github):

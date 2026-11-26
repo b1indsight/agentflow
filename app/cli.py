@@ -20,6 +20,7 @@ from pydantic import ValidationError
 
 from app import github
 from app.domain.models import ArchiveReason, DeliveryState
+from app.github import repositories as repo_api
 from app.worker.cli import app as worker_app
 
 if TYPE_CHECKING:
@@ -70,7 +71,7 @@ def project_check(repo: str) -> None:
         return
     try:
         installation = github.GitHubApp(settings).installation(config.installation_id)
-        target = asyncio.run(installation.project(config).validate(installation.repository(repo)))
+        target = asyncio.run(github.Project(installation, config).validate(github.Repository(installation, repo)))
     except github.GitHubError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(1) from None
@@ -182,7 +183,8 @@ def flow_create(
 
     async def target() -> github.Repository:
         # Same read-only target checks as console/api.py; never hold a DB transaction over I/O.
-        repository = await github.GitHubApp(settings).installation(request.installation_id).fetch_repository(request.repo)
+        installation = github.GitHubApp(settings).installation(request.installation_id)
+        repository = await repo_api.fetch_repository(installation, request.repo)
         if repository.archived:
             raise github.GitHubError(github.GitHubErrorKind.VALIDATION, "repository_archived")
         if request.issue_number is not None:

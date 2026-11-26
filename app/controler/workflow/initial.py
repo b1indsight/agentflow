@@ -27,6 +27,7 @@ from app.domain.models import (
     JobState,
 )
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
+from app.github import repositories as repo_api
 from app.persistence.activity import ActivityStore
 from app.persistence.agent_inputs import AgentInputStore
 from app.persistence.database import Database
@@ -97,7 +98,7 @@ class InitialPreparation:
             flow = fresh
         try:
             installation = self._github.installation(installation_id)
-            repository = await self._reads.read(job, lambda: installation.fetch_repository(flow.repo))
+            repository = await self._reads.read(job, lambda: repo_api.fetch_repository(installation, flow.repo))
             task_content = await self._reads.task_content(job, flow, repository)
         except GitHubError as exc:
             raise PreparationReadFailure(exc) from exc
@@ -118,7 +119,7 @@ class InitialPreparation:
             branch = delivery.branch
         if delivery is None or delivery.base_branch is None:
             try:
-                await self._reads.read(job, lambda: installation.fetch_ref(flow.repo, branch))
+                await self._reads.read(job, lambda: repo_api.fetch_ref(installation, flow.repo, branch))
             except GitHubError as error:
                 if error.kind is not GitHubErrorKind.NOT_FOUND:
                     raise PreparationReadFailure(error) from error

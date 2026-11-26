@@ -33,7 +33,8 @@ from app.controler.runtime import ServerRuntime
 from app.controler.workers.catalog import read_catalog
 from app.controler.workflow.service import AgentTaskRejected, ControlService, RetryRejected
 from app.domain.models import CodingModelSettings
-from app.github import GitHubError, GitHubErrorKind
+from app.github import GitHubError, GitHubErrorKind, Repository
+from app.github import repositories as repo_api
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
 from app.persistence.flows import FlowStore
@@ -86,7 +87,7 @@ async def flow_targets(request: Request, cursor: Cursor = None) -> FlowTargetPag
         if installations.items:
             index = identities.index(position.installation_id) if position.installation_id else 0
             installation = installations.items[index]
-            repositories = await installation.fetch_repositories(page=position.repository_page)
+            repositories = await repo_api.fetch_repositories(installation, page=position.repository_page)
             items = [FlowTarget(repo=repo.full_name, installation_id=installation.installation_id)
                      for repo in repositories.items]
             if repositories.next_cursor is not None:
@@ -180,8 +181,8 @@ async def update_skill_repository(request: Request, body: UpdateSkillRepositoryR
     if body.target is not None:
         installation = runtime.github.installation(body.target.installation_id)
         try:
-            await installation.repository(body.target.repo).verify_installation()
-            repository = await installation.fetch_repository(body.target.repo)
+            await Repository(installation, body.target.repo).verify_installation()
+            repository = await repo_api.fetch_repository(installation, body.target.repo)
         except GitHubError as error:
             raise _github_failure(error) from error
         if repository.archived:
@@ -228,7 +229,7 @@ async def create_flow(request: Request, body: CreateFlowRequest) -> FlowDetail:
     runtime: ServerRuntime = request.app.state.runtime
     try:
         # Keep these read-only checks aligned with the admin CLI's flow create command.
-        repository = await runtime.github.installation(body.installation_id).fetch_repository(body.repo)
+        repository = await repo_api.fetch_repository(runtime.github.installation(body.installation_id), body.repo)
         if repository.archived:
             raise ConsoleFailure("repository_archived")
         if body.issue_number is not None:

@@ -42,6 +42,7 @@ from app.github import (
     GitHubErrorKind,
     Issue,
     PullRequest,
+    Repository,
     ReviewThread,
     retry_delay,
 )
@@ -295,7 +296,7 @@ class ResultEffects:
         """Observe dispatched writes after merge/cancel; never reissue a mutation."""
         effect = record.payload
         installation, repo = effect.installation_id, effect.repo
-        repository = self.github.installation(installation).repository(repo)
+        repository = Repository(self.github.installation(installation), repo)
         if isinstance(effect, (CommentEffect, ThreadReplyEffect)):
             # This path already reconciles by marker and forbids resending a dispatched comment.
             return await self._execute(plan, record, records)
@@ -360,7 +361,7 @@ class ResultEffects:
     ) -> EffectReceipt:
         effect = record.payload
         installation, repo = effect.installation_id, effect.repo
-        repository = self.github.installation(installation).repository(repo)
+        repository = Repository(self.github.installation(installation), repo)
         if isinstance(effect, (CommentEffect, ThreadReplyEffect)):
             marker = self._comment_marker(plan, effect)
 

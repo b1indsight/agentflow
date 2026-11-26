@@ -13,6 +13,7 @@ from app.github import (
     GitHubError,
     GitHubErrorKind,
     PullRequest,
+    Repository,
     ReviewThread,
     ReviewThreads,
 )
@@ -73,7 +74,7 @@ async def test_threads_and_comments_have_independent_cursors(tmp_path, monkeypat
 
     app = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda _, **kwargs: SimpleNamespace(async_graphql=graphql))
-    result = await PullRequest(app.installation(1).repository("owner/repo"), 17).list_review_threads()
+    result = await PullRequest(Repository(app.installation(1), "owner/repo"), 17).list_review_threads()
     assert result.complete and len(result.threads) == 101
     assert len(result.threads[0].comments.items) == 21
     assert result.threads[0].comments.items[-1].node_id == "C999"
@@ -100,7 +101,7 @@ async def test_invalid_thread_reads_never_look_complete(tmp_path, monkeypatch, f
 
     app = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda _, **kwargs: SimpleNamespace(async_graphql=graphql))
-    result = await ReviewThread(PullRequest(app.installation(1).repository("owner/repo"), 17), "T1").refetch()
+    result = await ReviewThread(PullRequest(Repository(app.installation(1), "owner/repo"), 17), "T1").refetch()
     assert not result.complete
     if fault == "renamed-repository":
         assert result.limitations == ("thread:identity-mismatch",)
@@ -127,7 +128,7 @@ async def test_reply_uses_root_rest_endpoint_and_exact_app_marker(tmp_path, monk
     client = SimpleNamespace(async_graphql=graphql, rest=SimpleNamespace(pulls=SimpleNamespace(
         async_create_reply_for_review_comment=reply)))
     install_client(monkeypatch, lambda _, **kwargs: client)
-    resource = ReviewThread(PullRequest(app.installation(1).repository("owner/repo"), 17),
+    resource = ReviewThread(PullRequest(Repository(app.installation(1), "owner/repo"), 17),
                             "T1", root_comment_id=1)
     assert await resource.find_reply("MARK") == 4
     assert await resource.reply("note") == 900
@@ -146,7 +147,7 @@ async def test_resolve_returns_new_immutable_evidence_without_an_extra_read(tmp_
 
     app = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda _, **kwargs: SimpleNamespace(async_graphql=graphql))
-    bound = ReviewThread(PullRequest(app.installation(1).repository("owner/repo"), 17), "T1")
+    bound = ReviewThread(PullRequest(Repository(app.installation(1), "owner/repo"), 17), "T1")
     before = await bound.refetch()
     after = await before.resolve()
     assert after is not before and after.resolved and not before.resolved
@@ -177,7 +178,7 @@ async def test_unknown_resolve_result_keeps_original_state(tmp_path, monkeypatch
 
     app = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda _, **kwargs: SimpleNamespace(async_graphql=graphql))
-    before = await ReviewThread(PullRequest(app.installation(1).repository("owner/repo"), 17), "T1").refetch()
+    before = await ReviewThread(PullRequest(Repository(app.installation(1), "owner/repo"), 17), "T1").refetch()
     facts_before = before.model_dump()
     with pytest.raises(type(failure)) as caught:
         await before.resolve()
@@ -200,7 +201,7 @@ async def test_thread_snapshot_has_a_shared_finite_budget(tmp_path, monkeypatch,
 
     app = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda _, **kwargs: SimpleNamespace(async_graphql=graphql))
-    result = await ReviewThread(PullRequest(app.installation(1).repository("owner/repo"), 17), "T1").refetch()
+    result = await ReviewThread(PullRequest(Repository(app.installation(1), "owner/repo"), 17), "T1").refetch()
     assert not result.complete
     assert len(calls) == (1 if limit == "bytes" else 2)
 

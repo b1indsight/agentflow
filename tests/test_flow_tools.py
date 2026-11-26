@@ -14,7 +14,8 @@ from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
 from app.domain.delivery_models import PreparedDelivery
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, VcsKind
-from app.github import GitHubError, GitHubErrorKind, Installation, RemoteRef
+from app.github import GitHubError, GitHubErrorKind, RemoteRef
+from app.github import repositories as repo_api
 from app.persistence.deliveries import DeliveryStore
 from tests.flow_fixtures import enqueue_job
 from tests.github import RecordingGitHub
@@ -138,7 +139,7 @@ async def test_prepared_delivery_and_tool_receipt_roll_back_together(
         complete(self, call_id, response)
         raise RuntimeError("receipt commit interrupted")
 
-    monkeypatch.setattr(Installation, "fetch_ref", next_ref)
+    monkeypatch.setattr(repo_api, "fetch_ref", next_ref)
     monkeypatch.setattr(DeliveryStore, "complete_tool_call", crash)
     with pytest.raises(RuntimeError, match="receipt commit interrupted"):
         await subject.tools.execute(invocation, worker_id="worker-a", connection_epoch="epoch")
@@ -158,7 +159,7 @@ async def test_cancel_during_remote_verification_cannot_prepare_delivery(
         ControlService(database=store.database).cancel(flow)
         return RemoteRef(branch=branch, sha="abc123")
 
-    monkeypatch.setattr(Installation, "fetch_ref", cancel_and_read)
+    monkeypatch.setattr(repo_api, "fetch_ref", cancel_and_read)
     response = await subject.tools.execute(
         fresh_tool_request, worker_id="worker-a", connection_epoch="epoch",
     )
@@ -206,7 +207,7 @@ async def test_github_rate_limit_is_returned_as_retryable(
         raise GitHubError(GitHubErrorKind.RATE_LIMITED, "get ref", status_code=429,
                           retry_after="30")
 
-    monkeypatch.setattr(Installation, "fetch_ref", limited)
+    monkeypatch.setattr(repo_api, "fetch_ref", limited)
     flow, subject, _, _, _ = prepared_initial
     before = store.deliveries.get_delivery(flow.id)
     response = await subject.tools.execute(
@@ -264,7 +265,7 @@ async def test_reconnect_during_tool_read_keeps_original_epoch(
         )
         return RemoteRef(branch=branch, sha="abc123")
 
-    monkeypatch.setattr(Installation, "fetch_ref", reconnect)
+    monkeypatch.setattr(repo_api, "fetch_ref", reconnect)
     response = await subject.tools.execute(
         fresh_tool_request, worker_id="worker-a", connection_epoch="epoch",
     )

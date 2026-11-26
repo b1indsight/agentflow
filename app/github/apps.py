@@ -5,19 +5,23 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr
 
+from app.github._names import split_repo
 from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
 from app.github.pagination import Batch
-from app.github.projects import Project, ProjectConfig
-from app.github.repositories import RemoteRef, Repository, normalize_branch, split_repo
 
 if TYPE_CHECKING:
     from githubkit import AppAuthStrategy, AppInstallationAuthStrategy, GitHub
 
-    from app.controler.config import ServerSettings
+
+class _AppSettings(Protocol):
+    github_app_id: int
+    github_private_key_path: Path
+    github_request_timeout_seconds: float
 
 
 class PushCapability(BaseModel):
@@ -55,7 +59,7 @@ class GitHubApp(BaseModel):
     _bot_login: str | None = PrivateAttr(default=None)
     _bot_login_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
-    def __init__(self, settings: ServerSettings) -> None:
+    def __init__(self, settings: _AppSettings) -> None:
         from githubkit import AppAuthStrategy, GitHub
 
         if settings.github_app_id <= 0:
@@ -152,28 +156,6 @@ class Installation(BaseModel):
             client.config = replace(client.config, auto_retry=None)
         return client
 
-    def repository(self, full_name: str) -> Repository:
-        return Repository(self, full_name)
-
-    async def fetch_repository(self, full_name: str) -> Repository:
-        """Fetch a fresh repository bound to this installation."""
-        owner, name = split_repo(full_name)
-        client = self._client(auto_retry=False)
-        with translate_errors("get_repository"):
-            data = (await client.rest.repos.async_get(owner, name)).parsed_data
-            if data.full_name.casefold() != full_name.casefold():
-                raise ValueError("repository response does not match its requested identity")
-            return Repository(self, data.full_name, default_branch=data.default_branch, archived=data.archived)
-
-    async def fetch_ref(self, full_name: str, branch: str, *, retry_transient: bool = False) -> RemoteRef:
-        """Durable callers own retries; Flow tools opt into the bounded SDK retry."""
-        owner, name = split_repo(full_name)
-        branch = normalize_branch(branch)
-        client = self._client(auto_retry=retry_transient)
-        with translate_errors("get_ref"):
-            data = (await client.rest.git.async_get_ref(owner, name, f"heads/{branch}")).parsed_data
-            return RemoteRef(branch=branch, sha=data.object_.sha)
-
     async def create_push_capability(self, full_name: str) -> PushCapability:
         """Issue a contents-write token scoped to one repository in this installation."""
         _, name = split_repo(full_name)
@@ -199,19 +181,3 @@ class Installation(BaseModel):
                 permissions=permissions, expires_at=datetime.fromisoformat(data.expires_at),
                 bot_login=bot_login, bot_user_id=bot.id,
             )
-
-    async def fetch_repositories(self, *, page: int = 1) -> Batch[Repository]:
-        """Read one page of granted repositories, omitting archived repositories."""
-        client = self._client(auto_retry=False)
-        with translate_errors("list_installation_repositories"):
-            data = (await client.rest.apps.async_list_repos_accessible_to_installation(
-                per_page=100, page=page,
-            )).parsed_data
-            return Batch(
-                items=tuple(self.repository(item.full_name) for item in data.repositories
-                            if not item.archived),
-                next_cursor=str(page + 1) if len(data.repositories) == 100 else None,
-            )
-
-    def project(self, config: ProjectConfig) -> Project:
-        return Project(self, config)

@@ -26,6 +26,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import BatchState, FeedbackUpdate
 from app.github import PullRequest
+from app.github import repositories as repo_api
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
@@ -256,7 +257,6 @@ def test_manual_creation_rechecks_remote_access_before_writing(console_runtime, 
 
 def test_creation_targets_include_new_repositories_and_continue_empty_inventory_pages(console_runtime, store, monkeypatch):
     from app.github import Batch, GitHubApp, Repository
-    from app.github.apps import Installation
     from tests.github import RecordingGitHub
 
     console_runtime.github = RecordingGitHub()
@@ -271,7 +271,7 @@ def test_creation_targets_include_new_repositories_and_continue_empty_inventory_
         return Batch(items=(Repository(installation, f"owner/new-{installation.installation_id}"),), next_cursor=None)
 
     monkeypatch.setattr(GitHubApp, "fetch_installations", installations)
-    monkeypatch.setattr(Installation, "fetch_repositories", repositories)
+    monkeypatch.setattr(repo_api, "fetch_repositories", repositories)
     with TestClient(create_app(console_runtime)) as client:
         assert client.get("/api/flow-targets").status_code == 401
         headers = console_runtime.issuer.headers()

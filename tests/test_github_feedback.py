@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import pytest
 
 from app.controler.reconciliation.feedback import FeedbackReconciler
-from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
+from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest, Repository
 from tests.test_github_client import AsyncEndpoint, install_client, settings
 
 
@@ -19,7 +19,7 @@ def adapter(tmp_path, monkeypatch, client):
         return client
 
     install_client(monkeypatch, installation)
-    return PullRequest(app.installation(42).repository("owner/repo"), 17)
+    return PullRequest(Repository(app.installation(42), "owner/repo"), 17)
 
 
 @pytest.mark.parametrize("source", ["issue_comments", "pr_comments"])

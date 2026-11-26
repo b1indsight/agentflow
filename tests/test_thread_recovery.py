@@ -190,7 +190,7 @@ async def test_auth_failure_after_resolve_waits_for_confirmation(
 
     async def auth_after_resolve(thread):
         if github.resolves:
-            repo = adapter.installation(thread.pull_request.repository.installation.installation_id).repository(
+            repo = Repository(adapter.installation(thread.pull_request.repository.installation.installation_id),
                 thread.pull_request.repository.full_name)
             return await NATIVE_THREAD_REFETCH(ReviewThread(PullRequest(repo, thread.pull_request.number),
                 thread.thread_id, root_comment_id=thread.root_comment_id))

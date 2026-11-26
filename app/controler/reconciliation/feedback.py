@@ -18,6 +18,7 @@ from app.github import (
     Issue,
     PullRequest,
     RemoteFeedback,
+    Repository,
     ReviewComment,
     ReviewThread,
     ReviewThreads,
@@ -126,7 +127,7 @@ class FeedbackReconciler:
             bot_login = (await self.github.resolve_bot_login()).casefold()
             number = flow.issue_number if check.source == "issue_comments" else delivery.pr_number
             assert number is not None
-            repo = self.github.installation(flow.installation_id).repository(flow.repo)
+            repo = Repository(self.github.installation(flow.installation_id), flow.repo)
             threads, diagnostic = None, None
             page: Batch[RemoteFeedback] | None = None
             updates: list[FeedbackUpdate] = []

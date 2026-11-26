@@ -12,6 +12,7 @@ from psycopg.conninfo import make_conninfo
 from app.controler.config import ServerSettings
 from app.controler.runtime import ServerRuntime
 from app.github import Installation, Issue, PullRequest, Repository, ReviewThread
+from app.github import repositories as repo_api
 from app.persistence.store import Store
 from tests.github import (
     RecordingGitHub,
@@ -27,8 +28,8 @@ from tests.github import (
 
 @pytest.fixture
 def recording_resources(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(Installation, "fetch_repository", record_fetch_repository)
-    monkeypatch.setattr(Installation, "fetch_ref", record_fetch_ref)
+    monkeypatch.setattr(repo_api, "fetch_repository", record_fetch_repository)
+    monkeypatch.setattr(repo_api, "fetch_ref", record_fetch_ref)
     monkeypatch.setattr(Installation, "create_push_capability", record_create_push_capability)
     monkeypatch.setattr(Repository, "compare_commits", RecordingRepository.compare_commits)
     monkeypatch.setattr(Repository, "find_pull_request_by_head", RecordingRepository.find_pull_request_by_head)

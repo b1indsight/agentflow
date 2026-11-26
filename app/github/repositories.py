@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter
 
 from app.github._fields import unobserved_field
+from app.github._names import split_repo
+from app.github.apps import Installation
 from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
 from app.github.issues import Issue
+from app.github.pagination import Batch
 from app.github.pull_requests import PullRequest
-
-if TYPE_CHECKING:
-    from app.github.apps import Installation
 
 
 class RemoteRef(BaseModel):
@@ -38,13 +38,6 @@ class _LabelName(BaseModel):
 _LABEL_NAMES = TypeAdapter(list[_LabelName])
 
 
-def split_repo(repo: str) -> tuple[str, str]:
-    parts = repo.split("/")
-    if len(parts) != 2 or not all(parts):
-        raise GitHubError(GitHubErrorKind.VALIDATION, "repository")
-    return parts[0], parts[1]
-
-
 def normalize_branch(branch: str) -> str:
     normalized = branch.removeprefix("refs/heads/").removeprefix("heads/")
     if not normalized:
@@ -53,7 +46,7 @@ def normalize_branch(branch: str) -> str:
 
 
 class Repository(BaseModel):
-    """Bind locally; use ``installation.fetch_repository('owner/name')`` to read metadata."""
+    """Bind locally; use ``fetch_repository(installation, 'owner/name')`` to read metadata."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     full_name: str
@@ -65,11 +58,8 @@ class Repository(BaseModel):
         self, installation: Installation | None = None, full_name: str | None = None,
         **facts: Any,
     ) -> None:
-        if installation is not None:
-            from app.github.apps import Installation
-
-            if not isinstance(installation, Installation):
-                raise ValueError("installation must be an Installation resource")
+        if installation is not None and not isinstance(installation, Installation):
+            raise ValueError("installation must be an Installation resource")
         if full_name is not None:
             facts["full_name"] = full_name
         super().__init__(**facts)
@@ -79,7 +69,7 @@ class Repository(BaseModel):
     def __getattribute__(self, name: str) -> Any:
         if (name in type(self).model_fields
                 and name not in object.__getattribute__(self, "__pydantic_fields_set__")):
-            raise AttributeError(f"{name} has not been observed; call installation.fetch_repository()")
+            raise AttributeError(f"{name} has not been observed; call fetch_repository()")
         return super().__getattribute__(name)
 
     @property
@@ -196,3 +186,39 @@ class Repository(BaseModel):
                 self.owner, self.name, title=title, head=head, base=base, body=body,
             )).parsed_data
             return PullRequest._from_response(self, data)
+
+
+async def fetch_repository(installation: Installation, full_name: str) -> Repository:
+    """Fetch a fresh repository bound to the supplied installation."""
+    owner, name = split_repo(full_name)
+    client = installation._client(auto_retry=False)
+    with translate_errors("get_repository"):
+        data = (await client.rest.repos.async_get(owner, name)).parsed_data
+        if data.full_name.casefold() != full_name.casefold():
+            raise ValueError("repository response does not match its requested identity")
+        return Repository(installation, data.full_name, default_branch=data.default_branch, archived=data.archived)
+
+
+async def fetch_repositories(installation: Installation, *, page: int = 1) -> Batch[Repository]:
+    """Read one page of granted repositories, omitting archived repositories."""
+    client = installation._client(auto_retry=False)
+    with translate_errors("list_installation_repositories"):
+        data = (await client.rest.apps.async_list_repos_accessible_to_installation(
+            per_page=100, page=page,
+        )).parsed_data
+        return Batch(
+            items=tuple(Repository(installation, item.full_name) for item in data.repositories if not item.archived),
+            next_cursor=str(page + 1) if len(data.repositories) == 100 else None,
+        )
+
+
+async def fetch_ref(
+    installation: Installation, full_name: str, branch: str, *, retry_transient: bool = False,
+) -> RemoteRef:
+    """Durable callers own retries; Flow tools opt into the bounded SDK retry."""
+    owner, name = split_repo(full_name)
+    branch = normalize_branch(branch)
+    client = installation._client(auto_retry=retry_transient)
+    with translate_errors("get_ref"):
+        data = (await client.rest.git.async_get_ref(owner, name, f"heads/{branch}")).parsed_data
+        return RemoteRef(branch=branch, sha=data.object_.sha)

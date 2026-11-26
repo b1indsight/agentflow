@@ -25,6 +25,7 @@ from app.github import (
     ReviewThread,
     ReviewThreads,
 )
+from app.github import repositories as repo_api
 from tests.review_memory import review_context
 
 if TYPE_CHECKING:
@@ -35,7 +36,7 @@ NATIVE_ISSUE_COMMENT = Issue.comment
 NATIVE_ISSUE_FIND_COMMENT = Issue.find_comment
 NATIVE_ISSUE_ADD_LABEL = Issue.add_label
 NATIVE_ISSUE_FETCH_LABELS = Issue.fetch_labels
-NATIVE_INSTALLATION_FETCH_REF = Installation.fetch_ref
+NATIVE_FETCH_REF = repo_api.fetch_ref
 NATIVE_PULL_REQUEST_REFETCH = PullRequest.refetch
 NATIVE_THREAD_REFETCH = ReviewThread.refetch
 
@@ -80,7 +81,7 @@ async def record_fetch_repository(installation: Installation, full_name: str) ->
 
 
 async def record_create_push_capability(installation: Installation, full_name: str) -> PushCapability:
-    record_call(installation.repository(full_name), "create_push_capability")
+    record_call(Repository(installation, full_name), "create_push_capability")
     return PushCapability(
         token=SecretStr("push-token"), repository=full_name,
         permissions={"contents": "write"},
@@ -92,7 +93,7 @@ async def record_create_push_capability(installation: Installation, full_name: s
 async def record_fetch_ref(
     installation: Installation, full_name: str, branch: str, *, retry_transient: bool = False,
 ) -> RemoteRef:
-    state = record_call(installation.repository(full_name), "fetch_ref")
+    state = record_call(Repository(installation, full_name), "fetch_ref")
     if state.refs is not None:
         if branch not in state.refs:
             raise GitHubError(GitHubErrorKind.NOT_FOUND, "get_ref", status_code=404)
