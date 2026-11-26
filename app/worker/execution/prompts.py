@@ -118,6 +118,26 @@ def _revision_message(context: str, instruction: str) -> str:
     return message + (f"\n\n# Current request\n{instruction}" if instruction else "")
 
 
+def revision_markdown_parts(prompt: str) -> list[tuple[str, range | list[int]]]:
+    """Return each rendered Markdown document and its character positions in the native prompt."""
+    if not prompt.startswith(_CONTEXT_START):
+        return [(prompt, range(len(prompt)))]
+    context, end, request = prompt[len(_CONTEXT_START):].partition(_CONTEXT_END)
+    if not end:
+        return [(prompt, range(len(prompt)))]
+    # A quoted ]]> spans two CDATA nodes. Drop the intervening XML, not its literal characters.
+    parts = context.split("]]]]><![CDATA[>")
+    positions: list[int] = []
+    offset = len(_CONTEXT_START)
+    for index, part in enumerate(parts):
+        if index:
+            positions.extend((offset, offset + 1, offset + len("]]]]><![CDATA[")))
+            offset += len("]]]]><![CDATA[>")
+        positions.extend(range(offset, offset + len(part)))
+        offset += len(part)
+    return [("]]>".join(parts), positions), (request, range(len(prompt) - len(request), len(prompt)))]
+
+
 def add_backend_instructions(prompt: str, extra: str) -> str:
     """Keep backend-specific instructions inside a revision's foldable context."""
     if prompt.startswith(_CONTEXT_START):

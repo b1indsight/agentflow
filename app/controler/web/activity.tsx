@@ -365,6 +365,28 @@ function BodyReadError({ error, retry }: { error: string; retry: () => void }) {
   );
 }
 
+function ActivityToggle({
+  expanded,
+  onToggle,
+  children,
+}: {
+  expanded: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="activity-toggle"
+      aria-expanded={expanded}
+      onClick={onToggle}
+    >
+      <ChevronRight aria-hidden="true" />
+      {children}
+    </button>
+  );
+}
+
 /** Keep one Markdown document per mounted message; transport offsets count Unicode code points. */
 function MessageBody({
   entry,
@@ -443,23 +465,28 @@ function MessageBody({
       ? openFile
       : undefined;
   const partial = page.next !== null && !body.endsWith("\n");
+  const [expanded, setExpanded] = useReadingState(
+    `${flowId}-${entry.key}-${entry.version}-context`,
+    0,
+  );
   return (
     <div ref={root}>
       {context !== null && (
-        <SavedDetails
-          className="tool"
-          stateKey={`${flowId}-${entry.key}-${entry.version}-context`}
-        >
-          <summary>
-            <ChevronRight className="tool-chevron" aria-hidden="true" />
+        <>
+          <ActivityToggle
+            expanded={Boolean(expanded)}
+            onToggle={() => setExpanded(expanded ? 0 : 1)}
+          >
             修订上下文
-          </summary>
-          <ActivityMarkdown
-            text={context}
-            url={entry.url}
-            onFileOpen={onFileOpen}
-          />
-        </SavedDetails>
+          </ActivityToggle>
+          {Boolean(expanded) && (
+            <ActivityMarkdown
+              text={context}
+              url={entry.url}
+              onFileOpen={onFileOpen}
+            />
+          )}
+        </>
       )}
       <MessageDiff
         value={{
@@ -1111,17 +1138,11 @@ export function ActivitySummary({
           )}
           <time>{new Date(entry.occurred_at).toLocaleString()}</time>
         </div>
-        <button
-          type="button"
-          className="activity-toggle"
-          aria-expanded={expanded}
-          onClick={onToggle}
-        >
-          <ChevronRight aria-hidden="true" />
+        <ActivityToggle expanded={expanded} onToggle={onToggle}>
           {group.kind === "tool"
             ? `工具活动 · ${group.calls} 次调用 · ${group.results} 条结果`
             : `操作记录 · ${group.last - group.first + 1} 条`}
-        </button>
+        </ActivityToggle>
       </div>
     </article>
   );
