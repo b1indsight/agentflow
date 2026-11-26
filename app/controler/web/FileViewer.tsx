@@ -2,14 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, RefreshCw } from "lucide-react";
 import { ApiError } from "./api";
 import { Button } from "./components/ui/button";
-import { previewFile, readFile, type Preview } from "./files";
+import { readFile, type FilePreview } from "./files";
 import { parseSource, sourceLines } from "./fileSyntax";
 import { CODE_LINES, textEnd, WindowList } from "./windowing";
 
 type FileState =
   | { kind: "loading" }
   | { kind: "error"; error: Error }
-  | { kind: "ready"; preview: Preview; size: number };
+  | ({ kind: "ready" } & FilePreview);
 
 function failureMessage(error: Error) {
   if (error instanceof ApiError) {
@@ -105,13 +105,15 @@ function FileSource({
   );
 }
 
-/** Only the active document is read; switching or retrying aborts and fences previous reads/decodes. */
+/** Keep the read with its open tab; mount the preview UI only while selected. */
 export default function FileViewer({
   linkId,
   filename,
+  active,
 }: {
   linkId: string;
   filename: string | null;
+  active: boolean;
 }) {
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<FileState>({ kind: "loading" });
@@ -119,16 +121,15 @@ export default function FileViewer({
     const request = new AbortController();
     setState({ kind: "loading" });
     void readFile(linkId, request.signal)
-      .then(async (bytes) => {
-        const preview = await previewFile(bytes);
-        if (!request.signal.aborted)
-          setState({ kind: "ready", preview, size: bytes.byteLength });
+      .then((file) => {
+        if (!request.signal.aborted) setState({ kind: "ready", ...file });
       })
       .catch((error: Error) => {
         if (!request.signal.aborted) setState({ kind: "error", error });
       });
     return () => request.abort();
   }, [linkId, attempt]);
+  if (!active) return null;
   const authError =
     state.kind === "error" &&
     state.error instanceof ApiError &&
@@ -142,7 +143,7 @@ export default function FileViewer({
       <div className="file-toolbar">
         <div
           className="file-status"
-          title="读取 Worker 当前内容，需在线；上限 512 KiB。HTML 和 SVG 仅显示源码。"
+          title="显示上次读取的内容，重新读取需要 Worker 在线。上限 512 KiB。HTML 和 SVG 仅显示源码。"
         >
           <span>只读</span>
           {state.kind === "ready" && (

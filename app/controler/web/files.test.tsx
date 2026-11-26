@@ -38,7 +38,7 @@ test("worker file destinations require an exact same-origin file route", () => {
     assert.equal(workerFileLink(url, origin), null, url);
 });
 
-test("file reads preserve raw bytes and the authenticated cancellable download contract", async (t) => {
+test("file previews use the authenticated cancellable attachment endpoint", async (t) => {
   const bytes = new Uint8Array([0, 255, 1, 128]);
   const signal = new AbortController().signal;
   t.mock.method(
@@ -53,7 +53,10 @@ test("file reads preserve raw bytes and the authenticated cancellable download c
       return new Response(bytes);
     },
   );
-  assert.deepEqual(await readFile(id, signal), bytes);
+  assert.deepEqual(await readFile(id, signal), {
+    preview: { kind: "binary" },
+    size: bytes.length,
+  });
 });
 
 test("file reads enforce the actual 512 KiB stream budget and cancel oversized bodies", async (t) => {
@@ -85,9 +88,9 @@ test("file reads accept empty and boundary files and retain API error codes", as
   let response = new Response(new Uint8Array());
   t.mock.method(globalThis, "fetch", async () => response);
   const signal = new AbortController().signal;
-  assert.equal((await readFile(id, signal)).length, 0);
+  assert.equal((await readFile(id, signal)).size, 0);
   response = new Response(new Uint8Array(512 * 1024));
-  assert.equal((await readFile(id, signal)).length, 512 * 1024);
+  assert.equal((await readFile(id, signal)).size, 512 * 1024);
   response = new Response(JSON.stringify({ detail: "file_changed" }), {
     status: 409,
   });

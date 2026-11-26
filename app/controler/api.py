@@ -180,7 +180,15 @@ def create_app(runtime: ServerRuntime | None = None) -> FastAPI:
             await asyncio.wait({query, disconnected}, return_when=asyncio.FIRST_COMPLETED)
             if not query.done():
                 return Response(status_code=499)
-            return Response(query.result(), media_type="application/octet-stream", headers={
+            content = query.result()
+            etag = f'"{hashlib.sha256(content).hexdigest()}"'
+            validators = request.headers.get("if-none-match", "")
+            if validators.strip() == "*" or any(
+                tag.strip().removeprefix("W/") == etag for tag in validators.split(",")
+            ):
+                return Response(status_code=304, headers={"ETag": etag})
+            return Response(content, media_type="application/octet-stream", headers={
+                "ETag": etag,
                 "Content-Disposition": "attachment",
                 "Content-Security-Policy": "sandbox; default-src 'none'",
             })
