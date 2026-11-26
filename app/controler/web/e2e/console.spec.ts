@@ -6696,8 +6696,14 @@ for (const width of [1440, 390]) {
     await expect(
       page.getByRole("button", { name: `关闭 ${names[0]}`, exact: true }),
     ).toBeInViewport({ ratio: 1 });
-    await expect(page).toHaveURL(new RegExp(`#flow/42/file-${ids[0]}$`));
-    const panel = page.getByRole("tabpanel");
+    await expect(page).toHaveURL(
+      width === 390
+        ? new RegExp(`#flow/42/file-${ids[0]}$`)
+        : /#flow\/42\/conversation$/,
+    );
+    const panel = page
+      .getByRole("tabpanel")
+      .filter({ has: page.getByRole("region", { name: "文件查看器" }) });
     await expect(panel).toHaveAccessibleName(names[0]);
     await expect(panel.getByRole("heading")).toHaveCount(0);
     await expect(page.getByLabel("文件源码", { exact: true })).toContainText(
@@ -6721,7 +6727,10 @@ for (const width of [1440, 390]) {
       path: `../../../.amp/in/artifacts/numbered-file-long-${width}.png`,
     });
     const readsBeforeScroll = reads.length;
-    await root.evaluate((node) => (node.scrollTop = node.scrollHeight));
+    await panel.evaluate((node) => {
+      const root = node.closest("[data-scroll-root]")!;
+      root.scrollTop = root.scrollHeight;
+    });
     await expect
       .poll(() => page.getByLabel("文件源码", { exact: true }).textContent())
       .toBe(source);
@@ -6935,9 +6944,10 @@ for (const width of [1440, 390]) {
     await expect(
       page.getByRole("button", { name: /^(上一段|下一段)$/ }),
     ).toHaveCount(0);
-    await page
-      .locator(".detail-body")
-      .evaluate((node) => (node.scrollTop = node.scrollHeight));
+    const fileRoot = page
+      .locator("[data-scroll-root]")
+      .filter({ has: preview });
+    await fileRoot.evaluate((node) => (node.scrollTop = node.scrollHeight));
     await expect(numbers).toHaveCount(235);
     await expect(numbers.last()).toHaveAttribute("data-line-number", "235");
     expect(await preview.textContent()).toBe(source);
@@ -6947,15 +6957,13 @@ for (const width of [1440, 390]) {
       ),
     ).toBe(true);
     expect(
-      await page
-        .locator(".detail-body")
-        .evaluate((node) => node.scrollWidth <= node.clientWidth),
+      await fileRoot.evaluate((node) => node.scrollWidth <= node.clientWidth),
     ).toBe(true);
     await numbers.last().scrollIntoViewIfNeeded();
     await page.screenshot({
       path: `../../../.amp/in/artifacts/numbered-file-next-${width}.png`,
     });
-    await page.locator(".detail-body").evaluate((node) => (node.scrollTop = 0));
+    await fileRoot.evaluate((node) => (node.scrollTop = 0));
     await expect(numbers.first()).toBeInViewport();
     content = "";
     await page.getByRole("button", { name: "重新读取", exact: true }).click();
@@ -7017,6 +7025,69 @@ for (const width of [1440, 390]) {
     });
     await page.goto("/console/#flow/42/conversation");
     const conversation = page.getByRole("tab", { name: "会话", exact: true });
+    if (width === 1440) {
+      // Measure the detail, not the viewport: the task rail takes part of the width.
+      const rail = await page
+        .locator(".rail")
+        .evaluate((node) => node.getBoundingClientRect().width);
+      const resize = (detailWidth: number) =>
+        page.setViewportSize({ width: detailWidth + rail, height: 900 });
+      const link = (i: number) =>
+        page.getByRole("link", { name: `打开${i}`, exact: true });
+      const source = (i: number) =>
+        page.getByText(`source ${ids[i]} v1`, { exact: true });
+      await resize(960);
+      await link(0).press("Enter");
+      await expect(source(0)).toBeInViewport();
+      await expect(link(0)).toBeInViewport();
+      await page.screenshot({
+        path: "../../../.amp/in/artifacts/side-preview-two.png",
+      });
+      await resize(1440);
+      await link(1).click();
+      await expect(conversation).toHaveAttribute("aria-selected", "true");
+      await expect(page).toHaveURL(/#flow\/42\/conversation$/);
+      const bodies = [link(0), source(0), source(1)];
+      for (const body of bodies) await expect(body).toBeInViewport();
+      const boxes = await Promise.all(bodies.map((body) => body.boundingBox()));
+      expect(boxes[1]!.x).toBeGreaterThan(boxes[0]!.x + boxes[0]!.width);
+      expect(boxes[2]!.x).toBeGreaterThan(boxes[1]!.x + boxes[1]!.width);
+      await page.screenshot({
+        path: "../../../.amp/in/artifacts/side-preview-three.png",
+      });
+      await link(2).click();
+      await expect(source(0)).toBeInViewport();
+      await expect(source(1)).toHaveCount(0);
+      await expect(source(2)).toBeInViewport();
+      const openedReads = [...reads];
+      await link(0).click();
+      await expect(
+        page.getByRole("tab", { name: "README.md aaaaaa" }),
+      ).toBeFocused();
+      await resize(960);
+      await link(1).click();
+      await expect(source(0)).toHaveCount(0);
+      await expect(source(1)).toBeInViewport();
+      await expect(link(0)).toBeInViewport();
+      await page
+        .getByRole("tab", { name: "README.md bbbbbb" })
+        .press("ArrowLeft");
+      await expect(source(0)).toBeInViewport();
+      await resize(959);
+      await expect(source(0)).toHaveCount(0);
+      await expect(link(0)).toBeInViewport();
+      await resize(1440);
+      await expect(page.getByRole("tabpanel")).toHaveCount(1);
+      await link(2).click();
+      await page.getByRole("tab", { name: names[2] }).press("Delete");
+      await expect(
+        page.getByRole("tab", { name: "README.md bbbbbb" }),
+      ).toBeFocused();
+      await expect(source(1)).toBeInViewport();
+      expect(reads).toEqual(openedReads);
+      await resize(959);
+      // Continue with the existing single-pane keyboard and history checks.
+    }
     const panel = page.getByRole("tabpanel");
     for (let i = 0; i < ids.length; i++) {
       await conversation.click();
