@@ -901,11 +901,21 @@ svg {
   background: white;
   overflow: hidden;
 }
-.detail-body {
+.detail-panes {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   flex: 1;
   min-height: 0;
+}
+.detail-body,
+.file-pane {
+  min-width: 0;
   overflow: auto;
   overflow-anchor: none;
+}
+.file-pane {
+  border-left: 1px solid var(--line);
 }
 .flow-input {
   flex-shrink: 0;
@@ -1000,9 +1010,10 @@ svg {
   color: var(--destructive);
 }
 .detail-head {
+  --head-inset: 42px;
   position: relative;
   flex-shrink: 0;
-  padding: 24px 42px 0;
+  padding: 24px var(--head-inset) 0;
   background: var(--bg);
 }
 /* The active tab covers the shared seam to join its content surface. */
@@ -1077,6 +1088,20 @@ svg {
 .detail-head .tabs-list {
   margin-top: 20px;
 }
+.split-tab-row {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  margin-inline: calc(-1 * var(--head-inset));
+}
+.split-tab-row .tabs-list {
+  max-width: 100%;
+  margin-inline: 0;
+  padding-inline: 8px;
+}
+.split-tab-row > .tabs-list {
+  padding-left: var(--head-inset);
+}
 .tabs-list {
   display: flex;
   max-width: calc(100% + 8px);
@@ -1119,7 +1144,7 @@ svg {
   border: 1px solid transparent;
   border-bottom: 0;
 }
-.file-tab[data-active="true"] {
+.file-tab:has(.tabs-trigger[data-state="active"]) {
   z-index: 1;
   background: var(--paper);
   border-color: var(--line);
@@ -2275,8 +2300,7 @@ pre code {
 }
 @media (min-width: 1600px) {
   .detail-head {
-    padding-left: 58px;
-    padding-right: 58px;
+    --head-inset: 58px;
   }
 }
 @media (max-width: 1100px) {
@@ -2287,7 +2311,8 @@ pre code {
     width: 225px;
   }
   .detail-head {
-    padding: 26px 25px 0;
+    --head-inset: 25px;
+    padding-top: 26px;
   }
   .content {
     padding: 22px 25px 40px;

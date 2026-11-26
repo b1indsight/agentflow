@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Download, RefreshCw } from "lucide-react";
 import { ApiError } from "./api";
 import { Button } from "./components/ui/button";
@@ -105,15 +106,15 @@ function FileSource({
   );
 }
 
-/** Keep the read with its open tab; mount the preview UI only while selected. */
+/** Keep the read with its open tab, including when its preview moves into the primary panel. */
 export default function FileViewer({
   linkId,
   filename,
-  active,
+  target,
 }: {
   linkId: string;
   filename: string | null;
-  active: boolean;
+  target: "inline" | HTMLElement | null;
 }) {
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<FileState>({ kind: "loading" });
@@ -129,12 +130,12 @@ export default function FileViewer({
       });
     return () => request.abort();
   }, [linkId, attempt]);
-  if (!active) return null;
+  if (!target) return null;
   const authError =
     state.kind === "error" &&
     state.error instanceof ApiError &&
     [401, 403].includes(state.error.status);
-  return (
+  const viewer = (
     <section
       className="file-viewer"
       aria-label="文件查看器"
@@ -210,4 +211,5 @@ export default function FileViewer({
       </div>
     </section>
   );
+  return target === "inline" ? viewer : createPortal(viewer, target);
 }
