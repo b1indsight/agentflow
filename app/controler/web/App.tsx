@@ -124,6 +124,9 @@ const route = () => {
     tab,
   };
 };
+function openFlow(id: number) {
+  location.hash = `flow/${id}/conversation`;
+}
 const name = (f: FlowSummary) => f.title ?? `Flow #${f.id}`;
 const ref = (f: FlowSummary) =>
   f.pr_number
@@ -1703,7 +1706,7 @@ export default function App() {
           <CreateFlow
             onCreated={(id) => {
               setBoardRevision((x) => x + 1);
-              location.hash = `flow/${id}/overview`;
+              openFlow(id);
             }}
             onVerify={() => {
               changeQuery("");
@@ -1755,7 +1758,7 @@ export default function App() {
           columns={columns}
           counts={counts}
           load={load}
-          go={(id) => (location.hash = `flow/${id}/conversation`)}
+          go={openFlow}
           mobile={mobilePhase}
           onMobile={setMobilePhase}
         />
