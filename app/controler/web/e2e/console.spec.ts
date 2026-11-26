@@ -6157,11 +6157,15 @@ for (const width of [1440, 390]) {
       animations: "disabled",
     });
     release();
-    await expect(page).toHaveURL(/#flow\/91\/overview$/);
+    await expect(page).toHaveURL(/#flow\/91\/conversation$/);
     await expect(dialog).not.toBeVisible();
     await expect(
       page.getByRole("heading", { name: "Flow #91", exact: true }),
     ).toBeVisible();
+    await expect(
+      page.getByRole("tab", { name: "会话", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
+    await page.getByRole("tab", { name: "概览", exact: true }).click();
     await expect(
       page.getByRole("region", { name: "原始任务内容" }),
     ).toContainText("完整任务");
