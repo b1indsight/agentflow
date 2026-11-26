@@ -168,12 +168,12 @@ Control 把核验事实、待发布的说明和处理依据冻结成 `ResultPlan
 | `AGENTFLOW_SETTLE_SECONDS` / `AGENTFLOW_SUBMIT_GRACE_SECONDS` | 75 / 15 秒。普通讨论的静默窗口，以及提交 review 后留给同批意见的短窗口。 |
 | `AGENTFLOW_WORKER_SWEEP_INTERVAL` | 5 秒。周期扫描已持久化的截止时间，到点不代表模型已开工。 |
 | `AGENTFLOW_CONFIDENCE_THRESHOLD` | 0.6。用于 Judge 判 `revise`。 |
-| `AGENTFLOW_MAX_REVISION_CYCLES` | 20。每个 attempt 单独计数；答疑和改代码共用额度，新建的重试任务也在 `Started` 时计一次。 |
+| `AGENTFLOW_MAX_REVISION_CYCLES` | 500。每个 attempt 单独计数；答疑和改代码共用额度，新建的重试任务也在 `Started` 时计一次。 |
 | `AGENTFLOW_JUDGE_MODEL` / `AGENTFLOW_JUDGE_API_KEY` / `AGENTFLOW_JUDGE_API_BASE` | 默认不配置；模型、凭据和可选的 API 地址供 control 托管的 bub 推理 worker 使用。没有合适的 bub 时，可由具备推理能力的普通 worker 在独立会话处理。[推理调度](../../app/domain/inference_policy.py) |
 | `AGENTFLOW_JUDGE_TIMEOUT_SECONDS` | 60 秒。一次推理调用的总预算，含排队、最多三次授权派发、通信和退避。 |
 | `AGENTFLOW_CODEX_RUN_TIMEOUT_SECONDS` / `AGENTFLOW_AMP_RUN_TIMEOUT_SECONDS` | 均为 1,200 秒。编码进程连续无新 stdout/stderr 输出的空闲时限；有进度输出的长任务可超过该时长。 |
 
-**为什么默认 20 轮？** [最初的设计](../plan/m0.md)用这个值防止评审和修订无限循环，没有为 20 这个数字给出特殊依据。默认配置允许第 20 轮运行；同一 attempt 再申请第 21 轮时，[服务端会在 worker 开始前阻塞 Flow](../../app/controler/workflow/revisions.py)。需要更多轮次时，可在服务端设置 `AGENTFLOW_MAX_REVISION_CYCLES=30` 并重启服务使其生效。设为 0 会阻止第一轮修订。
+**达到上限会怎样？** [最初的设计](../plan/m0.md)用轮数上限防止评审和修订无限循环。默认允许第 500 轮运行；同一 attempt 申请第 501 轮时，[服务端会在 worker 开始前阻塞 Flow](../../app/controler/workflow/revisions.py)。已有部署若显式设置了 `AGENTFLOW_MAX_REVISION_CYCLES=20`，仍按 20 轮执行；改为 `500` 或移除该变量并重启服务后，新上限生效。设为 0 会阻止第一轮修订。
 
 核对一次「修订次数多了一次」时，先按 attempt 找 `Started`，不要数评论、批次或响应包。[计数原子性用例](../../tests/test_revision_recovery.py#L275-L286)在事务里接受 `Started` 后模拟崩溃，回滚后次数为 0，Job 的 `started_at` 也为空。再接受同一任务的开始消息才记 1；相同消息重复到达时返回未再次启动，次数仍是 1。这能区分三种现场：准备阶段重试消耗的是准备窗口，编码真正开始消耗修订次数，核验或通知恢复则继续处理既有结果。
 
