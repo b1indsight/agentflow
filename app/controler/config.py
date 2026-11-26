@@ -85,7 +85,7 @@ class ServerSettings(BaseSettings):
     settle_seconds: float = 75.0
     submit_grace_seconds: float = 15.0
     confidence_threshold: float = Field(default=0.6, ge=0, le=1, allow_inf_nan=False)
-    max_revision_cycles: int = 20
+    max_revision_cycles: int = 500
     prepare_max_failures: int = Field(default=5, ge=1, le=100)
     prepare_retry_window_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
 

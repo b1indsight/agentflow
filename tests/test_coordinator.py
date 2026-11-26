@@ -70,7 +70,7 @@ def coordinator(store: Store, github: GitHubApp) -> CoordinatorFixture:
         in_review_label="flow:in-review",
         done_label="flow:done",
         confidence_threshold=0.6,
-        max_revision_cycles=20,
+        max_revision_cycles=500,
         prepare_max_failures=5,
         prepare_retry_window_seconds=900,
     )

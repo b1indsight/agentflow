@@ -371,13 +371,20 @@ async def test_cancel_during_remote_verification_prevents_effects_and_commit(
     assert store.deliveries.get_delivery(flow.id).head_sha == "baseline"
 
 
-async def test_revision_limit_applies_to_strong_signals(store, pending_revision):
+@pytest.mark.parametrize("limit", [500, 20])
+async def test_revision_limit_applies_to_strong_signals(store, pending_revision, limit):
     _, job, task, _, subject = pending_revision
     attempt = store.flows.get_attempt(task.attempt_id)
-    attempt.revision_cycles = 20
+    # A request for changes can use the last available round, but cannot bypass the cap.
+    subject.settings.max_revision_cycles = limit
+    attempt.revision_cycles = limit - 1
+    store.flows.update_attempt(attempt)
+    assert isinstance(await subject.prepare(job), RevisionTask)
+    attempt.revision_cycles = limit
     store.flows.update_attempt(attempt)
     assert await subject.prepare_for_assignment(job, "worker-a", "token", "epoch") is JobState.FAILED
-    assert store.flows.get_attempt(task.attempt_id).revision_cycles == 20
+    assert store.flows.get_attempt(task.attempt_id).revision_cycles == limit
+    assert f"AGENTFLOW_MAX_REVISION_CYCLES={limit}" in store.jobs.get_job(job.id).last_error
     assert store.reviews.pending(job.flow_id)
 
 
