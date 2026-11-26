@@ -37,6 +37,16 @@ GET /api/flows/42/conversation?limit=1
 
 `ConversationBroker` 在这台 Worker 的在线连接上发送一次 `worker.history`：只交给后端 `session_id`、`cursor` 和 `limit`。回复要匹配本次调用和连接，Broker 还检查会话 ID、条目数、ID 前缀和续读位置。只有 control 能给结果附上 `attempt_id`、`session_id`、`session_generation`。断连不会把旧请求改投另一台机器；查询取消或超时会释放名额。[请求与回包校验](../../app/controler/workers/conversation.py#L39-L110) · [标注与翻页](../../app/controler/workers/conversation.py#L179-L227)
 
+以开头的请求为例，假设 Attempt 3 在 `worker-a` 上执行。沿一次读取看，三处的“页”各有用途：
+
+| 调用边界 | 传什么，返回什么 |
+|---|---|
+| [HTTP 路由](../../app/controler/api.py#L139-L170) → [ConversationService.read](../../app/controler/workers/conversation.py#L141-L150) | 路由完成 owner 验证后传 `flow_id=42, cursor=None, limit=1`。服务负责返回整个 `ConversationPage`，客户端不提供 Worker 地址或后端会话 ID。 |
+| [服务按 Attempt 查归属](../../app/controler/workers/conversation.py#L177-L198) → [ConversationBroker.query](../../app/controler/workers/conversation.py#L48-L81) | 服务用 `session_worker(3)` 找到 `worker-a`，传给 Broker 的是这个 Worker ID 和 `HistoryQuery`。数据库归属查询已结束，等 Worker 回包时不持有 Flow 事务。Broker 返回经过校验的 `HistoryPage`，它只描述这一份源记录。 |
+| [WorkerBusinessCallbacks.on_history](../../app/worker/transport/business.py#L53-L62) → [WorkerRuntime.read_history](../../app/worker/runtime.py#L268-L278) | Worker 按会话 ID 选读取器，`T-` 开头交给 Amp，其余交给 Codex；只在发出的副本上处理文件链接。读到的页或 `ConversationFailure` 错误码由[回包逻辑](../../app/worker/transport/business.py#L86-L96)关联到原调用。control 再给条目标上 Attempt 3，并生成供下次 GET 使用的外层游标。 |
+
+例如 Worker 的历史和模型目录查询共用两个异步查询名额，用满时 `on_history` 直接回 `query_busy`。即使 Broker 自己还有名额，这次 GET 也会返回 503：由 HTTP 客户端稍后按原游标重读，运行中的编码 Job 不参与重试。[Worker 名额检查](../../app/worker/transport/business.py#L53-L71) · [HTTP 错误映射](../../app/controler/api.py#L161-L166)
+
 | Worker 上的读取器 | 读什么、何时返回不完整结果 |
 |---|---|
 | [Codex](../../app/worker/execution/codex.py#L315-L398) | 在执行所用的 `CODEX_HOME`（默认 `~/.codex`）先查 `sessions` 再查 `archived_sessions`，验证 rollout 文件身份和 `session_meta.id`。按 JSONL 行提取公开 `response_item` 消息和工具操作，跳过重复事件及内部推理；末尾尚未写完的一行留待下次查询。目录最多检查 50,000 项，单页扫描预算 8 MiB，单条记录上限 256 KiB。 |

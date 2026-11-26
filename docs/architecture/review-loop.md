@@ -12,6 +12,8 @@
 
 普通讨论进入 Judge，即使正文写了 `@bot` 或「马上改」。只有 allowlist 中的作者**本人提交** Request Changes，才能在较短的提交窗口后直接进入修订；空的 Request Changes 保留信号，等有可操作的正文或 inline 再开工。编辑不会产生新的强信号，批准、撤销评审也不授权改码。[路由的授权判断](../../app/controler/events/router.py) · [批次选择规则](../../app/domain/review_policy.py)
 
+拿开头那条评论举例：作者编辑 GitHub 评论 501 时，[EventRouter](../../app/controler/events/router.py#L125-L153) 把本次投递 ID 和 `FeedbackUpdate` 一起交给 [ReviewStore.ingest](../../app/persistence/reviews.py#L48-L105)。投递 ID 用来识别重送；更新里的评论类别、GitHub ID、作者、正文和时间用来确认哪项反馈变了。存储层锁住 Flow，确认它仍属于当前执行，再将投递记录、反馈版本和需要更新的截止时间一起提交。返回 `True` 表示记录了变化，删除也可能返回 `True`；此时还没有给 worker 派任务。到期后[运行时](../../app/controler/runtime.py#L262-L281)调用 [ReviewStore.claim_due](../../app/persistence/reviews.py#L265-L324)，得到本轮新认领的批次列表；普通讨论随后从 `pending_triage()` 取出判定。
+
 ## B.2 冻结批次与任务协议
 
 对普通讨论，[上下文构建器](../../app/controler/review/context.py)把已选反馈、PR 标题与正文、来源和目标提交、上一轮未决点放入快照。只有 inline 反馈会补读关联线程，沿用评论自带的文件路径和 diff 片段；不会把整个仓库 diff、原 Issue 或其他线程全部送给 Judge。每组最多 60 项、每项最多 4,000 字符、快照最多 96,000 个 JSON 字节。相关线程缺失、被截断或读取期间提交变化时，判断可停在 `wait`；没有现成代码片段不等于不能让 worker 去仓库定位。GitHub 读取报错也不会被保存为「查过、没有内容」。[上下文边界测试](../../tests/test_review_context.py)
@@ -30,6 +32,8 @@ Judge 的结构化输出 `TriageVerdict` 包含 `verdict`、`confidence`、`reas
 | `ignore` | 消费这一批的精确版本，不写 GitHub，也不消费同一评论后来的编辑。 |
 
 「不知道怎么处理」与「推理服务没能返回」有不同的恢复路径。所选证据不全、非法模型输出或不可恢复的配置错误可以留下等待决定；可恢复的推理错误或后端不可用则交回 Job 调度，批次保留待判定。一次推理调用的派发次数与总期限持久化，重启不会刷新这次预算；运行故障不会被发布成对审查者的回复。[Judge 故障分类](../../app/controler/review/judge.py) · [推理任务与重试](../../app/persistence/inference.py)
+
+谁把「请改成可配置」变成编码任务？[JobCoordinator.triage](../../app/controler/workflow/coordinator.py#L79-L135) 先在 Flow 锁内确认批次仍有效并冻结上下文，再在锁外调用 [ReviewJudge.triage(context)](../../app/controler/review/judge.py#L47)。返回的 `JudgeDecision` 带上下文摘要，只能用于这份快照。若判为 `revise` 且达到阈值，协调器先复读 PR，再次加锁确认批次和基线：基线已变就撤销旧上下文；仍匹配才在**同一事务**记录决定、创建含 `batch_id` 和指令的 REVISION Job，并把批次关联到它。推理尚未返回时，[运行时](../../app/controler/runtime.py#L270-L289)先处理其他批次，下轮继续查询。
 
 ## B.4 修订结果
 
@@ -57,6 +61,8 @@ Control 把核验事实、待发布的说明和处理依据冻结成 `ResultPlan
 例如线程有两条人类评论，第一条已有回复并不足以关闭线程。Control 要求必要回复已确认，刷新线程和本地版本，用本次或同一 attempt 的历史核验结果逐条核对作者、正文、时间和身份；线程列表与其评论分别分页，缺页不算完整。执行 resolve 后还会复读。读取与 resolve 之间若又来了新评论，GitHub 无法把两步放进同一事务；系统记录新反馈，不自动反向打开线程。人工点过 resolve 也不能替代消费证据。[完整覆盖测试](../../tests/test_review_resolution.py) · [主动对账](../../app/controler/reconciliation/feedback.py)
 
 回到上面的 JSON：第一条说明发布确认后可消费对应版本；第二条仍未决，因此即使代码已经推送，也不请求复审。空 review 正文可以作为元数据随成功结果消费。只有本轮确有新提交、未决项已清且所需线程处理已确认，才进入复审通知；发送前还要检查后到反馈及 PR 是否仍匹配。[结果计划](../../app/controler/workflow/revisions.py) · [外部写入执行](../../app/controler/workflow/effects.py)
+
+结果处理器将**已收件的 Job** 交给 [verify_revision_result](../../app/controler/workflow/revisions.py#L179-L226)，在数据库事务外读取 GitHub。返回错误文字表示具体哪项核验失败；`None` 表示本步没有报告错误，也可能是计划已冻结或 Job 已过时，不能据此消费评论。GitHub 暂时不可读时，核验器保存下次核验时间并抛出 `ResultPending`；由 [ResultApplication 的恢复循环](../../app/controler/workflow/results.py#L192-L232)续办同一结果。核验返回后，处理器在事务中锁住 Flow 和 Job、按结果摘要保存或复用计划；提交后才按计划向 GitHub 写回复。
 
 ## B.5 取消、重试与恢复
 

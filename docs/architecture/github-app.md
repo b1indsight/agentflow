@@ -34,11 +34,18 @@ Control 使用 `AGENTFLOW_GITHUB_APP_ID` 和 `AGENTFLOW_GITHUB_PRIVATE_KEY_PATH`
 
 **202 只确认收件。** [收件箱](../../app/persistence/webhooks.py)先持久化投递，[消费者](../../app/controler/events/webhooks.py)再领取，在同一数据库事务里路由事件、记录控制台观察、完成收件记录；事务提交后才唤醒 worker。中途崩溃可重新领取，旧领取者不能确认新的领取。即使进程收到的是合法签名，bot 自己发表的评论也不会再启动一次评审。[收件箱回归测试](../../tests/test_webhook_inbox.py) · [查看与重试投递](../operations/webhook-inbox.md)
 
+例如，给 `owner/repo#7` 加标签后，若 GitHub 再次投递同一事件，可以沿两个调用点判断该由谁重试：
+
+1. [HTTP 入口](../../app/controler/api.py#L244-L253)经 [ServerRuntime.receive_webhook](../../app/controler/runtime.py#L300-L302) 调用 [WebhookStore.receive](../../app/persistence/webhooks.py#L38-L61)，传的是 **delivery ID**、事件类型、解析后的对象和**原始字节**的 SHA-256。正常返回没有 Flow ID：新收件已提交，或同一投递早已收下。重复请求不会重置处理进度。
+2. [WebhookConsumer.sweep](../../app/controler/events/webhooks.py#L53-L109) 调用 [WebhookStore.claim](../../app/persistence/webhooks.py#L63-L95)，拿到带领取凭据的 `Webhook`；`None` 表示此刻没有可领的投递。消费者在业务事务中用 `lock(item)` 核验领取权，再调用 `EventRouter.dispatch`；`complete(item)` 成功才能连同业务修改提交。处理失败由消费者调用 [WebhookStore.fail](../../app/persistence/webhooks.py#L97-L107) 安排退避或标记 `blocked`。已提交后即使唤醒失败，也由周期扫描接手，无须重新加标签。
+
 ## A.5 密钥管理
 
 App 私钥和验签 secret 留在 control。临近下发编码任务时，control 单独为这次 assignment 请求**指定仓库的 `contents: write`**，并核对返回的仓库、权限（允许附带隐式 `metadata: read`）和 bot 身份。短期令牌只随私密 assignment 字段传输；worker 给单次进程配置 Git credential helper、bot 身份的 `gh` 环境和临时配置目录，不将 token 写入任务结果或 journal。凭据过期后不会为正在运行的进程自动续签。[签发与校验](../../app/github/repositories.py) · [worker 环境测试](../../tests/test_worker_github_environment.py)
 
 因此 worker 可以推分支，却不需要持有 control 用于写 PR 的凭据。首轮工具 `flow.open_pr` 只记录经远端 ref 核验的开 PR 意图；control 收到并接受终态结果后才创建或复用 PR。反过来，GitHub 收到了写请求却没返回响应，本地超时也不能证明远端没有执行：写评论要先按本 App 作者和精确标记找回，不能直接发送第二条。[工具服务](../../app/controler/workflow/tools.py) · [外部写入处理](../../app/controler/workflow/effects.py)
+
+派发时有两种 token：[JobCoordinator.prepare_for_assignment](../../app/controler/workflow/coordinator.py#L138-L180) 收到的 `token` 标识这次 Job 分配，和 worker、连接代次一起用来核对领取权。另一个 token 由 control 按 Flow 保存的 installation ID 和仓库名调用 [Repository.create_push_capability](../../app/github/repositories.py#L250-L276) 换取；返回的 `PushCapability` 才含 GitHub 凭据、有效期及 bot 身份。[协调器](../../app/controler/workflow/coordinator.py#L256-L271)只为首轮和修订任务装配这个私密字段。签发失败且领取仍有效，由 control 将 Job 记为失败；签发期间领取权已变化，则丢弃本次准备结果，不交给旧 worker。
 
 `AGENTFLOW_GITHUB_REQUEST_TIMEOUT_SECONDS` 默认 30，须为正有限数；修改后重启 serve。它限制连接、读、写和连接池等待等单个网络阶段，不限制整轮分页或恢复的总时长。[错误分类](../../app/github/errors.py)区分临时故障与有证据的未发送或拒绝；即使 HTTP 200，GraphQL 写入也可能部分成功且附带 errors。[客户端契约测试](../../tests/test_github_client.py)
 

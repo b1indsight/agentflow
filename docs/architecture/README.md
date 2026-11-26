@@ -4,6 +4,12 @@
 
 第一次来，先读[控制端和工作端怎样分工](overview.md)，再看[架构图](diagram.html)。如果你更习惯边用边学，可以直接从[功能走查](../feature-walkthroughs/README.md)进入；那里从创建任务开始，一直写到审核、归档与重新开工。
 
+## 顺着一个任务编号读源码
+
+第一次读实现，不妨先问一个能验证的问题：控制台返回了一张新卡片，此刻系统究竟做完了什么？[控制台的 `create_flow`](../../app/controler/console/api.py#L225-L254) 先以指定的 GitHub 安装身份重新读取目标仓库，确认它没有归档；如果附带 Issue 编号，还要确认 Issue 可读。随后它把确认过的仓库名和任务交给 [`ControlService.create_flow`](../../app/controler/workflow/service.py#L106-L130)。后者把 Flow、首次开工和待执行工作一并写入数据库。HTTP 201 返回的是按 Flow ID 读出的 `FlowDetail`。从这张卡片可以断定任务已经登记，不能断定工作端已经启动，更不能断定 PR 已经创建。
+
+往下读时，沿两个编号就能分清各篇文章的入口。用 **Flow ID** 找整项工作的详情和历次开工；用 **Job ID** 找其中某次执行。[`AssignmentStore.assign_job`](../../app/persistence/assignments.py#L89-L108) 给有资格的工作端分配一个 Job；[`ResultApplication.apply`](../../app/controler/workflow/results.py#L112-L133) 按同一个 Job ID 找回已经保存的结果。想知道连接中断时这两个方法之间还剩下哪些证据，读[架构决策](decisions.md)；想知道这轮的修改最后对应哪条评论，读[评审循环](review-loop.md)。
+
 ## 当前实现状态
 
 | 想弄清楚的问题 | 从哪里读 |

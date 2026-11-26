@@ -6,7 +6,13 @@
 
 以控制台所有者身份打开「设置 → Skill 仓库」，从已授权的仓库中选择一个来源，保存后重新打开设置，应当仍能看到该选择。模型设置不应随之改变。选择「不指定」可以取消配置。保存配置本身不会在浏览器或当前目录安装文件；见[选择与清除来源的测试](../../tests/test_console_api.py#L116)。
 
+按保存时，[`update_skill_repository`](../../app/controler/console/api.py#L177-L197)收到目标仓库、安装 ID 和页面读到的旧仓库名。它先向 GitHub 核对安装、重读仓库信息；已归档的仓库会被拒绝。然后 [`SettingsStore.set_value`](../../app/persistence/settings.py#L33-L41)只在数据库里的旧值仍与页面相同时改这一项。旧页面想覆盖刚保存的选择，会收到 `409 settings_conflict`；重读设置再决定要不要改。成功响应是 GitHub 确认的仓库全名，清除时是 `null`。[API 测试](../../tests/test_console_api.py#L123-L137)分别检查了错误授权、过期旧值和清除后的模型设置。
+
+配置写好后，控制端请求同步。[worker 连接的 `poll`](../../app/controler/workers/callbacks.py#L287-L312)才读取最新值，为来源申请只读凭据，发送 `worker.sync_skills`。worker 的 [`on_sync_skills`](../../app/worker/transport/state.py#L458-L474)收到空来源便清除供新任务使用的快照引用，否则在后台启动 [`clone_skills`](../../app/worker/execution/skills.py#L44-L78)。它返回一个以提交 SHA 命名的本地快照路径；没有凭据或克隆失败则报告准备错误。网页保存成功并不等待这次克隆。已开始的 Flow 继续指向原快照，[远程测试](../../tests/test_remote_e2e.py#L206-L223)在更新来源、随后清除来源后仍读到了原内容。
+
 为了看出差别，可以在自己的测试来源中准备三项：一项常驻的写作规范（`always_on: true`），两项可选的数据库和前端指引。创建一项明显涉及改表的任务，观察这次新工作区的 `.agents/skills/`。工作端先链接可用的常驻项，再请独立会话根据任务和候选说明选择可选项。选择器看到候选名称、描述及声明的工具范围，无需把所有指引的正文放进提示里。
+
+任务何时用到快照？[首次准备工作区的 `_initial`](../../app/worker/execution/executor.py#L154-L171)在构建编码提示前清理上次登记的链接，等待快照任务，随后把路径、工作区、任务正文和编码工具交给 `link_skills`。它先[读取每个 `SKILL.md` 的头部](../../app/worker/execution/skills.py#L81-L101)，校验名称与目录一致，再[跳过项目已有的名字，登记并链接常驻项](../../app/worker/execution/skills.py#L139-L167)。如果还有候选，才[调用独立的 `agent.start`](../../app/worker/execution/skills.py#L168-L192)，读取它返回的 JSON 名单。空列表是有效选择；不在候选里的名字或错误输出会终止这次准备，worker 返回 `bootstrap` 阶段的失败，不会带着未经校验的选择开始编码。
 
 ## 用工作区里的链接判断结果
 

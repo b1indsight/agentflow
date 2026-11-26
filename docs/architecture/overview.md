@@ -19,6 +19,18 @@ GitHub 的通知 ──┐                          ┌── PostgreSQL：任�
 
 两个入口共享一套业务规则。Issue 标签可以触发任务；控制台也可以直接提交正文和图片，无需为了跑一次编码工作先造一个 Issue。两端启动时分别如何装配，见[控制端](../../app/controler/runtime.py)和[工作端](../../app/worker/runtime.py)。
 
+### 一条连接如何成为可用的工作端
+
+工作端拨号后，控制端的 WebSocket 入口先把连接交给 [`serve_worker`](../../app/controler/api.py#L253-L259) 验证身份。通过后，[`ServerRuntime.serve_worker_session(worker_id, register, session)`](../../app/controler/runtime.py#L146-L180) 才接手：`worker_id` 标识机器，`register` 是它报告的能力，`session` 是本次连接，三者不可互换。运行时把处理执行消息与文件消息的回调装到这条连接上，再调用 `Gateway.serve`。因此能连通网络，并不自动获得领取工作或查询文件的权限。
+
+同一台机器重连时会遇到一个实际问题：旧连接可能尚未关闭。[`Gateway.register`](../../app/communication/gateway.py#L104-L142) 先保留新连接的位置，等待前一条连接关闭，再检查新连接是否仍是当前连接。只在条件满足时，调用方才拿到可用的登记对象。接下来 [`ServerCallbacks.on_published`](../../app/controler/workers/callbacks.py#L202-L208) 把工作端能力与本次连接代次登记到存储。**替换连接只改变消息往哪里送**；是否有权继续某个 Job，还要对照工作区、Job 和原分配凭据。
+
+### 从消息里区分「开始」与「结果」
+
+以首轮编码为例，控制端发出 `worker.execute` 时，会先登记这次调用预期收到的结果类型。[`WorkerStateCallbacks.on_execute`](../../app/worker/transport/state.py#L324-L360) 收到 `Assignment` 后核对调用身份，并把参数交给本机执行对象；对于首次接收的工作，它先发送启动通知，再启动执行。控制端的 [`on_started`](../../app/controler/workers/callbacks.py#L533-L545) 把 Job ID、Attempt ID、worker、分配凭据和连接代次一并交给 `start_assignment`。只有这些条件和当前工作区都匹配，才写入启动时间、延长租约；修订次数也在这笔事务内增加。迟到的旧通知不能给新任务“签到”。[启动事务](../../app/persistence/assignments.py#L257-L311)
+
+进程结束后，消息回答的是另一个问题。工作端用 [`ExecutionState.complete`](../../app/worker/state/execution.py#L194-L219) 把本次执行的结果或异常变成一份可重送的记录；控制端的 [`on_result`](../../app/controler/workers/callbacks.py#L547-L573) 核对身份，持久接收记录，再交给工作流处理。因而发生重启时，已经收到的执行结果可以继续用于开 PR 或回复评论，不必再启动一次编码进程。[重连测试](../../tests/test_controller_update_boundary.py#L38)特意把连接切在“已启动、未交回结果”之间。
+
 ## 为什么有 Flow、Attempt 和 Job 三个名字？
 
 假设任务是给导出功能加一个日期选项。**Flow 是这件事本身**。你补充日期格式、评审者要求修正时区，仍然在同一个 Flow 里。**Attempt 是这件事的一次开工**：本次分支、编码会话和交付的 PR 都有归属。归档后如果要重做，可在同一 Flow 下另开一个 Attempt；原来那张 PR 不会变成新一轮的交付。

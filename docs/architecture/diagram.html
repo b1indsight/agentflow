@@ -79,5 +79,13 @@
         <li>断线、归档或结果入库本身都不能证明旧进程已经停止。回收旧执行并确认清理后，工作区才可安全复用。</li></ul>
     </section>
   </div>
+  <figure>
+    <figcaption>图 02　沿一次编码结果，读懂跨进程的三个确认点</figcaption>
+    <ol>
+      <li><strong>工作端先保留自己的答卷。</strong> <a href="../../app/worker/state/execution.py#L194-L219">ExecutionState.complete</a> 接收执行结果或异常，写成本次分配的最终记录。连接断开时可以重送这份记录；此刻数据库可能还不知道编码已结束。</li>
+      <li><strong>控制端确认收到的是同一次执行。</strong> <a href="../../app/controler/workers/callbacks.py#L547-L573">ServerCallbacks.on_result</a> 核对回复编号、工作端和分配凭据，交由 <a href="../../app/persistence/assignments.py#L429-L482">record_assignment_result</a> 保存。重送相同内容可以继续处理，同一分配的矛盾结果不能覆盖旧记录。</li>
+      <li><strong>工作流按已保存的证据交付。</strong> <a href="../../app/controler/workflow/results.py#L112-L133">ResultApplication.apply</a> 接收 Job ID，核验并应用结果。远端操作还需确认时，由恢复循环继续处理这个 Job；完成后返回数据库里的工作状态，不再调用一次编码后端。</li>
+    </ol>
+  </figure>
   <footer><a href="../feature-walkthroughs/README.md">逐项功能走查</a><a href="../../app/controler/workflow/initial.py">首轮交付核验</a><a href="../../app/domain/recovery_policy.py">恢复判定源码</a><a href="roadmap.md">现状与演进边界</a></footer>
 </main></body></html>

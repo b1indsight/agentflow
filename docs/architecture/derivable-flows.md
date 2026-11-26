@@ -4,9 +4,17 @@
 
 ## 当前能复用的边界
 
-Flow 可以源自 GitHub Issue，也可以来自控制台。它有稳定的 ID；重新开工产生新的 Attempt，重试和修订则沿用当次 Attempt 的交付分支和 PR。`FlowExecution` 记录工作区绑定，Job 记录本次调度的工作。[现有模型](../../app/domain/models.py)中的 `child_flow_id` 在未指定时取自身 ID，数据库的 NULL 也按此解释。不能据此判断一个 Flow 已经派生了子任务。
+**创建：谁可以开始一项独立工作？** [Issue 标签处理器](../../app/controler/events/router.py#L60-L72)要求标签匹配且发送者在允许名单内。[控制台路由](../../app/controler/api.py#L61-L83)要求通过[所有者身份验证](../../app/controler/access.py#L42-L69)；其 [`create_flow`](../../app/controler/console/api.py#L224-L251)还检查请求同源，以指定的 GitHub installation 重新读取仓库，拒绝归档仓库；若指定 Issue，还必须能读到它。
 
-首轮编码时，Agent 可以通过本地工具搜索同仓库的 Flow、请求用户补充信息或准备交付 PR。控制端依据当前任务和连接校验远程请求。[工作端 MCP](../../app/worker/transport/mcp.py)、[控制端工具](../../app/controler/workflow/tools.py)和[首轮结果处理](../../app/controler/workflow/initial.py)定义了今天的路径。请求用户输入可能使交付进入 `waiting`；这不涉及另一个 Flow。**下面的派生、等待和验收操作都是拟议能力，没有可调用的 API。**
+两个入口都调用 [`ControlService.create_flow`](../../app/controler/workflow/service.py#L106-L130)。它在事务内按仓库和 Issue 避免重复开工；直接输入的两份相同正文没有这个去重保证。[`FlowStore.create_flow`](../../app/persistence/flows.py#L62-L90)要求 Issue 号与正文恰好有一个，写入 Flow、首个 Attempt 和创建事实；服务在同一事务里排 INITIAL Job。这条调用链没有父任务参数。[`Flow.child_flow_id` 的默认值和 NULL 处理](../../app/domain/models.py#L118-L149)都指向自身，不能据此认定存在受委派的子任务。
+
+**搜索：能发现什么，谁可以看？** 首轮 Agent 访问本机工具时，[`WorkerMCP._handle`](../../app/worker/transport/mcp.py#L87-L99)先核对 Host、Origin 和 Bearer token。[`_dispatch` 的 `search_flows` 分支](../../app/worker/transport/mcp.py#L154-L165)接收查询、分页大小和游标；[服务端 `on_search`](../../app/controler/workers/flow.py#L50-L60)带上实际 worker 和连接代次调用 [`FlowToolService.search`](../../app/controler/workflow/tools.py#L54-L79)。它在一个只读快照内核对已启动、未收终态的 INITIAL Job、当前 Attempt、分配凭据和停止状态，再用 **Job 所属 Flow 的仓库** 查询。结果是分页摘要；换连接后沿用旧权限、改用修订 Job、或遇到停止请求都会被拒绝。搜索不写关系，也不给结果行授予操作权。见[仓库范围和过期权限测试](../../tests/test_flow_search.py#L25-L105)。
+
+**等待：谁在等谁？** 本机 [`request_user_input`](../../app/worker/transport/mcp.py#L166-L185)只接受 `message`；去空白后须有 1–4000 个字符，且同一次运行不能再成功调用另一项完成工具。它先把问题留在本次调用的内存里，没有远程 `wait` 请求。首轮终态到达后，[`initial_plan` 核对结果](../../app/controler/workflow/initial.py#L254-L272)：[分支、已推送 SHA、现有交付状态须匹配，且不能同时带 PR 回执](../../app/controler/workflow/initial.py#L304-L324)。直到 [`ResultApplication._commit`](../../app/controler/workflow/results.py#L467-L480) 才按版本更新交付为 `waiting` 并将问题写入活动记录。若选择的是 `open_pr`，同一个 MCP 分支会核验推送，再通过[实际注册的 `flow.open_pr` 路由](../../app/controler/workers/flow.py#L50-L53)准备本 Attempt 的 PR，见[交付的三个时刻](decisions.md)。
+
+**续办：人怎样把答案送回原任务？** 控制台[追加指令](../../app/controler/console/api.py#L341-L360)调用 [`append_agent_task`](../../app/controler/workflow/service.py#L309-L342)，按 Flow 和请求 ID 持久化输入；同 ID 同内容重送无副作用，换了内容则拒绝。控制端可在重启后扫描待用输入。[`_queue_agent_inputs`](../../app/controler/workflow/service.py#L344-L374)检查当前交付、绑定、待停止和忙碌 Job 等条件，满足时为 `waiting` 的原 Flow 排 INITIAL；忙碌时可以先收下消息。没有子 Flow 发布事件，也没有验证子结果版本。见[重启后依序交付原消息](../../tests/test_console_api.py#L516-L533)。
+
+**从下一节起都是提案。** `spawn`、`wait`、`accept` 等是描述预期行为的名字；下面的关系、等待记录和结果版本均未实现，没有对应的可调用 API。
 
 ## 提案一：把委派关系存入控制端
 

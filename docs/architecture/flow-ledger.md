@@ -49,6 +49,10 @@
 2. 存储层以当前状态和 Attempt 为条件更新 `flows`，再由 `ActivityStore.append_flow` 锁住 `console_flows` 的版本头，追加事实。事务失败时两者一起回滚；不会留下只有状态没有解释的提交。[普通转换](../../app/persistence/flows.py#L123-L186)
 3. 创建时先拿到 Flow 和首个 Attempt 的 ID 才能写 `created`。归档顺序相反：先写带结论的 `archive`，再用同一业务时间推进当前状态。归档证明业务已结束，不能据此推断 Worker 已经完成清理。[归档事务](../../app/persistence/flows.py#L434-L463) · [归档证据失败时回滚](../../tests/test_flow_archive_activity.py#L182-L218)
 
+**例：重新开工时为什么要带旧 Attempt ID？** 假设 Flow 42 的第 3 号 Attempt 已归档。[控制台](../../app/controler/console/api.py#L299)调用 [ControlService.resume](../../app/controler/workflow/service.py#L189-L227)，传入 Flow 和 `expected_attempt_id=3`。服务在事务内重新读并锁住当前行，核对归档证据、工作区是否已释放，以及同一 Issue 有没有其他活动 Flow。随后调用 [FlowStore.transition(fresh, ATTEMPT_STARTED)](../../app/persistence/flows.py#L123-L155)，返回的 `Flow` 已指向新 Attempt；服务用这个返回值安排首轮 Job，提交后才唤醒调度。若同一请求因响应丢失又到达，旧 ID 已不匹配，调用者应先重新读取 Flow，不能再替用户开一轮。
+
+上述事务也限定了谁能追加事实：[ActivityStore.append_flow](../../app/persistence/activity.py#L105-L148) 接受 `flow_id`、`attempt_id`、种类、业务时间和结构化事实。对每轮只记一次的事件，`True` 代表新增，`False` 代表已有完全相同的证据；时间或内容冲突则抛错，不能靠更换时间重试来覆盖它。如果后续入队失败，外层事务会连同新 Attempt 和 `attempt_started` 一起回滚。
+
 例如，迟到的 webhook 表明一条此前判为 `abandoned` 的 PR 其实在归档前已合并。系统按原仓库、PR、合并时间和提交核对证据；只有 `merged_at + 1 秒 < archived_at` 才据此更正原结论。如果用户已经重新开工，旧轮次保留 `merge` 和 `archive_correction`，新轮次的状态、交付不受影响。冲突的合并证据不能覆盖旧行。[按实际合并时间判断的测试](../../tests/test_flow_archive_activity.py#L100-L180)
 
 <a id="8-重放与校验"></a>
@@ -61,6 +65,8 @@ agentflow flow verify 42
 ```
 
 `history` 按版本列出跨 Attempt 的事件摘要，也会包含快照和通知。`verify` 则在共享锁下取出当前行，只把事实交给 `replay_flow`：从起点核对任务摘要，依序检查 Attempt 归属和状态转换是否合法，再比较上文列出的字段。省略 ID 会检查全部 Flow；有差异或无法重放时以非零退出，只报告不修复。`history_only` 的旧 Flow 单独报告为跳过，不计入通过数。[CLI](../../app/cli.py#L410-L453) · [重放函数](../../app/domain/flow_policy.py#L117-L185)
+
+在源码里，[CLI 调用](../../app/cli.py#L419)的 [FlowStore.verify(42)](../../app/persistence/flows.py#L209-L232) 返回空字典才表示比较通过。有差异时，每列对应一对值，顺序是 **重放值、数据库当前值**；返回 `None` 表示跳过历史只读 Flow。找不到 Flow 或不能重放则抛出异常，不能把这两种情况统计为「无差异」。
 
 <a id="12-代价与边界"></a>
 <a id="13-后续方向"></a>
