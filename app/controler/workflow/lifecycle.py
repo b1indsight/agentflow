@@ -25,7 +25,7 @@ from app.domain.models import (
     FlowState,
     Job,
 )
-from app.github import PullRequest, PullRequestMerge, Repository
+from app.github import Installation, PullRequest, PullRequestMerge
 from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
@@ -177,7 +177,7 @@ def close_delivery(
 
 
 async def prove_reopen(
-    repo: Repository,
+    installation: Installation,
     flow: Flow,
     delivery: FlowDelivery,
     remote: PullRequest,
@@ -229,13 +229,13 @@ async def prove_reopen(
             assert result.commit_sha is not None  # canonical mismatch validation requires this evidence
             baseline = result.baseline_sha or task.expected_head_sha
             if (task.purpose == "revise" and result.commit_sha != baseline
-                    and not await repo.compare_commits(baseline, result.commit_sha)):
+                    and not await installation.repository(flow.repo).compare_commits(baseline, result.commit_sha)):
                 return None, "old revision does not advance its coding baseline"
             head = result.commit_sha if task.purpose == "revise" else delivery.head_sha
             proof = ReopenProof(head, result.session_id, result.session_generation)
         else:
             return None, "unexpected coding result; manual reconciliation required"
-    ref = await repo.fetch_ref(delivery.branch)
+    ref = await installation.fetch_ref(flow.repo, delivery.branch)
     if ref.branch != delivery.branch or ref.sha != remote.head_sha:
         return None, "PR and remote branch disagree"
     return proof, None

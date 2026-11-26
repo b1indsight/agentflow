@@ -19,6 +19,8 @@ from tests.github import (
     RecordingPullRequest,
     RecordingRepository,
     RecordingReviewThread,
+    record_create_push_capability,
+    record_fetch_ref,
     record_fetch_repository,
 )
 
@@ -26,9 +28,9 @@ from tests.github import (
 @pytest.fixture
 def recording_resources(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Installation, "fetch_repository", record_fetch_repository)
-    monkeypatch.setattr(Repository, "fetch_ref", RecordingRepository.fetch_ref)
+    monkeypatch.setattr(Installation, "fetch_ref", record_fetch_ref)
+    monkeypatch.setattr(Installation, "create_push_capability", record_create_push_capability)
     monkeypatch.setattr(Repository, "compare_commits", RecordingRepository.compare_commits)
-    monkeypatch.setattr(Repository, "create_push_capability", RecordingRepository.create_push_capability)
     monkeypatch.setattr(Repository, "find_pull_request_by_head", RecordingRepository.find_pull_request_by_head)
     monkeypatch.setattr(Repository, "open_pull_request", RecordingRepository.open_pull_request)
     monkeypatch.setattr(Issue, "refetch", RecordingIssue.refetch)

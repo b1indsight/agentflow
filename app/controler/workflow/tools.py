@@ -207,8 +207,8 @@ class FlowToolService:
                 FlowToolErrorKind.AUTHORIZATION,
                 "Flow has no GitHub installation",
             )
-        repo = self.github.installation(installation_id).repository(flow.repo)
-        remote = await repo.fetch_ref(delivery.branch, retry_transient=True)
+        installation = self.github.installation(installation_id)
+        remote = await installation.fetch_ref(flow.repo, delivery.branch, retry_transient=True)
         if remote.branch != delivery.branch:
             raise FlowToolRejected(
                 FlowToolErrorKind.UPSTREAM,

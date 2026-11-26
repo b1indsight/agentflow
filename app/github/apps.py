@@ -4,19 +4,46 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr
 
 from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
 from app.github.pagination import Batch
 from app.github.projects import Project, ProjectConfig
-from app.github.repositories import Repository, _permissions, split_repo
+from app.github.repositories import RemoteRef, Repository, normalize_branch, split_repo
 
 if TYPE_CHECKING:
     from githubkit import AppAuthStrategy, AppInstallationAuthStrategy, GitHub
 
     from app.controler.config import ServerSettings
+
+
+class PushCapability(BaseModel):
+    """A short-lived Git credential that redacts its token in repr and JSON."""
+
+    model_config = ConfigDict(frozen=True)
+    token: SecretStr
+    repository: str
+    permissions: dict[str, Literal["read", "write"]]
+    expires_at: datetime
+    bot_login: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
+    bot_user_id: int = Field(gt=0)
+
+
+def _permissions(value: Any) -> dict[str, Literal["read", "write"]]:
+    if isinstance(value, dict):
+        raw = value
+    elif hasattr(value, "model_dump"):
+        raw = value.model_dump(exclude_none=True, exclude_unset=True)
+    else:
+        raw = vars(value)
+    permissions: dict[str, Literal["read", "write"]] = {}
+    for key, item in raw.items():
+        if item in {"read", "write"}:
+            permissions[key] = item
+    return permissions
 
 
 class GitHubApp(BaseModel):
@@ -137,6 +164,41 @@ class Installation(BaseModel):
             if data.full_name.casefold() != full_name.casefold():
                 raise ValueError("repository response does not match its requested identity")
             return Repository(self, data.full_name, default_branch=data.default_branch, archived=data.archived)
+
+    async def fetch_ref(self, full_name: str, branch: str, *, retry_transient: bool = False) -> RemoteRef:
+        """Durable callers own retries; Flow tools opt into the bounded SDK retry."""
+        owner, name = split_repo(full_name)
+        branch = normalize_branch(branch)
+        client = self._client(auto_retry=retry_transient)
+        with translate_errors("get_ref"):
+            data = (await client.rest.git.async_get_ref(owner, name, f"heads/{branch}")).parsed_data
+            return RemoteRef(branch=branch, sha=data.object_.sha)
+
+    async def create_push_capability(self, full_name: str) -> PushCapability:
+        """Issue a contents-write token scoped to one repository in this installation."""
+        _, name = split_repo(full_name)
+        bot_login = await self.app.resolve_bot_login()
+        client = self.app._client()
+        with translate_errors("create_push_capability"):
+            data = (await client.rest.apps.async_create_installation_access_token(
+                self.installation_id, repositories=[name], permissions={"contents": "write"},
+            )).parsed_data
+            permissions = _permissions(data.permissions)
+            repositories = [item.full_name for item in (data.repositories or [])]
+            # GitHub may include implicit read-only repository metadata access.
+            if permissions not in (
+                {"contents": "write"}, {"contents": "write", "metadata": "read"},
+            ) or repositories != [full_name]:
+                raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
+            installation_client = self._client()
+            bot = (await installation_client.rest.users.async_get_by_username(bot_login)).parsed_data
+            if bot.login.lower() != bot_login.lower() or bot.type != "Bot" or bot.id <= 0:
+                raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
+            return PushCapability(
+                token=SecretStr(data.token), repository=full_name,
+                permissions=permissions, expires_at=datetime.fromisoformat(data.expires_at),
+                bot_login=bot_login, bot_user_id=bot.id,
+            )
 
     async def fetch_repositories(self, *, page: int = 1) -> Batch[Repository]:
         """Read one page of granted repositories, omitting archived repositories."""

@@ -82,8 +82,8 @@ async def test_app_bot_identity_retries_failures_and_shares_success(tmp_path, mo
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("method,target", [("fetch_issue", 7), ("fetch_ref", "flow/7")])
-async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, monkeypatch, method, target):
+@pytest.mark.parametrize("method", ["fetch_issue", "fetch_ref"])
+async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, monkeypatch, method):
     requests = []
 
     def limited(request):
@@ -98,8 +98,11 @@ async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, mo
         return GitHub("test-token", auto_retry=auto_retry, async_transport=httpx.MockTransport(limited))
 
     install_client(monkeypatch, installation)
+    identity = app.installation(42)
+    read = (identity.repository("owner/repo").fetch_issue(7) if method == "fetch_issue"
+            else identity.fetch_ref("owner/repo", "flow/7"))
     with pytest.raises(GitHubError) as caught:
-        await asyncio.wait_for(getattr(app.installation(42).repository("owner/repo"), method)(target), 1)
+        await asyncio.wait_for(read, 1)
     assert caught.value.kind is GitHubErrorKind.RATE_LIMITED
     assert caught.value.retry_after == "600" and len(requests) == 1
 
@@ -284,7 +287,7 @@ async def test_fetches_issue_repository_and_remote_ref(
 
     observed_issue = await github.installation(42).repository("octo/repo").fetch_issue(7)
     observed_repository = await github.installation(42).fetch_repository("octo/repo")
-    remote_ref = await github.installation(42).repository("octo/repo").fetch_ref("topic")
+    remote_ref = await github.installation(42).fetch_ref("octo/repo", "refs/heads/topic")
 
     assert observed_issue.model_dump() == {
         "number": 7,
@@ -466,11 +469,11 @@ async def test_creates_repository_scoped_contents_push_capability(
 
     if not accepted:
         with pytest.raises(GitHubError) as caught:
-            await github.installation(42).repository("octo/repo").create_push_capability()
+            await github.installation(42).create_push_capability("octo/repo")
         assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
         return
 
-    capability = await github.installation(42).repository("octo/repo").create_push_capability()
+    capability = await github.installation(42).create_push_capability("octo/repo")
 
     assert capability.repository == "octo/repo"
     assert capability.permissions == permissions
@@ -480,13 +483,17 @@ async def test_creates_repository_scoped_contents_push_capability(
     assert create_token.calls == [
         ((42,), {"repositories": ["repo"], "permissions": {"contents": "write"}})
     ]
+    # GitHub signs by short name; reject a grant for the same name under a different owner.
+    with pytest.raises(GitHubError) as caught:
+        await github.installation(42).create_push_capability("other/repo")
+    assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
     # A valid scoped token must never authorize guessing a missing or different bot identity.
     for login, kind, user_id in (("other[bot]", "Bot", 7654321),
                                 ("agentflow-bot[bot]", "User", 7654321),
                                 ("agentflow-bot[bot]", "Bot", 0)):
         bot.update(login=login, type=kind, id=user_id)
         with pytest.raises(GitHubError) as caught:
-            await github.installation(42).repository("octo/repo").create_push_capability()
+            await github.installation(42).create_push_capability("octo/repo")
         assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
 
 

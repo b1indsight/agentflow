@@ -35,7 +35,15 @@ from app.domain.models import (
     Verdict,
 )
 from app.domain.review_models import FeedbackUpdate
-from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteRef, Repository
+from app.github import (
+    GitHubError,
+    GitHubErrorKind,
+    Installation,
+    Issue,
+    PullRequest,
+    RemoteRef,
+    Repository,
+)
 from app.persistence.agent_inputs import AgentInputStore
 from tests.flow_fixtures import enqueue_job
 from tests.github import RecordingGitHub, record_call
@@ -63,8 +71,8 @@ def revision_resources(recording_resources, monkeypatch):
                            head_repository=pr.repository.full_name, base_branch=state.base_branch,
                            base_sha="base", title="Task", body="Requirements")
 
-    async def fetch_ref(repo, branch, *, retry_transient=False):
-        state = record_call(repo, "fetch_ref", branch=branch)
+    async def fetch_ref(installation, full_name, branch, *, retry_transient=False):
+        state = record_call(installation.repository(full_name), "fetch_ref", branch=branch)
         return RemoteRef(branch=branch, sha=state.sha)
 
     async def compare_commits(repo, base, head):
@@ -72,7 +80,7 @@ def revision_resources(recording_resources, monkeypatch):
         return (base, head) == ("baseline", "revision")
 
     monkeypatch.setattr(PullRequest, "refetch", refetch)
-    monkeypatch.setattr(Repository, "fetch_ref", fetch_ref)
+    monkeypatch.setattr(Installation, "fetch_ref", fetch_ref)
     monkeypatch.setattr(Repository, "compare_commits", compare_commits)
 
 
@@ -356,15 +364,15 @@ async def test_cancel_during_remote_verification_prevents_effects_and_commit(
     assert store.assignments.start_assignment(job.id, task.attempt_id, "worker-a", "token", "epoch")
     subject.mark_started(job, task, "worker-a")
     assert accept(store, job, verified_result(task)) == "pending"
-    original = Repository.fetch_ref
+    original = Installation.fetch_ref
 
-    async def cancel(repo, branch, *, retry_transient=False):
+    async def cancel(installation, full_name, branch, *, retry_transient=False):
         ControlService(
             database=store.database,
         ).cancel(flow)
-        return await original(repo, branch, retry_transient=retry_transient)
+        return await original(installation, full_name, branch, retry_transient=retry_transient)
 
-    monkeypatch.setattr(Repository, "fetch_ref", cancel)
+    monkeypatch.setattr(Installation, "fetch_ref", cancel)
     await subject.results.apply(job.id)
     assert store.flows.get_flow(flow.id).state is FlowState.ARCHIVED
     assert github.comments == [] and github.review_requests == []
@@ -571,7 +579,7 @@ async def test_revision_preparation_failure_is_persisted_and_explicitly_retryabl
         raise GitHubError(GitHubErrorKind.NOT_FOUND, "fetch_ref", status_code=404)
 
     with monkeypatch.context() as patch:
-        patch.setattr(Repository, "fetch_ref", unavailable)
+        patch.setattr(Installation, "fetch_ref", unavailable)
         assert await subject.prepare_for_assignment(job, "worker-a", "token", "epoch") is JobState.FAILED
     failed = store.jobs.get_job(job.id)
     assert failed.state is JobState.FAILED and failed.result_applied_at is not None
@@ -653,10 +661,10 @@ async def test_durable_revision_recovery_and_reopen_keep_original_inbox(
     assert persisted.state is JobState.DONE and persisted.result_applied_at is not None
     if external_update:
         github.sha, github.base_branch = "external-rewrite", "release"
-    repo = github.installation(flow.installation_id).repository(flow.repo)
-    remote = await repo.fetch_pull_request(task.pr_number)
+    installation = github.installation(flow.installation_id)
+    remote = await installation.repository(flow.repo).fetch_pull_request(task.pr_number)
     proof, error = await prove_reopen(
-        repo,
+        installation,
         flow,
         store.deliveries.get_delivery(flow.id),
         remote,
@@ -712,10 +720,10 @@ async def test_durable_result_readers_reject_corrupt_evidence_without_rewriting(
         elif reader == "retired":
             subject.results._retired_plan(persisted, task.attempt_id)
         else:
-            repo = github.installation(flow.installation_id).repository(flow.repo)
-            remote = await repo.fetch_pull_request(task.pr_number)
+            installation = github.installation(flow.installation_id)
+            remote = await installation.repository(flow.repo).fetch_pull_request(task.pr_number)
             await prove_reopen(
-                repo,
+                installation,
                 flow,
                 store.deliveries.get_delivery(flow.id),
                 remote,

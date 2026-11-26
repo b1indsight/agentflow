@@ -259,7 +259,7 @@ class JobCoordinator:
         flow = self.flows.get_flow(job.required_flow_id)
         if flow is None or flow.installation_id is None:
             raise ValueError("coding assignment has no GitHub installation")
-        capability = await self.github.installation(flow.installation_id).repository(flow.repo).create_push_capability()
+        capability = await self.github.installation(flow.installation_id).create_push_capability(flow.repo)
         return AssignmentSecret(
             push=PushSecret(
                 token=capability.token,

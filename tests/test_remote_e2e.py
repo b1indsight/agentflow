@@ -14,7 +14,7 @@ from app.contracts.receipts import decode_result_inbox
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobState
-from app.github import GitHubError, GitHubErrorKind, RemoteRef, Repository
+from app.github import GitHubError, GitHubErrorKind, Installation, RemoteRef, Repository
 from app.persistence.records import required
 from app.persistence.settings import SettingsStore, TextSetting
 from app.worker.config import WorkerSettings
@@ -85,7 +85,7 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
             ["git", "--git-dir", str(remote), "rev-parse", f"refs/heads/{branch}"], text=True,
         ).strip()
 
-    async def fetch_ref(repo, branch, *, retry_transient=False):
+    async def fetch_ref(installation, full_name, branch, *, retry_transient=False):
         try:
             return RemoteRef(branch=branch, sha=await asyncio.to_thread(remote_sha, branch))
         except subprocess.CalledProcessError as error:
@@ -96,7 +96,7 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
         github.pull_request = pull.model_copy(update={"head_sha": remote_sha(head)})
         return github.pull_request
 
-    monkeypatch.setattr(Repository, "fetch_ref", fetch_ref)
+    monkeypatch.setattr(Installation, "fetch_ref", fetch_ref)
     monkeypatch.setattr(Repository, "open_pull_request", open_pull_request)
 
     class Agent(RecordingAgent):

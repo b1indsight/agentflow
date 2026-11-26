@@ -118,7 +118,7 @@ class InitialPreparation:
             branch = delivery.branch
         if delivery is None or delivery.base_branch is None:
             try:
-                await self._reads.read(job, lambda: repository.fetch_ref(branch))
+                await self._reads.read(job, lambda: installation.fetch_ref(flow.repo, branch))
             except GitHubError as error:
                 if error.kind is not GitHubErrorKind.NOT_FOUND:
                     raise PreparationReadFailure(error) from error

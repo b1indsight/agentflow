@@ -126,8 +126,8 @@ class Reconciler:
                     raise ValueError("missing installation")
                 coding = jobs_tx.lifecycle_job(flow.id)
                 blocked = jobs_tx.reopen_blocked(flow.id)
-            repo = self.github.installation(flow.installation_id).repository(flow.repo)
-            remote = await repo.fetch_pull_request(delivery.pr_number)
+            installation = self.github.installation(flow.installation_id)
+            remote = await installation.repository(flow.repo).fetch_pull_request(delivery.pr_number)
             if (remote.repo != flow.repo or remote.number != delivery.pr_number
                     or remote.head_repository != flow.repo):
                 raise ValueError("PR observation identity mismatch")
@@ -142,7 +142,7 @@ class Reconciler:
                     diagnostic = "old executor or result must settle before reopening"
                 else:
                     proof, diagnostic = await prove_reopen(
-                        repo,
+                        installation,
                         flow,
                         delivery,
                         remote,

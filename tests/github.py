@@ -35,7 +35,7 @@ NATIVE_ISSUE_COMMENT = Issue.comment
 NATIVE_ISSUE_FIND_COMMENT = Issue.find_comment
 NATIVE_ISSUE_ADD_LABEL = Issue.add_label
 NATIVE_ISSUE_FETCH_LABELS = Issue.fetch_labels
-NATIVE_REPOSITORY_FETCH_REF = Repository.fetch_ref
+NATIVE_INSTALLATION_FETCH_REF = Installation.fetch_ref
 NATIVE_PULL_REQUEST_REFETCH = PullRequest.refetch
 NATIVE_THREAD_REFETCH = ReviewThread.refetch
 
@@ -79,25 +79,29 @@ async def record_fetch_repository(installation: Installation, full_name: str) ->
     return repo
 
 
+async def record_create_push_capability(installation: Installation, full_name: str) -> PushCapability:
+    record_call(installation.repository(full_name), "create_push_capability")
+    return PushCapability(
+        token=SecretStr("push-token"), repository=full_name,
+        permissions={"contents": "write"},
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        bot_login=installation.app.bot_login, bot_user_id=7654321,
+    )
+
+
+async def record_fetch_ref(
+    installation: Installation, full_name: str, branch: str, *, retry_transient: bool = False,
+) -> RemoteRef:
+    state = record_call(installation.repository(full_name), "fetch_ref")
+    if state.refs is not None:
+        if branch not in state.refs:
+            raise GitHubError(GitHubErrorKind.NOT_FOUND, "get_ref", status_code=404)
+        return RemoteRef(branch=branch, sha=state.refs[branch])
+    return RemoteRef(branch=branch, sha="abc123")
+
+
 class RecordingRepository(Repository):
     """Repository operations with production signatures and real parent identities."""
-
-    async def create_push_capability(self) -> PushCapability:
-        record_call(self, "create_push_capability")
-        return PushCapability(
-            token=SecretStr("push-token"), repository=self.full_name,
-            permissions={"contents": "write"},
-            expires_at=datetime.now(UTC) + timedelta(minutes=10),
-            bot_login=self.installation.app.bot_login, bot_user_id=7654321,
-        )
-
-    async def fetch_ref(self, branch: str, *, retry_transient: bool = False) -> RemoteRef:
-        state = record_call(self, "fetch_ref")
-        if state.refs is not None:
-            if branch not in state.refs:
-                raise GitHubError(GitHubErrorKind.NOT_FOUND, "get_ref", status_code=404)
-            return RemoteRef(branch=branch, sha=state.refs[branch])
-        return RemoteRef(branch=branch, sha="abc123")
 
     async def compare_commits(self, base: str, head: str) -> bool:
         record_call(self, "compare_commits")

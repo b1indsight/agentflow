@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter
 
 from app.github._fields import unobserved_field
 from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
@@ -39,18 +38,6 @@ class _LabelName(BaseModel):
 _LABEL_NAMES = TypeAdapter(list[_LabelName])
 
 
-class PushCapability(BaseModel):
-    """A short-lived Git credential that redacts its token in repr and JSON."""
-
-    model_config = ConfigDict(frozen=True)
-    token: SecretStr
-    repository: str
-    permissions: dict[str, Literal["read", "write"]]
-    expires_at: datetime
-    bot_login: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
-    bot_user_id: int = Field(gt=0)
-
-
 def split_repo(repo: str) -> tuple[str, str]:
     parts = repo.split("/")
     if len(parts) != 2 or not all(parts):
@@ -63,20 +50,6 @@ def normalize_branch(branch: str) -> str:
     if not normalized:
         raise GitHubError(GitHubErrorKind.VALIDATION, "branch")
     return normalized
-
-
-def _permissions(value: Any) -> dict[str, Literal["read", "write"]]:
-    if isinstance(value, dict):
-        raw = value
-    elif hasattr(value, "model_dump"):
-        raw = value.model_dump(exclude_none=True, exclude_unset=True)
-    else:
-        raw = vars(value)
-    permissions: dict[str, Literal["read", "write"]] = {}
-    for key, item in raw.items():
-        if item in {"read", "write"}:
-            permissions[key] = item
-    return permissions
 
 
 class Repository(BaseModel):
@@ -186,17 +159,6 @@ class Repository(BaseModel):
             existing.add(definition.name.casefold())
         return tuple(created)
 
-    async def fetch_ref(self, branch: str, *, retry_transient: bool = False) -> RemoteRef:
-        """Durable callers own retries; Flow tools opt into the original bounded SDK retry."""
-        branch = normalize_branch(branch)
-        client = self.installation._client(auto_retry=retry_transient)
-
-        with translate_errors("get_ref"):
-            data = (await client.rest.git.async_get_ref(
-                self.owner, self.name, f"heads/{branch}",
-            )).parsed_data
-            return RemoteRef(branch=branch, sha=data.object_.sha)
-
     async def compare_commits(self, base: str, head: str) -> bool:
         """Prove a normal forward delivery from GitHub's comparison of immutable SHAs."""
         client = self.installation._client(auto_retry=False)
@@ -234,31 +196,3 @@ class Repository(BaseModel):
                 self.owner, self.name, title=title, head=head, base=base, body=body,
             )).parsed_data
             return PullRequest._from_response(self, data)
-
-    async def create_push_capability(self) -> PushCapability:
-        bot_login = await self.installation.app.resolve_bot_login()
-        client = self.installation.app._client()
-
-        with translate_errors("create_push_capability"):
-            data = (await client.rest.apps.async_create_installation_access_token(
-                self.installation.installation_id, repositories=[self.name],
-                permissions={"contents": "write"},
-            )).parsed_data
-            permissions = _permissions(data.permissions)
-            repositories = [item.full_name for item in (data.repositories or [])]
-            # GitHub may include implicit read-only repository metadata access.
-            if permissions not in (
-                {"contents": "write"}, {"contents": "write", "metadata": "read"},
-            ) or repositories != [self.full_name]:
-                raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
-            installation_client = self.installation._client()
-            bot = (await installation_client.rest.users.async_get_by_username(
-                bot_login,
-            )).parsed_data
-            if (bot.login.lower() != bot_login.lower() or bot.type != "Bot" or bot.id <= 0):
-                raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
-            return PushCapability(
-                token=SecretStr(data.token), repository=self.full_name,
-                permissions=permissions, expires_at=datetime.fromisoformat(data.expires_at),
-                bot_login=bot_login, bot_user_id=bot.id,
-            )
