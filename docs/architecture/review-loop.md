@@ -1,185 +1,141 @@
-# Review 修订循环
+# Review 修订循环：一条评论怎样才算处理完
 
-M2 F1–F4 已实现并通过 PR #19–#22 合并，包含持久反馈批次、bub 语义决策、修订交付/session
-兜底、原线程回复与保守 resolve。自动化通过，真实 GitHub App/Codex/bub 闭环待验收；M4 F1 已修复
-同秒重复 webhook 重放。合并证据与剩余工作见 [M2 状态与待办](README.md#m2-状态与待办)。
+审查者先问「这里为什么重试三次？」，又在同一条评论里补写「请改成可配置」。如果 worker 已经开始回答第一个问题，control 可以确认 worker 回答过旧问题，但必须把新要求留给下一轮。整个循环围绕一个约定：每轮任务只认领**特定版本的反馈**。本文用「消费」表示 control 已有依据把一个版本从待处理清单中移走；GitHub 上的评论和回复仍然可见。
+
+先认清四个模块，后面遇到「任务成功了，评论怎么还在」就能找到相应的记录：
+
+| 模块 | 手里的输入 | 负责交给下一步的东西 |
+|---|---|---|
+| 事件路由器、`ReviewStore` | GitHub 事件、Flow 和当前 attempt（一次执行） | 带类别和版本的反馈、合批截止时间，以及到期后认领的 `ReviewBatch`（一批待处理版本）。 |
+| 上下文构建器、Judge 和任务协调器 | 冻结的反馈、相关 PR 事实、上轮遗留问题 | 判定和理由。需要回答或改码时，协调器另建 `REVISION` Job，把判定转成给 worker 的指令。 |
+| 编码 worker | 绑定原仓库和会话的 `RevisionTask`、本轮允许处理的版本 | 每项处理说明或暂缓原因，连同工作区、提交以及执行过程的证据。 |
+| 结果处理器、线程处理器 | 已收件的结果、GitHub 上的 PR 与线程、本地冻结的反馈 | 核验事实，发布说明，确认能消费哪些版本、能否解决整条线程，以及能否请求复审。 |
+
+这四步有不同的完成点。`ReviewStore` 已经记录了一项意见，不代表 Judge 已经读过；Judge 决定 `answer` 不代表审查者已经收到回复；worker 交回成功结果，也不能代替 control 对 GitHub 的复读。下面先跟一条评论走到派发，再看多条意见、并发推送和重启怎样改变预期结果。
+
+本文讨论已交付 PR 的评审；从 GitHub 观察一次问答和改码的完整步骤，见[在同一张 PR 上提问，再要求改代码](../feature-walkthroughs/review.md)。
 
 ## B.1 反馈入口与持久 settle
 
-普通非 bot 反馈经过如下路径：
+[事件路由](../../app/controler/events/router.py)识别三种来源：Issue/PR 讨论区评论、review 正文、diff 行上的 inline 评论。它按仓库与编号寻找对应 Flow，过滤本 App 和其他 bot 的反馈。[评审存储](../../app/persistence/reviews.py)以 `(kind, github_id)` 标识评论，对每次有效变化保存版本和所属 attempt（本次执行）。这样不同类别里的同号评论不会串在一起；同一 Issue 上旧 Flow 已见过、此后未改动的评论也不会变成新任务。
 
-```text
-反馈 delivery + 不可变版本 + buffer deadline（同一事务）
-  → 持久 settle 到期
-  → 冻结 ReviewBatch
-  → control Judge 前置判断
-      answer / revise → 原子创建 revision job（冻结 purpose）→ worker
-      wait / ignore → 直接处理批次
-```
+审查者可能先发三条行内评论，再提交一份 review。Control 在 PostgreSQL 保存一个合批截止时间（settle），让相近的意见进入同一个 `ReviewBatch`；重启后按原截止时间继续扫描。重复投递、相同内容和过期事件不延长窗口；删除留下删除记录，旧正文不能复活。遇到同秒编辑，先用 GitHub 的 `changes.body.from` 核对前一版；无法排出先后就等[反馈对账](../../app/controler/reconciliation/feedback.py)重新读取，不按网络到达顺序猜。一个 Flow 同时最多一个待判定或正在处理的批次，之后到来的版本保留给下一轮。[合批与重放测试](../../tests/test_review_batches.py)
 
-review body、inline 和 conversation 使用全局的 `(kind, github_id)` 区分身份，不按 Flow 区分；每个版本保留来源 attempt。
-同一 Issue 上较早 Flow 已记录且之后未编辑的评论，不会成为新 Flow 的待处理反馈。
-重复 delivery/内容和较旧源时间不重置窗口；同秒编辑使用 GitHub `changes.body.from` 校验前序正文。
-前序与本地当前正文不符的同秒编辑无法定序，直接丢弃，由下一次主动观察按 GitHub 实际内容收敛。
-已在同秒历史中表示的转换不再次回放，重复转换只有新鲜远端观察可以推进；较晚时间戳的真实编辑仍正常入库，
-见 [M4 F1](../plan/m4-feedback-replay.md) 与[评审表合并](../plan/review-version-merge.md)。
-没有更新时间的编辑以接收时间排序。删除保存 tombstone，后到的旧事件不能复活正文；
-approval/删除只使原正文失效，不推迟 settle 截止时间，也不唤醒等待中的讨论。
+普通讨论进入 Judge，即使正文写了 `@bot` 或「马上改」。只有 allowlist 中的作者**本人提交** Request Changes，[批次策略](../../app/domain/review_policy.py)才允许跳过 Judge，在较短的提交窗口后直接进入修订。Control 为没有正文的 Request Changes 保留信号，等有可操作的正文或 inline 再派任务。编辑不会产生新的强信号，批准、撤销评审也不授权改码。
 
-仅 allowlist 作者本人提交的 Request Changes 使用较短 submit grace 合批后直达 REVISION。
-评论正文（包括 `@bot`、明确修改要求和代码示例）统一进入 Judge；非 allowlist 的 Request Changes
-也作为普通讨论。
-edited 不产生新的强信号，approve/dismissed 不触发修订。空 Request Changes 保存信号但不创建空修改，
-之后收到可操作正文/inline 再处理。配置 bot 和 GitHub `type=Bot` 的事件均不进入反馈循环。
+以 GitHub 评论 501 为例：作者编辑正文后，事件路由器把投递 ID 和 `FeedbackUpdate` 一起交给 [ReviewStore.ingest](../../app/persistence/reviews.py#L48-L105)。投递 ID 用来识别重送；更新里的评论类别、GitHub ID、作者、正文和时间用来确认哪项反馈变了。存储层锁住 Flow，核对当前执行，再将投递记录、反馈版本和需要更新的截止时间一起提交。返回 `True` 表示记录了变化，删除也可能返回 `True`；此时 control 还没有派任务。到期后运行时调用 [ReviewStore.claim_due](../../app/persistence/reviews.py#L265-L324)，得到本轮新认领的批次列表；普通讨论随后从 `pending_triage()` 取出判定。
 
-旧 v5 快照中的 `command` 值仍可读取，但缓冲区不再将它视为直达修订的强信号；已冻结批次保持原快照。
+**时间线：重启、重复投递和真正的编辑。** 假设使用默认 75 秒窗口，第一条普通评论在 12:00:00 入库。服务重启后重新连接同一数据库，12:00:30 扫描仍领不到；12:01:16 再扫描，若没有新的有效输入且 Flow 仍符合条件，可以领到一批，再扫一次不会领到第二批。假如第 60 秒只是重送相同正文，原截止时间不变。由此可以区分「不够安静，仍在收意见」与「没有新变化，已到可认领时刻」。[时钟与重放用例](../../tests/test_review_batches.py#L143-L197)直接推进测试时钟，不需要让测试进程真的等 75 秒。
 
-到期时间在 PostgreSQL；启动时以及 worker sweep 周期扫描，不依赖进程内 timer。
-到期后最多增加一次 sweep 周期的调度延迟。一个 Flow 最多一个 ready/processing 批次，
-批次从前置判断到 worker 执行和反馈发布一直保有这一约束，直到处理完成。
+批次一旦认领，control 不会就地改写清单。同一组测试先认领评论 101 的版本 1（`Add a bound.`），随后收到新正文 `Add an upper and lower bound.`，再收到新评论 102。即使合批窗口已经过去，第一批仍在处理时也领不到第二批。第一批按原清单完成后，下一批恰好含 `(101, 2)`、`(102, 1)`；老批次里仍能读到原句。若排查时只用评论 URL 搜索，两个版本会指向同一个页面，必须连同批次 ID 和本地版本号比对。
+
+空的 Request Changes 是另一条路径。假设有资格的审查者提交 review 却只在行上写了意见，review 正文可以是空串。只收到提交信号时，control 不会派一个没有指令的编码任务；行内意见到达并过了短窗口后，批次策略才生成带实际要求的 REVISION。查看 `test_empty_request_changes_waits_for_inline_then_bypasses_judge` 可以核对：收到 inline 后推进 16 秒，只得到一个 Job，指令包含原意见 `Add a bound`。普通用户在讨论里打出同样的词，仍走 Judge；两种路径由事件、动作和作者决定。
 
 ## B.2 冻结批次与任务协议
 
-协议 v24 向 worker 下发 INITIAL、REVISION、ARCHIVE。triage 直接使用 ReviewBatch，
-上下文与 Judge 决策保存在批次内，没有 triage job 或本地终态协议。
-REVISION 冻结原 PR、repo identity、head/base、session generation、原始任务和前轮未决点。
-RevisionTask.purpose 为 answer 或 revise；历史任务缺省为 revise。两者的结果都携带同一 batch ID 与精确 item/version 清单，control 校验所有权、当前 attempt 与快照。
+对普通讨论，[上下文构建器](../../app/controler/review/context.py)把已选反馈、PR 标题与正文、来源和目标提交、上一轮未决点放入快照。只有 inline 反馈会补读关联线程，沿用评论自带的文件路径和 diff 片段；不会把整个仓库 diff、原 Issue 或其他线程全部送给 Judge。每组最多 60 项、每项最多 4,000 字符、快照最多 96,000 个 JSON 字节。相关线程缺失、被截断或读取期间提交变化时，判断可停在 `wait`；没有现成代码片段不等于不能让 worker 去仓库定位。GitHub 读取报错也不会被保存为「查过、没有内容」。[上下文边界测试](../../tests/test_review_context.py)
 
-同仓库、同 PR、同来源分支的外部 push、rebase/force-push 和目标分支调整不暂停 Flow。reconcile 不提前改写 delivery head/version；每次准备重新读取 PR，`previous_head_sha` 保留历史已交付提交，`expected_head_sha` 保存本次 PR 观察值，base 使用新读取的目标分支。若已有 Judge context 的 head/base 过期，退休尚未执行的派生 job，清除 context、decision 和 inference 关联后重新判断；不把旧决定绑定到新快照。直接 Request changes 路径也读取当前 PR。
+[Judge](../../app/controler/review/judge.py)通过独立的 `INFERENCE` Job 判断下一步，不占用 Flow 的编码会话。批次保存上下文及其摘要、推理任务关联和决定；重启可接着取结果。如果尚未执行时发现 PR 的 head/base 已变化，control 丢弃不再适用的上下文和决定，重新观察。下发的 `RevisionTask` 则绑定原 worker、仓库、attempt、batch、会话代次和反馈清单；worker 必须交回这些身份对应的结果。[推理持久化](../../app/persistence/inference.py) · [任务准备](../../app/controler/workflow/revisions.py)
 
+Judge 交回的结构化判定 [`TriageVerdict`](../../app/domain/models.py#L395-L429) 包含 `verdict`、`confidence`、`reason`、`instruction` 和 `open_points`。模型拒绝额外字段，要求置信度为 `[0,1]` 内的有限数。`answer` 和 `revise` 都需要非空任务指令；Judge 不能填写最终答案，旧记录的 `answer` 字段仅供兼容。`wait`、`ignore` 不得带任务指令，`answer`、`ignore` 不得带未决点。
 
-control 读取当前 PR 标题正文、head/base SHA、冻结反馈和未决点，只补齐 inline 反馈所在的线程上下文，保留反馈已有的 path、original_commit_id 和 diff_hunk。不读取全 PR 文件 diff、原 Issue/任务正文或无关讨论前缀；非 inline 反馈只保留冻结内容，不猜测线程关系。
-每组反馈/讨论/未决点最多 60 项，每项最多 4000 字符，整个快照最多 96000 JSON 字节。线程定位复用现有分页，合计最多 50 次请求、2 MB；扫描可能读到其他线程的首批评论，但只有命中线程进入模型输入。
-所选反馈/线程确实缺失、截断或读取期间 SHA 变化时保守 wait；缺少现成代码片段本身不会阻止派发，worker 可以定位代码。API 错误留在准备重试边界，不冻结为部分证据。CI 为 `not-fetched`，不推断成功。实时讨论的后到编辑/
-新评论不混入当前批次；首次快照入库后 prepare 重试及重启都复用它。
+**快照里看得到什么？** [相关线程用例](../../tests/test_review_context.py#L110-L156)在一张 PR 里放进巨大的无关补丁、很长的旧 Issue 正文，再挑出 `app.py` 上关于 `+limit = 10` 的行内意见。调用 `build_review_context(repo, flow, batch, 17)` 后，当前反馈仍带路径、片段和原提交 ID；相关讨论只含编号 499，未决点是 `Why ten?`。`files` 为空，`issue`、`task_content` 为 `None`，`ci` 为 `not-fetched`；代码没有请求完整文件列表或 Issue 正文。读到 `not-fetched` 不能报告「检查已通过」，就像没有完整补丁不能报告「PR 没改文件」。
 
-例如：A/B 已进入批次，执行期间到达 C 或 A 的新版本；旧结果只确认 A/B 的旧版本，
-C 和新版 A 留到后续批次。模型已看到（relayed）、当前版本已消费（consumed）、远端 thread
-resolved 是不同事实；M2 F1 不把 addressed 写为 GitHub resolved。
+时间边界也适用于同一线程的旁证。冻结时知道评论 500，随后在 GitHub 读线程时看到 499、500、501。如果 501 在截止时间之后发布，上下文可以把 499 作为背景，保留 500 作为本轮输入，却不能绕过截止时间把 501 塞回背景。否则 Judge 会看见 worker 无权消费的意见。[截止时间用例](../../tests/test_review_context.py#L318-L336)分别断言 `feedback` 和 `discussions` 的 ID，检查的正是这个区别。
 
-Flow 生命周期保持 `ACTIVE/SUCCEEDED/CANCELLED/FAILED`；PR delivery 独立保存
-`NONE/OPENING/OPEN/CLOSED/MERGED`。settling/waiting/running 从 buffer、batch 和 job 推导，
-不恢复旧的 `PR_OPEN/REVISING` Flow 枚举。
+给 worker 的协议中，`batch_id` 和 `feedback` 共同限定了任务范围；`repo`、`branch`、`pr_number` 和 `base_branch` 指明要回到哪个交付现场；`session_id` 配合 `session_generation` 识别应该接续的会话。`purpose` 则决定可以做哪些动作，取值只有 `answer` 和 `revise`。例如，显式编码重试要传 `retry_status`，如果同时把 `purpose` 填成 `answer`，[任务模型](../../app/contracts/protocol.py#L94-L124)会在校验时拒绝。靠任务标题写「只回答」不能取代协议字段。
 
 ## B.3 判定与反馈消费
 
-| 结果 | 当前行为 |
+| 判断 | 对这一批反馈做什么 |
 |---|---|
-| revise 且达到置信度阈值 | 原子创建一个携带同批次的 REVISION，随后走普通 worker 下发流程 |
-| answer | 保存问题指令并创建 purpose=answer 的 REVISION；worker 回答后由 control 发布逐条 note，确认回执后精确消费 |
-| 解析/模型异常、超时、空答案或动作字段不匹配 | 保存分类 failure 并 waiting，不发错误输出或消费反馈 |
-| wait / 低置信度 revise | 保存 open_points/reason，保持 waiting，无新 generation 不自动重跑 |
-| ignore | 消费本批次精确版本，不发外部消息 |
+| `answer` | 把问题交给原工作区的 worker 查证，作为 `purpose=answer` 的 REVISION 执行。Control 负责发布答案。 |
+| `revise` | 达到置信度阈值才创建 `purpose=revise` 的 REVISION；混合反馈中需要改码的问题和需要解释的问题一并写进指令。 |
+| `wait` 或低置信度 `revise` | 保存原因、未决点和未消费版本；新反馈到来时接续，无新信息不重复作语义判断。 |
+| `ignore` | 消费这一批的精确版本，不写 GitHub，也不消费同一评论后来的编辑。 |
 
-新反馈到来后接续 waiting 批次的未消费版本和 open_points。旧批次结束后由新 generation
-建立下一批；没有新信息时不重复调用模型。置信度严格限制在 [0,1]，拒绝 NaN/Infinity、额外字段和
-错误类型。answer/ignore 不能携带未决点；混合反馈需要改码时使用 revise，并在 instruction 中包含问题，其余 open_points 保留。Judge 不生成最终答案；新 answer 必须有非空 instruction，历史 answer 字段只用于读取已保存决定和按原 marker 恢复旧发布，不转换为新任务或重复发送。
-下发任务前重新核对批次/attempt、PR 开放状态及 head/base；发布通过 ResultPlan 和 effect ledger 恢复回执。
+先区分「还需要证据」和「推理服务没有返回」。遇到证据不全、非法输出或不可恢复的配置错误，Judge 可以留下等待决定；遇到可恢复的推理错误或后端不可用，Judge 把错误交回 Job 调度，批次保留待判定。推理存储保存每次调用的派发次数与总期限，重启不会刷新预算。Control 不会把这类运行故障当成答案发给审查者。
+
+谁把「请改成可配置」变成编码任务？[JobCoordinator.triage](../../app/controler/workflow/coordinator.py#L79-L135) 先在 Flow 锁内确认批次仍有效并冻结上下文，再在锁外调用 [ReviewJudge.triage(context)](../../app/controler/review/judge.py#L47)。返回的 `JudgeDecision` 带上下文摘要，只能用于这份快照。若判为 `revise` 且达到阈值，协调器先复读 PR，再次加锁确认批次和基线：基线已变就撤销旧上下文；仍匹配才在**同一事务**记录决定、创建含 `batch_id` 和指令的 REVISION Job，并把批次关联到它。推理尚未返回时，[运行时](../../app/controler/runtime.py#L270-L289)先处理其他批次，下轮继续查询。
+
+可将下列判定作为控制样本，假设 PR 仍开放、基线匹配、选中证据完整，阈值取默认值。`instruction` 描述 worker 应去做什么；`reason` 描述选择这条路径的依据，两者不要混写：
+
+```json
+{"verdict":"revise","confidence":0.6,"reason":"已约定设置上限，命名尚未确定。",
+ "instruction":"为重试次数增加上限。","open_points":["配置项应叫什么？"]}
+```
+
+协调器比较的是「小于阈值」，因此 `0.6` 已经够，预期生成 REVISION，批次保留命名问题。只把 `confidence` 改为 `0.599`，同一份输入转入等待，不创建编码 Job，不发布 GitHub 评论，继续扫描也不会为同一份证据反复调用 Judge。[阈值用例](../../tests/test_review_batches.py#L456-L477)检查了两个具体值。若 Judge 填的是 `ignore` 却留下 `open_points`，则属于结构化输出不合法，不能按有效的忽略决定消费反馈。
+
+等待后的下一轮带着前因。例如先存下 `Which limit?`，没有新版本时扫描拿不到批次；作者补充 `Use 10.` 后，新批次包含旧反馈和新答复，并携带之前的未决点。若审查者进一步要求解释，Judge 可以给出 `answer` 及指令 `Explain the configured retry limit.`。这时查看数据库能找到 `purpose=answer` 的 REVISION、批次与 Job 的关联和仍待处理的反馈；查看 GitHub 则还看不到 bot 回复。实际解释须等 worker 查证并通过结果核验。[问答派发用例](../../tests/test_review_batches.py#L561-L583)
 
 ## B.4 修订结果
 
-修订使用原 session 调用 CodingAgent.resume，每轮注入新的临时 push capability 和原 Flow cwd，
-禁用首轮 MCP broker。prompt 包含原任务、PR 快照、冻结 instruction/feedback、约定和前轮未决点。
-`RevisionCodingOutput` 的 addressed/deferred 必须携带 `item_id`、`version`、GitHub `comment_id` 和
-note/reason；control 拒绝未知、重复、跨版本或互相冲突的引用。
+两种 REVISION 都要求 worker 交回 `RevisionCodingOutput`，例如下面这次只处理了第一条意见。`item_id` 与 `version` 指向冻结的本地反馈，`comment_id` 是这项反馈在 GitHub 对应类别里的 ID；正文被编辑后，只有前两者能精确指出 worker 看过哪一版。[输出模型](../../app/domain/models.py) · [结果校验](../../app/controler/workflow/revisions.py)
 
-非零 exit 按现有失败路径收尾，不消费反馈。成功时只消费明确 addressed 的版本；deferred、遗漏项
-及 needs_clarification 留作未决，有未决问题时不请求 re-review。inline 说明合并回复原线程，review body
-和 conversation 说明按批次发到 PR conversation 并引用来源。空 review 正文作为元数据随成功修订消费。
+```json
+{
+  "summary": "已将最大尝试次数改为配置项，默认仍为三次。",
+  "vcs_backend_used": "git",
+  "addressed": [{"item_id": 17, "version": 2, "comment_id": 501, "note": "配置项已接入，测试覆盖默认值。"}],
+  "deferred": [{"item_id": 18, "version": 1, "comment_id": 502, "reason": "等待确认旧配置的兼容期限。"}],
+  "needs_clarification": ["旧配置需要支持到哪个版本？"]
+}
+```
 
-answer 显式要求仅回答、不修改代码、不 commit/push，覆盖旧编码会话指令；worker 只比较执行前后的本地提交 ID（Git HEAD；jj 当前工作提交，读取不触发快照）。control 只比较目标 open PR 的 head 与冻结值，不读取分支 ref 或比较祖先。结果发布前也使用该冻结 PR head，不能拿 jj 本地工作提交当成 PR head。answer 不更新 delivery head/version，不请求 re-review。
-未提交文件变化、先改后恢复和其他外部副作用不在这两项检查范围内；这不是只读沙箱。失败保留现场及反馈，不自动回滚或升级为 revise。
+五个顶层字段都必填，`vcs_backend_used` 为 `git` 或 `jj`；没有待澄清项时传空数组。未上报的意见仍然待处理。未知 ID、重复引用、把同一版同时列为已处理和暂缓，都会让结果校验失败。成功退出和合法 JSON 只是第一道检查；还要看这次任务允许 worker 做什么。[worker 执行器](../../app/worker/execution/executor.py) · [交付契约测试](../../tests/test_revision_delivery.py)
 
-revise 的退出码之外，worker 要求完整 schema、Git/jj backend、正确 branch、干净工作区和一致的本地/远端 SHA；
-worker 先 fetch 原分支，确认本地没有脏文件或无法证明已发布的提交，再安全同步到 fetch 得到的 R。R 可以晚于 PR 观察值，也不必继承历史 delivery head。Git 与 colocated jj 均保留未发布工作；不会自动 stash、强推或在途 rebase。
-显式重试失败的 revise 时保留原工作区，只读记录远端基线 R，不执行上述同步；本地领先、远端领先或分叉均交给原 agent 处理。续跑消息只包含失败状态和用户补充，不生成提交差异。原会话不可用则报告失败，不另起会话。普通 revise 和只读 answer 不变。
-成功结果必须提供实际 `baseline_sha=R`。control 查询原 open PR 与 ref，核验来源仓库、base/branch、最终本地/远端提交一致，且最终提交等于 R 或继承 R，随后将交付事实及 addressed 声明冻结入 ResultPlan。只有成功结果更新 delivery head/base；评论、resolve 和 re-review 使用冻结任务/结果的 PR 事实。结果重放复用已核验事实与副作用回执。
-允许 SHA 不变的明确 no-op；是否有新提交比较最终提交与 R，外部提交不算 Agent 的新修订。没有新提交或有 deferred/clarification/遗漏项时不请求 review。编码后的并发更新由普通 push 和结果/effect 校验拒绝，保留现场与反馈，不自动重新编码。
+- **回答问题。** Worker 不同步分支，比较会话前后的本地提交（Git HEAD 或 jj 工作提交）；control 复读原开放 PR，要求远端 head 仍等于冻结值。不要求本地提交 ID 与 PR head 相等，不更新交付版本，也不请求复审。两项检查不能发现所有未提交文件变化或其他外部副作用，因此不能把 `answer` 当作只读沙箱。
+- **修改代码。** `previous_head_sha` 是上次已交付的提交，`expected_head_sha` 是准备任务时读到的 PR head，`baseline_sha` 才是 worker 实际 fetch 得到的起点。三者可能不同：同事可以在两次读取之间推送。普通修订安全同步到实际起点，保留无法证明已发布的本地工作，不自动 stash 或强推。完成后 worker 检查分支、工作区干净、本地与远端 SHA 一致；control 独立查询原开放 PR、来源和目标分支、远端 ref，验证最终提交等于实际起点或是它的后代。因此同事的提交不会被算作本轮的新修订，合法的无新提交结果也不会触发复审。[VCS 核验](../../app/worker/execution/vcs.py) · [control 的远端核验](../../app/controler/workflow/revisions.py)
 
-没有 session，或 Codex 0.153.4 明确返回执行前的 `no rollout found for thread id` 且无执行事件时，
-按任务用途重新核验（answer 比较本地提交，revise 只读复核已同步的本地基线、分支和 remote，不再次 fetch/移动工作区）后最多 start 一次；其他错误和不确定结果保留反馈并暂停。journal 在进程启动前记录
-resume/fallback 阶段、一次性兜底消耗和 invocation 结果。重启时没有 terminal 的 started job 不自动重跑。
-`Started` 与 revision_cycles 同事务提交，fallback/重放不增额度；新的显式 retry job 消耗新额度，保留原 worker binding。
-wire24 须协调升级，journal5/inbox1 保持不变。历史任务缺少 `previous_head_sha` 时按旧 expected head 解释；历史结果缺少 `baseline_sha` 时保持原 JSON/digest，新版 revise 成功结果不能省略该证据。升级前先收敛旧执行和未决回执，回滚前同样收敛新版任务；不自动重跑未知执行或恢复既有 BLOCKED Flow。旧执行/结果已收敛的 reopen 也允许同来源分支外部更新，正常关闭/合并/归档仍保持现有终态规则。
-成功接受新 session 后才更新 generation。每次 Amp/Codex 调用按 stdout/stderr 非空新读入
-刷新空闲期限（包括半行、工具调用/结果和进度）；连续无输出达到配置值才超时，没有修订外层总时限。
-心跳、历史查询和 EOF 不续期；静默工具仍可能超时，持续诊断也算活动。历史导出仍有 20 秒
-总时限，VCS 单命令仍有 30 秒总时限；取消和超时保留各自的进程回收。长任务可能超过
-GitHub capability 有效期，不自动续签凭据。INITIAL 失败保留 adapter 的安全详情与
-`execution` 阶段，controler 使用实际阶段和详情，不猜测后端或把执行错误一律标作 VCS。
-真实 GitHub/Codex 两轮 resume 和 start 兜底 smoke 尚未执行，完整 M2 仍待验收。
+用四个符号走一遍最容易混淆的提交比较。[并发推送用例](../../tests/test_revision_recovery.py#L124-L177)让合作者在任务准备前和 fetch 前各更新一次分支，测试用字符串代替实际 SHA：
 
-### 原线程回复与 resolve（F4）
+| 时间点 | 谁看到了什么 | 哪项事实可以据此成立 |
+|---|---|---|
+| 上次成功交付 | Control 保存 `previous_head_sha = baseline` | 可以追溯上次确认过的交付；现在的远端可能已移动。 |
+| 准备修订 | Control 读到 `expected_head_sha = external`，目标分支为 `release` | 可以冻结准备时的 PR 事实；worker 此时还没有 fetch。 |
+| Worker 开始 | Worker fetch 得到 `baseline_sha = fetched` | 应用本轮变更时以 `fetched` 为起点，不能把合作者的更新归到 worker 名下。 |
+| Worker 结束 | 最终 ref 为 `fetched`，或者为它的后代 `revision` | 前者可以是「合作者已修好」的合法结果；后者在谱系核验通过后才有本轮新提交的证据。 |
 
-control 在执行前把 repo/PR、thread node ID、comment database/node ID、正文版本和完整性冻结到 batch；
-worker wire contract 不携带远端操作权限。线程和评论独立 cursor 分页，每次读取最多 50 个请求、2 MB
-JSON 数据；异常或不完整映射保留待处理。REST reply 使用根评论 database ID，不能用 reply ID 或 thread ID。
+同一用例还在结果成功后再应用一次，预期两次都返回 `DONE`。如果两条路径都处理完全部意见、具备请求复审的其他条件，只有最终 ref 为 `revision` 才实际请求 reviewer。换成只回答的任务，control 可以用准备时看到的 `external` 验证 PR 尚未变化，同时让交付记录继续保留原值；发布答案不会把合作者的代码登记为本轮交付。排查「怎么没请求复审」时，先看任务目的和实际 fetch 起点，再看是否还有未决意见。
 
-GraphQL 批量查询使用原生 `cursor + limit`，返回 `Batch[T]`。thread 查询同时返回首批评论，
-外层 batch 与每个 thread 的评论 batch 各自提供 `next_cursor`。后续评论通过 thread
-资源单独请求；`next_cursor=None` 仅表示这次查询到达末尾，完整覆盖还需核对起点和遍历历史。
-持久扫描器拥有嵌套续读状态，不将评论进度编码进 thread 查询的 cursor；末批评论片段
-保持 `complete=False`，自动 resolve 必须重新取得完整证据。
+### 回复到哪里，什么时候能解决线程
 
-每线程说明经持久回执确认后，检查本轮与历史已核验修订对所有人类反馈的精确覆盖；deferred、遗漏、
-clarification、缺失映射或变化的 head 阻止完成。历史依据只接受当前 attempt 的最新 item/version。
-resolve 前刷新线程并补入尚未收到 webhook 的反馈；也核对本地新版本，避免迟到查询撤销同秒编辑。
-同秒刷新只可推进被冻结的 item/version，正文改回原值也不会重获旧版本资格。
-每个 resolve effect 仅保存该线程的 inline 处理依据。
-历史重复转换与无法定序的编辑等待新鲜观察；相关同秒交错由 PostgreSQL 回归验证。
-resolve 后复读记录远端状态和竞态反馈，不自动 unresolve。人工 resolve 不等于新反馈已消费。
+Control 把核验事实、待发布的说明和处理依据冻结成 `ResultPlan`。[说明规划器](../../app/controler/review/resolution.py)为讨论区和 review 正文生成带来源链接的 PR 讨论区回复；对于同一 inline 线程，规划器合并说明，指定**根评论的数据库 ID** 作为回复对象。如果无法唯一定位线程，control 保留相关反馈。`addressed` 是 worker 对某版本的声明，消费反馈是 control 的本地决定，`resolved` 则是 GitHub 上整条线程的状态。
 
-回复通过本 App 作者和精确 marker 找回；响应不确定时保留 uncertain，不盲目重发。
-确定的线程权限/删除错误保存未完成诊断，不阻止已验证代码的 result ACK；回复未成功的 addressed 仍未消费。
-必要线程处理未完成、存在新反馈、或 PR/head 已改变时不请求 re-review。新反馈属于下一批，不重跑旧 CodingAgent。
-标签和 reviewer 查询完成后，发送前还会在 workflow 事务内再次检查待处理反馈；新增反馈使通知跳过，
-留下未完成诊断并正常确认已交付的修订结果。
-GitHub 没有条件式 resolve 事务，刷新与 mutation 之间的竞态仍可能让新评论暂时位于已关闭线程中；
-系统保留该反馈与远端观察记录，持续远端对账属于 M4。
+写回复和解决线程是两个步骤。[线程处理器](../../app/controler/workflow/thread_effects.py)先确认必要回复，刷新线程和本地版本，再用本次或同一 attempt 的历史核验结果逐条核对作者、正文、时间和身份。线程列表与每个线程里的评论分别分页，缺页不算完整。Control 执行 resolve 后还会复读。读取与 resolve 之间若又来了新评论，GitHub 无法把两步放进同一事务；control 记录新反馈，不自动反向打开线程。
+
+在 `RevisionCodingOutput` 示例中，control 确认已发布评论 501 的说明后，可以消费对应版本。评论 502 仍待确认兼容期限，因此即使代码已经推送，control 也不请求复审。空 review 正文可以作为元数据随成功结果消费。只有本轮确有新提交、未决项已清且所需线程处理已确认，control 才准备复审通知；发送前还要检查后到反馈及 PR 是否仍匹配。
+
+**单项说明怎样影响整条线程？** 假设一条完整线程只有两条人类评论 1、2，以及一条 bot 回复 3。`covered_thread(thread, addressed)` 要求至少找到一条人类评论，并为每一条找到匹配的已处理 inline 版本。若清单含 1、2 的精确版本，覆盖判定为真；漏掉 2、2 的正文后来改过、误传同号 review 正文，或线程只读到第一页且标为不完整，判定均为假。bot 自己的回复不会制造一条新的人工义务。即使 GitHub 把线程显示为 `outdated` 或已经人工解决，漏掉 2 仍然不能通过检查。[线程覆盖用例](../../tests/test_review_resolution.py#L30-L54)覆盖这些反例。通过覆盖检查只证明版本吻合，真正执行和确认 resolve 还需前述步骤。
+
+还可以在 worker 的示例结果上做两个对照。第一，把 `item_id: 17` 留着但改成另一个 `comment_id`，control 无法把说明绑定到原反馈，结果失败；预期不发评论、不请求复审，待处理清单仍含原版本。第二，保留完全有效的 `addressed`，只在 `needs_clarification` 留下问题。此时 control 可以确认代码和所处理的版本，交付 SHA 也可以更新，但批次仍为 `waiting`。待处理版本列表甚至可能已空：等待的是额外澄清，不能只凭「列表长度为零」请求 reviewer。[部分交付与错误引用用例](../../tests/test_revision_delivery.py#L916-L973)分别检查 Job、批次、交付记录和远端写入。
+
+结果处理器将**已收件的 Job** 交给 [verify_revision_result](../../app/controler/workflow/revisions.py#L179-L226)，在数据库事务外读取 GitHub。返回错误文字表示具体哪项核验失败；`None` 表示本步没有报告错误，也可能是计划已冻结或 Job 已过时，不能据此消费评论。GitHub 暂时不可读时，核验器保存下次核验时间并抛出 `ResultPending`；由 [ResultApplication 的恢复循环](../../app/controler/workflow/results.py#L192-L232)续办同一结果。核验返回后，处理器在事务中锁住 Flow 和 Job、按结果摘要保存或复用计划；提交后才按计划向 GitHub 写回复。
 
 ## B.5 取消、重试与恢复
 
-- Flow 终态时退休 buffer/活动批次，恢复 sweep 同时退休残留 queued jobs；取消仍不 kill 运行中的 agent。
-- 显式 retry 先清理残留排队任务，仅重试当前失败任务，已被后续任务替换的历史失败不再作为候选。
-  当前失败 review 将原冻结批次交给新的 job，保留后到的新版本；没有当前失败任务时走 INITIAL。
-- triage 不领取 job、不修改 worker 绑定；未完成的 ready 批次由下一轮继续处理，无需任务恢复。
-  判断返回后检查批次/attempt/PR 状态；head/base 变化时清除过期快照与决定，下轮重取上下文。
-  ANSWER 保存决定及发送标记，回执不明时只查远端 marker；明确未发送/拒绝才可重新发送。
-- worker 的上下文读取和 capability 准备期间持续续租；冻结前验证任务所有权和租约，派发前再次验证 token/epoch。
-  过期或已重新分配的准备结果不得冻结或派发；未开始执行的 worker 任务由正常恢复流程重新排队。
-- 已接收的结果依然通过原子结果应用与 GitHub effect ledger 恢复，不能因重放重复派生或消费。
-- 已核验修订遇到明确拒绝的 GitHub 通知时，保留未完成的结果计划、交付/session 事实及成功回执，
-  Flow 保持 ACTIVE；显式 retry 仅重新启用已确认未成功发送的通知，完成后统一提交结果，不创建新修订任务。
-  取消后不能补发；状态不明或仍在执行的通知不得通过显式 retry 重发。
-- 修订准备阶段的 PR/ref/Issue 读取错误持久进入失败路径，包括临时 GitHub 故障；恢复后显式 retry，
-  不因 worker 重连无限重排，也不在 Started 前消耗修订额度。
-- 只支持当前完整 schema、协议 v13 和 journal v3；首次运行使用新数据库与 worker root。
-  同版本的未开始任务、冻结 assignment、已接收结果和 effect 回执继续按持久事实恢复。
-  不导入旧 review_threads，不维护旧 ANSWER 任务或旧版本启动迁移分支。
+**代码还没交付，先查原会话。** 准备时读取 GitHub 遇到临时错误，有持久化的准备重试窗口；尚未 `Started` 不消耗修订次数。普通修订优先恢复原编码会话，没有会话或能证明恢复请求在执行前就被拒绝时，才允许启动一次替代会话；执行是否发生说不清时保留现场。显式重试失败的 `revise` 更严格：保留原工作区，只记录远端基线，不移动分支，让原会话结合失败状态和人的补充续做；原会话不可用就停止。[准备读取](../../app/controler/workflow/preparation.py) · [执行与恢复](../../app/worker/execution/executor.py)
+
+**代码已核验，看哪一次写入缺回执。** 回复发出后断线，先用本 App 的作者身份与精确 marker 查远端，结果未知时不盲重发。明确的线程权限或删除错误会留下诊断和未消费反馈，不必推翻已核验的代码。其他必须完成的通知若被明确拒绝，显式重试可以续办那项通知，复用已成功回执，不要求 worker 再写一遍代码。[写入处理](../../app/controler/workflow/effects.py) · [恢复测试](../../tests/test_revision_recovery.py)
+
+**取消，看原 worker 是否确认停止。** Control 停用待处理批次和排队任务，向仍在执行的 worker 发持久停止请求；确认前保留绑定。已取消的任务不能靠重放旧结果补发通知。[停止确认](../operations/cancel-drain.md#停止确认) · [取消与结果恢复测试](../../tests/test_revision_recovery.py)
+
+**为什么「重试」要区分明确拒绝和结果未知？** 设想结果计划的最后一步是请求 reviewer，GitHub 明确返回 422，客户端能确认请求被拒绝。恢复用例要求 Flow 进入阻塞，保留已经核验的修订、写入记录和错误；服务重启也不能凭空把这一步确认成功。修复 reviewer 配置并显式重试时，处理器可以针对明确失败的步骤续办。反之，如果发送说明后连接断开，系统连评论是否已经出现都不知道，记录的写入状态是 `UNCERTAIN`。此时显式重试 Flow 也不会把那次写入变回「从未尝试」；应先找远端回执，以免同一线程收到两条说明。[未知写入用例](../../tests/test_revision_recovery.py#L589-L608)同时检查了写入状态和结果尚未应用的事实。
 
 ## B.6 参数与验证
 
-| 环境变量 | 默认值 | 用途 |
-|---|---|---|
-| `AGENTFLOW_SETTLE_SECONDS` | 75 | 普通静默窗口 |
-| `AGENTFLOW_SUBMIT_GRACE_SECONDS` | 15 | review submitted/强信号窗口 |
-| `AGENTFLOW_WORKER_SWEEP_INTERVAL` | 5 | 持久 deadline 与结果恢复扫描间隔 |
-| `AGENTFLOW_CONFIDENCE_THRESHOLD` | 0.6 | revise 最低置信度 |
-| `AGENTFLOW_JUDGE_MODEL` / `AGENTFLOW_JUDGE_API_KEY` | 未配置 | control 专用 provider:model 与凭据；model/key/base 均未配置时路由到可推理 worker，部分配置不转派 |
-| `AGENTFLOW_JUDGE_API_BASE` | provider 默认 | 可选模型 API 地址 |
-| `AGENTFLOW_JUDGE_TIMEOUT_SECONDS` | 60 | 一轮推理总预算，包含通信、启动、最多 3 次尝试及退避；不因编码进度续期 |
-| `AGENTFLOW_CODEX_RUN_TIMEOUT_SECONDS` | 1200 | Codex 连续无新 stdout/stderr 输出的空闲秒数，正有限值 |
-| `AGENTFLOW_AMP_RUN_TIMEOUT_SECONDS` | 1200 | Amp 连续无新 stdout/stderr 输出的空闲秒数，正有限值 |
-| `AGENTFLOW_MAX_REVISION_CYCLES` | 20 | 每 attempt 的修订次数限制 |
+以下是[服务端配置](../../app/controler/config.py)和[worker 配置](../../app/worker/config.py)的默认值。窗口、预算、空闲超时解决的是不同问题，调大其中一个不会给另外两项续期。
 
-worker 推理复用 Codex/Amp 的独立新会话，仅生成答案。可恢复失败耗尽保留 READY；配置/鉴权、
-非法输出等不可恢复错误仍保守 WAIT。三次失败或提前耗尽预算在执行记录生成持久通知，
-不消费反馈，也不发送 GitHub 通知。WAITING 后新的有效评论仍按原 ingest/settle 规则形成新批次。
+| 参数 | 默认值及边界 |
+|---|---|
+| `AGENTFLOW_SETTLE_SECONDS` / `AGENTFLOW_SUBMIT_GRACE_SECONDS` | 75 / 15 秒。普通讨论的静默窗口，以及提交 review 后留给同批意见的短窗口。 |
+| `AGENTFLOW_WORKER_SWEEP_INTERVAL` | 5 秒。周期扫描已持久化的截止时间，到点不代表模型已开工。 |
+| `AGENTFLOW_CONFIDENCE_THRESHOLD` / `AGENTFLOW_MAX_REVISION_CYCLES` | 0.6 / 20。前者用于 Judge 判 `revise`；后者按 attempt 计数，在 REVISION `Started` 时计入，新建重试任务并开始执行才再计一次。 |
+| `AGENTFLOW_JUDGE_MODEL` / `AGENTFLOW_JUDGE_API_KEY` / `AGENTFLOW_JUDGE_API_BASE` | 默认不配置；模型、凭据和可选的 API 地址供 control 托管的 bub 推理 worker 使用。没有合适的 bub 时，可由具备推理能力的普通 worker 在独立会话处理。[推理调度](../../app/domain/inference_policy.py) |
+| `AGENTFLOW_JUDGE_TIMEOUT_SECONDS` | 60 秒。一次推理调用的总预算，含排队、最多三次授权派发、通信和退避。 |
+| `AGENTFLOW_CODEX_RUN_TIMEOUT_SECONDS` / `AGENTFLOW_AMP_RUN_TIMEOUT_SECONDS` | 均为 1,200 秒。编码进程连续无新 stdout/stderr 输出的空闲时限；有进度输出的长任务可超过该时长。 |
 
-PostgreSQL 自动化覆盖入口回滚、并发领取、重启、批次内外版本、删除、wait 接续、强信号授权、
-结果重放和 retry，以及快照冻结前重启、准备期续租与过期隔离、无效结果恢复、直接答案丢失回执恢复、
-旧 attempt/关闭 PR/head 变化拦截和过期上下文重建。
-bub 0.4.1 使用本机假模型端点校准真实库行为；真实 provider 的语义 smoke、Codex/GitHub 多轮闭环
-及线程操作仍待各 feature 验收。
+核对一次「修订次数多了一次」时，先按 attempt 找 `Started`，不要数评论、批次或响应包。[计数原子性用例](../../tests/test_revision_recovery.py#L275-L286)在事务里接受 `Started` 后模拟崩溃，回滚后次数为 0，Job 的 `started_at` 也为空。再接受同一任务的开始消息才记 1；相同消息重复到达时返回未再次启动，次数仍是 1。这能区分三种现场：准备阶段重试消耗的是准备窗口，编码真正开始消耗修订次数，核验或通知恢复则继续处理既有结果。
 
-F4 升级检查也拒绝缺少线程处理意图的旧 pending revision plan；先完成或核对它们，禁止直接清除账本。
+观察一次评审可以依次记下：**评论类别、ID 和版本 → 批次与截止时间 → 判定与 Job 的 purpose → 实际基线和结果 → 说明及线程回执**。例如 PR 上暂时没有回复：若批次还在等安静窗口，先核对截止时间；若在等澄清，找 `open_points`；若 worker 已经完成，查看结果计划和哪一项远端写入缺回执。三种现场的 GitHub 页面可能一样，但只有最后一种需要核实写入，前两种重新派编码任务都无助于完成当前讨论。

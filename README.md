@@ -53,7 +53,8 @@ uv run agentflow flow history 42
 |---|---|
 | 安装、隔离和更新 Worker | [部署与配置](docs/deployment/README.md) · [Worker 更新](docs/deployment/worker-update.md) |
 | Flow 受阻、取消、重试或升级 | [运维手册](docs/operations/runbook.md) · [取消与停机](docs/operations/cancel-drain.md) · [升级与恢复](docs/operations/upgrade.md) |
-| Control 如何调度、交付和处理审核 | [端到端流程](docs/architecture/workflows.md) · [Review 循环](docs/architecture/review-loop.md) · [组件职责](docs/architecture/components.md) |
+| 想了解项目如何运作 | [架构导读](docs/architecture/README.md) · [模块地图](docs/architecture/components.md) |
+| 想跟着一次任务看结果 | [功能走查：从提出需求到归档](docs/feature-walkthroughs/README.md) |
 | 开发控制台、运行测试或打包 | [控制台开发](app/controler/web/README.md) · [本地验证](docs/verification/README.md) |
 
-真实 GitHub App、编码服务与目标部署的完整闭环仍待[环境验收](docs/verification/m5-live-e2e.md)；各模块的实现与验证范围见[架构状态表](docs/architecture/README.md#当前实现状态)。
+真实 GitHub App、编码服务与目标部署的完整闭环仍待[环境验收](docs/verification/m5-live-e2e.md)。

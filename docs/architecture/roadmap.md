@@ -1,129 +1,54 @@
-# 路线图
+# AgentFlow 还能怎样扩展？
 
-## 8. 当前目录与里程碑
+今天可以让一个 Flow 经历多轮评审，也可以让一个 worker 同时承接不同 Flow。前者靠同一次开工沿用分支和 PR，后者靠不同工作区分开执行。两者都没有引入父子任务。先看[架构图](diagram.html)了解一次交付经过哪些系统，再从[功能走查](../feature-walkthroughs/README.md)定位当前行为和测试。
 
-```
-agentflow/
-  app/
-    domain/           # 领域事实、类型、端口与纯策略（无运行时 I/O）
-    contracts/        # 版本化 task/result/message 与冻结结果应用契约
-    persistence/      # PostgreSQL schema、事务仓储、指标查询与就绪探针
-      store.py        # CLI、live smoke 与测试使用的仓储聚合
-      database.py     # 共享连接池、事务上下文、时钟、共用锁及 schema 初始化
-      repository.py   # 保留具体类型的显式事务绑定
-      schema.py       # 按依赖顺序初始化的完整建表 SQL
-      records.py      # 原生行类型与必需记录回读校验
-      flows.py        # Flow/Attempt/执行绑定
-      deliveries.py   # 交付与 tool-call 账本
-      jobs.py         # Job 生命周期与原始结果 inbox
-      workers.py      # Worker 会话、库存与 drain
-      assignments.py  # 领取、租约、准备重试与到期恢复
-      inference.py    # 推理调用的入队、取消、结算与恢复
-      stops.py        # 停止意图、授权与回执
-      results.py      # 冻结结果计划与副作用回执
-      reviews.py      # 反馈版本、批次、上下文与线程事实
-      webhooks.py     # 持久 Webhook 消费与事件审计
-      reconciliation.py # PR/反馈对账进度
-      projects.py     # Projects 投影与同步检查点
-      activity.py     # console_activity：Flow 事实账本、时间线快照与版本对比
-      console.py      # 控制台卡片、详情与执行记录查询
-      console_sync.py # 控制台采集的来源 claim 与检查点
-      console_schema.py # 控制台投影、归档表与触发器
-      metrics.py      # 数据库指标读取
-      readiness.py    # 只读就绪探针
-    github/           # githubkit App 认证、GraphQL 分页与远端数据解码
-    controler/        # 控制服务端，根目录为 API、配置与运行时装配
-      events/         # 持久 webhook 消费与事件路由
-      workers/        # Worker 连接、派发通信与历史查询
-      workflow/       # Flow/Job 准备、交付转换、结果与副作用恢复
-      review/         # 审核上下文、反馈解释与 Judge
-      reconciliation/ # PR、反馈与 Projects 对账
-    worker/           # WS client、journal、CodingAgent、prompt、工作目录与 VCS
-    telemetry/        # 通用 logging 与控制端 metrics，分开依赖
-    cli.py            # admin CLI（§10-8）
-    live_smoke.py      # 真实闭环验收命令入口
-    plugins/          # 生命周期 hook 插件（§9-7）
-  tests/
-  pyproject.toml      # uv 管理
-  README.md
-```
+先看系统如何分工。Flow 标识一项用户工作；Attempt 标识这项工作的某一次开工；Job 表示一次可调度的执行。控制端保存这些记录并决定谁有权继续，worker 在指定目录执行，GitHub 则保存分支、PR 和远端评审状态。评估一项扩展时，先明确它改变哪一方的责任。例如提高单机并行度时，要让多个工作目录和执行槽互不干扰；若要把正在修改文件的任务挪到另一台机器，还得回答原机器上的写入何时失效。
 
-包之间的依赖规则见[组件职责](components.md#包依赖边界)。包迁移不改变 CLI、数据库 schema
-或网络消息字段；内部 Python 导入使用新路径，不提供旧路径转发模块。
+<a id="8-当前目录与里程碑"></a>
 
-- **M0（已验收）** 骨架 + webhook 验签 + SQLite（含 `jobs`）+ 配置 + worker / 崩溃恢复骨架；
-  19 个自动化测试、Ruff、Mypy、CLI 与 `/healthz` runtime smoke 全部通过（2026-08-26）；
-- **持久层替换（2026-08-27）** PostgreSQL 成为当前唯一运行时数据库；M0 的 SQLite 描述保留为历史验收事实；
-- **远程执行 Features 1–3（2026-09-02）** serve/worker 分离、多 worker 公平调度与 affinity、持久 lease、
-  同 identity 忙碌重连、serve 重启恢复和结果重放均已实现；跨 worker session 迁移与多 serve HA 不在范围内；
-- **M1（已实现并合并，真实 E2E 待验收）** 触发（含 allowlist）→ Flow 独占 worker/repo → codex 首轮 → 开 PR
-- **M2（已实现并合并，真实 E2E 待验收）** 语义 Triage（bub）门 + 回喂循环
-  （settle → revise/answer/wait/ignore + resume/兜底 + 保守 resolve）；F1–F4 对应 PR #19–#22。
-  同秒重复 webhook 重放已在 M4 F1 修复；合并证据与剩余验收见 [M2 状态与待办](README.md#m2-状态与待办)。
-- **M3（F1/F2/F3 已合并，真实闭环待验收）** 人工合并检测（`pull_request.closed`）→ 归档 + 状态标签 / 评论；
-  拆为 F1 合并检测与任务收敛、F2 工作区清理与 worker 释放、F3 状态回写与闭环验收三个 PR，
-  [F3 实施与验收](../plan/m3-archive-status.md)记录增量回写、恢复操作及真实闭环待办。
-- **M4（实现已落地，真实验收待完成）** 恢复并发、已追踪 Flow 的 PR/反馈对账、
-  close/reopen、准备期有界重试与 Projects v2 同步已接入；阶段范围见
-  [M4 阶段计划](../plan/m4-stage.md)，当前实现以[状态表](README.md#当前实现状态)为准。
-- **M5（部署与运维实现已落地，环境验收待完成）** 持久 Webhook inbox、真实 smoke 入口、
-  Docker/Compose、结构化日志/指标、取消/drain/停机、Kubernetes 及运维恢复文档已提供；
-  真实模型闭环、镜像发布、目标集群与备份恢复仍待验收。每 Flow 动态容器/微 VM 和默认拒绝
-  egress 后置，见 [M5 阶段范围与记录](../plan/m5-stage.md)。
-- **2026-10-15 持久层简化** Runtime 管理共享 Database，服务自行创建所需仓储；Webhook 在
-  receipt 事务内直接构造服务/路由，保留仓储级显式事务绑定。见[实施记录](../plan/persistence-simplification.md)。
+## 现有设计必须守住什么
 
-上述实现状态不代表真实闭环或部署已经验收。当前事实见[架构入口](README.md#当前实现状态)，
-历史计划中的待合并/Draft 描述保留当时语境，不作为当前分支状态。
+**重新开工：同一个 Flow，新的 Attempt。** 修订沿用本次交付的分支和 PR，见[评审循环](../feature-walkthroughs/review.md)。重新开工则由[控制台命令](../../app/controler/console/api.py#L299)调用 [`ControlService.resume`](../../app/controler/workflow/service.py#L189-L227)，传入 Flow 和用户所见的 `expected_attempt_id`。锁内要求该 Attempt 仍是当前轮次、已归档且有归档记录、原绑定已释放，同一 Issue 也不能已被另一 Flow 占用。通过后重置本轮同步和对账进度，以 [`transition(ATTEMPT_STARTED)` 创建新 Attempt](../../app/persistence/flows.py#L143-L155)，有旧交付时为新轮次预留不同分支，然后排新的 INITIAL Job。过期或重复的开工请求不能再开一轮。加入新编码后端也必须维持[首轮交付核验](decisions.md)。见[归档后开新 Attempt 的测试](../../tests/test_console_api.py#L765)。
 
-## 9. 未来方向（Roadmap）
+**调度：哪个目录可以写？** [worker 会话申请工作](../../app/controler/workers/callbacks.py#L330)时，以 worker ID、token 和连接代次调用 [`AssignmentStore.assign_job`](../../app/persistence/assignments.py#L89-L107)。执行槽的 [`_assign_coding`](../../app/persistence/assignments.py#L141-L194)只看本连接上报、匹配仓库且空闲的工作区；已有绑定时还得匹配原目录和代次。只有 INITIAL 能首次占用未绑定的目录，且受排空状态和容量上限约束。锁内复查后写绑定并认领 Job；没有合格位置就不认领。一个 worker 上不同 Flow 因此可以并行，已有绑定的 Flow 不会随意换目录。见[并发分配与停止互不干扰的测试](../../tests/test_workspace_dispatch.py#L85)。
 
-> 以下是 MVP 之后的方向，接口与类型在实际需要时扩展。GitHub 使用具体资源；
-> CodingAgent、Judge 和插件沿用各自已有职责。
+**断线：何时能接回原执行？** [重连处理](../../app/controler/workers/callbacks.py#L986-L998)收到 `started` 却没有活跃执行器的报告，会保留普通编码 Job；只有可恢复的归档清理例外。[`resume_assignment`](../../app/persistence/assignments.py#L357-L409)按原 Job、worker、token、当前连接和工作区身份核验，然后才续租。[工作端 `ExecutionState.resume`](../../app/worker/state/execution.py#L148-L186)也要能接回原执行，或从冻结的归档任务恢复清理。超时时，[清理过期分配的调用处](../../app/persistence/assignments.py#L748)使用 [`decide_job_recovery`](../../app/domain/recovery_policy.py#L61-L77)：已收到结果就保留；租约过期、能证明未执行且无待停止请求才重排；可能执行过的任务超过恢复期限则受阻。这些条件没有一个授权把有疑问的写入搬到另一台机器重跑。
 
-1. **Web 控制台后续能力** —— Kanban、持久混合时间线、同源 API 与单 owner Access 已实现。
-   - cancelled Flow 支持手动展示归档，不改写生命周期、执行或交付事实，见[功能记录](../plan/cancelled-flow-archive.md)。
-   - 实时插话、个人阅读状态和工作流写操作仍待实现，需要明确授权、持久消息语义与 CodingAgent 实时注入契约。
-   - 真实 GitHub App 全来源回填、Access 登录/MFA 与目标部署仍需验收。
+**审计：重放能证明什么？** [`FlowStore.transition`](../../app/persistence/flows.py#L123-L175)要求调用者已开启事务；旧状态或 Attempt 不符就拒绝写入，受条件保护的空操作不留新事实。有效变化和相应事实同事务保存。[`FlowStore.verify`](../../app/persistence/flows.py#L209-L232)锁定要比对的 Flow，用持久正文和事实调用 [`replay_flow`](../../app/domain/flow_policy.py#L117-L148)：缺起点、正文摘要不符或重复开始同一 Attempt 都报错。输出是账本负责的列与当前行的差异，不会修改 Flow，也不会查 GitHub。PR 是否实际合并仍靠[主动对账](../../app/controler/reconciliation/pull_requests.py#L183)，已发评论能否恢复则靠[逐项回执](decisions.md)。见[非法迁移回滚测试](../../tests/test_flow_states.py#L92-L106)和[事实账本](flow-ledger.md)。
 
-2. **可派生 Flow 编排** —— Flow 像持久化的分布式 subagent 一样 spawn/send/wait/inspect/accept 其他 Flow；
-   每个子 Flow 拥有自己的隔离执行环境、repo、干净上下文、skills、结果和最多一张 PR。
-   - **目标边界已定（2026-09-03）**：调度和协作的一等单位是 Flow，不是人格化 Agent；一 Flow = 一
-     隔离执行环境 = 一独占 repo = 一 branch = 最多一 PR，Attempt 只表示同一 Flow 的执行尝试。目标模型、
-     状态分轴、tool RPC、context/skill portability 和父级验收见[可派生 Flow 编排](derivable-flows.md)。
-   - M1 先让 Flow 全生命周期固定占用单槽 worker/repo，并以 `flow.open_pr` 验证通用 tool transport；
-     FlowLink、派生、durable join、result acceptance 和可释放的跨 worker checkpoint 后续分阶段实现。
+### 从一次重复点击看“同一项工作”
 
-3. **完善 GitHub 协作** —— 覆盖常见协作动作（reviewer 指派、draft PR、labels、Projects 联动、review 线程 resolve 等）。
-   - GitHub 使用具体资源对象，能力按真实需求添加到相应资源；control 同步使用实际接口。
+假定所有者在两个标签页打开同一个已归档 Flow，两页都记住了 Attempt A。第一页请求重新开工，控制端发现 A 仍是当前轮次并满足释放条件，便创建 Attempt B，响应保留原 Flow ID，显示新 Attempt 已排队；A 的归档摘要仍然可以从历史读取。第二页这时也按下重新开工，它送来的仍是 A。即便用户耐心等到 B 也归档再点，控制端仍应拒绝：这个人读过的是 A 的结论，没有确认要在 B 的基础上开工。单查 `archived` 状态分不出两页，跟请求一并提交的 `expected_attempt_id` 才能分清。
 
-4. **Code Agent 标准接口** —— 把"与 code agent 交互"抽象成统一端口，方便接入新的底层 agent（不只 codex）。
-   - **当前接缝已就位**：`CodingAgent` port 已定义 `start / resume`，Codex 是第一个 adapter；实时
-     `inject`、统一日志/产物收集和其他 agent adapter 属于后续扩展。
+[控制台测试](../../tests/test_console_api.py#L765-L830)用仓库 `owner/repo` 的 Issue 7 验证这个过程：归档请求以同样内容重送得到同样的详情；已归档时点普通重试得到 409；首次重新开工成功，只为新 Attempt 排一个 Job；旧页面无论何时重送开工请求都得到 409。由此可见，重试、修订和重新开工需要不同入口。将来若增加批量操作或新的用户界面，调用者仍要能表达“我确认的是哪次开工”，尤其不能在收到冲突后悄悄改用最新 Attempt 再发。
 
-5. **更强隔离** —— 每个 Flow 放进容器 / 微VM，隔离完整 repo、文件系统与网络。
-   - M1 full-access worker 必须先通过专用 OS account、容器或 VM 与 control secret 隔离；不同 Flow repo
-     目录只表达所有权。容器 / 微VM adapter 在 M5 接管 per-Flow FS、egress 和生命周期，支持互不信任租户。
+### 从一次断连看“恢复执行”
 
-6. **多 Worker 调度与恢复** —— 多 identity、session affinity、公平调度、单机多 root、忙碌重连、
-   持久 lease 与 result replay 已完成。
-   - M1 先增加 Flow 生命周期固定 binding：一个 worker 同时服务一个 Flow，空闲 job 期间也不复用。
-   - 后续方向：可释放 checkpoint、跨 worker 重建 session/repo、多 serve leader election、外部副作用幂等键
-     及更完整的可观测性；当前结构化日志和指标已提供。
+现有并行调度测试构造两个仓库，每个仓库提交的任务都比给定的并发上限多一个。worker 先按需求准备互不相同的编码目录，超额的两个 Job 继续排队。测试主动断开连接，然后以原 worker 接回：正在执行的集合保持不变，磁盘上的执行记录内容也没有变化。结束其中一个 Job 后，它不再占用正在运行的位置，但控制端仍保留该 Flow 的绑定供后续评审；停止另一个 Flow 不该连带停止其他目录的工作。检查这些观察值比单数“恢复了多少个连接”更能验证并行是否安全。[测试中的断线前后对照](../../tests/test_workspace_dispatch.py#L121-L160)记录了目录数、运行集合和绑定的区别。
 
-7. **端口插件扩展** —— 在生命周期端口挂插件。
-   例：合并后总结插件——归纳上一段对话里的代码风格偏好、更新仓库的 skill 文件。
-   - **已接线（2026-08-02）**：五个生命周期 hook（`on_flow_start / on_pr_opened / on_review / on_merged / on_archived`）已在 engine 的对应状态转移处触发，插件可订阅；插件异常被隔离（不掀翻 core）。
-     待实现：示例插件 `post-merge-summary` 的插件体（读会话 + diff → 提炼风格偏好 → 提 PR 更新 repo 的 skill），目前只打日志。
+这里有一个影响容量估算的限制：执行槽空闲，只能说明该槽没有正在执行的 Job；周转给别的 Flow 还取决于工作区绑定。新增 worker 或扩大槽位可以服务其他符合条件的工作，却不能仅凭这份新容量认领旧机器上可能已经开始的 Job。若超时诊断表明它受阻，应分别查原执行是否获准启动、是否交回了结果、是否还有停止请求。把“等了多久”当作“没人再写”的证据，会误伤恰好只是连接中断的任务。
 
-8. **Flow 事实账本** —— 以 `console_activity` 的 Flow 事实为 Flow 状态的唯一可信来源，`flows` 为同事务状态表。
-   - **已实现（2026-11-17，自动化验证）**：数据分类、事实目录、写入路径和重放校验见
-     [Flow 事实账本与状态表](flow-ledger.md)，实施记录见 [feature record](../plan/flow-activity-ledger.md)。
-   - 首期只覆盖 `flows` 表。事实引用 Job/PR、交付与 Job 的粗粒度事实、独立的事实表、停止生成触发器快照，
-     以及可派生 Flow 的关系与结果事实，均属后续计划。
+<a id="9-未来方向roadmap"></a>
 
-control 直接依赖具体 GitHub 资源，由 App/Installation 绑定身份并调用 Repository、Issue、PR、Thread 和 Project/Item。
-GitHub 不预留 adapter 或替代协议。`CodingAgent` / `Judge` 保留已有接口，插件使用生命周期 hooks；
-worker 执行器直接管理执行与工作区约束。
-**VCS 不是端口**：它由 Flow repo 准备、自探测 guidance 和只读事实核验函数组成（见 §4.6）。
-当前使用 codex、bub、WebSocket worker、githubkit 和插件集；外部契约校准情况由各组件的验收记录说明。
+## 演进方向及其前提
+
+以下是候选方向，没有上线日期，也没有可供集成方调用的未来 API。表中“今天可以依赖什么”列出已经存在的起点；最后一列描述尚待解决的问题。
+
+| 方向 | 今天可以依赖什么 | 实现前还需要解决什么 |
+| --- | --- | --- |
+| 父子任务 | 每个 Flow 有独立标识；现有工具可以在所属仓库搜索 Flow。 | 谁授权派生？结果交给谁验收？父任务退出后谁来唤醒？见[派生编排提案](derivable-flows.md)。 |
+| 跨机器恢复、高可用控制端 | 同身份重连、持久结果和原工作区可用于恢复。 | 为仓库和会话建立可校验的 checkpoint；恢复前撤销旧执行权。多个控制端还要协调调度权与连接归属。 |
+| 隔离和交互 | 每个 Flow 分开工作目录；控制台可持久排队追加指令。 | 目录无法隔离同一账户下的不可信进程。每任务容器或微 VM、限制出站网络需单独设计；实时插话还需要编码后端确认何时接收指令。 |
+| 审计和插件 | [合并事务提交后通知插件](../../app/controler/workflow/service.py#L298-L307)；[`PostMergeSummary.on_merged(flow)`](../../app/plugins/builtin.py#L15-L21)仅记录 Flow ID，无仓库写入。 | 若要重放交付及父子关系，先定义对应事实和版本；若总结插件要修改仓库 skill，需要提交可审核的变更并处理重复通知。 |
+
+**候选能力怎样验收？** 以跨机恢复为例，未来的实验需要刻意让旧 worker 在新 worker 准备接管后重新出现。如果两个进程仍能写同一个交付分支，即使新机器成功跑完测试，也不能认为接管成功。还应在恢复点核对仓库版本、会话和未交回的结果，说明哪些输入可以重新取回、哪些操作需要先查远端回执。高可用控制端则需要另一组实验：同时启动两个调度者，在其中一个失联和重新加入时证明同一 Job 只有一个合法执行者。通过其中一组实验不等于通过另一组。
+
+再以实时交互为例：当前追加指令允许控制端先收下消息，等合适的 Job 消费它。若未来界面要声称“正在运行的编码者已读”，后端需要能从指定执行器取到确认，并且能区分消息尚在队列、已交到进程、进程已退出三种情况。否则用户可能反复发送同一条纠正，或误以为一项即将提交的修改已经采用新意见。新界面可以先如实展示已收到的输入；在完成这项验证之前，不应把收到消息的时间显示成编码者采用它的时间。
+
+## 怎样读历史计划和验收记录
+
+[M0 骨架](../plan/m0-closeout.md)记载早期 SQLite 设计；[首轮交付](../plan/m1-issue-to-pr.md)、[评审修订](../plan/m2-revision-delivery.md)、[归档](../plan/m3-archive-status.md)和[对账](../plan/m4-stage.md)解释今天这些边界从何而来。计划对应当时的问题；判断现在支持哪种操作，回到[功能走查](../feature-walkthroughs/README.md)。
+
+[部署与运维阶段](../plan/m5-stage.md)提供模板和工具。真实 GitHub App 授权、模型执行、Access 登录及 MFA、目标集群和备份恢复，仍须在目标环境记录结果。核对[真实闭环清单](../verification/m5-live-e2e.md)和[运维手册](../operations/runbook.md)，不要把自动化测试当作这类验收的凭据。
+
+例如，上文的断连测试使用进程内传输，主动切断会话时仍能访问原 worker 的磁盘记录。这个输入适合验收“原机器重连不会重复开工”。如果部署方要验收的是“原磁盘损坏后仍能恢复交付”，就必须换掉故障条件，实际从独立副本取回数据并核对版本。不能只把相同的重连测试多跑几次，就在验收单上勾选磁盘灾难恢复。

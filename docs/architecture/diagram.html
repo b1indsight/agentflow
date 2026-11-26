@@ -1,632 +1,128 @@
 <!doctype html>
-<html lang="zh">
+<html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AgentFlow 架构状态 · 2026-10-15 / E2E 与部署待验收</title>
-<style>
-  :root {
-    --bg:#eaeef3; --surface:#ffffff; --surface-2:#f4f7fb;
-    --ink:#172231; --ink-soft:#4a5768; --line:#d4dce7; --line-strong:#bccadb;
-    --accent:#1f6fe0; --accent-soft:rgba(31,111,224,.10);
-    --done:#1f9d52; --done-bg:rgba(31,157,82,.12);
-    --partial:#b5791b; --partial-bg:rgba(181,121,27,.14);
-    --stub:#5b6b80; --stub-bg:rgba(91,107,128,.13);
-    --missing:#d0455f; --missing-bg:rgba(208,69,95,.10);
-    --dot:rgba(30,60,100,.05);
-    --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
-    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"Helvetica Neue",sans-serif;
-    --r:10px; --maxw:1180px;
-  }
-  @media (prefers-color-scheme:dark){
-    :root{
-      --bg:#0c1220; --surface:#141d2c; --surface-2:#101827;
-      --ink:#dce5f1; --ink-soft:#8b99ad; --line:#243244; --line-strong:#34465d;
-      --accent:#54a6ff; --accent-soft:rgba(84,166,255,.14);
-      --done:#4bcf74; --done-bg:rgba(75,207,116,.13);
-      --partial:#e0a53a; --partial-bg:rgba(224,165,58,.14);
-      --stub:#8194ab; --stub-bg:rgba(129,148,171,.13);
-      --missing:#f2647f; --missing-bg:rgba(242,100,127,.13);
-      --dot:rgba(140,180,230,.055);
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentFlow 架构图｜一次交付如何完成</title>
+  <style>
+    * { box-sizing: border-box }
+    body { margin: 0; background: #f6f7f4; color: #192f3b; font: 16px/1.65 system-ui, sans-serif }
+    main { max-width: 1180px; margin: auto; padding: 36px 28px }
+    header { border-top: 4px solid #254e62; padding-top: 16px }
+    .label { font: 600 12px/1.5 ui-monospace, monospace; letter-spacing: .08em; color: #406276 }
+    h1 { font-size: clamp(30px, 4vw, 48px); line-height: 1.2; margin: 10px 0 }
+    h2 { font-size: 23px; line-height: 1.35; margin: 6px 0 8px }
+    h3 { font-size: 18px; margin: 0 0 4px }
+    p { margin: 0 }
+    header p { color: #415663 }
+    figure { margin: 24px 0; padding: 22px; border: 1px solid #b4c4c9; background: white }
+    figcaption { margin-bottom: 16px; font-weight: 650 }
+    .route { display: grid; grid-template-columns: 1fr 106px 1.25fr 106px 1fr; align-items: stretch }
+    .node { border-top: 3px solid #778f96; background: #eff3f3; padding: 16px }
+    .control { background: #244d60; color: white; border-color: #244d60 }
+    .control .label { color: #d9eaf0 }
+    .worker { border-color: #578378; background: #eaf3ef }
+    .edge { text-align: center; align-self: center; color: #385b69; font-size: 13px }
+    .edge::after { display: block; content: '⟷'; font: 30px/1.1 system-ui }
+    .storage { border-top: 1px solid currentColor; margin-top: 14px; padding-top: 10px; font-size: 14px }
+    .git { margin-top: 14px; border-left: 3px solid #578378; padding-left: 12px; color: #345448 }
+    .notes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 30px }
+    .notes section { border-top: 1px solid #aabdc2; padding-top: 10px }
+    ol, ul { margin: 0; padding-left: 1.45em }
+    li { margin: .4em 0 }
+    a { color: #20526e; text-underline-offset: .2em }
+    .casebook { margin: 30px 0; max-width: 88ch }
+    .casebook > p { margin: 8px 0 16px }
+    .casebook details { margin: 10px 0; border: 1px solid #b4c4c9; background: white; padding: 12px 16px }
+    .casebook summary { cursor: pointer; font-weight: 650; color: #244d60 }
+    .casebook details p { margin-top: 10px }
+    .casebook pre { background: #eff3f3; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere }
+    footer { border-top: 1px solid #aabdc2; margin-top: 22px; padding-top: 12px; display: flex; flex-wrap: wrap; gap: 8px 24px }
+    @media (max-width: 840px) {
+      main { padding: 18px 16px }
+      figure { padding: 14px }
+      .route, .notes { grid-template-columns: 1fr }
+      .edge { padding: 6px; display: flex; justify-content: center; gap: .6em; align-items: center }
+      .edge::after { content: '↕'; font-size: 22px }
+      .notes { gap: 16px }
     }
-  }
-  :root[data-theme="dark"]{
-    --bg:#0c1220; --surface:#141d2c; --surface-2:#101827;
-    --ink:#dce5f1; --ink-soft:#8b99ad; --line:#243244; --line-strong:#34465d;
-    --accent:#54a6ff; --accent-soft:rgba(84,166,255,.14);
-    --done:#4bcf74; --done-bg:rgba(75,207,116,.13);
-    --partial:#e0a53a; --partial-bg:rgba(224,165,58,.14);
-    --stub:#8194ab; --stub-bg:rgba(129,148,171,.13);
-    --missing:#f2647f; --missing-bg:rgba(242,100,127,.13);
-    --dot:rgba(140,180,230,.055);
-  }
-  :root[data-theme="light"]{
-    --bg:#eaeef3; --surface:#ffffff; --surface-2:#f4f7fb;
-    --ink:#172231; --ink-soft:#4a5768; --line:#d4dce7; --line-strong:#bccadb;
-    --accent:#1f6fe0; --accent-soft:rgba(31,111,224,.10);
-    --done:#1f9d52; --done-bg:rgba(31,157,82,.12);
-    --partial:#b5791b; --partial-bg:rgba(181,121,27,.14);
-    --stub:#5b6b80; --stub-bg:rgba(91,107,128,.13);
-    --missing:#d0455f; --missing-bg:rgba(208,69,95,.10);
-    --dot:rgba(30,60,100,.05);
-  }
-
-  *{box-sizing:border-box}
-  body{
-    margin:0; background:var(--bg); color:var(--ink);
-    font-family:var(--sans); line-height:1.5;
-    background-image:radial-gradient(var(--dot) 1px, transparent 1px);
-    background-size:22px 22px;
-    -webkit-font-smoothing:antialiased;
-  }
-  .wrap{max-width:var(--maxw); margin:0 auto; padding:clamp(18px,4vw,40px) clamp(16px,4vw,32px) 64px}
-
-  /* ---------- masthead ---------- */
-  .masthead{display:flex; justify-content:space-between; align-items:flex-start; gap:20px; flex-wrap:wrap}
-  .brand{display:flex; gap:14px; align-items:center}
-  .brand .mark{
-    width:40px; height:40px; border-radius:9px; flex:none;
-    display:grid; place-items:center; font-size:20px;
-    background:var(--accent-soft); border:1px solid var(--line-strong); color:var(--accent);
-  }
-  h1{font-family:var(--mono); font-size:clamp(20px,3.4vw,27px); margin:0; letter-spacing:-.01em; font-weight:600}
-  .tagline{margin:2px 0 0; color:var(--ink-soft); font-size:13.5px}
-  .tagline code{font-family:var(--mono); color:var(--accent); background:var(--accent-soft); padding:.5px 5px; border-radius:5px; font-size:.92em}
-  .theme{
-    font-family:var(--mono); font-size:12px; cursor:pointer;
-    background:var(--surface); color:var(--ink-soft); border:1px solid var(--line-strong);
-    padding:8px 12px; border-radius:8px; display:inline-flex; gap:7px; align-items:center;
-  }
-  .theme:hover{color:var(--ink); border-color:var(--accent)}
-
-  /* ---------- stat ribbon ---------- */
-  .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; margin:22px 0 6px}
-  .stat{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:13px 15px; position:relative; overflow:hidden}
-  .stat::before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--c,var(--accent))}
-  .stat b{font-family:var(--mono); font-size:24px; font-weight:600; font-variant-numeric:tabular-nums; display:block; letter-spacing:-.02em}
-  .stat span{font-size:11.5px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.05em}
-  .stat.d{--c:var(--done)} .stat.p{--c:var(--partial)} .stat.s{--c:var(--stub)} .stat.m{--c:var(--missing)}
-
-  /* ---------- legend ---------- */
-  .legend{display:flex; flex-wrap:wrap; gap:8px 10px; align-items:center; margin:16px 0 26px; padding:12px 14px;
-    background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r)}
-  .legend .hint{font-size:11.5px; color:var(--ink-soft); margin-right:2px; font-family:var(--mono)}
-  .key{
-    font-family:var(--mono); font-size:11.5px; cursor:pointer; user-select:none;
-    display:inline-flex; align-items:center; gap:6px; padding:5px 9px; border-radius:20px;
-    background:var(--surface); border:1px solid var(--line-strong); color:var(--ink-soft);
-    transition:transform .12s ease;
-  }
-  .key .dot{width:9px; height:9px; border-radius:50%; background:var(--kc)}
-  .key[data-filter="done"]{--kc:var(--done)} .key[data-filter="partial"]{--kc:var(--partial)}
-  .key[data-filter="stub"]{--kc:var(--stub)} .key[data-filter="missing"]{--kc:var(--missing)}
-  .key[aria-pressed="true"]{color:var(--ink); border-color:var(--kc); box-shadow:0 0 0 1px var(--kc) inset}
-  .key:hover{transform:translateY(-1px)}
-  .key .missing-dot{border:1.5px dashed var(--missing); background:transparent}
-
-  /* ---------- diagram / planes ---------- */
-  .diagram{display:flex; flex-direction:column; gap:0}
-  .plane{
-    border:1px solid var(--line); border-radius:14px; background:var(--surface-2);
-    padding:16px 16px 18px; position:relative;
-    animation:rise .5s ease both;
-  }
-  .plane + .boundary{margin:0}
-  .plane-label{
-    display:inline-flex; align-items:center; gap:9px; font-family:var(--mono); font-size:11.5px;
-    text-transform:uppercase; letter-spacing:.08em; color:var(--accent);
-    background:var(--accent-soft); border:1px solid var(--line-strong);
-    padding:4px 10px; border-radius:7px; margin-bottom:14px;
-  }
-  .plane-label small{color:var(--ink-soft); letter-spacing:0; text-transform:none; font-size:11px}
-  .plane--edge{background:var(--surface); border-style:dashed}
-  .plane--local .plane-label{color:var(--partial); background:var(--partial-bg)}
-
-  /* boundary divider between planes */
-  .boundary{
-    display:flex; align-items:center; gap:12px; padding:11px 4px; margin:2px 0;
-  }
-  .boundary .rule{flex:1; height:0; border-top:1.5px dashed var(--line-strong)}
-  .boundary .btag{
-    font-family:var(--mono); font-size:10.5px; letter-spacing:.06em; text-transform:uppercase;
-    color:var(--ink-soft); white-space:nowrap;
-  }
-  .boundary .dir{display:flex; gap:8px; flex-wrap:wrap; justify-content:center}
-  .boundary .dir span{font-family:var(--mono); font-size:10.5px; color:var(--accent); white-space:nowrap}
-
-  .row-label{font-family:var(--mono); font-size:10.5px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.07em; margin:14px 0 8px}
-  .row-label:first-of-type{margin-top:0}
-
-  .scroll-x{overflow-x:auto; padding-bottom:2px}
-  .pipe{display:flex; align-items:stretch; gap:10px; min-width:min-content}
-  .pipe .node{flex:1 1 0; min-width:180px}
-  .arrow{align-self:center; font-family:var(--mono); color:var(--accent); font-size:18px; flex:none}
-  .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:10px}
-
-  /* ---------- component node ---------- */
-  .node{
-    background:var(--surface); border:1px solid var(--line); border-radius:var(--r);
-    padding:12px 13px 12px 15px; position:relative; overflow:hidden;
-    transition:transform .14s ease, border-color .14s ease, box-shadow .14s ease, opacity .2s ease, filter .2s ease;
-    --s:var(--accent); --sbg:var(--accent-soft);
-  }
-  .node::before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--s)}
-  .node[data-status="done"]{--s:var(--done); --sbg:var(--done-bg)}
-  .node[data-status="partial"]{--s:var(--partial); --sbg:var(--partial-bg)}
-  .node[data-status="stub"]{--s:var(--stub); --sbg:var(--stub-bg)}
-  .node[data-status="missing"]{--s:var(--missing); --sbg:var(--missing-bg); border-style:dashed}
-  .node[data-status="artifact"]{--s:var(--line-strong); --sbg:transparent; background:var(--surface-2); border-style:dashed}
-  .node:hover{transform:translateY(-2px); border-color:var(--s); box-shadow:0 6px 18px -12px rgba(0,0,0,.5)}
-  .node.dimmed{opacity:.28; filter:grayscale(.5)}
-  .node__top{display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:5px}
-  .node__name{font-family:var(--mono); font-weight:600; font-size:13.5px; letter-spacing:-.01em}
-  .node__role{font-size:12px; color:var(--ink-soft); margin:0 0 9px; line-height:1.42}
-  .node__file{font-family:var(--mono); font-size:11px; color:var(--ink-soft); background:var(--surface-2); border:1px solid var(--line); padding:2px 6px; border-radius:5px; display:inline-block}
-  .node[data-status="artifact"] .node__file{background:transparent; border:none; padding:0}
-  .pill{
-    font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.02em;
-    padding:2px 7px; border-radius:20px; white-space:nowrap; flex:none;
-    background:var(--sbg); color:var(--s); border:1px solid color-mix(in srgb, var(--s) 32%, transparent);
-  }
-
-  /* foundation strip */
-  .foundation{display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; margin-bottom:22px}
-
-  /* ---------- state machine ---------- */
-  section.block{margin-top:34px}
-  .block h2{font-family:var(--mono); font-size:14px; font-weight:600; letter-spacing:.02em; margin:0 0 4px; display:flex; align-items:center; gap:9px}
-  .block h2::before{content:""; width:8px; height:8px; border-radius:2px; background:var(--accent)}
-  .block .sub{color:var(--ink-soft); font-size:12.5px; margin:0 0 16px}
-  .fsm{display:flex; flex-wrap:wrap; align-items:center; gap:9px 8px; background:var(--surface-2); border:1px solid var(--line); border-radius:14px; padding:18px 16px}
-  .state{font-family:var(--mono); font-size:12px; font-weight:600; padding:7px 12px; border-radius:8px; background:var(--surface); border:1px solid var(--line-strong); letter-spacing:.02em; white-space:nowrap}
-  .state.term{border-style:dashed; color:var(--missing); border-color:color-mix(in srgb,var(--missing) 45%, var(--line-strong))}
-  .state.mid{color:var(--accent); border-color:color-mix(in srgb,var(--accent) 45%, var(--line-strong))}
-  .to{font-family:var(--mono); color:var(--ink-soft); font-size:14px}
-  .fsm .brk{flex-basis:100%; height:0}
-  .fsm .cap{font-family:var(--mono); font-size:10.5px; color:var(--ink-soft)}
-
-  /* ---------- M0 callout ---------- */
-  .callout{margin-top:20px; background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--missing); border-radius:var(--r); padding:15px 17px}
-  .callout h3{font-family:var(--mono); font-size:13px; margin:0 0 9px; color:var(--missing)}
-  .callout ul{margin:0; padding-left:18px; display:flex; flex-direction:column; gap:6px}
-  .callout li{font-size:12.5px; color:var(--ink)}
-  .callout code{font-family:var(--mono); font-size:.9em; color:var(--ink-soft); background:var(--surface-2); padding:1px 5px; border-radius:4px}
-
-  footer{margin-top:34px; padding-top:16px; border-top:1px solid var(--line); color:var(--ink-soft); font-size:11.5px; font-family:var(--mono); display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px}
-
-  /* ---------- future / roadmap ---------- */
-  .node[data-status="future"]{--s:var(--accent); --sbg:var(--accent-soft); border-style:dashed; background:var(--surface-2)}
-  .plane--future{border-style:dashed; background:transparent}
-  .plane--future .plane-label{color:var(--accent); background:var(--accent-soft)}
-  .key[data-filter="future"]{--kc:var(--accent)}
-  .key .future-dot{border:1.5px dashed var(--accent); background:transparent}
-  .port-tag{font-family:var(--mono); font-size:10px; color:var(--accent); background:var(--accent-soft);
-    border:1px solid color-mix(in srgb,var(--accent) 28%, transparent); padding:2px 7px; border-radius:5px; display:inline-block}
-
-  .track{display:flex; align-items:stretch; gap:9px; min-width:min-content; padding:2px 0 4px}
-  .ms{flex:0 0 216px; background:var(--surface); border:1px solid var(--line); border-radius:var(--r);
-    padding:13px 14px; position:relative; overflow:hidden; --mc:var(--accent)}
-  .ms::before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--mc)}
-  .ms--now{--mc:var(--partial); border-color:color-mix(in srgb,var(--partial) 40%, var(--line))}
-  .ms--future{--mc:var(--accent); border-style:dashed; background:var(--surface-2)}
-  .ms__head{display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; gap:8px}
-  .ms__id{font-family:var(--mono); font-weight:700; font-size:16px; letter-spacing:.01em; color:var(--mc)}
-  .ms__tag{font-family:var(--mono); font-size:9.5px; text-transform:uppercase; letter-spacing:.05em;
-    padding:2px 7px; border-radius:20px; white-space:nowrap; color:var(--mc);
-    background:color-mix(in srgb,var(--mc) 13%, transparent); border:1px solid color-mix(in srgb,var(--mc) 30%, transparent)}
-  .ms__title{font-family:var(--mono); font-size:12.5px; font-weight:600; margin-bottom:9px; color:var(--ink); letter-spacing:-.01em}
-  .ms__list{margin:0; padding-left:15px; display:flex; flex-direction:column; gap:5px}
-  .ms__list li{font-size:11.5px; color:var(--ink-soft); line-height:1.4}
-  .ms__list li b{color:var(--ink); font-weight:600}
-
-  @keyframes rise{from{opacity:0; transform:translateY(8px)} to{opacity:1; transform:none}}
-  @media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
-  @media (max-width:560px){
-    .pipe{flex-direction:column}
-    .arrow{transform:rotate(90deg)}
-    .boundary{flex-wrap:wrap}
-    .boundary .dir{width:100%; order:3; justify-content:flex-start}
-  }
-</style>
-
+  </style>
 </head>
-<body>
-<div class="wrap">
-
-  <header class="masthead">
-    <div class="brand">
-      <div class="mark">🏗️</div>
-      <div>
-        <h1>AgentFlow</h1>
-        <p class="tagline">目标闭环 · GitHub issue 打 <code>flow</code> 标 → codex 编码 → PR → 审核回喂 → 人工合并 → 归档</p>
-      </div>
-    </div>
-    <button class="theme" id="theme" aria-label="切换主题"><span id="theme-ico">◐</span> <span id="theme-txt">主题</span></button>
+<body><main>
+  <header><div class="label">AGENTFLOW / 系统架构</div>
+    <h1>一次交付如何完成</h1>
+    <p>从打上 flow 标签的 Issue 或控制台任务开始：控制端记下要做的事，工作端修改代码，GitHub 保存推送的提交和 PR。</p>
   </header>
-
-  <div class="stats">
-    <div class="stat d"><b>12</b><span>已实现</span></div>
-    <div class="stat p"><b>7</b><span>部分</span></div>
-    <div class="stat s"><b>0</b><span>桩 stub</span></div>
-    <div class="stat m"><b>0</b><span>M0 缺失</span></div>
-    <div class="stat"><b>M1–M5</b><span>实现已落地 · 环境待验</span></div>
+  <figure>
+    <figcaption>图 01　控制端连接两侧；业务记录与工作目录分别保存</figcaption>
+    <div class="route">
+      <section class="node"><span class="label">外部仓库</span><h2>GitHub</h2>
+        <p>接收提交、展示 PR。评审者留下反馈，并决定是否合并。</p>
+        <p class="storage">远端事实：分支指向、PR 是否关闭或合并、评审线程。</p>
+      </section>
+      <div class="edge">事件通知<br>API 读写</div>
+      <section class="node control"><span class="label">调度与交付</span><h2>控制端 · serve</h2>
+        <p>处理 webhook 和控制台请求，安排 Job，核验结果，调用 GitHub App 接口。</p>
+        <p class="storage"><strong>↕ PostgreSQL</strong><br>保存 Flow 状态、Attempt 交付记录、任务租约、结果和待执行的外部操作。</p>
+      </section>
+      <div class="edge">任务与授权<br>心跳与结果</div>
+      <section class="node worker"><span class="label">代码执行</span><h2>工作端 · worker</h2>
+        <p>主动连接控制端，经认证的 WebSocket 领任务，在绑定目录运行 Codex 或 Amp。</p>
+        <p class="storage"><strong>↕ 本地磁盘</strong><br>保留工作区、会话和执行日志，重连时据此核对执行进度。</p>
+      </section>
+    </div>
+    <p class="git"><strong>独立的 Git 数据流：</strong>工作端使用限定仓库的授权向 GitHub 推送分支；控制端核对远端提交，再处理 PR。</p>
+  </figure>
+  <div class="notes">
+    <section><span class="label">01 / 交付边界</span><h2>分支已推送，PR 就开好了吗？</h2>
+      <ol><li>Flow 是持续跟踪的任务。一次开工称为 Attempt；其下可以有多个执行步骤（Job）。</li>
+        <li>首轮调用 <code>flow.open_pr</code> 时，控制端先核对分支并保存交付意图。收到匹配的执行结果后，才创建或认领 PR。</li>
+        <li>评审修订沿用这一轮的分支和 PR。控制端用 webhook 和主动查询核对已追踪 PR；归档后重新开工会产生新的 Attempt。</li></ol>
+    </section>
+    <section><span class="label">02 / 恢复边界</span><h2>工作端断线，谁能接着跑？</h2>
+      <ul><li>同一身份的工作端重连，核对任务凭据与原工作区；结果若已生成，可以重送，控制端按持久记录继续处理。</li>
+        <li>能证明没有启动、没有待确认停止的任务，租约过期后才可重新排队。可能已执行但无法确认的任务过了恢复期限会被阻塞。</li>
+        <li>断线、归档或结果入库本身都不能证明旧进程已经停止。回收旧执行并确认清理后，工作区才可安全复用。</li></ul>
+    </section>
   </div>
-
-  <div class="legend" role="group" aria-label="按状态筛选">
-    <span class="hint">实现状态 ≠ 端到端验收 · 点击筛选 →</span>
-    <button class="key" data-filter="done" aria-pressed="false"><span class="dot"></span>已实现 implemented</button>
-    <button class="key" data-filter="partial" aria-pressed="false"><span class="dot"></span>部分 partial</button>
-    <button class="key" data-filter="stub" aria-pressed="false"><span class="dot"></span>桩 stub</button>
-    <button class="key" data-filter="missing" aria-pressed="false"><span class="dot missing-dot"></span>缺失 missing</button>
-    <button class="key" data-filter="future" aria-pressed="false"><span class="dot future-dot"></span>将来 future</button>
-  </div>
-
-  <!-- foundation contracts -->
-  <div class="row-label">契约地基 · core 只依赖这些</div>
-  <div class="foundation">
-    <article class="node" data-status="done">
-      <div class="node__top"><span class="node__name">models</span><span class="pill">M0 已验</span></div>
-      <p class="node__role">枚举 · Pydantic 持久化/跨模型契约 · 非持久化 dataclass</p>
-      <code class="node__file">app/domain/models.py</code>
-    </article>
-    <article class="node" data-status="done">
-      <div class="node__top"><span class="node__name">config</span><span class="pill">M0 已验</span></div>
-      <p class="node__role">pydantic-settings · env 前缀 AGENTFLOW_ · allowlist / 路径展开</p>
-      <code class="node__file">app/controler/config.py · app/worker/config.py</code>
-    </article>
-    <article class="node" data-status="done">
-      <div class="node__top"><span class="node__name">ports</span><span class="pill">已定义</span></div>
-      <p class="node__role">CodingAgent / Judge 两个 Protocol · GitHub 使用具体资源 · 工作区策略与 VCS 使用普通函数</p>
-      <code class="node__file">app/domain/ports.py</code>
-    </article>
-  </div>
-
-  <div class="diagram">
-
-    <!-- external plane -->
-    <div class="plane plane--edge">
-      <span class="plane-label">外部 · GitHub <small>issues / PRs / reviews / projects</small></span>
-      <div class="grid">
-        <article class="node" data-status="artifact">
-          <div class="node__top"><span class="node__name">GitHub</span></div>
-          <p class="node__role">交互面本身（headless 的「UI」）：打标触发 · PR review 反馈 · 人工 Approve+Merge · label / 进度评论</p>
-          <code class="node__file">webhooks ↕ REST + GraphQL</code>
-        </article>
-      </div>
-    </div>
-
-    <div class="boundary">
-      <span class="btag">平面边界</span>
-      <span class="rule"></span>
-      <div class="dir"><span>↓ webhooks</span><span>↑ REST + GraphQL</span></div>
-      <span class="rule"></span>
-    </div>
-
-    <!-- control plane -->
-    <div class="plane">
-      <span class="plane-label">Serve / Control plane <small>= 数据库、Judge 与 GitHub API 权威</small></span>
-
-      <div class="row-label">事件管线 · webhook 秒回，长活交后台</div>
-      <div class="scroll-x">
-        <div class="pipe">
-          <article class="node" data-status="done">
-            <div class="node__top"><span class="node__name">Ingress</span><span class="pill">M0 已验</span></div>
-            <p class="node__role">FastAPI · HMAC 验签 · 202 前持久化 inbox · receipt 事务内创建服务/路由 · 提交后通知</p>
-            <code class="node__file">app/controler/api.py</code>
-          </article>
-          <span class="arrow" aria-hidden="true">→</span>
-          <article class="node" data-status="done">
-            <div class="node__top"><span class="node__name">Event Router</span><span class="pill">M2 自动化</span></div>
-            <p class="node__role">delivery/反馈版本原子入库 · allowlist · 持久 settle/冻结批次 · 同秒历史转换核对</p>
-            <code class="node__file">app/controler/events/router.py</code>
-          </article>
-          <span class="arrow" aria-hidden="true">→</span>
-          <article class="node" data-status="partial">
-            <div class="node__top"><span class="node__name">Control Service + Coordinator</span><span class="pill">部分</span></div>
-            <p class="node__role">INITIAL 成功后创建 PR · 语义决策/交付核验 · 原线程回复/resolve · 结果计划与回执恢复 · 真实 E2E、冲突处理待完成</p>
-            <code class="node__file">app/controler/workflow/service.py · coordinator.py</code>
-          </article>
-        </div>
-      </div>
-
-      <div class="row-label">Control 协作 · 协议、Gateway 与持久化</div>
-      <div class="grid">
-        <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Persistence</span><span class="pill">自动化</span></div>
-          <p class="node__role">Runtime 管理共享 Database 生命周期 · 服务自建具体仓储 · 显式事务/时钟/锁 · Store 仅供 CLI、live smoke 和测试聚合</p>
-          <code class="node__file">app/persistence/</code>
-        </article>
-        <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Protocol</span><span class="pill">已验证</span></div>
-          <p class="node__role">wire19 · typed call/result 列表 · 整批校验失败返回固定 error，无详情 · 控制 ACK 与业务接纳分离 · journal5 / inbox1</p>
-          <code class="node__file">app/contracts/protocol.py</code>
-        </article>
-        <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">共享 Gateway + Session</span><span class="pill">通信层</span></div>
-          <p class="node__role">两端 Runtime 持有 · Gateway 统一事件驱动与 package.method 路由 · Session 交付 message / Ready / wake，管理单 reader / FIFO / 写入 / 查询 / 时限</p>
-          <code class="node__file">app/communication/gateway.py · session.py</code>
-        </article>
-        <article class="node" data-status="partial">
-          <div class="node__top"><span class="node__name">GitHub Client</span><span class="pill">部分</span></div>
-          <p class="node__role">githubkit 0.16 · scoped token · Issue/ref/PR · 线程/comment 分页、回复/resolve 有自动化 · 真实 App 待验</p>
-          <code class="node__file">app/github/</code>
-        </article>
-      </div>
-
-      <div class="row-label">常驻后台任务</div>
-      <div class="grid">
-        <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">ServerCallbacks</span><span class="pill">每连接业务</span></div>
-          <p class="node__role">接入函数认证与首条 message 校验 · Runtime 挂载回调 · 调度 / 恢复 / 工具 / 结果与停止提交 · 无独立接收循环</p>
-          <code class="node__file">app/controler/workers/callbacks.py · transport.py</code>
-        </article>
-        <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Reconciliation</span><span class="pill">自动化</span></div>
-          <p class="node__role">已追踪 PR 的 merge/close/reopen · 评论/线程分页补偿 · Projects 独立投影同步 · 持久 cursor/退避 · 不补建新 trigger</p>
-          <code class="node__file">app/controler/reconciliation/</code>
-        </article>
-        <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Judge / Triage</span><span class="pill">adapter 自动化</span></div>
-          <p class="node__role">control 本地 bub 无工具子进程 · 冻结批次上下文 · revise/answer/wait/ignore · 仅 revise 创建 worker job · 真实 provider 待验</p>
-          <code class="node__file">app/controler/review/judge.py · runner.py</code>
-        </article>
-      </div>
-    </div>
-
-    <div class="boundary">
-      <span class="btag">平面边界</span>
-      <span class="rule"></span>
-      <div class="dir"><span>authenticated WebSocket · versioned task/result + flow tool RPC ↓↑</span></div>
-      <span class="rule"></span>
-    </div>
-
-    <!-- worker plane -->
-    <div class="plane plane--local">
-      <span class="plane-label">Remote Worker <small>Runtime 持有共享 Gateway / Session · 无数据库/GitHub App/Judge 凭据</small></span>
-      <div class="grid">
-        <article class="node" data-status="partial">
-          <div class="node__top"><span class="node__name">Codex Driver</span><span class="pill">部分</span></div>
-          <p class="node__role">codex exec / resume · 一次性 session 兜底 · output schema · 每轮短时 push 凭据 · 首轮 worker 内 HTTP MCP</p>
-          <code class="node__file">app/worker/execution/codex.py · V5/V6</code>
-        </article>
-        <article class="node" data-status="partial">
-          <div class="node__top"><span class="node__name">Execution Policy</span><span class="pill">部分</span></div>
-          <p class="node__role">danger-full-access 需专用 account/container/VM 隔离 control secret · Flow 目录只表达所有权 · 每 Flow 动态隔离与受控 egress 后置</p>
-          <code class="node__file">app/worker/config.py · runtime.py</code>
-        </article>
-        <article class="node" data-status="partial">
-          <div class="node__top"><span class="node__name">Flow repo + VCS 核验</span><span class="pill">部分</span></div>
-          <p class="node__role">Flow 独占 repo · Agent 自选 Git/jj · 首轮/修订核验 branch/commit/clean/remote SHA</p>
-          <code class="node__file">app/worker/execution/vcs.py · V8</code>
-        </article>
-        <article class="node" data-status="artifact">
-          <div class="node__top"><span class="node__name">WorkerStateCallbacks + WorkerBusinessCallbacks</span></div>
-          <p class="node__role">Runtime 平级挂载状态协议与业务回调 · worker.history 与 Flow 工具走统一 FIFO，无查询旁路 · WorkerExecution 长期持有 Task / 工具 Future / shielded stop · ExecutionState 持久 journal · 断线不取消执行</p>
-          <code class="node__file">app/worker/runtime.py · transport/state.py · transport/business.py · execution/lifecycle.py · state/execution.py</code>
-        </article>
-      </div>
-    </div>
-
-    <div class="boundary">
-      <span class="btag">外围 · 运维 &amp; 扩展</span>
-      <span class="rule"></span>
-    </div>
-
-    <div class="plane plane--edge">
-      <span class="plane-label">外围 <small>CLI · 测试 · 插件</small></span>
-      <div class="grid">
-        <article class="node" data-status="partial">
-          <div class="node__top"><span class="node__name">CLI</span><span class="pill">部分验证</span></div>
-          <p class="node__role">typer · serve / worker / flows / flow show / cancel / retry · worker-drain · inbox / project · live smoke 入口</p>
-          <code class="node__file">app/cli.py</code>
-        </article>
-        <article class="node" data-status="done">
-          <div class="node__top"><span class="node__name">Automated Tests</span><span class="pill">已验证</span></div>
-          <p class="node__role">角色配置/协议 · PostgreSQL · HMAC/路由 · 远程闭环/断线 · import 边界</p>
-          <code class="node__file">tests/ · pytest / Ruff / Mypy 全绿</code>
-        </article>
-        <article class="node" data-status="partial">
-          <div class="node__top"><span class="node__name">Plugins</span><span class="pill">部分</span></div>
-          <p class="node__role">pluggy 五个生命周期 hook · 提交后尽力调用 · 异常隔离 · 示例 post-merge-summary 仍只写日志</p>
-          <code class="node__file">app/plugins/ · 已接线</code>
-        </article>
-      </div>
-    </div>
-
-    <div class="boundary">
-      <span class="btag">架构预留 · 将来</span>
-      <span class="rule"></span>
-      <div class="dir"><span>按实际需求扩展协议、执行能力与插件</span></div>
-      <span class="rule"></span>
-    </div>
-
-    <!-- future modules plane -->
-    <div class="plane plane--future">
-      <span class="plane-label">将来的模块 <small>边界与待办 · roadmap §9</small></span>
-      <div class="grid">
-        <article class="node" data-status="future">
-          <div class="node__top"><span class="node__name">Web 控制台 (Kanban)</span><span class="pill">未排期</span></div>
-          <p class="node__role">webapp 看板,每张卡 = 一条被追踪的对话,可点进去实时插话。与 GitHub 并列的第二入口 adapter（≠ M4 的 GitHub Projects 看板）</p>
-          <span class="port-tag">预留 · core→store+API 层 · Driver 留实时注入入口</span>
-        </article>
-        <article class="node" data-status="future">
-          <div class="node__top"><span class="node__name">可派生 Flow 编排</span><span class="pill">目标已定</span></div>
-          <p class="node__role">子 Flow 独占执行环境、repo、分支与最多一张 PR · Attempt 只记录执行尝试 · 派生、等待和父级验收待实现</p>
-          <span class="port-tag">derivable-flows.md · roadmap §9-2</span>
-        </article>
-        <article class="node" data-status="future">
-          <div class="node__top"><span class="node__name">CodingAgent 标准接口</span><span class="pill">端口已立</span></div>
-          <p class="node__role">当前 CodingAgent 定义 start / resume，Codex 是首个 adapter；实时 inject、产物统一收集和其他 agent 后续扩展</p>
-          <span class="port-tag">port · ports.CodingAgent</span>
-        </article>
-        <article class="node" data-status="future">
-          <div class="node__top"><span class="node__name">每 Flow 容器 / 微VM</span><span class="pill">后置隔离阶段</span></div>
-          <p class="node__role">动态隔离工作区、HOME/session、凭据与网络 · Docker/K8s 服务部署已提供，不等于每 Flow 强隔离</p>
-          <span class="port-tag">M5 隔离子阶段 · 当前无 Sandbox 端口</span>
-        </article>
-        <article class="node" data-status="future">
-          <div class="node__top"><span class="node__name">执行平面 HA 与迁移</span><span class="pill">后续</span></div>
-          <p class="node__role">多 serve leader election · 共享 registry · 可迁移 session/workspace · 外部副作用幂等</p>
-          <span class="port-tag">当前只支持同 identity 恢复</span>
-        </article>
-        <article class="node" data-status="future">
-          <div class="node__top"><span class="node__name">插件生态</span><span class="pill">hook 已接线</span></div>
-          <p class="node__role">五个生命周期 hook（flow_start / pr_opened / review / merged / archived）engine 已实际触发。留待扩展:更丰富的插件(示例合并后总结仍是桩)</p>
-          <span class="port-tag">app/plugins/ · pluggy · 已接线</span>
-        </article>
-      </div>
-    </div>
-
-  </div><!-- /diagram -->
-
-  <!-- roadmap milestone timeline -->
-  <section class="block">
-    <h2>Roadmap · 里程碑 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">M1–M4 功能与 M5 部署运维已落地 · 环境待验</span></h2>
-    <p class="sub">实现状态与真实验收分别记录；每 Flow 动态强隔离仍后置</p>
-    <div class="scroll-x">
-      <div class="track">
-        <article class="ms ms--now">
-          <div class="ms__head"><span class="ms__id">M0</span><span class="ms__tag">已完成</span></div>
-          <div class="ms__title">骨架 &amp; 崩溃恢复</div>
-          <ul class="ms__list">
-            <li>webhook 验签 · SQLite(jobs)</li>
-            <li>配置 · worker / recover 骨架</li>
-            <li><b>验收:</b> 19 tests · Ruff · Mypy · health 200</li>
-          </ul>
-        </article>
-        <span class="arrow" aria-hidden="true">→</span>
-        <article class="ms ms--now">
-          <div class="ms__head"><span class="ms__id">M1</span><span class="ms__tag">已实现 / 待验</span></div>
-          <div class="ms__title">首轮 happy path</div>
-          <ul class="ms__list">
-            <li>触发(allowlist) → workspace</li>
-            <li>codex 首轮 → 开 PR</li>
-            <li>单 flow 打通</li>
-          </ul>
-        </article>
-        <span class="arrow" aria-hidden="true">→</span>
-        <article class="ms ms--now">
-          <div class="ms__head"><span class="ms__id">M2</span><span class="ms__tag">已合并 / 待验</span></div>
-          <div class="ms__title">回喂循环</div>
-          <ul class="ms__list">
-            <li>F1–F4 · PR #19–#22</li>
-            <li>持久 settle · bub 四类决策</li>
-            <li>修订核验/兜底 · 回复/保守 resolve</li>
-          </ul>
-        </article>
-        <span class="arrow" aria-hidden="true">→</span>
-        <article class="ms ms--now">
-          <div class="ms__head"><span class="ms__id">M3</span><span class="ms__tag">已实现 / 待验</span></div>
-          <div class="ms__title">合并归档</div>
-          <ul class="ms__list">
-            <li>人工合并检测</li>
-            <li>pull_request.closed → 归档</li>
-            <li>状态标签 / 评论</li>
-          </ul>
-        </article>
-        <span class="arrow" aria-hidden="true">→</span>
-        <article class="ms ms--now">
-          <div class="ms__head"><span class="ms__id">M4</span><span class="ms__tag">已实现 / 待验</span></div>
-          <div class="ms__title">规模化</div>
-          <ul class="ms__list">
-            <li>多 flow 并发</li>
-            <li>reconcile 对账</li>
-            <li>GitHub Projects 看板 · 错误恢复</li>
-          </ul>
-        </article>
-        <span class="arrow" aria-hidden="true">→</span>
-        <article class="ms ms--now">
-          <div class="ms__head"><span class="ms__id">M5</span><span class="ms__tag">部署运维 / 待验</span></div>
-          <div class="ms__title">加固 &amp; 部署</div>
-          <ul class="ms__list">
-            <li>Docker/Compose · Kubernetes</li>
-            <li>持久接收 · 取消/drain · 指标</li>
-            <li>发布与恢复待验 · 强隔离后置</li>
-          </ul>
-        </article>
-        <span class="arrow" aria-hidden="true">⇢</span>
-        <article class="ms ms--future" style="--mc:var(--stub)">
-          <div class="ms__head"><span class="ms__id">◇</span><span class="ms__tag">未排期</span></div>
-          <div class="ms__title">Web 控制台 (Kanban)</div>
-          <ul class="ms__list">
-            <li>自建 webapp 看板</li>
-            <li>第二入口 adapter · 可实时插话</li>
-            <li>post-MVP · roadmap §9-1</li>
-          </ul>
-        </article>
-      </div>
-    </div>
+  <figure>
+    <figcaption>图 02　沿一次编码结果，读懂跨进程的三个确认点</figcaption>
+    <ol>
+      <li><strong>工作端先保留自己的答卷。</strong> <a href="../../app/worker/state/execution.py#L194-L219">ExecutionState.complete</a> 接收执行结果或异常，写成本次分配的最终记录。连接断开时可以重送这份记录；此刻数据库可能还不知道编码已结束。</li>
+      <li><strong>控制端确认收到的是同一次执行。</strong> <a href="../../app/controler/workers/callbacks.py#L547-L573">ServerCallbacks.on_result</a> 核对回复编号、工作端和分配凭据，交由 <a href="../../app/persistence/assignments.py#L429-L482">record_assignment_result</a> 保存。重送相同内容可以继续处理，同一分配的矛盾结果不能覆盖旧记录。</li>
+      <li><strong>工作流按已保存的证据交付。</strong> <a href="../../app/controler/workflow/results.py#L112-L133">ResultApplication.apply</a> 接收 Job ID，核验并应用结果。远端操作还需确认时，由恢复循环继续处理这个 Job；完成后返回数据库里的工作状态，不再调用一次编码后端。</li>
+    </ol>
+  </figure>
+  <section class="casebook" aria-labelledby="casebook-title">
+    <span class="label">03 / 对照实例</span>
+    <h2 id="casebook-title">同一项需求，在三端分别能看到什么？</h2>
+    <p>假设你提交了「导出报表时支持按日期筛选」。任务编号是 42，首轮编码交给工作端 A。下面四个片段分别截取这次工作在不同条件下的一个时刻，编号和仓库内容都是示例。展开片段，可以看到应以哪一侧的记录为准，以及另一侧为什么可能暂时没有结果。</p>
+    <details open>
+      <summary>控制台已经返回任务编号，GitHub 上还没有 PR</summary>
+      <p><strong>先看控制端。</strong>浏览器向控制台提交任务，控制端重新核对 GitHub 安装和目标仓库，再让工作流服务登记 Flow、首次开工和编码作业。这些记录在同一笔数据库事务里提交。此时页面可以展示任务；即使工作端 A 正在忙，用户也不需要重复创建它。</p>
+      <pre aria-label="任务详情的示例字段"><code>GET /api/flows/42
+id: 42          lifecycle: queued
+pr_number: null</code></pre>
+      <p>这里只摘取详情响应的三个字段，并非完整的 JSON。编号指向可以继续查询的业务记录；排队表示控制端仍在安排工作。创建任务与打开 PR 发生在不同阶段，因此没有 PR 编号不能说明创建失败。若要知道 A 是否已经领到作业，应查看这个 Flow 的 Job 记录。</p>
+    </details>
+    <details>
+      <summary>工作端已经推送提交，评审者在哪里找 PR？</summary>
+      <p><strong>先区分 Git 推送和 PR 创建。</strong>工作端在已绑定目录里运行编码工具，修改和测试通过后可以把版本推到目标分支。GitHub 此时已经能展示分支差异；评审者通常需要的却是带标题、说明和讨论记录的 PR。这是后来由控制端负责的另一项操作。</p>
+      <p>首轮编码工具向控制端提出 <code>flow.open_pr</code> 请求时，工作流先核对推送的分支并保存交付意图。工作端随后交回与这次意图相符的执行结果，控制端核验后才向 GitHub 创建或认领 PR。若创建请求已经送达但应答丢失，直接重发可能产生重复的远端操作。控制端要先按仓库和分支核对远端状态，不能凭本机进程已经退出就向用户报告成功。</p>
+      <p><strong>读者可以这样核对：</strong>从任务详情里的交付链接打开当前 Attempt 对应的 PR；若只能看到分支，先确认结果是否已由控制端接收。手动新建一张同名 PR 会改变核对现场，不能作为排查的第一步。</p>
+    </details>
+    <details>
+      <summary>控制端重启，工作端 A 上的编码进程还在运行</summary>
+      <p><strong>先保留原执行现场。</strong>WebSocket 断开只切断了两台机器的消息传输。本机工作区仍可能有未提交的修改，编码进程也可能正等一个工具回复。新的控制端能从数据库读出原 Job 的分配，但不能从一条离线状态推断进程已经停止。</p>
+      <p>原工作端重连后会报告自己保留的执行记录。控制端核对 Job、工作端身份和分配凭据；若原执行还活着，就让它接回通信。若原执行已经结束并留下最终结果，就让它补传结果。另一个工作端 B 即便能克隆同一仓库，也没有 A 的分配凭据和本地记录。让 B 重新编码既可能覆盖未交付的工作，也不能解释 A 稍后交回的结果。</p>
+      <p>对照图 02：如果断点位于第一与第二个确认点之间，A 应补传本机保存的结果；若数据库早已收妥结果，控制端可以继续核验交付。两条恢复路径处理的都是原 Job。<a href="../../tests/test_controller_update_boundary.py#L38-L96">控制端替换测试</a>让连接在编码期间真实断开，再检查同一个编码调用最终只交付一张 PR。</p>
+    </details>
+    <details>
+      <summary>已经进入 review，为什么任务仍在等我回答？</summary>
+      <p><strong>看交付状态和问题正文。</strong>编码工具可能已经理解了「按日期筛选」，但无法自行决定以用户时区还是 UTC 划分一天。这时可以请求人工输入。控制端记下问题，保留 Flow 及本次开工的归属，供用户回到详情里回答。进入需要评审或人工参与的阶段，并不要求仓库里已经有一张 PR。</p>
+      <p>假设你回答「全部使用 UTC，以跨午夜的一条记录做测试」。控制端可以先把这句话保存下来。页面显示消息已记录，说明网络请求成功传到了控制端；原工作端是否已经收到、编码工具是否采用要求、GitHub 是否已经出现新的测试，分别要从后续的作业、会话和提交核对。只见到第一项时，重复发送同一句话不能证明后面三项已经完成。</p>
+      <p>如果后来要追查「哪一次开工回答了这个问题」，使用 Flow 编号查整项工作，再对照当前 Attempt 与 PR。重新开工会保留同一个 Flow 的历史，但产生新的一次执行归属。旧 PR 上已有的答复有助于理解背景，不能替代新一轮交付记录。</p>
+    </details>
   </section>
-
-  <!-- state machine -->
-  <section class="block">
-    <h2>Flow 状态机 <span style="font-family:var(--mono);font-size:11px;color:var(--ink-soft);font-weight:400">控制流有自动化 · 真实闭环待验收</span></h2>
-    <p class="sub">单 serve + 多个单槽 worker · 同 Flow 独占 worker/repo 并串行处理反馈批次</p>
-    <div class="fsm">
-      <span class="state mid">ACTIVE</span>
-      <span class="cap">delivery: NONE → OPENING → OPEN → CLOSED / MERGED</span>
-      <span class="to">→</span>
-      <span class="state">SUCCEEDED</span>
-      <span class="brk"></span>
-      <span class="cap">可取消的未合并 Flow →</span>
-      <span class="state term">CANCELLED</span>
-      <span class="cap">持久停止握手 · 未确认不释放绑定</span>
-      <span class="cap" style="margin-left:8px">执行失败 →</span>
-      <span class="state term">FAILED</span>
-      <span class="cap">codex 报错 / 超最大修订轮</span>
-    </div>
-  </section>
-
-  <!-- M0 acceptance result -->
-  <div class="callout">
-    <h3>✓ M0 验收结果（2026-08-26）</h3>
-    <ul>
-      <li><b>自动化</b> —— 19 项覆盖配置/契约、SQLite、HMAC/路由、worker/恢复及 heartbeat 清理/重试；pytest、Ruff、Mypy 全绿。</li>
-      <li><b>运行时</b> —— <code>uv sync --locked</code>、CLI、真实 <code>agentflow serve</code> 与 <code>GET /healthz</code> 200 已验证。</li>
-      <li><b>M1/M2 已实现并合并、E2E 待验收</b> —— F1–F4 完整自动化 377 passed / 0 skipped（2026-09-07）；GitHub/Codex 使用替身，bub 连接假 provider。</li>
-      <li><b>最新完整回归记录</b> —— 2026-10-15 持久层简化：735 passed、无跳过；这是既有实施记录，见 <a href="../plan/persistence-simplification.md">验证与对照</a>。</li>
-      <li><b>剩余工作</b> —— 真实 GitHub App/Codex/bub、镜像发布、目标集群与恢复演练待执行，见 <a href="README.md#当前实现状态">当前状态表</a> 和 <a href="../verification/m5-live-e2e.md">真实验收清单</a>。</li>
-    </ul>
-  </div>
-
-  <footer>
-    <span>AgentFlow · 实现与验收分列 · 文档核对 2026-10-15</span>
-    <span>docs/architecture/ · docs/plan/</span>
-  </footer>
-
-</div>
-
-<script>
-  (function(){
-    var root=document.documentElement;
-    var mq=window.matchMedia("(prefers-color-scheme: dark)");
-    var ico=document.getElementById("theme-ico"), txt=document.getElementById("theme-txt");
-    function cur(){ return root.getAttribute("data-theme") || (mq.matches?"dark":"light"); }
-    function paint(){ var d=cur()==="dark"; ico.textContent=d?"☾":"☀"; txt.textContent=d?"暗色":"亮色"; }
-    document.getElementById("theme").addEventListener("click",function(){
-      root.setAttribute("data-theme", cur()==="dark"?"light":"dark"); paint();
-    });
-    mq.addEventListener&&mq.addEventListener("change",paint);
-    paint();
-
-    // status filter (multi-select)
-    var active=new Set();
-    var nodes=document.querySelectorAll(".node[data-status]");
-    document.querySelectorAll(".key[data-filter]").forEach(function(btn){
-      btn.addEventListener("click",function(){
-        var f=btn.dataset.filter;
-        if(active.has(f)){active.delete(f); btn.setAttribute("aria-pressed","false");}
-        else{active.add(f); btn.setAttribute("aria-pressed","true");}
-        var on=active.size>0;
-        nodes.forEach(function(n){
-          var s=n.dataset.status;
-          if(s==="artifact"){ n.classList.toggle("dimmed", on); return; }
-          n.classList.toggle("dimmed", on && !active.has(s));
-        });
-      });
-    });
-  })();
-</script>
-
-</body>
-</html>
+  <footer><a href="../feature-walkthroughs/README.md">逐项功能走查</a><a href="../../app/controler/workflow/initial.py">首轮交付核验</a><a href="../../app/domain/recovery_policy.py">恢复判定源码</a><a href="roadmap.md">现状与演进边界</a></footer>
+</main></body></html>

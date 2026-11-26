@@ -1,598 +1,93 @@
-# 组件职责
+# 沿着一条任务读代码
 
-本页同时写目标职责和当前边界。组件的汇总状态以[架构入口](README.md#当前实现状态)为准。
+沿着一个 Job 读代码时，先确认上一个模块交出了什么，以及下一个模块还需要验证什么。HTTP 入口交给消费者的是通知，调度器交给 worker 的是带身份的分配，worker 交回的是执行结果。以“给一个 Issue 加标签，最后得到一张 PR”为例：从收件记录确认 GitHub 的通知到没到，从分配记录确认谁领了任务，最后从交付记录确认 PR 开在了哪里。
 
 ## 包依赖边界
 
-`domain/` 保存领域事实、端口与纯策略；`contracts/` 在这些类型上定义跨进程消息与冻结结果。
-`persistence/` 拥有 SQL 和事务，`github/` 拥有资源、远端查询数据、绑定配置及其 GitHub SDK/GraphQL 操作，两者不反向依赖编排层。
-领域容器、合同和仓储直接引用同一个资源模型；公开事实可以离线恢复，SDK/认证只在实际操作时加载。
-`controler/` 是控制服务端，组合仓储、GitHub、协议与插件，负责工作流、Judge 决策和外部副作用；`worker/` 组合协议、CodingAgent
-执行器及 VCS，不加载 control、数据库或 GitHub SDK 实现。轻量或通常会使用的依赖在模块级导入；
-局部导入仅用于实际循环或依赖隔离。CLI 的 uvicorn、领域类型和离线 GitHub 资源直接导入，
-控制端运行时、数据库与配置实例化仍归对应命令；加载 CLI 不提前加载 SQL、SDK 或控制端。
+[领域层 `domain`](../../app/domain)定义 Flow、Attempt、Job 的含义，以及给定一组事实后可以做什么决定。它不用连数据库，也不需要知道 GitHub 的网址。[契约层 `contracts`](../../app/contracts)约定两端能交换哪些任务、结果和会话数据；[通信层 `communication`](../../app/communication)负责把这些消息送到正确的连接，把回复配回原来的请求。传输成功只能说明消息送达，不能替代业务层的交付确认。
 
-`telemetry/logging.py` 只提供通用日志配置；`telemetry/metrics.py` 由控制端使用，并调用
-`persistence/metrics.py` 读取数据库指标。两者不在包入口集中导出，避免 worker 经日志导入 SQL。
-GitHub 错误分类和 Retry-After 计时由 `github/errors.py` 提供，仓储通过 `app.github` 复用纯计算，
-不会初始化 SDK。`domain/project_models.py` 只保留业务目标状态，GitHub Project 绑定配置及远端目标数据归 `github/projects.py`。
-职责边界由 `tests/test_boundaries.py` 检查，另以独立解释器验证 worker 启动、实际 CLI 入口和资源 JSON 恢复的传递导入。
+真正组合这些能力的是[控制端 `controler`](../../app/controler)。它一侧依赖[持久层](../../app/persistence)提交本地事务，另一侧依赖[GitHub 客户端](../../app/github)访问安装了 App 的仓库。[工作端 `worker`](../../app/worker)隔着连接接任务，不直接改业务表。这个分工也由[包依赖测试](../../tests/test_boundaries.py)约束。
 
-`controler/` 根目录的 `api.py`、`config.py`、`runtime.py` 分别拥有 HTTP/WS 入口、
-`ServerSettings` 与 `ServerRuntime` 装配。子包按职责归组：`events/` 消费并路由持久 webhook，
-`workers/` 管理 Worker 连接、派发通信与历史查询，`workflow/` 拥有 Flow/Job 准备、交付转换、
-结果提交及副作用恢复，`review/` 加工审核上下文和反馈并运行 Judge，`reconciliation/` 对账
-PR、反馈与 Projects。事件、Worker 管理和对账调用工作流，工作流调用审核模块；
-各子包直接引用已有领域类型、协议、具体仓储/GitHub 及配置，不反向依赖 API 或运行时。
-Runtime 统一初始化工具、effects、结果应用和 conversation broker；各服务仅接收实际
-使用的数据库与服务，自行创建需要的具体仓储。Runtime 管理共享 Database 的初始化和关闭，
-向服务提供同一 Database。ServerCallbacks 直接使用结果应用，ServerFlowCallbacks 调用 Flow 工具服务；
-结果应用的锁由 Runtime、coordinator
-与回调对象共享；Gateway 只驱动通信事件。Webhook 消费器接收配置、插件、通知回调和 Database，在每次 receipt
-事务内直接创建 ControlService 与 EventRouter，构造函数以事务上下文创建仓储；通知和 hook
-排到外层提交后执行。API 和对账使用独立的常驻控制服务。
-各包入口只说明职责，调用者直接导入具体模块。
+### 跟踪一张任务卡，应该记住哪些编号？
 
-目录列表见[当前目录](roadmap.md#8-当前目录与里程碑)。ASGI Python 入口为
-`app.controler.api`，本地 bub 推理子进程入口为 `app.inference.runner`；
-CLI 命令为 `agentflow serve` / `agentflow worker`，真实验收入口为 `app.live_smoke`。
+先记 **Flow ID**，再分清要查的是哪次开工、哪份作业或哪张 PR。Issue 编号帮助定位仓库里的输入；控制台也能直接用一段文字创建 Flow，此时没有 Issue 编号。[Flow 的输入检查](../../app/domain/models.py#L118-L149)要求 Issue 编号和直接任务正文恰好二选一。两种入口都可以产生后续交付，届时从交付记录读取 PR 编号即可。
 
-## 4.1 Webhook Ingress（FastAPI + uvicorn）
-
-职责：读取原始请求体，用 Webhook secret 校验 `X-Hub-Signature-256`，把有效事件交给 router，避免
-Codex 等长任务占用 GitHub 的 Webhook 请求。
-
-当前实现：
-
-- `GET /healthz` 返回 `{"status": "ok"}`；它是存活探针，不检查数据库或外部依赖；
-- `GET /readyz` 检查运行时启动状态与数据库；`GET /metrics` 由独立 token 保护，未配置时关闭；
-- `GET /api/flows/{flow_id}/conversation` 校验 Cloudflare Access JWT 并限制单 owner 邮箱，经 WS 查询原 worker 历史，
-  不在数据库复制完整会话正文，详见[会话查询 API](conversation-api.md)；
-- `POST /webhook` 缺少或带错误签名时返回 401；签名正确时持久化 webhook inbox 后返回 202；
-- `WS /internal/workers/connect` 按 token map 鉴权，并为每个 worker identity 保持一条连接；
-- FastAPI lifespan 初始化 PostgreSQL schema，启动 reconciler、lease sweeper 和 result inbox recovery，不启动进程内 worker；
-- 自动化测试覆盖 health、错误签名、正确签名、202 持久化确认和一条 signed label→job 路径。
-
-边界：202 表示事件已持久化到 webhook inbox；后台消费者在事务内调用 Event Router，失败后可重试。
-202 不表示业务处理已经完成。
-
-### 4.1.1 Flow 六态、归档与恢复
-
-Flow 持久化 `queued/running/review/blocked/finalizing/archived`，所有看板与 Projects 只映射
-这个字段；finalizing 合并到进行中。失败为 blocked，继续占用 Issue；归档结果只有 succeeded/abandoned。
-`POST /api/flows/{id}/archive` 接受 `{reason,summary,expected_attempt_id}`，复用单 owner Access
-验签及同源检查，通过现有 ControlService 请求收尾。无 PR 的成功调查必须提供非空结论。
-服务端确认业务结论后，在同一事务写入归档 activity 与 archived，不等待 worker 回执。
-若旧执行或已发出的外部操作尚未结清，保留工作区绑定；确认可安全复用后再释放。
-`POST /api/flows/{id}/resume` 接受 `{expected_attempt_id}`，检查 Issue 冲突并开启同一 Flow 的新 Attempt。
-旧 PR、Job 与反馈不授权新 Attempt 工作；分页游标重新开始，activity 历史保留。
-Job 和执行活动通过 `attempt_id` 关联到当时开工的 Attempt。归档 activity 保留原始结果、时间和 PR 身份。
-已核验 webhook 与补偿查询自动更正归档前已合并的 abandoned 结果；严格要求 merged_at 加一秒早于 archived_at。
-合并证据、更正 activity 与当前归档结果同事务提交，重复消息幂等，不改变原归档时间、当前 Attempt、owner 或执行。
-状态 activity 继续由数据库触发器产生；归档、合并证据和更正由内部事务写入，不能覆盖或作为缓存清理。
-这一做法已推广到全部 Flow 状态变化：每次 `FlowStore.transition` 同事务追加一条以事件命名的事实，
-触发器快照只作展示，见 [Flow 事实账本与状态表](flow-ledger.md)。
-Worker 内容按 Attempt 归属，PR 内容按交付身份归属，Issue 共享/未知归属内容的 attempt_id 为 NULL。
-详见[控制台说明](../../app/controler/web/README.md)；原展示归档记录保留在历史规划中。
-
-## 4.2 Event Router
-
-当前实现：
-
-- 触发/反馈忽略当前 App 自动解析的 bot login（不区分大小写）及 GitHub `type=Bot` 的事件；合法关联 PR 的合并事实不受此过滤；
-- 以 `X-GitHub-Delivery` 原子占有并持久化去重，只有成功插入的 handler 才继续处理，同时记录原始 payload；
-- 仅允许 allowlist 用户通过 `issues.labeled(flow)` 创建 queued Flow 与 initial job；
-- `issues.unlabeled(flow)` 或严格等于 `/flow stop` 的评论请求废弃收尾；
-- review body、inline comment 和 conversation 按 Flow/kind/GitHub ID 保存不可变版本，保留来源 attempt；
-- 反馈 delivery、版本和 deadline 共用事务，持久 settle 后冻结批次；仅 allowlist 作者提交的 Request Changes 经 grace 直达 REVISION；
-- `pull_request.closed (merged=true)` 原子保存事件去重、合并时间/SHA、delivery version，停止
-  queued 编码/review 和活动批次并入队唯一 ARCHIVE；校验 repo/PR/installation，approve 不归档。
-- 合并后的任务派发、flow.open_pr、结果应用和 GitHub 写入均检查 delivery；迟到结果只保存
-  执行事实并收尾 ACK，已发 GitHub 操作只查询回执，ARCHIVE 等待旧执行/结果收尾。
-
-M2 F1 自动化覆盖反馈工作流锁、同 Flow 批次串行、重启恢复和精确版本消费。
-WebhookConsumer 已持久化失败退避和重放；PR 对账处理已追踪 PR 的 merge/close/reopen，
-反馈对账补充 Issue/PR/review/线程漏投。未合并 close 请求废弃收尾，reopen 不恢复执行，
-恢复只通过显式新 Attempt操作；漏失的新 Flow trigger 不由对账补建。真实 GitHub payload 兼容性
-仍需服务验收。依据：[消费者](../../app/controler/events/webhooks.py)、
-[PR 对账](../../app/controler/reconciliation/pull_requests.py)、
-[反馈对账](../../app/controler/reconciliation/feedback.py)。
-
-## 4.3 Control Service / Job Coordinator（状态机核心）
-
-业务阶段由 Flow 持久化；Job、反馈批次与 delivery 保留各自技术事实：
-
-| 记录 | 状态 | 约束 |
+| 手头的问题 | 查哪个对象 | 它能回答什么 |
 | --- | --- | --- |
-| Flow | queued、running、review、blocked、finalizing、archived | 非 archived 继续占用 Issue；新 Attempt仅显式恢复 |
-| Delivery | none、opening、open、closed、merged | 原生 PR 事实不替代 Flow；关闭/合并经业务处理器更新 Flow |
-| Review | ready、processing、completed、waiting、cancelled | blocked 暂停；finalizing/archived 退休活动批次 |
-
-Flow 行只由 `FlowStore` 写入：状态经 `transition(flow, FlowEvent)`，标题经 `set_title`，
-两类指针经 `set_current_attempt`、`set_title_job`。前两者在同一事务内追加一条 Flow 事实；
-状态转换规则本身由 `decide_flow_state` 决定，见[写入路径](flow-ledger.md#7-写入路径)。
-
-`ControlService` 在显式事务中负责触发、取消和 retry，并由 `lifecycle` 提交合并事实；
-`lifecycle` 也拥有创建 PR 的身份核验、绑定及 close/reopen。`JobCoordinator` 把 INITIAL、REVISION、ARCHIVE
-持久 job 分派到 `initial.py`、`revisions.py`、`archive.py` 准备版本化 task，并在创建 revision 前直接处理需要 Judge 判断的反馈批次。
-三个类型模块同时拥有各自的结果计划构造；INITIAL 的准备与命名共用一个具体准备对象，REVISION
-持有 answer/revise 的远端核验，ARCHIVE 分别处理清理回执与无 worker 的合并通知。
-`preparation.py` 共用有界 GitHub 读取及准备检查，`plans.py` 只共用失败与审核效果等计划构造。
-类型模块不依赖公共编排服务，也不接受它们作为上下文；`retry` 的共同生命周期检查仍归 `ControlService`。
-Runtime 创建并共享的 `ResultApplication` 按 job ID 读取并校验已持久接收的 result，
-冻结一次结果的领域变更和 GitHub 操作，
-由 `ResultEffects` 查询/执行远端操作并保存回执，最后一起提交本地状态和结果确认。
-PR 依赖操作与 INITIAL 提交复用 `contracts.result_models.unique_pull_request_receipt`，
-只消费已读取的唯一创建回执；退休恢复缺少唯一回执时继续等待，不提交本地完成状态。
-`ResultApplication` 同时拥有逐 job 锁、有界分页和固定并发恢复；Runtime 调度其恢复方法，
-ServerCallbacks 持久接收终态 T 后直接调用 `self.results.apply`，核验提交完成后才回复接纳调用 A；
-工具请求直接调用 `self.tools.execute`。内部配置、数据库、仓储与服务依赖使用具体类型。
-网络请求不占用数据库事务；plugin hook 在提交后调用，不具备持久化投递保证。worker 不能直接更新这些状态。
-`JobCoordinator.prepare_for_assignment` 完成任务构造、push capability 签发和 I/O 后业务复查，
-直接返回 typed `AssignmentArguments` 或 QUEUED/DONE/FAILED。读取故障使用持久重试预算，签发故障直接失败。
-`ServerCallbacks` 通过现有 `Session.watch` 观察编码准备，期间维持准备租约，同连接继续派发推理和
-处理消息。完成通知回到串行 driver，发送前仍独立调用 `self.stops.authorize_dispatch`，再以稳定执行 ID
-和当前连接头构造 `worker.execute` 调用；准备状态不授权 worker 提前报 Started 或结果。
-停止时撤销未下发准备，连接结束或替换时等待其取消清理。`Session.unwatch` 立即撤销完成通知，
-清理中的观察仍计入容量并由 Session 持有；关闭时一并等待，不重复取消已在清理的观察。
-非零 Codex exit 将 Job 置为 failed、Flow 置为 blocked。revision 成功后仅消费明确 addressed 的 item/version，deferred/遗漏项/
-clarification 保持 waiting；不把 addressed 当作远端 resolved。有未决问题时不重新请求审核。
-
-M2 已接入有界 Issue/PR/patch/讨论快照、线程/comment 映射与原线程回复/保守 resolve。
-当前 coordinator 仍有以下边界：
-
-- 上述路径有自动化覆盖，真实 GitHub App/Codex/bub 闭环待验收；
-- 同秒已出现的编辑转换不重复回放，无法定序的同秒编辑直接丢弃；新鲜观察可推进，见 [M4 F1](../plan/m4-feedback-replay.md)；
-- 冻结上下文尚不包含 CI 状态；
-- cancel 持久化停止意图，worker 取消执行并回收持有的进程组；未知旧执行和未决 effects
-  保留绑定，无强制释放。cancel 不撤销已发生的 push/PR/评论，停止回执不改变已归档的业务状态；
-- 未合并 close 结束本次执行，reopen 只记事实；显式 resume 创建新 Attempt。修订拒绝远端 head 漂移，
-  人工 push 的自动接纳、rebase/冲突处理尚未实现。
-
-因此状态转换代码存在不等于目标闭环可用。
-
-### 4.3.1 公共 Gateway / Session 与角色驱动
-
-两端 Runtime 直接创建同类 `Gateway`，统一登记、查找、替换、通信关闭和串行事件驱动。
-ServerRuntime 为每条连接创建 `ServerCallbacks`；WorkerRuntime 分别创建 `WorkerStateCallbacks` 和
-`WorkerBusinessCallbacks`，以 `Gateway.serve(..., state_callbacks, business_callbacks, replace=False)` 平级挂载，
-以固定 `server` key 拒绝重叠连接。worker 两类分别位于 `transport/state.py` 与 `transport/business.py`。
-server 仍由 ServerCallbacks 组合 ServerFlowCallbacks；本轮不扩展 server 的装配重构。
-ServerFlowCallbacks 通过 `bind(routes)` 注册 `flow.open_pr` 请求，并拒绝未注册工具请求。
-WorkerBusinessCallbacks.bind 注册 `worker.history` 和 `before_wait(self.prepare)`，在同一 driver
-中读取历史、管理工具观察。它与 WorkerStateCallbacks 互不引用或调用；状态类是唯一 configure owner，
-负责连接与执行状态协议、terminal 观察和授权。握手缺少恢复决定时，不授权仍在运行的旧执行发送工具。
-Flow 只在 epoch 已绑定且执行 lease 有效时观察队首，发送时再次检查 lease 与 Future；正常完成
-保留原调用关联以消费迟到回复，停止或 assignment 退休/更换后撤销。只读的 WorkerExecution.stopping
-区分正常完成与 fenced stop，不增加共享业务状态容器。
-WorkerBusinessCallbacks 不注册 Flow 工具名；发送前用 `expect_reply(call, model, deliver, on_reply=..., on_rejected=...)`
-登记原调用的接收函数。Dispatcher 匹配 reply_to、method 和模型后，直接调用它的 `on_reply`，
-成功返回才调用 deliver，将回复交给 WorkerExecution 完成原 Future，不经 WorkerStateCallbacks 转发。
-ServerFlowCallbacks 校验 Flow/job 归属，通过连接 owner 的实时检查获得 assignment 与 stopping 状态；
-WorkerBusinessCallbacks 只保存当前连接借出的工具调用，原 Future 继续由 WorkerExecution 持有。
-握手、逐项授权、整批验证错误和关键证据恢复仍由连接回调统一处理。
-Gateway 在准入前调用 `bind(routes)`，冻结 `register("包名.方法名", model, callback)` 的精确请求路由；
-该接口只接受 ToolCall 模型。普通 ToolResult 由 Dispatcher 的连接局部关联表按原 payload ID 分派；
-执行/停止调用及其接纳调用也在发送前登记。`on_reply` 是每次调用可选的交付前钩子，抛错阻止交付；
-call_id、job/token、持久结果和停止证据继续由业务 owner 校验。调用完成、弃用或发送失败时撤销关联，
-Gateway 退出时清空；表不接管执行 Future 的生命周期。server 的 T/R 接收函数保留至 A/B 接纳，允许重复凭据。
-无法匹配的回复交给 `configure(unmatched_reply=...)`：worker 拒绝；server 对跨重连或旧任务终态，
-用持久 job 的原 assignment 身份核对调用 ID，再执行原结果处理，不依赖旧连接的关联表。
-ValidationErrorResult 先进入原 `validation_error` 钩子，未匹配错误不会触发新业务效果。
-worker 验证 epoch 与整批关联头后，通过 Dispatcher.reject_reply 通知原调用登记的 on_rejected；
-核心协议回调不再判断 FlowToolResponse 或直接调用 Flow 对象，关键协议错误仍由自身证据策略处理。
-不使用通配、反射或 pluggy hook 分发。Session 交付既有 message、类型化 Ready 回调或无数据 wake，
-不增加 Delivery；观察任务只借用执行结果，业务处理始终在共同驱动中串行进行。
-
-`configure(message=self.on_message, message_done=self.on_message_done, ...)` 处理完整 message：先校验控制与 epoch，
-再逐项处理 payload，全部成功后执行 message_done。`Message` 是共同消息模型，
-`WorkerMessageUnion` / `ServerMessageUnion` 是含控制变体的方向联合；`WorkerMessage` /
-`ServerMessage` 是 `control=None` 的具体变体，也包含空 payload 的纯收件 ACK。
-它们使用相同的 `message_header`，不增加另一层消息包装。
-
-serve 的 `workers/transport.py:serve_worker` 校验 bearer token、accept 与实际首条 message Register，
-再创建带随机 epoch 的 Session，交给 Runtime 装配回调并调用 `Gateway.serve`。
-回调保存调度、恢复、持久化和 assignment fencing 的连接局部状态，无 Endpoint/Run/Context 对象。
-普通 worker 按仓库维护多个编码 workspace，另有一个无仓库默认 workspace 和独立推理槽；
-本地 bub 仅有推理槽。worker 按排队需求补充并登记具体目录，编码任务按 FIFO、worker
-`last_assigned_at` 和 Flow execution binding 在 PostgreSQL 中事务化领取具体 `(worker_id, workspace)`。
-每仓库限额使用该 worker 上报的配置；不同 workspace 的 job 并行，同 Flow 串行，推理选择规则见下文。
-`WorkerRuntime` 直接负责主动拨号、认证、指数退避和连接任务的关闭等待，
-并直接持有按 Flow 分开的执行集合，不增加 Registry。`Connection` 接口与 `WebSocketTransport` 均位于 `worker/runtime.py`；
-后者只适配底层 WebSocket IO，不负责连接生命周期，不保留独立 client 模块。
-`WorkerExecutor` 只依赖 CodingAgent 和 Flow repo/VCS helpers，不导入 Store、FastAPI 或 GitHub。
-
-Gateway 仅发布当前登记，另保留尚未退休的 Session 以便进程关闭全部通信。A→B→C 重叠替换时，
-C 可越过慢 A；B 等待结束后必须复核身份，不能重新发布或覆盖在线 DB。旧 finally 只退休自己。
-Gateway 退出先撤回路由并 join Session，再调用角色 closed 钩子以原 epoch 写 DB 断连；关闭错误也不跳过 DB 清理。
-进程关闭先 seal，拒绝新登记和查找，再 join 全部通信；不接管 ASGI 或执行任务。正常 ASGI drain
-仍负责业务退出，强制超时退出没有新增业务 join 保证。FastAPI transport.close 仅吸收正常断连的
-WebSocketDisconnect，其他错误与取消继续传播，见[第三阶段记录](../plan/shared-communication-gateway.md)。
-
-不同 identity 可并发在线；同 identity 新连接取得新 epoch 并关闭旧 socket，数据库条件保证旧连接最终失效。
-未授权派发的任务断线后可在 lease 到期 requeue；已授权派发但缺少 Started 的未知执行不当作
-未发送重排。Started job 进入 RECOVERING，只允许原 identity 在 grace 内恢复，
-到期才把 job/活跃 flow 置 FAILED，不覆盖 CANCELLED。取消通过 `worker.stop` 与 `[R,B]`
-握手收敛；真实停止凭据与已发送 effects 未确认前不回复 B、不释放绑定，
-离线和 lease 到期不能替代停止证明。drain 只阻止分配新 Flow，已有绑定继续 revision/archive。
-详见[取消、drain 与停机](../operations/cancel-drain.md)。
-已持久接收的终态结果由 control 接管，不因 worker 的 recovery deadline 到期重新执行或失败；
-后台循环持续恢复未应用结果。必要的 GitHub 操作未完成时不回复 `server.accept_result`，worker 保留 journal 重连。
-Flow 未释放时，即使暂时没有 running job，binding 也继续独占该具体 workspace。
-worker socket 与 executor 解耦，root 内 `journals/flow-<id>.json` 分别保存进度和终态结果；
-结果或停止提交后仍等待精确 ACK 库存凭据，不凭漏报或旧代际消息释放执行。
-进程重启可重放终态，但不会猜测恢复已经消失的 executor。同一 attempt 的后续任务仍只回到首次 Started 的 worker，
-不支持跨 worker session 迁移。同机默认 root 按 identity 派生，并用持久 identity 标记与独占锁拒绝并发或顺序复用。
-
-## 4.4 CodingAgent Drivers
-
-`CodingAgent` 位于 `worker/coding_agent.py`，统一声明 `start`、`resume` 和同步只读
-`read_history`。`CodexAgent` / `AmpCodingAgent` 各自拥有同模块内的原生 history reader；
-`ExecutionState` 只负责执行状态和恢复证据。`WorkerRuntime` 通过该接口在线程中读历史，
-按 session ID 选择来源，与编码后端配置、当前 assignment 及 trusted-host 编码开关无关。
-worker 生命周期的只读实例保留分页、缓存与并发预算；每 Flow 编码及独立 inference 实例仍各自创建。
-
-`WorkerRuntime` 默认装配 Codex；`AGENTFLOW_CODING_AGENT=amp` 装配本地 Amp CLI，采用各自的
-stdout/stderr 空闲超时，不再设置整轮 revision deadline。INITIAL/REVISION 的业务 Schema、VCS 核验、
-交付回执和 ARCHIVE 的 workspace 释放由共用 executor 负责。
-
-两个后端通过 `credentials.inherited_agent_environment` 继承原生 CLI/skills/MCP 环境，
-先清除 ambient Flow、Git/GitHub/SSH 认证与父会话状态，再注入当前 assignment 能力。
-HOME、原生配置入口及自定义 MCP 变量保留；不增加配置解析、skills 复制或通用密钥识别。
-独立 VCS 核验仍使用自己的最小环境；自定义秘密及磁盘文件依赖专用 worker 身份隔离。
-
-`SettingsStore` 在 PostgreSQL 的单行 `runtime_settings` 保存按 Codex / Amp 类型共享的编码默认值；
-owner 设置 API 按版本原子保存，冲突返回 409。注册的 `coding_agent` 独立于可选 inference 能力，
-coordinator 在签发 capability 前按已认证 worker 类型读取设置，经 `AssignmentArguments.model/effort` 下发。
-executor 按 assignment 捕获值，仅用于 INITIAL 或原有 revision fallback 的 `CodingAgent.start`；
-resume 不带全局模型或强度覆盖，不修改共享 agent 或凭据 context。ARCHIVE 不读取模型设置。
-Codex 选择通过原生 `--model` 与 `-c model_reasoning_effort="..."` 传入，空值不覆盖原生配置；
-独立 inference / Bub Judge 不使用此设置。owner 读取 `GET /api/settings/model-catalog` 时，control 通过 `worker.model_catalog` 请求就绪的编码 worker；同类 CLI 列出的模型及其可保存的强度取并集，不探测账号可用性。
-
-### Amp
-
-- `amp_agent.AmpCodingAgent` 适配 worker 的编码请求，使用私有 local execute thread；
-  prompt 经 stdin，恢复显式指定同一 `T-UUID`，
-  新会话按设置传 `--model provider/name`，空值保留 `--mode low`，两者不同时使用；
-  显式模型可额外指定 `--effort`，默认不传；continue 不传模型、模式或强度覆盖。
-  不运行 orb、runner 或 SDK。worker 镜像固定 CLI 为
-  `0.0.1794672034-g01d6fa`，页面提供具体模型下拉列表，不开放插件模式或实时权限探测。
-  原生登录或 `AMP_API_KEY` 归专用 worker 账户。
-- 一次性推理结束时归档原生 thread；编码 thread 保留到对应 Attempt 结束。服务端只向所属 worker 发送指定 ID 的归档命令，不等待执行结果，不删除会话历史。
-- 使用原生 user/workspace settings；每轮仅通过 `--mcp-config` 覆盖保留名称 `flow`。
-  INITIAL 配置当前 WorkerMCP，REVISION 用不可连接的 loopback 端口零替换旧 broker，不带旧 token；
-  该路径不设置原生 `disabled`，会报告连接错误，其他 MCP 保留。Git helper 和 `gh` 临时环境
-  继续按本轮 GitHub capability 重建。
-- 成功必须具有完整、同 session 的 init/result、进程退出 0、`is_error=false` 和 `subtype=success`。
-  最终文本原样交给 executor，Schema 只作提示，不修复 JSON 或自动重跑未知执行。
-- `AmpCodingAgent.run_process` 直接监督编码、历史导出及附件下载，并行有界读取两条管道；
-  编码使用 idle 超时，导出和下载保留各自 total 预算及输出/文件上限。
-  取消/超时先 SIGTERM，升级时包含事前捕获的独立
-  shell 进程组。该快照无法保证回收任意脱离进程树的进程；仍依赖外部隔离。
-- `WorkerRuntime` 按 ID 格式选择历史来源，经 `AmpCodingAgent.read_history` 调用 `AmpHistory`。
-  Amp 原生 export 经公开块映射与脱敏后短时缓存，
-  支持外部追加、块内分页、前缀编辑失效；不保存第二套捕获历史，不显示 thinking。
-  记录 ID 保留 session 前缀，满足 control 的来源校验；两端使用 protocol v27。
-- 不再拒绝 workspace Amp 设置或因额外工具拒收结果；保留必要的原生 shell 与完整终态检查。
-  用户禁用与 workspace MCP 审批由原生 CLI 执行，不自动批准；managed policy/账户插件仍由
-  运维核查，CLI 工具列表不能替代权限或 OS 隔离。
-
-配置、历史预算和取消限制见[部署说明](../deployment/README.md)；实现与实测记录见
-[Amp feature record](../plan/worker-amp-cli.md)。
-
-两个编码后端默认接收 `FULL_ACCESS`。可用 `resolve_file_access` 和 `allows_tcp` 独立计算
-路径及 TCP 规则。受限路径查询跟随符号链接，取请求路径与最终目标权限的交集；
-查询只读取路径元数据，不打开文件内容，也不解析 DNS。两个后端都不能强制执行受限规则，构造时会拒绝
-任一维度受限的 `PermissionProfile`。详见[权限模型](../plan/unified-execution-permissions.md)。
-
-### Codex
-
-`CodexAgent` 实现 `CodingAgent` 的 `start` / `resume` / `read_history`，历史读取由同模块的
-`CodexHistory` 处理原生 rollout；查询无需开启 trusted-host 编码权限。
-
-编码行为：
-
-- start 仅在显式 `AGENTFLOW_TRUSTED_HOST_EXECUTION=true` 时使用
-  `codex exec <prompt> --json -C <flow-repo> -s danger-full-access`；
-- start/resume 都要求 trusted-host 开关；worker 还必须声明专用 account/container/VM 隔离，且不得继承
-  control-plane 环境变量；
-- 从 JSONL 的 `thread.started.thread_id` 读取 session id；
-- start/resume 都显式接收当前 Flow 的 cwd，CLI 参数与子进程工作目录使用同一个值；
-  resume 通过配置覆盖保存的 cwd 与 sandbox；
-- `CodingExecutionContext` 只携带临时 push token 与 MCP endpoint/token；MCP 凭据必须成对提供，
-  未提供 endpoint 时 start/resume 均显式禁用 flow MCP，修订 fallback 也遵循这个规则；
-- VCS 远端验证只接收 push token，在 agent 仓库之外查询固定 URL；repository、过期时间与
-  worker binding 仍由 executor 校验；
-- `-o` 读取原始最终消息，`--output-schema` 约束 CLI 输出；`WorkerExecutor` 按 INITIAL/revision
-  严格解析各自结果模型，adapter 不解释业务 schema；
-- 子进程保留原生配置、skills/MCP 和自定义环境变量；INITIAL 额外获得单次短时 push credential helper 与
-  指向 worker 进程内 loopback HTTP 服务的 `flow.open_pr` MCP 配置及单次 Bearer 凭据，不获得 control/worker credential；
-- 单次运行使用配置的 timeout，超时 kill 子进程并返回 exit 124。
-
-2026-08-01 的独立 CLI 实测证明 `exec` / `resume` 上下文连续、workspace-write 可修改工作区、jj
-`.jj` 可写且能 commit。它没有证明当前 driver 能在真实 flow 中完成 issue→commit→push→PR。
-
-当前 worker 返回 exit/result、worker 验证的 VCS facts 和 `flow.open_pr` handle；control 将完整
-terminal payload 与 digest 持久化到 jobs，并与持久 tool outcome 核对。INITIAL 成功/失败和
-REVISION 的有序 invocations（包括 resume 失败后 fallback）均以该结果为编码审计来源。
-`result_received_at` 和 `result_applied_at` 分别表示接收与应用时间，不表示进程执行开始/结束。
-跨协议不回传完整 prompt 或原始 JSONL。GitHub-only egress 和多轮 context 增长仍待验证。
-
-## 4.5 GitHub 资源
-
-目标职责：以 GitHub App installation 身份创建 PR、评论、设置 labels、请求 reviewers、列出 review
-threads、resolve thread，并签发 push 所需的短时 installation token。自动合并明确不在职责内。
-
-`GitHubApp` 已对齐锁定的 githubkit 0.16，负责 App 认证及安装绑定；`Repository` 读取仓库事实、
-获取 Issue/PR，并通过父 App 签发只含单仓库 Contents write 的短时 capability。
-Issue/PR、线程和 Project/Item 拥有各自操作；查询返回新的不可变观察，错误转换不含响应 body。
-M2 已加入类型化 GraphQL 线程/comment 分页、共享预算、原线程回复和 resolve/复读，
-并通过隔离自动化。Projects v2 资源 API 与独立同步已接入；真实 GitHub App/看板 smoke、
-关闭 issue 等未纳入当前流程的动作仍待验收或实现。接入边界见 [GitHub App 文档](github-app.md)。
-
-## 4.6 本地平面：Flow repo / execution policy / VCS
-
-| 轴 | 是否端口 | 当前载体 | 当前边界 |
-|---|---|---|---|
-| Flow repo | 否 | `prepare_flow_repo/cleanup_flow_repo` | stable flow id 派生独占完整 repo；同 Flow 复用、不同 Flow 分离 |
-| execution policy | 否 | worker config / `CodexAgent` | full access 需专用 account/container/VM；目录只表达所有权 |
-| VCS | 否 | `agent_guidance/verify_pushed_outcome` | Agent 自探测；worker 在 tool 前用固定 remote 和净化、限时命令验证 ancestry/clean/remote SHA |
-
-INITIAL 复用当前 Attempt 的命名推理结果，校验 `title` 和英文 kebab-case `branch_slug` 后才创建 delivery、派发编码。实际分支由 `attempts.delivery_branch` 保存。等待使用独立异步 preparation，不持有事务或阻塞 inference 槽；逻辑调用仍限 30 秒。
-重试沿用已有分支。重新开工时，新交付分支用 `-attempt-<id>` 区分，旧分支与 PR 保留。首次派发前只读检查远端同名 ref，拒绝接管；该检查不构成远端原子占名。
-worker 内的 Code Agent 在 Flow repo 完成 branch/bookmark、commit 和
-push；worker 在转发 `flow.open_pr` 前核验，control 再读取 GitHub ref 核对 SHA 后才创建/复用 PR，最后以
-terminal result 三方核对。当前缺口包括：
-
-- 每 Flow 容器/微 VM 和互不信任租户的强隔离仍属 M5；M1 至少要求 worker 与 control secret 分离；
-- 仅允许 GitHub egress 的策略未实现；
-- installation token 尚未在真实 GitHub 上验证，且 GitHub-only egress 未强制；
-- 大 repo 的完整复制成本和 terminal cleanup 故障恢复仍待验证。
-
-## 4.7 Store（PostgreSQL）
-
-当前持久层由 Database 与具体仓储组成；Store 只为运维、live smoke 和测试聚合仓储。
-
-反馈批次的前置判断/直接修订选择、指令和未决问题归并由 `review_policy` 的纯函数决定；
-`recovery_policy` 根据固定时间及读取的事实决定重排、失败、保留诊断、绑定释放和准备阶段的重试预算；
-`inference_policy` 决定一次推理调用的取消、结算（退避、次数上限、结束原因、worker 避让）、单次尝试和候选 worker。
-功能仓储负责候选查询、信号/回执事实和原子写入，Database 统一维护连接、事务、时钟和共用锁。
-AssignmentStore 的恢复扫描在原 worker 锁事务内先提交 job 动作，再查询事务内更新后的绑定事实；
-策略函数不执行 SQL、读取时钟或调用外部服务。
-
-服务接收共享的 `Database`，自行创建并持有以下具体仓储，使用 Psycopg 3 同步连接池访问
-PostgreSQL，例如在构造函数内执行 `self.flows = FlowStore(database)`，业务调用使用
-`self.flows.get_flow_by_pr(...)`。服务与功能仓储均不依赖聚合 Store：
-
-| 仓储与模块 | 操作归属 |
-| --- | --- |
-| `FlowStore` / `flows.py` | Flow 与 Attempt 的事实读写；Flow 执行绑定的读取与释放 |
-| `DeliveryStore` / `deliveries.py` | 交付状态与 tool-call 去重账本 |
-| `JobStore` / `jobs.py` | Job 生命周期、未应用结果分页及完成提交 |
-| `WorkerStore` / `workers.py` | Worker 会话与库存：连接、就绪、库存上报、断线与启动时的隔离、列表、drain |
-| `AssignmentStore` / `assignments.py` | fenced assignment：领取、开始、心跳、恢复、结果入库、完成、准备重试、退回队列、租约恢复、退休排队任务 |
-| `InferenceStore` / `inference.py` | 推理调用：入队、消费、取消、结果校验后的结算、失联恢复 |
-| `StopStore` / `stops.py` | 停止请求、发送授权与停止回执 |
-| `ResultStore` / `results.py` | 冻结结果计划和 effects/receipt 恢复 |
-| `ReviewStore` / `reviews.py` | 反馈版本、批次、审核上下文及线程事实 |
-| `WebhookStore` / `webhooks.py` | Webhook inbox 消费和事件去重审计 |
-| `ReconcileStore` / `reconciliation.py` | `reconcile_checks` 中 PR 状态与反馈来源的对账进度 |
-| `ProjectStore` / `projects.py` | Projects 投影与有类型的局部更新 |
-| `ActivityStore` / `activity.py` | `console_activity` 的追加、Flow 事实读写、时间线快照分页与版本对比 |
-| `ConsoleStore` / `console.py` | 控制台卡片、详情、来源状态与执行记录查询，以及同步请求 |
-| `ConsoleSyncStore` / `console_sync.py` | 控制台采集的来源 claim、检查点和 webhook 观察归档 |
-| `InferenceNoticeStore` / `inference_notices.py` | 推理耗尽通知的追加与分页 |
-| `SettingsStore` / `settings.py` | 编码模型默认值的读取与按版本更新 |
-
-`schema.py` 集中完整建表 SQL，初始化沿用既有依赖顺序；`records.py` 仅提供原生行类型及
-必需记录回读校验。`database.py` 提供连接、显式事务、注入时钟、共用锁和 schema 初始化；
-Runtime 管理该数据库的生命周期。`repository.py` 的 `using(tx)` 保留具体仓储类型，
-返回绑定事务连接的视图；原仓储保留自己的连接范围。仓储需要其他仓储的 SQL 操作时，
-显式使用具体类型并传入同一上下文。Store 仅为 CLI 运维、live smoke 和测试提供整组仓储，
-其事务视图用于这些入口的数据库操作；Runtime 不使用 Store 装配服务。
-领域数据类型继续拥有自己的校验和纯规则，持久化操作归上述仓储；时间统一使用注入时钟。
-
-`Flow`、`FlowExecution`、`FlowDelivery`、`FlowToolCall`、`Attempt`、`Job` 是 Pydantic
-持久化模型。返回这些领域对象的查询在
-cursor 上使用 Psycopg `class_row(Model)`，由模型统一校验枚举、时间和其他字段；其余轻量查询继续
-使用 pool 的 `dict_row` 默认值。SQL、JSONB 适配和原子操作由对应仓储显式维护，
-事务边界与共用锁由 Database 提供，没有引入 ORM。
-
-- `flows`：Flow 生命周期、Issue 展示归属和当前交付（分支、PR、独立版本和时间戳），`(repo, issue)` 仅允许一个非终态 flow；
-- `flow_executions`：Flow 到具体 worker/workspace/generation 的生命周期 binding 与 recovery deadline，活跃位置唯一；
-- `flow_tool_calls`：fenced command 的参数与成功交付回执 response，支持同 call id 重放；
-- `attempts`：一次运行/恢复尝试的 session 与 revision cycles，不拥有 worker、branch 或 PR；
-- `jobs`：queued/running/done/failed、worker/workspace/generation/token/start、lease/recovery deadline、result inbox/digest 与尝试次数；
-- `result_applications`：按源 job 唯一保存冻结的结果计划；
-- `result_effects`：有序 GitHub 操作、claim/fencing、远端回执、退避时间和最后错误；
-- `workers`：以 `(worker_id, workspace)` 为复合主键，一位置一行；默认无仓库行保存连接/epoch/限额/推理槽，各仓库行保存代际、库存状态和当前编码 job；
-- `events`：按 delivery ID 保存收件队列和独立的业务去重登记，完成收件过期不删除业务凭据；
-- `execution_stops`：绑定到具体执行与 workspace/generation 的停止意图、凭据 digest 与确认状态；
-- `review_versions`：按全局 `(kind, github_id)` 识别的反馈对象的不可变版本，版本号最大的一行为当前版本；
-  含独立 relay/consume 时间和已核验 addressed 依据。新对象的 `item_id` 为 `github_id*4+kind` 编码，升级前的对象保留原 ID；
-- `review_buffers` / `review_batches`：每 Flow 的持久 settle 截止时间、冻结反馈/上下文/线程快照、批次所有者 job 和未决问题；
-- `console_flows`：每 Flow 一行的控制台投影，保存 `console_facts` 视图的快照和两个版本号；
-  它的行锁同时是 `console_activity` 分配 `version` 的发布围栏；
-- `console_activity`：按 Flow 递增 `version` 的只追加归档，包含 Flow 事实账本、触发器状态快照、
-  推理通知，以及 GitHub 与 Worker 内容的展示版本；
-- `console_sync` / `console_installation_backoff`：控制台采集的来源游标、claim、退避与覆盖情况。
-
-### 数据分类与 Flow 事实账本
-
-PostgreSQL 中的全部表按职责分为五类：Flow 事实账本、`flows` 状态表、业务状态与专用证据、协调数据、
-展示投影与采集归档。逐表归属见[数据分类](flow-ledger.md#2-数据分类)。
-
-`console_activity` 中除 `state`、`baseline`、`inference_exhausted` 外的 `source='flow'` 行是业务事务写入的
-不可变 Flow 事实，触发器拒绝更新和删除：
-
-- `flows` 的账本列只经 `FlowStore` 写入；每次状态转换同事务追加一条以 `FlowEvent` 命名的事实，
-  创建、归档、归档后合并与标题也各有事实；
-- 领域层的纯函数 `replay_flow` 复用 `decide_flow_state` 重放事实，`agentflow flow verify` 比较重放结果与当前行；
-- 存量 Flow 在启动时补一条 `snapshot` 作为重放起点；
-- Job、交付、反馈、Worker 等表不由账本重建；租约、游标等协调数据不进入账本。
-
-实施过程与验证见 [feature record](../plan/flow-activity-ledger.md)。
-
-新库不创建 `codex_runs` 或其唯一索引；应用停止写入和依赖该表。已有库的旧表及数据在
-初始化时保留，不 DROP、不回填。外部 SQL 消费者需迁移到 jobs 的持久结果；旧表人工清理
-另行处理。重复应用、control 重启及已合并 PR 的迟到结果保留原始 payload、digest 和接收时间；
-应用时间与业务变更在同一事务提交，退休结果不改变 delivery 或当前 session。
-
-自动化覆盖 active 唯一约束、flow/attempt/job 往返、review upsert、assignment start/heartbeat/fencing、
-lease 到期 requeue、started grace/deadline、epoch fencing、result inbox 去重、跨 Store 可见性、delivery 去重和并发 assign。
-`AssignmentStore.assign_job()` 是编码与推理的共同领取入口，gateway 接受多个独立配置 worker。
-
-仓储继续使用同步接口。编码 claim 无锁读取公平候选，只有请求方就是候选时才锁定自身 worker，
-重新检查 epoch、在线状态、空闲槽位及 drain/binding；随后锁定最早 eligible Flow job，并原子创建
-或复用 lifecycle binding。推理 claim 按 worker ID 顺序锁定候选状态，再比较本地优先、能力和空闲
-推理槽；它不创建 lifecycle binding。该选择串行化领取事务，代价随 worker 数量增长，不承诺大规模吞吐。
-`with database.transaction() as tx` 提供绑定连接的数据库上下文；
-服务用 `self.flows.using(tx)`、`self.jobs.using(tx)` 绑定自己持有的仓储。
-所有步骤共用该连接，异常一起回滚，事务退出后这些视图拒绝继续使用。
-结果的最终事务同时写入 flow/delivery/attempt、带源 job 唯一键的派生 job、`result_applied_at` 和 worker slot；
-编码审计保存在源 job 的终态结果，不再写 `codex_runs`。
-`flow_tool_calls` 的 prepared delivery 与 response 也一起提交。
-
-评论使用稳定隐藏 marker 并分页核对本 bot 作者，PR 使用固定 head 查询，labels/reviewers 则核对目标状态。
-不能确认是否成功的非幂等请求保持 uncertain，不盲目重复 POST；`flow show` 显示待处理操作，retry 不能绕过它们。
-因此不宣称跨 PostgreSQL/GitHub 的通用 exactly-once。跨 worker session 迁移和多 serve HA 仍未实现。
-启动初始化 schema，并幂等升级推理 Job、双槽和批次关联字段；已有编码记录保留。serve/worker 在线使用 wire19，
-正常写 journal5 / ResultInbox v1；journal/inbox 只存业务事实，不存 message、条目身份、ACK 或 epoch。
-受限 v4 journal（内嵌 v14/v15 回执）与已知旧 inbox 只读转换；保持摘要，正常状态保存才写 v5。
-未知、混合或损坏记录保留并拒绝；切换和降级边界见[升级说明](../operations/upgrade.md)。
-
-## 4.8 GitHub 交互面
-
-目标用户体验完全位于 GitHub：标签触发、PR review 反馈、网页人工合并、状态 labels 与评论。
-
-当前 router 已识别触发、取消、review/comment 和 merged 事件；PR 创建、评论、reviewer 和 label 已有
-经隔离测试的具体资源操作，且 reviewer 配置不复用 trigger allowlist。真实 Issue/default branch、
-head PR 查询和 capability 已接入 INITIAL；M2 原线程回复/resolve 已接入并有自动化覆盖，
-Project 状态更新由独立 ProjectSync 投影循环负责，远端失败不改变 Flow；真实 App/看板校准仍待完成。
-工具没有自动合并实现。
-
-`app/github` 以 `GitHubApp → Installation → Repository → Issue/PullRequest → ReviewThread`
-组织仓库资源，`Installation → Project → ProjectItem` 组织看板资源。App 持有认证配置，安装
-持有 installation ID；control 从 Flow、effect 或 Project 配置的持久身份绑定具体资源，方法只传操作数据。
-`fetch_*` 和 `refetch()` 返回当次查询的新实例，成功状态更新返回仅确认字段改变的副本。
-已有字段保留之前的观察，嵌套线程与项目配置不可变；仅绑定身份时，未知事实不能作为属性读取。
-标准序列化排除私有认证及父资源引用，持久化直接序列化同一个资源模型，离线恢复不创建认证对象。
-
-## 4.9 Context Builder
-
-当前 `ContextBuilder` 是纯字符串组件：
-
-- initial prompt 包含任务正文、VCS 指引和硬约束；仓库指令文件由编码工具自行加载；
-- revision prompt 包含 Judge instruction、冻结批次的 item/version、inline path/diff hunk/original commit id、
-  原 Issue、交付基线、此前 summary/open_points、VCS 指引和 `RevisionCodingOutput` 输出约定；有冻结 PR context 时一并传入。
-
-INITIAL 已使用 GitHub Issue 的真实标题与正文；冻结 PR context 包含有界 patch 和讨论，不含 CI 状态。
-F4 的完整线程映射由 control 持有，遵循当前 worker v13 契约。issue/PR 文本是不可信输入，必须保留明确的数据/指令边界。
-
-## 4.10 Judge / Triage
-
-语义见 [Review 修订循环](review-loop.md)。`review/context.py` 在 control 读取 Issue、PR 与分页文件/
-讨论，冻结有界 JSON 快照；先后读取 PR 防止 head/base 在取数期间变化，未完成批次复用入库快照。
-
-triage 由 control 的 review sweep 处理 ready 且无修订 job 的批次；需要模型时提交推理 Job，
-立即让出扫描，后续批次可继续入队。`review_batches.inference_job_id` 与修订 `job_id` 分开保存。
-REVISE 在工作流事务中创建 revision job 并关联批次；ANSWER/IGNORE/WAIT 直接处理批次。
-推理使用真实 Job/token/epoch、总截止和持久结果；重新扫描不能重置活动 Job 的请求和尝试预算。
-当前性检查与原子关联避免迟到决定或重复下发，推理不更改 Flow binding。答案已发送但回执不明时，
-只查询批次 marker，不重复 POST。`ReviewStore` 拥有上下文失效、答案发送授权和确定拒绝后的复位；
-coordinator 不直接更新业务表。批次答案与结果评论保留各自的事务授权和 marker 恢复，
-共享 `GitHubError.definitely_rejected` 的拒绝判定；线程回复与普通结果评论共用一个执行分支。
-
-control 的 `ReviewJudge` 负责 prompt 和业务判定，`JobInference` 提交/读取通用 messages、可选 schema、
-字节限制及总预算。`AssignmentStore.assign_job` 统一选择固定 execute/infer 槽，结果经共同受理和
-`ResultApplication` 保存、校验和应用；review 的 `TriageVerdict` 校验必须在推理 Job 成功前完成。
-无 Flow 的通用推理也能执行。旧 `InferenceRouter`、`InferencePool` 已删除，不保留另一套调度循环。
-controller 只在 bub 配置和依赖预检通过时托管 mini worker；会话就绪、空闲且能力合条件时优先。
-未配置、半配、忙或不符合条件则选普通 worker；永久调用错误不能通过更换 provider 绕过。
-`app.inference.runner` 子进程显式配置 bub 0.4.1 `ModelRunner.completion_response`，不创建 framework、
-加载插件、读写 tape 或执行工具，SDK retries 为零。父进程限制时长和管道，取消时回收子进程。
-
-普通 worker 在鉴权和 Registered 完成后登记推理能力，拥有 execute 和 infer 两个独立持久槽。
-编码忙不排除推理，draining/recovering/failed 排除；无需 Flow/repo 绑定即可接推理。
-bub mini worker 仅挂 infer 回调，通过有界进程内 Transport 和相同 Session/Dispatcher 注册及领取，
-不实例化编码 Runtime、不创建仓库或编码 journal。宿主负责连接重建、取消和 join，网络连接不能冒用本地身份。
-共享 `app.inference.transport` 负责异步执行与按 Job/token 取消，`app.inference.local` 管理 mini 生命周期；
-controller 不依赖 `app.worker`。临时 RPC helper 继续服务 history，推理通过持久 Job 回复关联恢复。
-worker 通过 Session.watch 观察异步答案任务，模型等待不占用串行消息 driver；断线取消并 join 推理。
-原生 Codex/Amp 每次调用 start，在 `worker_root/inference/answer-*` 下使用新会话，不授予 Flow capability。
-两类 worker 每次推理使用初始为空、不复用的非 Git 目录；原生工具/用户配置仍受外部专用账号、container 或 VM 约束。
-
-只有 Job 状态机重试可恢复错误，最多 3 次授权派发，排队、通信和退避计入同一总预算并跨重启保存；
-每次换 request_id，未知结果排除原 worker。不可恢复错误保守 WAIT，可恢复耗尽保留 READY，
-后续扫描允许新一轮 Job；已保存结果/决定的应用不需要 worker 在线，也不再次调用模型。
-三次未成功或提前耗尽预算的安全摘要与 Job 终结在同一事务写入活动账本；写入失败保留 inbox，仅重试应用。
-`InferenceNoticeStore` 按快照、keyset 分页读取每个批次的最新通知，并从当前批次/Flow 状态生成后续说明。
-控制台执行记录展示推理 Job、状态和派发次数；独立读取通知，不改变 jobs 分页，不轮询，也不向 GitHub 发送失败通知。
-
-严格校验四类 verdict、有限 confidence、动作字段和 envelope 身份。结果持久保存模型/adapter 版本、
-context digest、reason/open_points；answer 使用同一个答案，由反馈批次持久化发送授权并通过
-批次 marker 核对回执，不再调用模型。
-adapter/控制流已通过自动化，真实 provider 的语义准确性仍待 smoke 验收。
-
-
-### Worker 执行生命周期
-
-`WorkerRuntime` 装配一个进程级 `WorkerExecution`，拥有根锁、信号、健康任务与关闭顺序。
-`execution/lifecycle.py` 中的 owner 持有唯一执行 Task、工具请求和原 Future、停止清理 Task。
-`WorkerExecutor` 继续编排 initial/revision/archive、agent、MCP、VCS 和 workspace，不管理连接。
-连接回调只借用 owner；重新连接前必须关闭并 join 旧 Session，同一 owner 不支持并行通信消费者。
-
-`state/execution.py` 的 `ExecutionState` 保存当前 assignment、持久化阶段、修订调用记录、
-终态脱敏/归档、恢复描述及停止/清理凭据。唯一 `state/record.py:ExecutionRecord` 保存 v5
-业务记录与原 digest；ExecutionState 负责 IO。执行自然结束时 owner 主动落盘，无需等待重连；落盘失败保留
-完成 Task 的结果，恢复时重试，不能重新执行。Register 后完成的任务可接收 `Registered.recovery=resume`，
-然后重放终态；普通 started 任务在进程重启后没有 Task 时仍不能推断已停止或重新运行。
-
-首次派发保持 `record_received → 发送 Started → record_started → 创建 Task` 的顺序。
-工具调用由 MCP 交给 owner，WorkerBusinessCallbacks 借用队头、以当前 epoch 的新 message 发送原条目，收到响应后交回 owner
-完成原 Future。断线不出队、不换 call_id 或调用条目 ID；原 socket 仍消费已取消调用的匹配迟到回复。
-`on_result_accepted` / `on_stop_accepted` 只处理收到的确认，不发送 ACK。
-
-双端 Runtime 使用公共 Gateway 管理 `app/communication/session.py` 中的 Session 实例。
-一个 Session 对应单个对端的一次连接 epoch，唯一 reader 严格解析完整 message；所有 payload 和拒收进入
-32 条 message / 32 个业务条目 / 16 MiB FIFO。history 请求、回复和错误都经过相同 driver，
-先由控制 owner 授权，再逐项分派。`Dispatcher` 只按 `package.method` 注册请求模型与绑定回调；
-普通回复按 `reply_to` 由 Dispatcher 关联，经过可选 `on_reply` 后交给原调用接收函数；
-无反射或广播，Session 不再持有查询表或 responder；临时 history 同样使用 Dispatcher 的关联表。
-Session 对 terminal/tool 做有界一次性观察；Gateway 公平交替网络输入与就绪回调，禁止嵌套消费。
-Session 的 stop 硬截止覆盖回调内部 await；通信心跳独立运行，慢业务不阻塞心跳发送。
-所有消息经 Session 串行写入，`send` 等实际写完成；工具 guard 在拿到锁后的实际写入前检查。
-不确定的写失败/取消封闭连接，无自动重试。FastAPI socket 直接满足 Transport；websockets client
-只用本地适配器转换 send/recv/bytes。message 携带共同连接头及 typed call/result 列表，
-控制 ACK 用独立的 32 项 FIFO 和 sender，实际写成功才出队，可顺带附加到业务写；不确认业务成功或续 lease。
-
-Broker 持有临时查询 Future，按 Session 限额 4 个、全局 64 个，保留 30 秒发送加等待总预算和历史页校验。
-Gateway.get 一次选定 Registration 中配对的 Session/Dispatcher，不保存第二张 peer 表、不重投后继连接。
-worker.history 由业务类串行处理；慢 history 与其他慢回调互相等待。无独立 handler、busy 队列或查询 sender。
-临时请求使用 expect_reply 的 on_closed 通知；持久接收者不登记它，关闭连接不取消真实执行。
-epoch 由合法握手/恢复响应确认一次；`worker.stop` 与已提交 Register+A 的接纳回复可早于 Registered。
-终态发 `[T,A]`，停止发 `[R,B]`；每项各自关联。T 后不丢 A，R 后不丢 B；停止阶段不回复 A、不创建新 Flow effects。
-
-关闭先失败临时查询、清连接缓存，再完整取消并 join 通信任务；不取消执行 Task、原工具 Future、
-shielded stop，也不释放 Flow binding。读失败先按序排空已读 FIFO，交付已收到的回复/拒收，再失败剩余查询；
-显式关闭则丢弃旧 FIFO。旧连接/epoch 回复不能完成新请求，不跨连接重放查询。
-WorkerBusinessCallbacks.on_history 内 await to_thread 调用 `ExecutionState.read()`，再选择 Codex/Amp 读取器，
-允许查询 control 指定的既往会话；无额外历史 facade。取消 to_thread 的等待不保证同步读取立即停止；
-其结果只属于旧 Session。Registered 前的合法 history 不绑定 epoch 或 ready；server 的 history 回复
-不要求 Started，也不替代 Started 或刷新执行存活期限。可靠领域事件/outbox 与 HA 不在当前通信架构范围。
-
-wire v18 的可关联 payload 校验失败整批拒收；合法兄弟项也不执行。每项收到同 method、
-`reply_to=原条目ID` 的 `tool_result`，error 严格只有固定 `code=validation_error` 与
-`message=message payload failed validation`，不暴露详情。坏头、握手、epoch、容量或畸形 error
-仍关闭连接，不对 error 回 error；混合控制拒收不续租、不登记 ACK。
-普通工具/history 失败原 Future，保持连接；Started、T/A、R/B 或 stop 失败保留证据并恢复关闭。
-Assignment 拒绝只在 SQL 预启动围栏成立后写 control-source Failed，应用提交后才退出派发等待；
-与 stop 竞争时保留 binding/intent，缺 journal 不能伪造停止证据。双端协调升级，journal5/inbox1 不变。
-
-WorkerMCP 随首次编码启动与关闭，提供交付工具 `open_pr` 和只读工具 `search_flows`。搜索使用看板语法，Control 按有效任务确定仓库；每页的任务、阶段计数和游标都限于该仓库。查询走当前连接，不进入交付回执队列。
-修订恢复覆盖为禁用的 flow MCP 配置，避免重新连接旧任务端口。MCP 服务不接管 worker 信号。
-
-
-Worker 目录分为 `execution/`（lifecycle、executor、Codex/Amp、prompts、VCS、credentials）、
-`transport/`（IO 适配器、状态/业务回调、MCP）和 `state/`（execution、history）。
-根目录保留 runtime/config/health，分别负责组装、配置和探针入口；各子包不提供转发导出。
+| 原任务归档后又开工了，当前在做哪一轮？ | `Flow.current_attempt_id` → `Attempt` | Flow 保持同一个任务身份。Attempt 保存这一次开工的会话 ID 和修订轮次；网络重连无需更换 Attempt。 |
+| 编码已经完成，为什么详情页还有待处理的工作？ | `Job` | 每份 Job 有自己的类型、分配和结果；可以分开查看首轮编码、命名推理及后续修订。收到结果和应用结果各有一个时间戳。 |
+| 可以到另一台 worker 的同名目录继续吗？ | `FlowExecution` | 绑定同时记录 worker、仓库身份、位置及代次。路径字符串本身不能证明这个目录仍归当前任务。 |
+| 链接里展示的 PR 属于哪次开工？ | `FlowDelivery` | 顺着 Attempt 查分支、提交和 PR 编号；旧 Attempt 的交付资料不应该充当本轮交付。 |
+
+这些字段可以直接对照[开工记录、位置与交付模型](../../app/domain/models.py#L181-L218)和[作业模型](../../app/domain/models.py#L245-L266)。举个有意把编号错开的例子：仓库 `octo/repo` 的 Issue 7 第一次交付到 PR 17，随后任务归档。重新开工后，原 Flow ID 不变，但新 Attempt 的当前 PR 为空，旧归档仍记录 PR 17。若只按 Flow ID 找到第一张 PR 就拿去更新，会把新工作写到旧交付上。[归档后重新开工测试](../../tests/test_console_archive.py#L219-L260)
+
+包边界还有一个可观察的作用：**工作机可以读取任务数据而不加载数据库驱动**。[独立解释器测试](../../tests/test_boundaries.py#L12-L56)分别导入通信网关、worker 启动模块和 CLI，并在另一个示例中从 JSON 恢复仓库、Issue、PR 等资源。测试检查实际加载的模块，预期没有 `psycopg`、`githubkit` 和持久层。如果改一个共享数据结构却导致启动 worker 时需要数据库配置，应该先检查它的导入依赖，再排查连接地址。通信消息即使带有仓库和 PR 信息，也不因此拥有访问 GitHub 的凭据。
+
+## 从收到通知，到允许执行
+
+[事件入口](../../app/controler/events/webhooks.py)先保留原始通知，再由[路由器](../../app/controler/events/router.py)识别它的含义：Issue 标签可能触发创建，评论进入反馈缓冲，合并交给生命周期处理。同一个通知可以多次送达；重复投递不会因此变成多项新任务。浏览器则经过[控制台 API](../../app/controler/console/api.py)校验登录身份和写请求来源，直接提出创建、补充指令或重新开工等命令。
+
+两条路都需要[工作流服务](../../app/controler/workflow/service.py)判断当前 Attempt 能不能接受操作。比如人在工作端正忙时补充一条要求，服务可以先保存输入，等能派发时一起交付。收到浏览器请求与编码进程读到新要求并非同一时刻。[任务协调器](../../app/controler/workflow/coordinator.py)为已领取的 Job 准备具体输入，包括仓库、交付分支和本次执行配置；只有分配仍有效，工作才可发出。
+
+### 一张收据跨过了哪些事务？
+
+以 Issue 标签通知为例。[HTTP 入口 `webhook`](../../app/controler/api.py#L219-L251)检查原始请求体的签名、投递编号、事件名和 JSON 格式，把这次投递的编号、类型、正文及内容摘要交给 [`ServerRuntime.receive_webhook`](../../app/controler/runtime.py#L300-L302)。它等待 `WebhookStore.receive` 提交收件记录，再唤醒消费者。相同编号和内容重复到达不会重新启动处理；同一编号配上不同内容会被拒绝。数据库无法接收时返回 503，不向 GitHub 假报 202。[收件契约](../../app/persistence/webhooks.py#L38-L62)
+
+接下来是**另一笔事务**。[`WebhookConsumer.sweep`](../../app/controler/events/webhooks.py#L53-L110)领取一条待处理记录，把事务绑定的服务交给 `EventRouter.dispatch(event_type, delivery_id, payload)`。只有认出符合条件的触发动作，才会进入创建任务的路径；路由成功与标记收件已处理一起提交。异常会回滚业务写入，由收件箱记录失败。唤醒 worker 的通知在提交之后发送，即使这次通知没送到，已经排队的 Job 仍在。[事务回滚测试](../../tests/test_webhook_inbox.py#L422)
+
+创建本身还有一层约束。[`ControlService.create_flow`](../../app/controler/workflow/service.py#L106-L130)接收仓库、安装身份，以及 Issue 编号或任务正文。在同一个事务中，[`FlowStore.create_flow`](../../app/persistence/flows.py#L62-L89)创建 Flow、首次 Attempt 及创建事实，随后 `JobStore.enqueue_job` 放入首轮工作。函数返回 `Flow`，不是执行结果；若该 Issue 已经有活跃 Flow，服务返回 `None`。读者在浏览器里再创建同一 Issue 时，[控制台入口](../../app/controler/console/api.py#L225-L254)会把这个返回值变成冲突，而不是再新增一张卡片。
+
+**没看到卡片时，沿着投递编号查到业务事务为止。** [消费失败后重试的用例](../../tests/test_webhook_inbox.py#L165-L184)让消费者照常创建 `owner/repo` 的 Issue 7 任务，随即在提交前抛出异常。第一次扫描后，按 Issue 查不到活跃 Flow，按投递编号也查不到“已处理”标记，但收件记录还在，并保存了异常类型。恢复正常处理逻辑、等到可重试时间，再扫同一张收据，就能同时查到处理标记和活跃 Flow。这能区分收件失败（入口不应答应接单）与业务失败（控制端已经负责稍后处理）；后一种情况下从控制台手动创建新任务，反而会让人难以判断原通知后来做了什么。
+
+收件箱还决定**哪条通知可以先处理**。同仓库的后续通知要等前一条完成，另一个仓库可以继续。[并发领取测试](../../tests/test_webhook_inbox.py#L350-L370)把两条同仓库通知记为 `head` 和 `tail`；一个消费者持有 `head` 时，另一个能领到其他仓库的通知，却领不到 `tail`。如果前一个消费者挂起，租约过后新消费者会领到同一个 `head` 和新的领取令牌；旧令牌不能再标记完成。[故障隔离测试](../../tests/test_webhook_inbox.py#L212-L242)还展示了值班时可能看到的三种状态：故障通知进入 `blocked`，同仓库后一条留在 `pending`，另一仓库的通知已经 `done`。此时应先处理堵住该仓库的那张收据，无需重启所有工作端。
+
+## 工作端怎样选目录、工具和模型
+
+工作端上报的是具体[工作区库存](../../app/worker/execution/workspaces.py)。控制端在[领取事务](../../app/persistence/assignments.py)中保存 worker 身份、位置和该次绑定的代次。后续修订由原位置继续，另一项 Flow 则可以用同机其他位置。代次用于区分同一路径先后两位使用者：旧任务迟到的结果不能仅因目录名相同就被接纳。
+
+[执行器](../../app/worker/execution/executor.py)通过同一个[编码接口](../../app/worker/coding_agent.py)启动或恢复 Codex、Amp。新会话使用本次任务指定的设置，恢复已有会话不会把后来的全局默认设置强加给它。项目也可配置 skill 仓库：工作端用单独的只读授权获取快照，再把常驻或选中的 skill 链接到工作区，见[安装逻辑](../../app/worker/execution/skills.py)。
+
+只需要模型判断的工作有另一条路径。比如给任务命名，或判断评论是在提问还是要求修改，都不需要占用原 Flow 的代码目录。[推理调度](../../app/controler/workflow/inference.py)将它们作为推理 Job 派发给可用执行者：符合条件时优先使用控制端托管的 bub 推理 worker，也可以由支持推理的普通 worker 在独立会话中完成。如何由判断变成下一轮编码，见[评审循环](review-loop.md)。
+
+### 分到一个位置，不等于已经启动进程
+
+1. **领取。** 控制端轮询时调用 [`AssignmentStore.assign_job(worker_id, token, connection_epoch, slot=…)`](../../app/persistence/assignments.py#L89-L108)。三个身份参数分别表示哪台机器、哪次分配、哪条连接。`execute` 选一份可写工作区并沿用原 Flow 的绑定；`infer` 选推理位置，不占仓库。返回 `None` 表示本次没有领到匹配的工作；返回 `Job` 只意味着分配已记录。
+2. **准备与授权。** [`JobCoordinator.prepare_for_assignment`](../../app/controler/workflow/coordinator.py#L138-L181)用该 Job 和同一组身份准备任务、模型设置和临时授权。成功返回 `AssignmentArguments`，携带工作区和代次；也可能返回 `JobState`，此时连接处理器应重新排队或结束这次准备，不能把状态值发给编码器。即便准备成功，发送前仍须经过 [`StopStore.authorize_dispatch` 的调用点](../../app/controler/workers/callbacks.py#L818-L841)：准备期间收到的取消，不能因为参数已经组装好就被忽略。
+3. **执行。** [`WorkerStateCallbacks.on_execute`](../../app/worker/transport/state.py#L324-L360)核对连接已就绪、调用编号与分配凭据匹配，再交给本机执行对象。重复送达且已越过接收阶段的分配不会再启动编码器。首次工作由 [`RepositoryWorkspaces.claim`](../../app/worker/execution/workspaces.py#L341-L366)按仓库、Flow、位置及代次取回 `WorkspaceBinding`；旧代次或同代次已被别人占用都不能写。后续修订使用原工作区，而非就近找一个空目录。
+4. **调用编码后端。** [`WorkerExecutor.execute`](../../app/worker/execution/executor.py#L96-L119)接收有类型的任务、可选临时授权和工具调用接口，返回对应的 `ExecutionResult`。首轮与修订分别走自己的核验路径；归档任务核验归属后执行目录清理，不调用模型。[`CodingAgent.start` 和 `resume`](../../app/worker/coding_agent.py#L64-L95)只在调用方指定的目录运行后端；后者还需要明确的会话 ID。它们返回编码进程的结果，解释最终 JSON 是否满足业务契约仍是执行器的责任。
+
+推理调用者看到的是另一种返回语义。[`JobInference.infer(task)`](../../app/controler/workflow/inference.py#L25-L56)先查找或登记对应的持久推理 Job。若仍在排队或执行，它唤醒调度并抛出带 Job ID 的 `InferencePending`，让扫描器先处理其他批次；下次以同一请求回来，可读到保存的 `InferenceOutput`。失败则携带已有失败分类，不把重扫一轮当作重新获得一份推理预算。
+
+### 一个 Flow 为什么在首轮编码前就有两份作业？
+
+直接从控制台提交需求时，命名推理为首轮编码准备标题和分支。沿着[命名与首次派发的测试](../../tests/test_coordinator.py#L154-L204)看两个位置如何协作：先登记一台能访问仓库的 worker 并领取编码 Job。这时 `prepare` 还没返回，Flow 上却已经有了 `title_job_id`，交付记录仍为空。worker 上报推理能力后，可以用 `infer` 位置领走这个编号对应的 Job。推理输入含原任务正文，输出同时给标题和符合格式的 `branch_slug`；控制端应用这份结果后才把确定的分支交给编码执行器。仓库目录由原分配使用，推理回复无需在那里创建文件。
+
+核对结果时，顺着这两个编号分别看：Flow 的标题应当来自推理输出，`InitialTask.branch` 应当等于输出的分支名。给原编码 Job 再做一次准备，仍会得到同一个分支，列表中也仍然只有一份首轮 Job 和一份推理 Job。若只有编码能力、一直没有执行者能在期限内完成命名，则出现完全不同的结果：[命名超时测试](../../tests/test_coordinator.py#L397-L417)观察到 Flow 进入 `blocked`，编码 Job 没有启动时间，也没有产生交付。维护者应先查推理能力和命名错误；重试该 Flow 后，控制端保留 Attempt，给新一轮命名分配另一个 Job ID。
+
+## 从本地提交，到 GitHub 上的一张 PR
+
+首轮编码可以通过[本地工具接口](../../app/worker/transport/mcp.py)申请开 PR，也可以请人补充输入。工作端核对 Git 或 jj 的实际提交和远端分支；[控制端工具服务](../../app/controler/workflow/tools.py)记录意图，[结果处理](../../app/controler/workflow/results.py)结合最终结果决定哪些操作可以生效。GitHub 评论、开 PR 等写入由[远端操作模块](../../app/controler/workflow/effects.py)完成。这样既不用把 App 私钥放进编码环境，也能在响应丢失时回头查清发生过什么。
+
+这一段有三个容易混用的返回值。**工具回复**来自 [`FlowToolService.execute(request, worker_id=…, connection_epoch=…)`](../../app/controler/workflow/tools.py#L81-L105)，回答这次 `flow.open_pr` 请求是否被接纳。只读的 [`search`](../../app/controler/workflow/tools.py#L54-L79) 则从活跃首轮分配推导允许搜索的仓库，返回一页结果或错误；它不会完成交付。**执行终态**由 [`ExecutionState.complete`](../../app/worker/state/execution.py#L194-L219) 把编码结果或异常连同 Job ID 和分配凭据写入本地日志。**业务结果**由控制端依据已接收终态处理；若没有这最后一步，不能据工具回复或本机日志宣布 PR 已经出现。
+
+细看最后一步：[`ServerCallbacks.on_result`](../../app/controler/workers/callbacks.py#L547-L573)核对回复属于哪次执行，调用 [`AssignmentStore.record_assignment_result`](../../app/persistence/assignments.py#L429-L482)。相同摘要重传得到 `pending` 或 `applied`，取决于是否已经处理；同一分配交回不同摘要得到 `conflict`，不覆盖旧结果。接下来 [`ResultApplication.apply(job_id)`](../../app/controler/workflow/results.py#L112-L133)提交本地变化，或让未完成的远端操作留待恢复。已处理的 Job 返回保存的 `JobState`；仍须等待时抛出 `ResultPending`。恢复循环继续处理**这个 Job ID**，不会创建第二个编码任务。
+
+**准备开 PR 以后，有三种不同的现场。** 可先看编码结果，再看控制端还缺哪种 GitHub 回执：
+
+1. 工具已经接纳开 PR 意图，编码器最终却以退出码 1 结束。[首轮失败用例](../../tests/test_coordinator.py#L420-L435)得到失败的 Job、仍为 `opening` 的交付记录和空的开 PR 调用列表。控制端再次应用结果仍然返回失败。维护者可在本地活动里用 Job ID 找到退出码，不必从交付状态推测模型是否成功。
+2. PR 已经创建，请求评审人时 GitHub 明确拒绝请求并返回 429。[必要操作重试用例](../../tests/test_result_recovery.py#L185-L217)首次应用后仍为 `opening`，`result_applied_at` 仍为空。退避后控制端完成缺少的邀请，交付进入 `open`。此后重复应用，原始结果摘要、接收时间都不变，开 PR 总数仍是一张。遇到这种状态，查控制端的远端操作记录，比让 worker 再次推送分支更有用。
+3. PR 已经创建，失败的只是展示用的状态标签。[标签失败用例](../../tests/test_result_recovery.py#L221-L258)让读取或写入标签出错，预期 Job 完成、Flow 进入评审，交付仍记 PR 17。具体错误留在标签操作上，状态为 `skipped`。若仅从仓库看不到预期标签就判定“没开 PR”，会漏掉数据库里已确认的交付。
+
+<a id="47-storepostgresql"></a>
+
+## PostgreSQL 里保存的是哪一种历史？
+
+[数据库模块](../../app/persistence/database.py)管理共享连接池和事务；服务按职责使用具体仓储。在同一事务里，可以把阶段变化写入 `flows` 并追加一条解释变化的[Flow 事实](flow-ledger.md)。Job 的结果、工作区的占用和 GitHub 写入回执另有记录，不靠解释一段活动文本来决定是否重试。管理命令和测试可通过聚合的 [Store](../../app/persistence/store.py)访问这些仓储。
+
+控制台看板和「会话」页都能读数据库里已发布的记录。后台刷新或 API 客户端要读取尚未采集的编码对话时，控制端才需要联系原 worker，因为原始会话保存在执行机器上。见[会话查询](conversation-api.md)。
+
+**读取历史时，先按记录的用途选择入口。** 要解释“为什么从评审转入归档”，从 Flow 事实及对应 Attempt 查起；要解释“GitHub 已经有评论，为什么修订还没有完成”，应查 Job 和远端操作。比如[最终提交中断的用例](../../tests/test_result_recovery.py#L419-L445)让评论先成功，再在本地完成 Job 的事务中抛错。回滚后评审记录保持原样，Job 的应用时间为空，但评论操作已有成功回执。控制端再应用原结果，便能填上完成时间；GitHub 上还是一条评论，数据库也没多出一份修订 Job。若只看一张表，就无法区分“还要发评论”和“只要完成本地记账”。
+
+若要读的是**编码者当时说了什么**，则查原 worker 与会话 ID。[查询服务测试](../../tests/test_conversation_proxy.py#L327-L353)用同一个 Flow 逐步补全线索：没有绑定时读到 `no_worker`；已分配位置、还没有会话 ID 时读到 `no_session`；补上会话 ID 后，即使取消任务、释放位置，查询服务仍把请求交给记录中的原 worker，并携带原会话 ID。这个例子验证了查询发往何处；原机器是否在线、是否仍保留相应文件，还要由实际读取来确认。释放写入位置和删除历史对话是两件不同的事。
+
+独立运行的[对账模块](../../app/controler/reconciliation)定期核对已知 PR、反馈及可选的 GitHub Projects 看板，远端看板写入失败不会倒过来改变 Flow。类似地，[生命周期插件](../../app/plugins/hookspecs.py)可观察业务事件，插件执行成功不能充当 PR 已创建的证据。

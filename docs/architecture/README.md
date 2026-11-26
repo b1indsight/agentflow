@@ -1,112 +1,52 @@
-# AgentFlow 架构文档
+# AgentFlow：谁记住任务，谁动手改代码？
 
-> 状态：M0 已验收；M1–M4 功能及 M5 部署、接收、运维实现已落地，真实 E2E 与部署验收待完成。
-> 初始日期：2026-08-02 · M0 验收：2026-08-26 · 文档核对：2026-10-15（最新 main，含 PR #82）。
+假设你给 GitHub Issue 加上 `flow` 标签，然后关掉浏览器。稍后回来，可能看到一张等待审核的拉取请求（PR），也可能看到一个问题在等你决定。两种情况都不需要保持浏览器打开：AgentFlow 把任务记在控制端，把改代码的工作交给能访问仓库的工作端。两个进程可以同机运行，也可以分别部署。
 
-本目录是 AgentFlow 架构的唯一入口。代码、测试、配置示例和已执行的运行验证是“当前实现”的事实
-来源；目标流程不会因为已经写入设计文档就被视为可用。
+第一次来，先读[控制端和工作端怎样分工](overview.md)，再看[架构图](diagram.html)。如果你更习惯边用边学，可以直接从[功能走查](../feature-walkthroughs/README.md)进入；那里从创建任务开始，一直写到审核、归档与重新开工。
 
-## 如何阅读
+## 用一个实际问题认识四个模块
 
-- 本页的状态表描述当前实现，是架构文档中的 current truth；
-- [会话查询 API](conversation-api.md)描述按 flow 读取 worker Codex 历史的接口、分页与可用性边界；
-- [已取消 Flow 手动归档](../plan/cancelled-flow-archive.md)描述控制台展示归档、持久化与恢复边界；
-- [总览](overview.md)、[组件职责](components.md)和[端到端流程](workflows.md)同时记录目标设计，
-  每处涉及未完成能力时明确标注当前边界；
-- [关键决策](decisions.md)记录已定方案、开放风险和退出条件；
-- [Flow 事实账本与状态表](flow-ledger.md)描述数据分类，以及以 Flow 事实为可信来源的账本与重放校验；
-- [路线图](roadmap.md)与[计划目录](../plan/README.md)分别记录未来方向和具体实施决策。
+假设产品同事提交了「导出记录时允许选择日期」，随后问你：「可以开始评审了吗？」回答这个问题要看本次交付有没有一张可读的 PR。控制台已经显示任务、工作端已经改完代码、GitHub 已经接受分支推送，都可能发生在 PR 出现之前。下面四个模块各自掌握回答这个问题所需的一部分信息。
 
-状态术语：
+* **控制台**把用户操作翻译成业务请求，再把控制端已经保存的记录呈现给用户。用户可以选仓库并提交正文，也可以引用现有 Issue。控制台检查当前 GitHub App 安装能否访问目标；选择 Issue 时还会读取该 Issue。这样，用户即使一直开着旧页面，也不能用过期的仓库列表绕过提交时的检查。
+* **控制端的工作流服务**决定何时创建、继续或结束工作。PostgreSQL 把任务身份和本次要做的工作一起保存。服务完成这笔事务后，即使新任务暂时找不到可用的工作端，控制台仍能给用户一个可再次访问的编号。相反，业务记录没有写入成功时，网页不能用一次按钮点击作为「任务已登记」的证据。
+* **工作端**提供可写的仓库目录和编码工具。调度器选择一个工作位置后，工作端在该位置修改文件、运行检查、推送提交；还把执行结果送回控制端。下一轮评审可能要继续使用同一份本地工作区和会话。单独复制一张看板卡片，不能复制编码现场。
+* **GitHub 接入模块**让控制端以仓库安装身份读取分支、创建或认领 PR、核对评审反馈。列表中出现一条本地分支名时，不能直接把它拼成 PR 地址；控制端记录了 GitHub 返回并经核验的 PR 编号，读者才有本次交付的明确入口。[GitHub 接入专题](github-app.md)用一次标签事件解释收件、授权和远端核验为何分开。
 
-- **已验证**：由当前自动化测试或记录在案的 runtime smoke 证明；
-- **部分**：已有真实代码，但路径不完整或尚未端到端验证；
-- **桩**：接口和调用位置已存在，外部契约或主要副作用尚未校准；
-- **未来**：仅有架构预留，没有当前实现。
+### 示例：只读查询一次交付
+
+如果能在配置了项目数据库的控制端运行管理命令，先从卡片地址或任务详情取到 Flow ID。下面以 `42` 举例，不会创建任务，也不会向 GitHub 写入：
+
+```sh
+agentflow flow show 42
+```
+
+[这条命令](../../app/cli.py#L258-L291)先按编号读 Flow，再分别读执行记录和交付记录。假设输出里出现 `state=review` 和 `delivery: state=waiting ... pr=-`：任务进入了需要人参与的阶段，本轮在等回答。应先到详情里读问题；此时查 CI 没有意义。另一张卡片同样显示 `state=review`，但交付行是 `state=open` 并带有 `pr=17`，这时应该打开**当前仓库**的 PR #17 查看改动。示例只摘出有辨识度的字段；命令还会按实际记录显示仓库、工作区以及后台核对进度。
+
+找不到某一行同样有用：尚无执行记录时，命令不会输出 `execution:`，因此不能据此认定是哪台机器处理了任务。遇到「PR 有代码，但页面还在等待」这样的差异，先记录任务编号、本次开工编号、分支及 PR 号，再核对它们是否属于同一次开工。这样能把「当前交付尚未核验」与「看到了上一次开工的 PR」分开，也不会因误判而重新提交同一需求。
+
+## 顺着一个任务编号读源码
+
+第一次读实现，不妨先问一个能验证的问题：控制台返回了一张新卡片，此刻系统究竟做完了什么？[控制台的 `create_flow`](../../app/controler/console/api.py#L225-L254) 先以指定的 GitHub 安装身份重新读取目标仓库，确认它没有归档；如果附带 Issue 编号，还要确认 Issue 可读。随后它把确认过的仓库名和任务交给 [`ControlService.create_flow`](../../app/controler/workflow/service.py#L106-L130)。后者把 Flow、首次开工和待执行工作一并写入数据库。HTTP 201 返回的是按 Flow ID 读出的 `FlowDetail`。从这张卡片可以断定任务已经登记，不能断定工作端已经启动，更不能断定 PR 已经创建。
+
+往下读时，沿两个编号就能分清各篇文章的入口。用 **Flow ID** 找整项工作的详情和历次开工；用 **Job ID** 找其中某次执行。[`AssignmentStore.assign_job`](../../app/persistence/assignments.py#L89-L108) 给有资格的工作端分配一个 Job；[`ResultApplication.apply`](../../app/controler/workflow/results.py#L112-L133) 按同一个 Job ID 找回已经保存的结果。想知道连接中断时这两个方法之间还剩下哪些证据，读[架构决策](decisions.md)；想知道这轮的修改最后对应哪条评论，读[评审循环](review-loop.md)。
 
 ## 当前实现状态
 
-| 范围 | 状态 | 当前事实 |
-|---|---|---|
-| 配置与领域契约 | 已验证（自动化） | serve/worker 独立配置、协议消息、分页 inventory、answer/revise 任务、纯文本输入与可空 Issue、逐 Flow journal、交付基线与反馈批次身份有覆盖；当前版本和兼容范围见[升级说明](../operations/upgrade.md) |
-| PostgreSQL 持久层 | 已验证（自动化） | Runtime 管理共享 Database，服务自行创建具体仓储；显式事务与共用锁保护 flow/attempt/job、binding、结果回执与反馈批次；聚合 Store 用于 CLI、live smoke 和测试 |
-| Flow 事实账本 | 已验证（自动化） | `flows` 的每次账本列变化同事务追加一条不可变 Flow 事实；存量 Flow 启动时补快照；`agentflow flow verify` 重放比较，测试夹具对每个 PostgreSQL 用例校验，见 [Flow 事实账本与状态表](flow-ledger.md) |
-| Webhook Ingress | 已验证（自动化） | HMAC 验签后、202 前持久化 inbox；后台消费者在每条 receipt 事务内创建服务/路由，提交后通知；失败退避、重放和请求体限制有覆盖 |
-| Event Router | 已验证（M2 F1 自动化） | 反馈 delivery/版本/deadline 原子写入，持久 settle、强信号授权、显式 action、同 Flow 冻结批次串行和重启恢复已覆盖 |
-| 合并与清理 | 已实现、有自动化覆盖 | 确认当前 PR 已合并即成功归档；原 Worker 的停止与工作区释放、GitHub 通知独立收尾。真实闭环待验收，见[端到端流程](workflows.md) |
-| Control/Worker 边界 | 已验证（Features 1–3） | 多 worker 鉴权/调度、Flow 生命周期 binding、tool multiplex、busy reconnect、result replay 与 journal secret 负向覆盖 |
-| Worker workspace 并发 | 本地实现、自动化验证 | workers 复合主键，一 Flow 独占一个位置；按需求补充库存，worker 可在不同 workspace 并行执行；默认无仓库推理目录、逐 job ACK/停止/恢复；旧数据库物理身份迁移仍是部署前置条件，见[实施记录](../plan/worker-workspace-concurrency.md) |
-| Control Service / Job Coordinator | 部分 | Issue 或持久任务输入/default branch prepare、原子创建、tool fencing、INITIAL 成功后创建 PR、原线程回复/保守 resolve 与持久恢复已接线；冲突自动处理与真实副作用 E2E 未完成 |
-| Codex / Context / Sandbox / VCS | 部分 | Flow repo、临时凭据、首轮 MCP、修订 resume/一次性 fallback、Git/jj clean/remote/lineage 双端核验有自动化；GitHub-only egress 与真实多轮 run 未验证 |
-| GitHub Client | 部分 | githubkit 0.16 App/installation 认证、Issue/repository/ref/PR、单仓库 Contents capability 与错误映射有隔离测试；M2 线程分页、回复、resolve 及竞态恢复有自动化；真实 App smoke 待验证 |
-| Judge / 通用推理 | 已验证（adapter / Job 自动化） | 推理 Job 复用统一领取、结果与恢复；Judge 按相关 PR、反馈线程和引用片段判定 answer/revise/wait/ignore，不生成最终答复。优先由 controller 托管的 bub mini worker 推理，否则使用普通 worker 的独立推理会话；真实 provider smoke 待执行。见 [Review 循环](review-loop.md) |
-| PR / 反馈对账 | 已实现、有自动化覆盖 | 独立有界循环读取已追踪 PR 的 merge/close/reopen 及 Issue/PR/review/线程反馈；cursor、退避和诊断持久化，不补建漏失的新 Flow trigger |
-| Projects v2 | 已实现、有自动化覆盖 | 可选组织看板配置、资源 API、独立投影同步及 check/status/retry；远端失败不改写 Flow，真实看板待验收 |
-| 取消 / drain / 停机 | 已实现、有自动化覆盖 | 持久 stop intent、执行 nonce、进程组取消与停止凭据握手；未知执行/未决 effects 保留占用；drain 不派新 Flow，已有绑定继续收尾 |
-| 会话查询 | 已实现、有自动化覆盖 | token 保护的 HTTP API 经 broker/WS 读取原 worker 的 Codex 历史；control 绑定 Flow/Attempt/session 并管理跨 session 分页 |
-| Web 控制台 | 已实现、有自动化覆盖 | 单 owner Access 保护的真实看板、详情与持久时间线；顶栏选择授权仓库并输入内容创建 Flow，保留任务原文和 nullable Issue 展示；真实 Access 登录与部署仍待验收 |
-| 可观测性 / 部署 | 部分 | 结构化日志、受保护 metrics、DB readiness、worker 状态文件、Docker/Compose、Kubernetes 与运维文档已落地；镜像发布、目标集群与恢复演练待验收 |
-| CLI / 真实验收入口 | 部分验证 | Flow、worker-drain、inbox、project 运维命令及 `app.live_smoke` 已提供；真实 GitHub/Codex/模型闭环仍须按验收清单执行 |
-| 插件 | 部分 | 五个生命周期 hook 已接线并隔离异常；post-merge-summary 仍只写日志 |
+| 想弄清楚的问题 | 从哪里读 |
+|---|---|
+| 一个请求到了服务端，哪个模块决定能不能执行？ | [沿着模块边界读代码](components.md)：从收件、事务到工作区和编码后端。 |
+| 服务中途重启，怎样知道哪些动作能重试？ | [三个容易混淆的完成时刻](decisions.md)，以及[Flow 事实账本](flow-ledger.md)。 |
+| 谁可以触发任务？为什么 worker 能推送却不用保管 App 私钥？ | [GitHub App 与仓库的边界](github-app.md)。 |
+| 多条评审评论如何变成一次修订？ | [评审循环](review-loop.md)：反馈版本、批次、判定和原线程回复。 |
+| 为什么能看到任务卡片，却可能读不到编码对话？ | [会话查询](conversation-api.md)：数据库和原执行机器分别保留什么。 |
+| 子任务、跨机器迁移现在能用吗？ | [路线图](roadmap.md)区分现有行为和未来方向；[派生 Flow](derivable-flows.md)是设计提案。 |
 
-装配与运行依据：[ServerRuntime](../../app/controler/runtime.py)、
-[事务内 Webhook 服务](../../app/controler/events/webhooks.py)、[Database](../../app/persistence/database.py)、
-[协议](../../app/contracts/protocol.py)。对账与运维依据：
-[PR 对账](../../app/controler/reconciliation/pull_requests.py)、
-[反馈对账](../../app/controler/reconciliation/feedback.py)、
-[Projects](../../app/controler/reconciliation/projects.py)、
-[取消边界](../operations/cancel-drain.md)、[会话查询](conversation-api.md)、
-[部署指南](../deployment/README.md)。
+## 从实现走到真实部署
 
-## M2 状态与待办
+阅读源码或运行行为测试，可以验证断线时任务是否重派、一个输入会不会被处理两次。真实 GitHub App 的安装权限、模型账号、集群网络和灾备则需要在目标环境中验证。准备运行系统时，请读[部署指南](../deployment/README.md)、[运维手册](../operations/runbook.md)和[真实环境验收清单](../verification/m5-live-e2e.md)。
 
-**F1–F4 均已实现并合并；M2 尚未通过真实环境验收。**
+<a id="m2-状态与待办"></a>
+早期计划把评审修订称作 M2。今天的行为见[评审走查](../feature-walkthroughs/review.md)，当时的设计取舍与真实服务验收项保留在[功能记录](../plan/m2-review-resolution.md)。其他功能的提案和修订历史也保留在[计划目录](../plan/README.md)。
 
-| Feature | 已合并 PR | 实现范围 |
-|---|---|---|
-| F1 | [#19](https://github.com/b1indsight/agentflow/pull/19) | 持久反馈版本、settle 与冻结批次 |
-| F2 | [#20](https://github.com/b1indsight/agentflow/pull/20) | bub 语义决策、有界上下文与直接答复 |
-| F3 | [#21](https://github.com/b1indsight/agentflow/pull/21) | 同 repo/branch/PR 修订、交付核验与一次性 session 兜底 |
-| F4 | [#22](https://github.com/b1indsight/agentflow/pull/22) | 线程/comment 分页映射、原线程回复、保守 resolve 与持久恢复 |
-
-F4 于 **2026-09-08 00:02:45（Asia/Singapore）**合并，对应 UTC 2026-09-07 16:02:45，
-合并提交为 `5fd27f23584e`。[PR #22](https://github.com/b1indsight/agentflow/pull/22)
-记录修复 head `0294c003128b` 的 377 passed / 0 skipped，
-[对应 CI](https://github.com/b1indsight/agentflow/actions/runs/34140178991) 全部通过；这些结果覆盖自动化场景。
-
-剩余工作：
-
-- **真实验收**：GitHub App smoke、M1 Issue→PR 前置，以及两轮修订、answer/wait/ignore、session
-  兜底、重启恢复和真实线程回复/resolve 均缺少真实服务运行证据，按 [F4 验收矩阵](../plan/m2-review-resolution.md#6-自动化与真实-m2-验收)逐项完成。
-
-M4 F1 已修复同秒旧转换重放：历史中已表示的编辑及不能定序的后继保留待核对，只有新鲜
-远端观察推进重复转换。原复现、重启/回滚及并发回归见 [F1 实施记录](../plan/m4-feedback-replay.md)。
-[评审表合并](../plan/review-version-merge.md)后不再暂存不能定序的同秒编辑，改为直接丢弃，由下一次主动观察收敛。
-
-## 当前验证基线
-
-- pytest 覆盖协议、角色边界、远程执行闭环与真实 PostgreSQL 持久层场景；
-- 最近完整记录为 2026-10-15 持久层简化后的 **735 passed、无跳过**，Ruff、Mypy 通过；
-  这是既有实施记录，不代表本次文档更新重新运行了完整测试，见[验证与对照](../plan/persistence-simplification.md)；
-- PostgreSQL-backed `agentflow serve` 与两个 worker 在 CI 中独立启动，并在 serve 重启后自动重新注册；
-- 测试不访问真实 GitHub、Codex 或模型服务；Judge 契约测试运行真实 bub 库连接假模型端点。
-
-真实验收入口和待办见 [M5 E2E 清单](../verification/m5-live-e2e.md)；
-部署/恢复检查见[运维手册](../operations/runbook.md)。已有命令、清单和自动化不等于真实环境已通过。
-
-M0 在 2026-08-26 使用 SQLite 和 19 项测试完成原始验收；该记录保留在
-[`m0.md`](../plan/m0.md)与[`m0-closeout.md`](../plan/m0-closeout.md)。当前 PostgreSQL 替换不证明
-完整产品闭环。多 worker 恢复不等于跨 worker session 迁移或 control-plane HA；这两项仍属后续 feature。
-
-## 阅读导航
-
-- [总览](overview.md)：定位、运行形态、平面边界与组件总览；
-- [组件职责](components.md)：端口、适配器、状态机与持久层；
-- [端到端流程](workflows.md)：M1/M2 自动化覆盖的切片与目标闭环；
-- [关键决策、风险与短板](decisions.md)：已定方案和开放问题；
-- [Flow 事实账本与状态表](flow-ledger.md)：数据分类、事实目录、写入路径与重放校验；
-- [路线图](roadmap.md)：M0–M5 里程碑与扩展预留；
-- [GitHub App 接入](github-app.md)：认证、权限、Webhook 和密钥；
-- [Review 修订循环](review-loop.md)：triage、revise 与并发语义；
-- [可派生 Flow 编排](derivable-flows.md)：Flow 独占执行环境、未来派生、上下文/skills 与父级验收；
-- [架构可视化](diagram.html)：手工维护的状态图，信息以本页和代码为准。
+维护这些文档时，按[项目工作流](https://github.com/b1indsight/skills/blob/d56afec6c820b33a0ab44673aa280d0fb820603a/plan-first-workflow/references/feature-record.md)选择落点：模块职责、依赖或数据归属变化，更新架构文章；用户能观察到的行为变化，更新对应走查及其行为测试链接。一次变更的提案与取舍留在原功能记录，不把它当成已经上线的行为。

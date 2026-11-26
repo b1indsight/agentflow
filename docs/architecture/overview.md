@@ -1,120 +1,76 @@
-# 架构总览
+# 一项任务怎样在控制端与工作端之间流转？
 
-## 1. 定位
+把 AgentFlow 放在一次普通的代码评审里看：你提出改动，编码工具在仓库中提交一个版本，你和同事在 GitHub 上决定是否接受。AgentFlow 接手的是这些步骤之间的衔接。它记住该用哪份代码、上一轮问了什么、该回哪条评论；是否合并，仍由人和目标仓库的审核规则决定。
 
-AgentFlow 的**目标形态**是本地优先、headless 的编排器：把带 `flow` 标签的 GitHub issue 运行成
-`Codex 编码 → PR → 人工审核 → 回喂修订 → 人工合并 → 归档` 的闭环。产品交互面是 GitHub
-issue / PR；Web 控制台已提供单 owner 的看板、详情、执行记录和混合时间线，
-支持 cancelled Flow 的本地展示归档，保留取消状态且不修改交付。
-实时插话、个人阅读状态和工作流写操作仍待实现，见[路线图](roadmap.md#9-未来方向roadmap)。
+## 控制端记住约定，工作端保留现场
 
-M0 已验收基础设施切片；M1–M4 功能及 M5 部署、接收、运维实现已落地，有自动化覆盖，
-真实服务闭环与部署仍待验收。当前状态以[架构入口](README.md#当前实现状态)为准。
+`agentflow serve` 运行**控制端**。它接收 GitHub 通知和控制台请求，并把业务状态写入 PostgreSQL。GitHub 收到 HTTP 202 时，通知已经存好，即使后台还没来得及处理，服务重启也有记录可查。此时不能推断编码已经开始。
 
-已定基调：**Python** · **Webhook 驱动的 control plane** · **出站长连接 worker** · **headless** ·
-**worker 本地 checkout 跑 Codex** · **PostgreSQL 持久化**。
+`agentflow worker` 运行**工作端**。它主动连到控制端，报告这台机器上哪些仓库位置可以使用。控制端分给它一项工作和一个具体目录，它才在那份仓库里调用 Codex 或 Amp。一个 worker 可以提供多个位置；同一个位置在安全释放前只属于原任务。网络断开既不会搬走这个目录，也不能证明目录里的进程已经退出。
 
-## 2. 运行形态
-
-目标部署要求 Webhook 能到达 serve；持有本地 checkout 的 worker 只需主动访问 serve：
-
-- 本地开发可通过可信隧道把 GitHub Webhook 转发到 `localhost`；
-- 长期运行时，serve 部署在有受控公网入口的控制节点，worker 可部署在独立执行节点；
-- 给 issue 打标签会触发本机执行模型生成的命令，因此 allowlist、沙盒、短时凭据和网络出口都是
-  前置安全边界，而不是后期增强。
-
-当前验证了 serve/双 worker 多进程启动与重启重连、认证 WebSocket 注册、租约恢复和 fake executor 的远程 job；公网入口、
-真实 Webhook 投递和生产部署尚未验证。
-
-## 3. 组件总览
-
-```diagram
-┌──────────────────────────────────────────────────────┐
-│ GitHub：Issue / PR / Review / Projects                │
-└──────────────┬───────────────────▲───────────────────┘
-               │ Webhook           │ REST / GraphQL
-               ▼                   │
-┌────────────────── serve / control ───────────────────┐
-│ API → 持久 Inbox → Consumer → EventRouter            │
-│                            → ControlService          │
-│ Coordinator → 本地 Judge / Worker 任务准备            │
-│ ResultApplication → ResultEffects → GitHub           │
-│ 独立循环：租约 / 结果恢复 / 反馈合批 / PR与反馈对账    │
-│           Projects 同步 / 指标采集                    │
-│ 各服务自建仓储，共享 Database                        │
-│ ServerCallbacks / Broker + Gateway / Session × worker│
-└──────────────┬───────────────────┬───────────────────┘
-               │                   │ 认证 WebSocket
-               ▼                   ▼
-┌────────────────────┐  ┌──────────────────────────────┐
-│ PostgreSQL         │  │ Runtime + Gateway + Session  │
-│ 状态、结果、回执   │  │ journal / 历史查询 / 停止握手 │
-│ 批次、对账进度     │  │ Executor → Codex / repo / VCS │
-└────────────────────┘  └──────────────────────────────┘
+```text
+GitHub 的通知 ──┐                          ┌── PostgreSQL：任务、分配记录、结果
+                ├── 控制端（serve）─────────┤
+浏览器的请求 ──┘          │                └── GitHub API：核对分支、创建 PR、回复
+                          │ 已认证的 WebSocket：任务、工具请求、执行结果
+                          │ 由工作端主动连接
+                    工作端（worker）── 本地仓库、编码进程、原始会话
 ```
 
-平面边界：
+两个入口共享一套业务规则。Issue 标签可以触发任务；没有 Issue 时，用户也可以从控制台直接提交正文和图片。[控制端运行时](../../app/controler/runtime.py)把数据库、工作流服务和接收工作端消息的网关接在一起，服务重启后仍能从库里读回未完成的作业。[工作端运行时](../../app/worker/runtime.py)管理本机的执行与连接，把控制端发来的作业交给执行器。两端通过消息交换执行进度，不要求能直接读取对方的文件系统。
 
-- **Control plane**负责 Webhook、持久化、状态机、Judge 决策和 GitHub API，是唯一数据库权威；
-- **Worker execution plane**负责编码 prompt、Codex 与 Flow repo 内的改码/提交/push，以及执行停止、
-  journal 重放和历史查询；不持有数据库、GitHub App 或 Judge 凭据；
-- control 只确定分支名并在 worker 完成 push 后创建 PR，不直接执行本地版本控制；
-- 本地能力按 [Flow repo / execution policy / VCS](components.md) 分离（§4.6）：Agent 选择并操作
-  Git/jj，worker 只验证事实。
+## 为什么有 Flow、Attempt 和 Job 三个名字？
 
-Runtime 创建并关闭共享 Database，装配共享的结果应用、effects、工具和 conversation broker。
-两端 Runtime 持有相同的 Gateway / Session：server 管多 worker，worker 至多登记一个 server。
-Gateway 驱动统一的 Session 事件入口；Dispatcher 按 `package.method` 精确路由请求，普通回复按
-`reply_to` 找原调用，经过可选 `on_reply` 再交付。所有 payload 与拒收均走 FIFO，无 history 旁路。
-server 每连接挂载 ServerCallbacks；worker 平级挂载 WorkerStateCallbacks / WorkerBusinessCallbacks。
-状态类管理连接和执行状态协议；业务类注册 worker.history，通过 before_wait 管理工具观察，
-通过 Dispatcher 接收回复与已授权的拒收。两类互不持有或调用，在同一 driver 串行处理。
-Broker 持有查询 Future 与限额，从 Registration 取得配对的 Session/Dispatcher；慢业务回调与 history 互相等待。
-server 接入函数只负责认证与首条 message，WorkerRuntime 直接负责主动拨号、重连与连接任务回收；
-wire v17 双端协调升级。
-执行 Task、durable 工具 Future 和停止清理由 WorkerExecution 长期持有，journal 由 ExecutionState 保存。
-服务自行创建所需仓储；Webhook 每条 receipt 在事务内创建 ControlService/EventRouter，
-事务外执行提交后通知。聚合 Store 只用于 CLI 运维、live smoke 和测试。
-依据：[运行时装配](../../app/controler/runtime.py)、[事件消费](../../app/controler/events/webhooks.py)、
-[数据库上下文](../../app/persistence/database.py)、[Store 用途](../../app/persistence/store.py)。
+假设任务是给导出功能加一个日期选项。**Flow 是这件事本身**。你补充日期格式、评审者要求修正时区，仍然在同一个 Flow 里。**Attempt 是这件事的一次开工**：本次分支、编码会话和交付的 PR 都有归属。归档后如果要重做，可在同一 Flow 下另开一个 Attempt；原来那张 PR 不会变成新一轮的交付。
 
-GitHub、Judge、push capability 和结果回执恢复已有实现与自动化；真实 GitHub/Codex/bub
-闭环、生产部署和恢复演练仍需单独验收，不能从图中推断它们已经端到端可用。
+**Job 是一次能派给 worker 的工作**。首次编码、按意见修订、收尾和模型推理有不同的输入，也有各自的执行结果。一次 Job 结束，只能说明这一步有了结果。例如首轮可以完成并留下一个给人的问题；这时 Flow 还在等输入，没有 PR，也不应自动归档。三个对象的定义见[领域模型](../../app/domain/models.py)。
 
-## 4. 数据架构
+### 一张新卡片怎样拿到第一个执行位置
 
-PostgreSQL 是唯一运行时数据库，由 control 独占。表按职责分为五类：
+**登记任务和领取任务可以发生在不同时间。**控制台入口负责确认请求来自有权限的用户，并以 GitHub 安装身份重新读取仓库。业务服务接过确认后的仓库名，把 Flow、首次 Attempt 和首轮 Job 写入同一个数据库事务。这三条记录分别回答「用户要完成什么」「这是哪一次开工」和「下一步要运行什么」。如果写入中途失败，数据库会一起撤销；调度器不会捡到一项找不到所属任务的工作。提交成功后，服务才通知在线工作端有新任务可领。[创建流程](../../app/controler/console/api.py#L224-L254)以及[原子创建测试](../../tests/test_console_api.py#L167-L199)给出了这两个阶段的分界。
 
-```diagram
-┌──────────────────── 业务事务（control） ────────────────────┐
-│                                                             │
-│  ② 追加 Flow 事实            ① 同事务更新状态表              │
-│  ┌───────────────────┐       ┌──────────────┐               │
-│  │ console_activity  │ ────▶ │ flows        │ ◀── 调度、对账 │
-│  │ source='flow' 的  │ 投影  │ 六态、轮次、 │     API、CLI  │
-│  │ 事实行（只追加）  │       │ 归档结论     │     读取      │
-│  └─────────┬─────────┘       └──────────────┘               │
-│            │ 不复制其他表                                    │
-│            ▼                                                │
-│  ┌──────────────────────────────────────────────┐           │
-│  │ 业务状态与专用证据：jobs、flow_tool_calls、   │           │
-│  │ attempts、review_*、result_*、events 等       │           │
-│  └──────────────────────────────────────────────┘           │
-│  ┌──────────────────────────────────────────────┐           │
-│  │ 协调数据：workers、租约与 claim、对账游标、   │           │
-│  │ 退避时间（不是业务事实，不进入账本）          │           │
-│  └──────────────────────────────────────────────┘           │
-└─────────────────────────────────────────────────────────────┘
-                 │ 触发器刷新
-                 ▼
-  展示投影与采集归档：console_flows、console_activity 的其余行
+调度器需要确认谁能写**这份**工作区。例如一台机器可以同时报告两个可写位置。一次首轮任务会占用其中一个；在这个 Flow 上继续修订时，调度器要沿用已有的归属。换用空闲目录固然能找到另一份相同版本的代码，却未必能找到上一轮的编码会话、本地修改和待确认的执行结果。因此，连接的身份、一次分配的凭据和目录的使用代次需要分别检查；只有 worker 名字相同，还不足以证明同一进程可以接管工作。[分配模块](../../app/persistence/assignments.py)负责在数据库里选择可用工作，[工作区模块](../../app/worker/execution/workspaces.py)则在本机检查目录归属。两者检查的是不同机器上的事实。
+
+### 一条连接如何成为可用的工作端
+
+工作端拨号后，控制端的 WebSocket 入口先把连接交给 [`serve_worker`](../../app/controler/api.py#L253-L259) 验证身份。通过后，[`ServerRuntime.serve_worker_session(worker_id, register, session)`](../../app/controler/runtime.py#L146-L180) 才接手：`worker_id` 标识机器，`register` 是它报告的能力，`session` 是本次连接，三者不可互换。运行时把处理执行消息与文件消息的回调装到这条连接上，再调用 `Gateway.serve`。因此能连通网络，并不自动获得领取工作或查询文件的权限。
+
+同一台机器重连时会遇到一个实际问题：旧连接可能尚未关闭。[`Gateway.register`](../../app/communication/gateway.py#L104-L142) 先保留新连接的位置，等待前一条连接关闭，再检查新连接是否仍是当前连接。只在条件满足时，调用方才拿到可用的登记对象。接下来 [`ServerCallbacks.on_published`](../../app/controler/workers/callbacks.py#L202-L208) 把工作端能力与本次连接代次登记到存储。**替换连接只改变消息往哪里送**；是否有权继续某个 Job，还要对照工作区、Job 和原分配凭据。
+
+### 从消息里区分「开始」与「结果」
+
+以首轮编码为例，控制端发出 `worker.execute` 时，会先登记这次调用预期收到的结果类型。[`WorkerStateCallbacks.on_execute`](../../app/worker/transport/state.py#L324-L360) 收到 `Assignment` 后核对调用身份，并把参数交给本机执行对象；对于首次接收的工作，它先发送启动通知，再启动执行。控制端的 [`on_started`](../../app/controler/workers/callbacks.py#L533-L545) 把 Job ID、Attempt ID、worker、分配凭据和连接代次一并交给 `start_assignment`。只有这些条件和当前工作区都匹配，才写入启动时间、延长租约；修订次数也在这笔事务内增加。迟到的旧通知不能给新任务“签到”。[启动事务](../../app/persistence/assignments.py#L257-L311)
+
+进程结束后，消息回答的是另一个问题。工作端用 [`ExecutionState.complete`](../../app/worker/state/execution.py#L194-L219) 把本次执行的结果或异常变成一份可重送的记录；控制端的 [`on_result`](../../app/controler/workers/callbacks.py#L547-L573) 核对身份，持久接收记录，再交给工作流处理。因而发生重启时，已经收到的执行结果可以继续用于开 PR 或回复评论，不必再启动一次编码进程。[重连测试](../../tests/test_controller_update_boundary.py#L38)特意把连接切在“已启动、未交回结果”之间。
+
+### 可运行的例子：同样是超时，为什么一个任务重新排队，另一个保持阻塞？
+
+工作端需要定期续约。**租约过期只说明控制端没有按时收到续约，不能说明执行器是否已经动过代码。**控制端的恢复模块从持久记录中提取事实，再由一个不访问网络或数据库的函数决定 Job 的处置。下面把时间固定，直接调用项目里的判定函数。在仓库根目录用 `uv run python` 执行即可，不需要启动控制端、连接 GitHub 或准备数据库。
+
+```python
+from datetime import datetime, timedelta, timezone
+
+from app.domain.models import FlowState, JobKind
+from app.domain.recovery_policy import JobRecoveryFacts, decide_job_recovery
+
+now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+before = now - timedelta(minutes=1)
+job = JobRecoveryFacts(
+    id=81, flow_id=42, kind=JobKind.INITIAL,
+    flow_state=FlowState.RUNNING, delivery_state=None,
+    lease_expires_at=before, recovery_deadline=now,
+)
+for changes in ({}, {"dispatch_authorized_at": before}, {"result_received_at": before}):
+    observation = job.model_copy(update=changes)
+    print(decide_job_recovery(observation, now).value)
 ```
 
-- **Flow 事实账本**是 Flow 状态的唯一可信来源：每次改变 `flows` 的业务列，都同事务追加一条以事件
-  命名的事实。重放一个 Flow 的事实可以得到与 `flows` 当前行一致的结果。
-- **`flows` 状态表**是账本的同事务投影。业务判断、行锁和唯一约束继续使用它，读路径不变。
-- **其他表**保持各自的权威，不由账本重建。
-- **协调数据**记录谁占用什么、处理到哪里，不进入账本。
+预期三行输出依次是 `requeue`、`blocked`、`keep`。第一份记录没有派发授权、启动记录或待确认的停止请求；租约已过期，系统可以安全地把 Job 放回队列。第二份只多了一项证据：控制端曾授权发送任务。即使控制端没收到启动通知，工作端也可能已经开始执行；恢复期限到了仍无法核对，重新启动编码有重复写入的风险。第三份已经有结果到达，应保留这份 Job 记录，让负责应用结果的模块继续处理交付，不靠第二次编码补写结果。[恢复判定](../../app/domain/recovery_policy.py#L61-L88)还单独检查工作区是否能释放；示例的三个返回值都不是「删除目录」的指令。
 
-`agentflow flow verify` 重放比较；账本之前的 Flow 从启动时补录的快照开始重放。
-完整分类、事实目录和写入规则见 [Flow 事实账本与状态表](flow-ledger.md)。
+在实际部署里，控制端的恢复循环先读取事实，再把判定应用到数据库。工作端能否重新连上、能否读回本机执行记录，则取决于原机器和磁盘是否仍然可用。上面的例子可以重现规则，却不能用来证明某台离线机器已经停止。要观察两端真正的消息顺序，可以运行[控制端替换测试](../../tests/test_controller_update_boundary.py#L38-L96)：测试暂停正在执行的作业，断开原连接，换上新控制端，让**原工作端**继续，最后同时检查编码调用只有一次、Job 已完成、PR 也只创建了一次。
+
+## 读懂看板上的一个状态
+
+`queued` 表示排队，`running` 表示正在处理，`review` 表示等待评审或人的输入。一项工作若无法安全继续，会进入 `blocked`。`finalizing` 是正在收尾，`archived` 才是归档；归档原因另记为成功或放弃。看到 `review` 时，要看本次交付有没有 PR；看到成功归档时，还要看原工作区是否已经释放。**业务阶段、远端交付和本机进程是三件可以分别变化的事。**
+
+接下来可以[跟着一次首轮交付走](../feature-walkthroughs/first-delivery.md)，也可以转到[模块地图](components.md)，看看是谁维护上述三种记录。
