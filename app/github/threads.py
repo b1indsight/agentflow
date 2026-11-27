@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
-from app.github.errors import GitHubError, GitHubErrorKind
-from app.github.pagination import Batch, next_cursor
+from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
+from app.github.pagination import Batch, next_cursor, validate_limit
 from app.github.review_threads import ReviewComment, ReviewThread
 
 if TYPE_CHECKING:
@@ -105,6 +105,44 @@ def decode_thread(node: dict[str, Any], pull_request: PullRequest) -> ReviewThre
         complete=valid and bool(comments.items) and comments.next_cursor is None,
         fetched_at=datetime.now(UTC), limitations=() if valid else ("thread:invalid-comments",),
     )
+
+
+async def fetch_threads(
+    pr: PullRequest, *, cursor: str | None = None, limit: int = 100,
+) -> Batch[ReviewThread]:
+    """Request threads with their first 20 comments and independent comment cursors."""
+    validate_limit(limit)
+    repo = pr.repository
+    client = repo.installation._client(auto_retry=False)
+    with translate_errors("review_threads"):
+        data = await client.async_graphql(_THREADS, {
+            "owner": repo.owner, "name": repo.name, "pr": pr.number, "cursor": cursor, "limit": limit,
+        })
+        if data.get("errors") or len(json.dumps(data).encode()) > MAX_THREAD_BYTES:
+            raise ValueError("partial or oversized thread batch")
+        connection = data["repository"]["pullRequest"]["reviewThreads"]
+        following = next_cursor(connection, cursor)
+        nodes = connection["nodes"]
+        if len(nodes) > limit or (not nodes and following):
+            raise ValueError("invalid thread batch size")
+        threads = []
+        for node in nodes:
+            if node is None or not belongs_to_pr(node, repo.full_name, pr.number):
+                raise ValueError("missing or foreign thread")
+            thread = decode_thread(node, pr)
+            if thread.limitations:
+                raise ValueError("missing or duplicate comment identity")
+            threads.append(thread)
+        if len({thread.thread_id for thread in threads}) != len(threads):
+            raise ValueError("duplicate thread identity")
+        return Batch[ReviewThread](items=tuple(threads), next_cursor=following)
+
+
+async def list_review_threads(pr: PullRequest) -> ReviewThreads:
+    """Read threads and their comments within a shared traversal budget."""
+    reader = ThreadReader(pr, auto_retry=False)
+    with translate_errors("list_review_threads"):
+        return await reader.all()
 
 
 class ThreadReader:

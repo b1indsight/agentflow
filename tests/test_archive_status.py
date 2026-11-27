@@ -17,6 +17,7 @@ from app.controler.workflow.archive import archive_effects, archive_progress
 from app.controler.workflow.service import ControlService
 from app.domain.models import Flow, FlowDelivery, FlowState, JobState
 from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest, Repository
+from app.github.threads import list_review_threads
 from app.persistence.results import ResultStore
 from app.persistence.store import Store
 from app.plugins.hookspecs import hookimpl
@@ -519,11 +520,12 @@ async def test_preparation_discovery_defers_retries_to_its_durable_owner(tmp_pat
 
     adapter, _ = archive_adapter(tmp_path, monkeypatch, transport)
     monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
+    pr = PullRequest(Repository(adapter.installation(42), "owner/repo"), 17)
     with pytest.raises(GitHubError) as caught:
-        await PullRequest(Repository(adapter.installation(42), "owner/repo"), 17).list_review_threads()
+        await list_review_threads(pr)
     assert caught.value.kind is GitHubErrorKind.TRANSIENT
     assert len(queries) == 1
-    snapshot = await PullRequest(Repository(adapter.installation(42), "owner/repo"), 17).list_review_threads()
+    snapshot = await list_review_threads(pr)
     assert snapshot.complete
     assert len(queries) == 2
 

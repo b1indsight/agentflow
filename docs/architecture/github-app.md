@@ -15,9 +15,11 @@
 
 Control 使用 `AGENTFLOW_GITHUB_APP_ID` 和 `AGENTFLOW_GITHUB_PRIVATE_KEY_PATH` 初始化 [GitHubApp](../../app/github/apps.py)，要求 ID 为正数、私钥可读且非空。SDK 用私钥签短期 [App JWT](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app)。Control 以 App 身份读取自身的 slug，得到 `slug[bot]`，并可换取[安装令牌](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation)。安装令牌通常一小时过期，权限不能超过该 installation 已获授权的仓库与操作。
 
-对于标签触发的 Flow，[路由器](../../app/controler/events/router.py)从事件取 `installation.id`，和仓库、Issue 一起交给 control。此后 GitHub 请求沿 `GitHubApp → Installation → Repository → Issue / PullRequest` 找到操作对象。绑定资源时还没联网；持有一个 PR 编号也不等于知道它是否仍开放。[PR 资源](../../app/github/pull_requests.py)将已读取的事实与未读取的字段区分开；交付前仍需复读 PR 和分支。
+对于标签触发的 Flow，[路由器](../../app/controler/events/router.py)从事件取 `installation.id`，和仓库、Issue 一起交给 control。Control 用安装 ID 选择请求身份，用仓库名和编号绑定操作对象。绑定资源时还没联网；持有一个 PR 编号也不等于知道它是否仍开放。[PR 资源](../../app/github/pull_requests.py)将已读取的事实与未读取的字段区分开；交付前仍需复读 PR 和分支。
 
-调用方用 `Repository(installation, full_name)` 或 `Project(installation, config)` 本地绑定资源。需要最新默认分支或归档状态时，调用 [`await fetch_repository(installation, full_name)`](../../app/github/repositories.py#L191-L199) 取得新的 `Repository`。只查分支的 SHA 时，直接调用 [`await fetch_ref(installation, full_name, branch)`](../../app/github/repositories.py#L215-L224)，无需先读取仓库信息。两个函数均位于 `app.github.repositories`。
+调用方用 `Repository(installation, full_name)` 或 `Project(installation, config)` 本地绑定资源。需要最新默认分支或归档状态时，调用 [`await fetch_repository(installation, full_name)`](../../app/github/repositories.py#L156-L164) 取得新的 `Repository`。只查分支的 SHA 时，直接调用 [`await fetch_ref(installation, full_name, branch)`](../../app/github/repositories.py#L180-L189)，无需先读取仓库信息。两个函数均位于 `app.github.repositories`。
+
+知道编号时，用 `await Issue(repo, number).refetch()` 或 `await PullRequest(repo, number).refetch()` 读取当前状态；只有分支名时，用 [`find_pull_request_by_head(repo, branch)`](../../app/github/pull_requests.py#L266-L278) 查找 PR。读取审核线程时，把 PR 传给 [`fetch_threads(pr, cursor=...)` 或 `list_review_threads(pr)`](../../app/github/threads.py#L110-L145)：前者读一页，后者在请求和字节预算内遍历线程及评论。
 
 以安装 42 下的 `octo/repo` 为例，调用方通过安装实例为指定仓库申请推送凭据：
 

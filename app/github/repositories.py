@@ -11,9 +11,7 @@ from app.github._fields import unobserved_field
 from app.github._names import split_repo
 from app.github.apps import Installation
 from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
-from app.github.issues import Issue
 from app.github.pagination import Batch
-from app.github.pull_requests import PullRequest
 
 
 class RemoteRef(BaseModel):
@@ -94,12 +92,6 @@ class Repository(BaseModel):
             if grant.id != self.installation.installation_id or grant.suspended_at is not None:
                 raise GitHubError(GitHubErrorKind.PERMISSION, "get_repo_installation")
 
-    async def fetch_issue(self, number: int) -> Issue:
-        return await Issue(self, number).refetch()
-
-    async def fetch_pull_request(self, number: int) -> PullRequest:
-        return await PullRequest(self, number).refetch()
-
     async def ensure_labels(self, definitions: Sequence[LabelDefinition]) -> tuple[str, ...]:
         """Create missing definitions only; uncertain writes are recovered by the next full read.
 
@@ -159,33 +151,6 @@ class Repository(BaseModel):
             )).parsed_data
             return (data.status == "ahead" and data.merge_base_commit.sha == base
                     and data.base_commit.sha == base and data.behind_by == 0)
-
-    async def find_pull_request_by_head(self, branch: str) -> PullRequest | None:
-        branch = normalize_branch(branch)
-        client = self.installation._client()
-
-        with translate_errors("find_pull_request_by_head"):
-            pulls: Any = (await client.rest.pulls.async_list(
-                self.owner, self.name, state="all", head=f"{self.owner}:{branch}", per_page=2,
-            )).parsed_data
-            if not pulls:
-                return None
-            if len(pulls) != 1:
-                raise GitHubError(
-                    GitHubErrorKind.UNEXPECTED_RESPONSE, "find_pull_request_by_head",
-                )
-            return PullRequest._from_response(self, pulls[0])
-
-    async def open_pull_request(
-        self, head: str, base: str, title: str, body: str,
-    ) -> PullRequest:
-        client = self.installation._client(auto_retry=False)
-
-        with translate_errors("open_pull_request"):
-            data = (await client.rest.pulls.async_create(
-                self.owner, self.name, title=title, head=head, base=base, body=body,
-            )).parsed_data
-            return PullRequest._from_response(self, data)
 
 
 async def fetch_repository(installation: Installation, full_name: str) -> Repository:

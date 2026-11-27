@@ -74,7 +74,8 @@ async def test_threads_and_comments_have_independent_cursors(tmp_path, monkeypat
 
     app = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda _, **kwargs: SimpleNamespace(async_graphql=graphql))
-    result = await PullRequest(Repository(app.installation(1), "owner/repo"), 17).list_review_threads()
+    pr = PullRequest(Repository(app.installation(1), "owner/repo"), 17)
+    result = await github_threads.list_review_threads(pr)
     assert result.complete and len(result.threads) == 101
     assert len(result.threads[0].comments.items) == 21
     assert result.threads[0].comments.items[-1].node_id == "C999"

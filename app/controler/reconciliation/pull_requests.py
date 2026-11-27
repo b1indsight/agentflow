@@ -20,6 +20,7 @@ from app.github import (
     GitHubApp,
     GitHubError,
     GitHubErrorKind,
+    PullRequest,
     PullRequestMerge,
     Repository,
     retry_delay,
@@ -134,7 +135,7 @@ class Reconciler:
                 coding = jobs_tx.lifecycle_job(flow.id)
                 blocked = jobs_tx.reopen_blocked(flow.id)
             installation = self.github.installation(flow.installation_id)
-            remote = await Repository(installation, flow.repo).fetch_pull_request(delivery.pr_number)
+            remote = await PullRequest(Repository(installation, flow.repo), delivery.pr_number).refetch()
             if (remote.repo != flow.repo or remote.number != delivery.pr_number
                     or remote.head_repository != flow.repo):
                 raise ValueError("PR observation identity mismatch")

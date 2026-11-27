@@ -108,19 +108,21 @@ class RecordingRepository(Repository):
         record_call(self, "compare_commits")
         return True
 
-    async def find_pull_request_by_head(self, branch: str) -> PullRequest | None:
-        state = record_call(self, "find_pull_request_by_head")
-        if state.pull_request is None:
-            return None
-        return PullRequest(self, **state.pull_request.model_dump(exclude_unset=True))
 
-    async def open_pull_request(self, head: str, base: str, title: str, body: str) -> PullRequest:
-        state = record_call(self, "open_pull_request")
-        state.opened.append(head)
-        state.pull_request = PullRequest(
-            self, number=17, state="open", head_branch=head, head_sha="abc123", base_branch=base,
-        )
-        return state.pull_request
+async def record_find_pull_request_by_head(repo: Repository, branch: str) -> PullRequest | None:
+    state = record_call(repo, "find_pull_request_by_head")
+    if state.pull_request is None:
+        return None
+    return PullRequest(repo, **state.pull_request.model_dump(exclude_unset=True))
+
+
+async def record_open_pull_request(repo: Repository, head: str, base: str, title: str, body: str) -> PullRequest:
+    state = record_call(repo, "open_pull_request")
+    state.opened.append(head)
+    state.pull_request = PullRequest(
+        repo, number=17, state="open", head_branch=head, head_sha="abc123", base_branch=base,
+    )
+    return state.pull_request
 
 
 class RecordingIssue(Issue):
@@ -201,17 +203,19 @@ class RecordingPullRequest(PullRequest):
         for item in items:
             yield item
 
-    async def list_review_threads(self) -> ReviewThreads:
-        state = record_call(self.repository, "list_review_threads", number=self.number)
-        return ReviewThreads(
-            repo=self.repository.full_name, pr_number=self.number, fetched_at=datetime.now(UTC),
-            threads=tuple(ReviewThread(self, **thread.model_dump(exclude_unset=True))
-                          for thread in state.threads),
-        )
 
-    async def fetch_threads(self, *, cursor: str | None = None, limit: int = 100) -> Batch[ReviewThread]:
-        state = record_call(self.repository, "fetch_threads", number=self.number)
-        return Batch[ReviewThread](items=tuple(state.threads))
+async def record_list_review_threads(pr: PullRequest) -> ReviewThreads:
+    state = record_call(pr.repository, "list_review_threads", number=pr.number)
+    return ReviewThreads(
+        repo=pr.repository.full_name, pr_number=pr.number, fetched_at=datetime.now(UTC),
+        threads=tuple(ReviewThread(pr, **thread.model_dump(exclude_unset=True))
+                      for thread in state.threads),
+    )
+
+
+async def record_fetch_threads(pr: PullRequest, *, cursor: str | None = None, limit: int = 100) -> Batch[ReviewThread]:
+    state = record_call(pr.repository, "fetch_threads", number=pr.number)
+    return Batch[ReviewThread](items=tuple(state.threads))
 
 
 class RecordingReviewThread(ReviewThread):

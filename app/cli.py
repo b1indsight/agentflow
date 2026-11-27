@@ -188,7 +188,7 @@ def flow_create(
         if repository.archived:
             raise github.GitHubError(github.GitHubErrorKind.VALIDATION, "repository_archived")
         if request.issue_number is not None:
-            await repository.fetch_issue(request.issue_number)
+            await github.Issue(repository, request.issue_number).refetch()
         return repository
 
     try:

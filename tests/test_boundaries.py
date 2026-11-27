@@ -85,6 +85,7 @@ def contains_forbidden(modules: set[str], prefixes: set[str]) -> bool:
 
 
 _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
+_THREAD_MODULES = {"app.github.review_threads", "app.github.threads"}
 
 
 @pytest.mark.parametrize(("package", "forbidden"), [
@@ -97,6 +98,9 @@ _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
     ("persistence", {"app.controler", "app.worker", "githubkit"}),
     ("github", {"app.controler", "app.worker", "app.persistence", "psycopg"}),
     ("github/apps.py", {"app.github.repositories", "app.github.projects", "app.controler"}),
+    ("github/repositories.py", {"app.github.issues", "app.github.pull_requests"} | _THREAD_MODULES),
+    ("github/issues.py", {"app.github.pull_requests"} | _THREAD_MODULES),
+    ("github/pull_requests.py", _THREAD_MODULES),
     ("controler", {"app.worker"}),
     ("worker", {"app.controler", "app.persistence", "app.github", "app.telemetry.metrics",
                 "psycopg", "githubkit", "bub", "app.contracts.control"}),
@@ -122,10 +126,10 @@ _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
     }),
 ])
 def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[str]) -> None:
-    auth_layer = package == "github/apps.py"
-    modules = imported_modules(Path("app") / package, include_types=auth_layer)
+    github_layer = package.startswith("github/")
+    modules = imported_modules(Path("app") / package, include_types=github_layer)
     assert modules, f"No imports found in {package}; check the package path"
-    if auth_layer:
+    if github_layer:
         # The public facade also re-exports the higher-level resources.
         assert "app.github" not in modules
     if package == "controler/workflow/initial.py":

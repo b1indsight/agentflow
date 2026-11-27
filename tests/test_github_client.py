@@ -24,6 +24,7 @@ from app.github import (
     PushCapability,
     Repository,
 )
+from app.github import pull_requests as pr_api
 from app.github import repositories as repo_api
 
 
@@ -100,7 +101,7 @@ async def test_preparation_rate_limit_is_returned_without_sdk_sleep(tmp_path, mo
 
     install_client(monkeypatch, installation)
     identity = app.installation(42)
-    read = (Repository(identity, "owner/repo").fetch_issue(7) if method == "fetch_issue"
+    read = (Issue(Repository(identity, "owner/repo"), 7).refetch() if method == "fetch_issue"
             else repo_api.fetch_ref(identity, "owner/repo", "flow/7"))
     with pytest.raises(GitHubError) as caught:
         await asyncio.wait_for(read, 1)
@@ -286,7 +287,7 @@ async def test_fetches_issue_repository_and_remote_ref(
     github = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
-    observed_issue = await Repository(github.installation(42), "octo/repo").fetch_issue(7)
+    observed_issue = await Issue(Repository(github.installation(42), "octo/repo"), 7).refetch()
     observed_repository = await repo_api.fetch_repository(github.installation(42), "octo/repo")
     remote_ref = await repo_api.fetch_ref(github.installation(42), "octo/repo", "refs/heads/topic")
 
@@ -348,7 +349,8 @@ async def test_full_pr_read_preserves_merge_sha_even_when_sdk_schema_omits_it(tm
     sdk = GitHub("test-token", auto_retry=None, async_transport=httpx.MockTransport(handler))
     install_client(monkeypatch, lambda _, **kwargs: sdk)
     repo = Repository(GitHubApp(settings(tmp_path)).installation(42), "octo/repo")
-    observed = await repo.fetch_pull_request(17)
+    pr = PullRequest(repo, 17)
+    observed = await pr.refetch()
     assert observed.state == state and observed.merged is merged
     assert observed.merge_commit_sha == "c" * 40
     assert observed.head_repository == "octo/repo" and observed.body == ""
@@ -357,10 +359,10 @@ async def test_full_pr_read_preserves_merge_sha_even_when_sdk_schema_omits_it(tm
     del payload["merge_commit_sha"]
     if merged:
         with pytest.raises(GitHubError) as error:
-            await repo.fetch_pull_request(17)
+            await pr.refetch()
         assert error.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE
     else:
-        assert (await repo.fetch_pull_request(17)).merge_commit_sha is None
+        assert (await pr.refetch()).merge_commit_sha is None
 
 
 def test_partial_pull_request_distinguishes_unobserved_nullable_facts_from_null():
@@ -529,9 +531,10 @@ async def test_finds_and_opens_pull_requests_and_skips_empty_reviewers(
     github = GitHubApp(settings(tmp_path))
     install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
-    found = await Repository(github.installation(42), "octo/repo").find_pull_request_by_head("topic")
-    opened = await Repository(github.installation(42), "octo/repo").open_pull_request("new-topic", "trunk", "Title", "Body")
-    await PullRequest(Repository(github.installation(42), "octo/repo"), 10).request_reviewers([])
+    repo = Repository(github.installation(42), "octo/repo")
+    found = await pr_api.find_pull_request_by_head(repo, "topic")
+    opened = await pr_api.open_pull_request(repo, "new-topic", "trunk", "Title", "Body")
+    await PullRequest(repo, 10).request_reviewers([])
 
     assert found is not None and found.number == 9
     assert found.head_branch == "topic"
@@ -673,7 +676,7 @@ async def test_maps_github_failures_without_response_bodies(
     install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
     with pytest.raises(GitHubError) as captured:
-        await Repository(github.installation(42), "octo/repo").fetch_issue(7)
+        await Issue(Repository(github.installation(42), "octo/repo"), 7).refetch()
 
     error = captured.value
     assert error.kind is kind
@@ -700,7 +703,7 @@ async def test_maps_real_githubkit_transport_wrappers_as_transient(
     install_client(monkeypatch, lambda installation_id, **kwargs: client)
 
     with pytest.raises(GitHubError) as captured:
-        await Repository(github.installation(42), "octo/repo").fetch_issue(7)
+        await Issue(Repository(github.installation(42), "octo/repo"), 7).refetch()
 
     assert captured.value.kind is GitHubErrorKind.TRANSIENT
     assert captured.value.retryable is True

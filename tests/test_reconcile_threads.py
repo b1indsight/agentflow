@@ -8,7 +8,8 @@ import pytest
 from app.controler.reconciliation.feedback import FeedbackReconciler, ThreadScanState
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState
-from app.github import Batch, GitHubError, GitHubErrorKind, PullRequest, ReviewComment, ReviewThread
+from app.github import Batch, GitHubError, GitHubErrorKind, ReviewComment, ReviewThread
+from app.github import threads as thread_api
 from app.persistence.reconciliation import ReconcileStore
 from app.persistence.store import Store
 from tests.github import RecordingGitHub, record_call
@@ -20,7 +21,7 @@ from tests.test_review_batches import (
 )
 from tests.test_review_resolution import human, snapshot
 
-NATIVE_FETCH_THREADS = PullRequest.fetch_threads
+NATIVE_FETCH_THREADS = thread_api.fetch_threads
 NATIVE_FETCH_COMMENTS = ReviewThread.fetch_comments
 
 
@@ -53,7 +54,7 @@ def thread_page_resources(recording_resources, monkeypatch):
     async def comments(thread, *, cursor=None, limit=20):
         return result(thread.pull_request, cursor).items[0].comments
 
-    monkeypatch.setattr(PullRequest, "fetch_threads", read)
+    monkeypatch.setattr(thread_api, "fetch_threads", read)
     monkeypatch.setattr(ReviewThread, "fetch_comments", comments)
 
 
@@ -206,7 +207,7 @@ async def test_nested_scan_retries_and_resumes_after_restart(
         return result
 
     install_client(monkeypatch, lambda *args, **kwargs: SimpleNamespace(async_graphql=graphql))
-    monkeypatch.setattr(PullRequest, "fetch_threads", NATIVE_FETCH_THREADS)
+    monkeypatch.setattr(thread_api, "fetch_threads", NATIVE_FETCH_THREADS)
     monkeypatch.setattr(ReviewThread, "fetch_comments", NATIVE_FETCH_COMMENTS)
     github = GitHub(clock)
     await sweep(store, github)

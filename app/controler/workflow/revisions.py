@@ -38,6 +38,7 @@ from app.domain.models import (
 from app.domain.review_models import BatchState, ReviewBatch
 from app.github import GitHubApp, GitHubError, Installation, PullRequest, Repository
 from app.github import repositories as repo_api
+from app.github import threads as thread_api
 from app.persistence.agent_inputs import AgentInputStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
@@ -72,12 +73,12 @@ async def prepare_revision(
     assert flow.installation_id is not None
     installation = github.installation(flow.installation_id)
     repository = Repository(installation, flow.repo)
+    pr = PullRequest(repository, number)
     threads = None
     if batch.threads is None and any(f.kind is ReviewItemKind.INLINE for f in batch.feedback):
         # Bind persisted identity; the thread query does not need current PR facts.
-        pr = PullRequest(repository, number)
         try:
-            threads = await reads.read(job, pr.list_review_threads)
+            threads = await reads.read(job, lambda: thread_api.list_review_threads(pr))
         except GitHubError as exc:
             raise PreparationReadFailure(exc) from exc
 
@@ -92,7 +93,7 @@ async def prepare_revision(
         await fail(job, "修订任务缺少有效 worker binding。")
         return JobState.FAILED
     try:
-        remote = await reads.read(job, lambda: repository.fetch_pull_request(number))
+        remote = await reads.read(job, pr.refetch)
         mismatch = (delivery.state is not DeliveryState.OPEN or not delivery.head_sha
             or remote.repo != flow.repo or remote.number != delivery.pr_number
             or remote.state != "open" or remote.merged
@@ -391,7 +392,7 @@ async def verify_answer_remote(
     """Answer checks only the original open PR's code head, not refs or ancestry."""
     if flow.installation_id is None:
         return "answer has no open verified delivery"
-    pr = await repo.fetch_pull_request(task.pr_number)
+    pr = await PullRequest(repo, task.pr_number).refetch()
     if (pr.repo != task.repo or pr.number != task.pr_number or pr.state != "open" or pr.merged
             or pr.head_repository != task.repo or pr.head_branch != task.branch
             or pr.base_branch != task.base_branch or pr.head_sha != task.expected_head_sha):
@@ -411,7 +412,7 @@ async def verify_revision_remote(
     if not baseline or not result.commit_sha:
         return "revision lacks its synchronized coding baseline"
     repo = Repository(installation, flow.repo)
-    pr = await repo.fetch_pull_request(task.pr_number)
+    pr = await PullRequest(repo, task.pr_number).refetch()
     ref = await repo_api.fetch_ref(installation, flow.repo, task.branch)
     if (pr.repo != task.repo or pr.number != task.pr_number or pr.state != "open" or pr.merged
             or pr.head_repository != flow.repo or pr.head_branch != task.branch

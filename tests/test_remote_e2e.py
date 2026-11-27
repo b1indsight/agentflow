@@ -14,13 +14,14 @@ from app.contracts.receipts import decode_result_inbox
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobState
-from app.github import GitHubError, GitHubErrorKind, RemoteRef, Repository
+from app.github import GitHubError, GitHubErrorKind, RemoteRef
+from app.github import pull_requests as pr_api
 from app.github import repositories as repo_api
 from app.persistence.records import required
 from app.persistence.settings import SettingsStore, TextSetting
 from app.worker.config import WorkerSettings
 from app.worker.runtime import WorkerRuntime
-from tests.github import RecordingGitHub, RecordingRepository
+from tests.github import RecordingGitHub, record_open_pull_request
 from tests.test_vcs import _git, _git_fixture
 from tests.test_worker_executor import RecordingAgent
 from tests.test_worker_workspaces import managed_seed
@@ -93,12 +94,12 @@ def remote_flow(store, tmp_path, monkeypatch, recording_resources, server_runtim
             raise GitHubError(GitHubErrorKind.NOT_FOUND, "get_ref", status_code=404) from error
 
     async def open_pull_request(repo, head, base, title, body):
-        pull = await RecordingRepository.open_pull_request(repo, head, base, title, body)
+        pull = await record_open_pull_request(repo, head, base, title, body)
         github.pull_request = pull.model_copy(update={"head_sha": remote_sha(head)})
         return github.pull_request
 
     monkeypatch.setattr(repo_api, "fetch_ref", fetch_ref)
-    monkeypatch.setattr(Repository, "open_pull_request", open_pull_request)
+    monkeypatch.setattr(pr_api, "open_pull_request", open_pull_request)
 
     class Agent(RecordingAgent):
         def __init__(self):

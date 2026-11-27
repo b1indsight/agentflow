@@ -24,6 +24,7 @@ from app.github import (
     ReviewThreads,
     retry_delay,
 )
+from app.github import threads as thread_api
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.reconciliation import FeedbackCheck, ReconcileStore
@@ -214,7 +215,7 @@ class FeedbackReconciler:
             repo=pr.repository.full_name, pr_number=pr.number, fetched_at=self.database.now(),
         )
         if state.thread is None:
-            batch = await pr.fetch_threads(cursor=state.cursor, limit=1)
+            batch = await thread_api.fetch_threads(pr, cursor=state.cursor, limit=1)
             following = batch.next_cursor
             threads = batch.items
         else:

@@ -662,7 +662,7 @@ async def test_durable_revision_recovery_and_reopen_keep_original_inbox(
     if external_update:
         github.sha, github.base_branch = "external-rewrite", "release"
     installation = github.installation(flow.installation_id)
-    remote = await Repository(installation, flow.repo).fetch_pull_request(task.pr_number)
+    remote = await PullRequest(Repository(installation, flow.repo), task.pr_number).refetch()
     proof, error = await prove_reopen(
         installation,
         flow,
@@ -721,7 +721,7 @@ async def test_durable_result_readers_reject_corrupt_evidence_without_rewriting(
             subject.results._retired_plan(persisted, task.attempt_id)
         else:
             installation = github.installation(flow.installation_id)
-            remote = await Repository(installation, flow.repo).fetch_pull_request(task.pr_number)
+            remote = await PullRequest(Repository(installation, flow.repo), task.pr_number).refetch()
             await prove_reopen(
                 installation,
                 flow,

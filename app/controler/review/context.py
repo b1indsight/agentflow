@@ -12,6 +12,7 @@ from app.domain.context_models import (
 from app.domain.models import Flow, ReviewItemKind
 from app.domain.review_models import ReviewBatch
 from app.github import PullRequest, Repository, ReviewThread
+from app.github import threads as thread_api
 from app.github.threads import MAX_THREAD_BYTES, MAX_THREAD_REQUESTS
 
 
@@ -56,7 +57,7 @@ async def _related_discussions(
     cursor = None
     seen_cursors: set[str] = set()
     while pending and within_budget():
-        thread_page = await pr.fetch_threads(cursor=cursor, limit=100)
+        thread_page = await thread_api.fetch_threads(pr, cursor=cursor, limit=100)
         requests += 1
         read_bytes += len(thread_page.model_dump_json().encode())
         if read_bytes > MAX_THREAD_BYTES:
@@ -142,7 +143,7 @@ async def build_review_context(
         return value[:SOURCE_CHARS]
 
     # API failures belong to the pre-Assignment retry boundary, not a frozen partial context.
-    pr = await repo.fetch_pull_request(pr_number)
+    pr = await PullRequest(repo, pr_number).refetch()
     discussion = await _related_discussions(pr, batch, limitations)
     after = await pr.refetch()
     if (pr.head_sha, pr.base_sha, pr.state, pr.merged) != (

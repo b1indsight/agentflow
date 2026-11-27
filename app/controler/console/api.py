@@ -33,7 +33,7 @@ from app.controler.runtime import ServerRuntime
 from app.controler.workers.catalog import read_catalog
 from app.controler.workflow.service import AgentTaskRejected, ControlService, RetryRejected
 from app.domain.models import CodingModelSettings
-from app.github import GitHubError, GitHubErrorKind, Repository
+from app.github import GitHubError, GitHubErrorKind, Issue, Repository
 from app.github import repositories as repo_api
 from app.persistence.activity import ActivityStore
 from app.persistence.console import ConsoleStore
@@ -233,7 +233,7 @@ async def create_flow(request: Request, body: CreateFlowRequest) -> FlowDetail:
         if repository.archived:
             raise ConsoleFailure("repository_archived")
         if body.issue_number is not None:
-            await repository.fetch_issue(body.issue_number)
+            await Issue(repository, body.issue_number).refetch()
     except GitHubError as error:
         raise _github_failure(error) from error
     loop = asyncio.get_running_loop()

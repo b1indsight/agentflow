@@ -39,7 +39,7 @@ from app.domain.models import (
 )
 from app.domain.ports import Judge
 from app.domain.review_models import BatchState, ReviewBatch
-from app.github import GitHubApp, Repository
+from app.github import GitHubApp, PullRequest, Repository
 from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
@@ -107,7 +107,7 @@ class JobCoordinator:
             verdict = TriageVerdict(verdict=Verdict.WAIT, confidence=verdict.confidence,
                 reason=f"low-confidence: {verdict.reason}"[:2000], open_points=verdict.open_points)
         # Remote reads can outlive close/merge or a changed PR baseline.
-        remote = (await repo.fetch_pull_request(context.pr_number)
+        remote = (await PullRequest(repo, context.pr_number).refetch()
                   if verdict.verdict in {Verdict.ANSWER, Verdict.REVISE} else None)
         with self.flows.locked(flow.id) as locked:
             tx = locked.database

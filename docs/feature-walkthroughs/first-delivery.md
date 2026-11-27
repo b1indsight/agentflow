@@ -51,7 +51,7 @@ await inspectDelivery();
 
 编码工具在分配到的目录里工作，提交并推送到本次指定的分支，然后请求开 PR。等详情出现 PR 链接，再点开 GitHub 检查：目标仓库和分支应当正确，PR 顶端应是这次交付的提交。此时任务进入 `review`，由你审核。工具调用的回执或会话里一句“已经完成”，都不能代替这张实际的 PR。[远程交付测试](../../tests/test_remote_e2e.py#L167)检查从领取到关联 PR 的整条路径。
 
-为什么工具成功了还要等？第一次调用 [`_open_pr`](../../app/controler/workflow/tools.py#L226-L266) 时，控制端复核本次分配仍有效，把已核对的提交 SHA、标题、正文存下，返回 `PreparedDelivery`，里面还没有 PR 号。等 worker 交回终态结果，[`initial_plan`](../../app/controler/workflow/initial.py#L254-L293) 才把结果和保存的工具调用对上，生成创建请求。控制端[先存计划，离开事务再执行远端操作](../../app/controler/workflow/results.py#L225-L233)：按分支查找已有 PR，确实尚未发出请求才调用 [`repository.open_pull_request`](../../app/controler/workflow/effects.py#L392-L405)。上次已发出却无法确认结果时会等待核对，不盲目再开一张。[测试最后逐项核对](../../tests/test_remote_e2e.py#L225-L238)了 PR 号、远端 SHA、工具回执以及实际开 PR 的次数。
+为什么工具成功了还要等？第一次调用 [`_open_pr`](../../app/controler/workflow/tools.py#L226-L266) 时，控制端复核本次分配仍有效，把已核对的提交 SHA、标题、正文存下，返回 `PreparedDelivery`，里面还没有 PR 号。等 worker 交回终态结果，[`initial_plan`](../../app/controler/workflow/initial.py#L254-L293) 才把结果和保存的工具调用对上，生成创建请求。控制端[先存计划，离开事务再执行远端操作](../../app/controler/workflow/results.py#L225-L233)：按分支查找已有 PR，确实尚未发出请求才调用 [`open_pull_request(repository, …)`](../../app/controler/workflow/effects.py#L394-L408)。上次已发出却无法确认结果时会等待核对，不盲目再开一张。[测试最后逐项核对](../../tests/test_remote_e2e.py#L225-L238)了 PR 号、远端 SHA、工具回执以及实际开 PR 的次数。
 
 ## 路径二：还缺一个人的决定
 

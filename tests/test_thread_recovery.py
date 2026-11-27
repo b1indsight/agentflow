@@ -29,6 +29,7 @@ from app.github import (
     ReviewThread,
     ReviewThreads,
 )
+from app.github import threads as thread_api
 from app.persistence.jobs import JobStore
 from tests.flow_fixtures import enqueue_job
 from tests.github import NATIVE_THREAD_REFETCH, record_call
@@ -99,7 +100,7 @@ def thread_resources(revision_resources, monkeypatch):
             raise GitHubError(GitHubErrorKind.TRANSIENT, "resolve")
         return thread.model_copy(update={"resolved": True})
 
-    monkeypatch.setattr(PullRequest, "list_review_threads", list_threads)
+    monkeypatch.setattr(thread_api, "list_review_threads", list_threads)
     monkeypatch.setattr(ReviewThread, "refetch", refetch)
     monkeypatch.setattr(ReviewThread, "find_reply", find_reply)
     monkeypatch.setattr(ReviewThread, "reply", reply)
