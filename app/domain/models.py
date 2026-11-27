@@ -296,6 +296,15 @@ class Job(BaseModel):
         return self.flow_id
 
 
+class WorkspaceDiff(BaseModel):
+    """Disjoint text-line counts relative to the workspace's allocation baseline."""
+
+    model_config = ConfigDict(extra="forbid")
+    added: int = Field(ge=0, strict=True)
+    deleted: int = Field(ge=0, strict=True)
+    modified: int = Field(ge=0, strict=True)
+
+
 class WorkspaceInventory(BaseModel):
     """Concrete identity and freshness, never authority to release a controller claim."""
 

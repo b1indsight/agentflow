@@ -9,7 +9,7 @@ from pathlib import Path
 
 import anyio
 
-from app.contracts.protocol import WorkspaceDiff
+from app.domain.models import WorkspaceDiff
 from app.worker.execution.vcs import VcsVerificationError, _required_stdout, _vcs_environment
 
 _HUNK = re.compile(rb"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", re.MULTILINE)

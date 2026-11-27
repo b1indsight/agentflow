@@ -919,15 +919,9 @@ function DetailPanel({
                     PR #{flow.pr_number} ↗
                   </a>
                 )}
-                {flow.worker_id &&
-                  !flow.worker_historical &&
-                  !flow.history_only && (
-                    <WorkspaceDiff
-                      key={flow.current_attempt_id}
-                      id={id}
-                      refresh={refresh}
-                    />
-                  )}
+                {freshFlow?.workspace_diff && (
+                  <WorkspaceDiff counts={freshFlow.workspace_diff} />
+                )}
               </span>
             </div>
             <FileTabRow split={visiblePanes.length > 1} move={placeFile}>
@@ -1901,6 +1895,7 @@ export default function App() {
           refresh={refresh}
           onChanged={({
             task_content,
+            workspace_diff,
             reason,
             next_condition,
             sources,

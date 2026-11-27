@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
 from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING
@@ -20,19 +19,14 @@ from app.contracts.protocol import (
     ServerMessageUnion,
     WorkerMessage,
     WorkerMessageUnion,
-    WorkspaceDiffQuery,
-    WorkspaceDiffResult,
     message_header,
     result_header,
 )
 from app.worker.execution.lifecycle import PendingToolCall, WorkerExecution, WorkerProtocolError
-from app.worker.execution.vcs import VcsVerificationError
 from app.worker.model_catalog import CatalogUnavailable
 
 if TYPE_CHECKING:
     from app.worker.runtime import WorkerRuntime
-
-type QueryResult = ConversationResult | CatalogResult | WorkspaceDiffResult
 
 
 class WorkerBusinessCallbacks:
@@ -48,31 +42,13 @@ class WorkerBusinessCallbacks:
         self.session, self.runtime = session, runtime
         self.ready = ready
         self.pending: dict[int, PendingToolCall] = {}
-        self._queries: dict[asyncio.Task[QueryResult], str | None] = {}
+        self._queries: dict[asyncio.Task[ConversationResult | CatalogResult], str | None] = {}
 
     def bind(self, routes: Dispatcher[ServerMessageUnion]) -> None:
         self.routes = routes
         routes.register("worker.history", ConversationQuery, self.on_history)
         routes.register("worker.model_catalog", CatalogQuery, self.on_catalog)
-        routes.register("worker.workspace_diff", WorkspaceDiffQuery, self.on_workspace_diff)
         routes.before_wait(self.prepare)
-
-    async def on_workspace_diff(self, call: WorkspaceDiffQuery, message: ServerMessageUnion) -> None:
-        result = WorkspaceDiffResult(**result_header(call.message_id), method=call.method, diff=None)
-        if not self.ready() or len(self._queries) >= 2:
-            await self._send_query(result, message.connection_epoch)
-            return
-
-        async def read() -> WorkspaceDiffResult:
-            try:
-                result.diff = await self.runtime.workspaces.diff(call.flow_id, call.workspace, call.generation)
-            except (OSError, VcsVerificationError, subprocess.CalledProcessError):
-                pass  # Unavailable, not a clean workspace. Never send subprocess output.
-            return result
-
-        task = asyncio.create_task(read())
-        self._queries[task] = message.connection_epoch
-        task.add_done_callback(self._query_completed)
 
     async def on_history(self, call: ConversationQuery, message: ServerMessageUnion) -> None:
         """Keep the driver free to receive registration replies while history is prepared."""
@@ -102,7 +78,7 @@ class WorkerBusinessCallbacks:
         return CatalogResult(**result_header(call.message_id), method=call.method,
                              models=models if models is not None and len(models) <= 1024 else None)
 
-    def _query_completed(self, task: asyncio.Task[QueryResult]) -> None:
+    def _query_completed(self, task: asyncio.Task[ConversationResult | CatalogResult]) -> None:
         if not task.cancelled():
             task.exception()
         self.session.wake()
@@ -119,7 +95,7 @@ class WorkerBusinessCallbacks:
                 **result_header(call.message_id), method="worker.history", error=error.code
             )
 
-    async def _send_query(self, result: QueryResult, epoch: str | None) -> None:
+    async def _send_query(self, result: ConversationResult | CatalogResult, epoch: str | None) -> None:
         await self.session.send(
             WorkerMessage(
                 **message_header(epoch), control=None, payload=[result]

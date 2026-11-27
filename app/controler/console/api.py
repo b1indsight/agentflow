@@ -8,7 +8,6 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.communication.requests import ReplyRejected, request_reply
 from app.contracts.catalog import CatalogGroup
 from app.contracts.console import (
     ActivityPage,
@@ -29,14 +28,6 @@ from app.contracts.console import (
     RetryRequest,
     UpdateSettingsRequest,
     UpdateSkillRepositoryRequest,
-)
-from app.contracts.protocol import (
-    ServerMessage,
-    WorkspaceDiff,
-    WorkspaceDiffQuery,
-    WorkspaceDiffResult,
-    call_header,
-    message_header,
 )
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.catalog import read_catalog
@@ -146,27 +137,6 @@ async def detail(request: Request, flow_id: FlowId) -> FlowDetail:
     store = ConsoleStore(runtime.database)
     await runtime.console.db(partial(store.request_sync, flow_id))
     return await runtime.console.db(partial(store.detail, flow_id))
-
-
-@router.get("/flows/{flow_id}/workspace-diff")
-async def workspace_diff(request: Request, flow_id: FlowId) -> WorkspaceDiff | None:
-    """Read the current allocation independently of rendering or syncing Flow detail."""
-    runtime: ServerRuntime = request.app.state.runtime
-    owner = await runtime.console.db(partial(FlowStore(runtime.database).get_flow_execution, flow_id))
-    if owner is None or owner.released_at is not None:
-        return None
-    peer = runtime.gateway.get(owner.worker_id)
-    if peer is None or peer.session.epoch is None:
-        return None
-    call = WorkspaceDiffQuery(**call_header(), method="worker.workspace_diff", flow_id=flow_id,
-                              workspace=owner.workspace, generation=owner.generation)
-    try:
-        reply, _ = await request_reply(peer, call, WorkspaceDiffResult, ServerMessage(
-            **message_header(peer.session.epoch), control=None, payload=[call],
-        ), timeout=10)
-    except (ConnectionError, TimeoutError, ReplyRejected):
-        return None
-    return reply.diff
 
 
 def _require_same_origin_json(request: Request) -> None:

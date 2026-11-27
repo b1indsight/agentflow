@@ -15,8 +15,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 
-from app.contracts.protocol import ProvisionError, WorkspaceDiff
-from app.domain.models import WorkspaceInventory
+from app.contracts.protocol import ProvisionError
+from app.domain.models import WorkspaceDiff, WorkspaceInventory
 from app.worker.execution.git_identity import configure_git_identity
 from app.worker.execution.skills import clear_skill_links
 from app.worker.execution.vcs import (
@@ -331,17 +331,14 @@ class RepositoryWorkspaces:
     def _repository_lock(self, repository: str) -> asyncio.Lock:
         return self._repository_locks.setdefault(repository, asyncio.Lock())
 
-    async def diff(self, flow_id: int, workspace: str, generation: int) -> WorkspaceDiff | None:
-        """Return counts only while the requested generation still owns this directory."""
-        slot = next((s for s in self._load().slots if s.slot_id == workspace), None)
-        if (slot is None or slot.binding is None or slot.binding.flow_id != flow_id
-                or slot.generation != generation or slot.baseline is None or slot.release_job_id is not None):
+    async def diff(self, binding: WorkspaceBinding) -> WorkspaceDiff | None:
+        """Snapshot the bound directory before the executor hands back its result."""
+        slot = self._owned(self._load(), binding)
+        if slot.baseline is None or slot.release_job_id is not None:
             return None
         path = self._verify_slot(slot)
         require_repository(path)
-        result = await workspace_diff(path, slot.baseline)
-        current = self._owned(self._load(), slot.binding)
-        return result if current.release_job_id is None and self._verify_slot(current) == path else None
+        return await workspace_diff(path, slot.baseline)
 
     async def configure_git_identity(
         self, binding: WorkspaceBinding, bot_login: str, bot_user_id: int,

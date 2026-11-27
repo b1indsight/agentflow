@@ -40,6 +40,7 @@ from app.domain.models import (
     FeedbackRef,
     RevisionCodingOutput,
     VcsKind,
+    WorkspaceDiff,
     WorkspaceInventory,
 )
 from app.domain.review_models import ReviewFeedback
@@ -153,7 +154,12 @@ ExecutionTask = Annotated[
 ]
 
 
-class InitialTaskResult(ProtocolModel):
+class CodingTaskResult(ProtocolModel):
+    # Omitting absent snapshots keeps historical result receipts and their digests unchanged.
+    workspace_diff: WorkspaceDiff | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+class InitialTaskResult(CodingTaskResult):
     kind: Literal["initial"] = "initial"
     session_id: str | None
     last_message: str
@@ -170,7 +176,7 @@ class InitialTaskResult(ProtocolModel):
     input_request: str | None = Field(default=None, min_length=1, max_length=4000, exclude_if=lambda v: v is None)
 
 
-class RevisionTaskResult(ProtocolModel):
+class RevisionTaskResult(CodingTaskResult):
     batch_id: int = Field(gt=0)
     feedback_refs: list[FeedbackRef]
     kind: Literal["revision"] = "revision"
@@ -385,26 +391,6 @@ class ConversationQuery(ToolCall):
 
 class CatalogQuery(ToolCall):
     method: Literal["worker.model_catalog"]
-
-
-class WorkspaceDiffQuery(ToolCall):
-    method: Literal["worker.workspace_diff"]
-    flow_id: int = Field(gt=0)
-    workspace: str = Field(pattern=r"^[0-9a-f]{32}$")
-    generation: int = Field(gt=0)
-
-
-class WorkspaceDiff(ProtocolModel):
-    """Disjoint text-line counts relative to the workspace's allocation baseline."""
-
-    added: int = Field(ge=0, strict=True)
-    deleted: int = Field(ge=0, strict=True)
-    modified: int = Field(ge=0, strict=True)
-
-
-class WorkspaceDiffResult(ToolResult):
-    method: Literal["worker.workspace_diff"]
-    diff: WorkspaceDiff | None
 
 
 class CatalogResult(ToolResult):
@@ -700,11 +686,11 @@ class FlowToolResponse(ToolResult):
 # the only list of its members; directional parsing and _FIXED_METHODS derive from them.
 type WorkerCalls = (
     Assignment | StopExecution | ConversationQuery | FileQuery | InferenceRequest
-    | RecoveryRejected | RepositoryDemand | CatalogQuery | WorkspaceDiffQuery | SyncSkills | ArchiveAmpThread
+    | RecoveryRejected | RepositoryDemand | CatalogQuery | SyncSkills | ArchiveAmpThread
 )
 type WorkerResults = (
     ExecuteResult | StopResult | ConversationResult | FileResult | InferenceResult | ProvisionResult
-    | CatalogResult | WorkspaceDiffResult
+    | CatalogResult
 )
 type ServerCalls = Started | AcceptResultRequest | AcceptStop | FileRegister | FlowSearchCall
 type ServerResults = AcceptResultResponse | StopAccepted | FileRegistered | FlowSearchResult

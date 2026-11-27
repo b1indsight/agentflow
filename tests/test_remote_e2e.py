@@ -167,30 +167,23 @@ async def remote_connection(server, worker):
                 raise outcome
 
 
-async def test_console_workspace_diff_includes_committed_and_live_changes(store, remote_flow):
-    # A pushed PR may be clean locally while the agent starts editing again in its workspace.
+async def test_console_detail_keeps_the_completed_workspace_snapshot(store, remote_flow):
+    # Later local edits and disconnects must not change the last completed execution's counts.
     flow, server, _, worker, agent = remote_flow
     issuer = AccessIssuer()
     await server.access.close()
     server.access = issuer.auth
     app = create_app(server)
     app.state.runtime = server
-    endpoint = f"/api/flows/{flow.id}/workspace-diff"
+    endpoint = f"/api/flows/{flow.id}"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
                                  headers=issuer.headers()) as http:
+        assert (await http.get(endpoint)).json()["workspace_diff"] is None
         async with remote_connection(server, worker):
             await wait_until(lambda: store.flows.get_flow(flow.id).state is FlowState.REVIEW)
             (_, repo), = agent.started
             (repo / "draft").write_text("one\ntwo\n")
-            (repo / ".gitignore").write_text("build/\n")
-            _git("add", ".gitignore", cwd=repo)
-            (repo / "build").mkdir()
-            (repo / "build/cache").write_text("ignored\n")
-            status = ["git", "status", "--porcelain"]
-            before = await asyncio.to_thread(subprocess.check_output, status, cwd=repo)
-            assert (await http.get(endpoint)).json() == {"added": 2, "deleted": 1, "modified": 1}
-            assert await asyncio.to_thread(subprocess.check_output, status, cwd=repo) == before
-        assert (await http.get(endpoint)).json() is None
+        assert (await http.get(endpoint)).json()["workspace_diff"] == {"added": 0, "deleted": 0, "modified": 1}
 
 
 @pytest.mark.parametrize("remote_flow", ["codex", "amp"], indirect=True)

@@ -69,6 +69,7 @@ const flow: FlowDetail = {
   next_condition: "等待结果",
   sources: [],
   task_content: "保留原有会话读取与看板状态。",
+  workspace_diff: null,
 };
 
 /** Mutable server state and request gates make races deterministic without real services. */

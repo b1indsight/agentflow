@@ -10,32 +10,34 @@ import type {
 } from "../types";
 
 const now = "2026-10-17T12:00:00Z";
-const flow: FlowSummary & Pick<FlowDetail, "task_content"> = {
-  id: 42,
-  history_only: false,
-  repo: "owner/agentflow",
-  issue_number: 85,
-  issue_url: "https://example.test/issues/85",
-  task_content: null,
-  title: "真实 DTO Flow",
-  pr_number: 87,
-  pr_url: "https://example.test/pulls/87",
-  lifecycle: "running",
-  phase: "running",
-  action: "正在验证",
-  worker_id: "worker-1",
-  worker_historical: false,
-  revision_cycles: 1,
-  branch: "flow/85",
-  created_at: now,
-  updated_at: now,
-  current_attempt_id: 73,
-  attempt_started_at: now,
-  archive_reason: null,
-  archive_summary: null,
-  archived_at: null,
-  state_version: 2,
-};
+const flow: FlowSummary & Pick<FlowDetail, "task_content" | "workspace_diff"> =
+  {
+    id: 42,
+    history_only: false,
+    repo: "owner/agentflow",
+    issue_number: 85,
+    issue_url: "https://example.test/issues/85",
+    task_content: null,
+    workspace_diff: null,
+    title: "真实 DTO Flow",
+    pr_number: 87,
+    pr_url: "https://example.test/pulls/87",
+    lifecycle: "running",
+    phase: "running",
+    action: "正在验证",
+    worker_id: "worker-1",
+    worker_historical: false,
+    revision_cycles: 1,
+    branch: "flow/85",
+    created_at: now,
+    updated_at: now,
+    current_attempt_id: 73,
+    attempt_started_at: now,
+    archive_reason: null,
+    archive_summary: null,
+    archived_at: null,
+    state_version: 2,
+  };
 const blockedFlow: FlowDetail = {
   ...flow,
   lifecycle: "blocked",
@@ -222,10 +224,6 @@ test.beforeEach(async ({ page }) => {
           sources: [],
         },
       });
-    if (url.pathname.endsWith("/workspace-diff"))
-      return route.fulfill({
-        json: { added: 2021, deleted: 1800, modified: 1300 },
-      });
     if (url.pathname.endsWith("/jobs"))
       return route.fulfill({ json: pageOf([]) });
     if (url.pathname.endsWith("/inference-notices"))
@@ -261,11 +259,18 @@ test.beforeEach(async ({ page }) => {
 test("workspace diff shares the PR row and links the repository", async ({
   page,
 }) => {
-  await page.clock.install();
+  let snapshot: FlowDetail["workspace_diff"] = {
+    added: 2021,
+    deleted: 1800,
+    modified: 1300,
+  };
+  await mockFlows(page, () => [
+    { ...blockedFlow, ...flow, workspace_diff: snapshot },
+  ]);
   await page.goto("/#flow/42/conversation");
   const header = page.locator(".detail-head-full");
   const badge = header.getByRole("img", {
-    name: "工作区相对起点：新增 2021 行，删除 1800 行，修改 1300 行",
+    name: "最近一次执行结束时的工作区差异：新增 2021 行，删除 1800 行，修改 1300 行",
   });
   await expect(badge).toHaveText("+2k−1.8k~1.3k");
   await expect(
@@ -283,25 +288,23 @@ test("workspace diff shares the PR row and links the repository", async ({
       path: `../../../.amp/in/artifacts/workspace-diff-${width}.png`,
     });
   }
-  // Changes can disappear and return without navigation while the agent edits.
-  let body = '{"added":0,"deleted":0,"modified":0}';
-  await page.route("**/workspace-diff", (route) =>
-    route.fulfill({ contentType: "application/json", body }),
-  );
+  // Each completed execution replaces the snapshot served with ordinary Flow detail.
+  snapshot = { added: 0, deleted: 0, modified: 0 };
   const indicator = header.getByRole("img", { name: /工作区/ });
-  await page.clock.fastForward(15000);
+  const refresh = page.getByRole("button", { name: "刷新当前视图" });
+  await refresh.click();
   await expect(indicator).toHaveCount(0);
   await header.screenshot({
     path: "../../../.amp/in/artifacts/workspace-diff-clean.png",
   });
-  body = '{"added":0,"deleted":7,"modified":0}';
-  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  snapshot = { added: 0, deleted: 7, modified: 0 };
+  await refresh.click();
   await expect(indicator).toHaveText("+0−7~0");
   await header.screenshot({
     path: "../../../.amp/in/artifacts/workspace-diff-single.png",
   });
-  body = "null";
-  await page.clock.fastForward(15000);
+  snapshot = null;
+  await refresh.click();
   await expect(indicator).toHaveCount(0);
 });
 
