@@ -14,6 +14,7 @@ from app.github import (
     GitHubApp,
     GitHubError,
     GitHubErrorKind,
+    Installation,
     Issue,
     PullRequest,
     PushCapability,
@@ -24,6 +25,7 @@ from app.github import (
     ReviewThread,
     ReviewThreads,
 )
+from app.github import repositories as repo_api
 from tests.review_memory import review_context
 
 if TYPE_CHECKING:
@@ -34,7 +36,7 @@ NATIVE_ISSUE_COMMENT = Issue.comment
 NATIVE_ISSUE_FIND_COMMENT = Issue.find_comment
 NATIVE_ISSUE_ADD_LABEL = Issue.add_label
 NATIVE_ISSUE_FETCH_LABELS = Issue.fetch_labels
-NATIVE_REPOSITORY_FETCH_REF = Repository.fetch_ref
+NATIVE_FETCH_REF = repo_api.fetch_ref
 NATIVE_PULL_REQUEST_REFETCH = PullRequest.refetch
 NATIVE_THREAD_REFETCH = ReviewThread.refetch
 
@@ -72,47 +74,55 @@ def record_call(repo: Repository, operation: str, **identity: Any) -> RecordingG
     return state
 
 
+async def record_fetch_repository(installation: Installation, full_name: str) -> Repository:
+    repo = Repository(installation, full_name, default_branch="trunk", archived=False)
+    record_call(repo, "fetch_repository")
+    return repo
+
+
+async def record_create_push_capability(installation: Installation, full_name: str) -> PushCapability:
+    record_call(Repository(installation, full_name), "create_push_capability")
+    return PushCapability(
+        token=SecretStr("push-token"), repository=full_name,
+        permissions={"contents": "write"},
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        bot_login=installation.app.bot_login, bot_user_id=7654321,
+    )
+
+
+async def record_fetch_ref(
+    installation: Installation, full_name: str, branch: str, *, retry_transient: bool = False,
+) -> RemoteRef:
+    state = record_call(Repository(installation, full_name), "fetch_ref")
+    if state.refs is not None:
+        if branch not in state.refs:
+            raise GitHubError(GitHubErrorKind.NOT_FOUND, "get_ref", status_code=404)
+        return RemoteRef(branch=branch, sha=state.refs[branch])
+    return RemoteRef(branch=branch, sha="abc123")
+
+
 class RecordingRepository(Repository):
     """Repository operations with production signatures and real parent identities."""
-
-    async def refetch(self) -> Repository:
-        record_call(self, "fetch_repository")
-        return Repository(self.installation, self.full_name, default_branch="trunk", archived=False)
-
-    async def create_push_capability(self) -> PushCapability:
-        record_call(self, "create_push_capability")
-        return PushCapability(
-            token=SecretStr("push-token"), repository=self.full_name,
-            permissions={"contents": "write"},
-            expires_at=datetime.now(UTC) + timedelta(minutes=10),
-            bot_login=self.installation.app.bot_login, bot_user_id=7654321,
-        )
-
-    async def fetch_ref(self, branch: str, *, retry_transient: bool = False) -> RemoteRef:
-        state = record_call(self, "fetch_ref")
-        if state.refs is not None:
-            if branch not in state.refs:
-                raise GitHubError(GitHubErrorKind.NOT_FOUND, "get_ref", status_code=404)
-            return RemoteRef(branch=branch, sha=state.refs[branch])
-        return RemoteRef(branch=branch, sha="abc123")
 
     async def compare_commits(self, base: str, head: str) -> bool:
         record_call(self, "compare_commits")
         return True
 
-    async def find_pull_request_by_head(self, branch: str) -> PullRequest | None:
-        state = record_call(self, "find_pull_request_by_head")
-        if state.pull_request is None:
-            return None
-        return PullRequest(self, **state.pull_request.model_dump(exclude_unset=True))
 
-    async def open_pull_request(self, head: str, base: str, title: str, body: str) -> PullRequest:
-        state = record_call(self, "open_pull_request")
-        state.opened.append(head)
-        state.pull_request = PullRequest(
-            self, number=17, state="open", head_branch=head, head_sha="abc123", base_branch=base,
-        )
-        return state.pull_request
+async def record_find_pull_request_by_head(repo: Repository, branch: str) -> PullRequest | None:
+    state = record_call(repo, "find_pull_request_by_head")
+    if state.pull_request is None:
+        return None
+    return PullRequest(repo, **state.pull_request.model_dump(exclude_unset=True))
+
+
+async def record_open_pull_request(repo: Repository, head: str, base: str, title: str, body: str) -> PullRequest:
+    state = record_call(repo, "open_pull_request")
+    state.opened.append(head)
+    state.pull_request = PullRequest(
+        repo, number=17, state="open", head_branch=head, head_sha="abc123", base_branch=base,
+    )
+    return state.pull_request
 
 
 class RecordingIssue(Issue):
@@ -193,17 +203,19 @@ class RecordingPullRequest(PullRequest):
         for item in items:
             yield item
 
-    async def list_review_threads(self) -> ReviewThreads:
-        state = record_call(self.repository, "list_review_threads", number=self.number)
-        return ReviewThreads(
-            repo=self.repository.full_name, pr_number=self.number, fetched_at=datetime.now(UTC),
-            threads=tuple(ReviewThread(self, **thread.model_dump(exclude_unset=True))
-                          for thread in state.threads),
-        )
 
-    async def fetch_threads(self, *, cursor: str | None = None, limit: int = 100) -> Batch[ReviewThread]:
-        state = record_call(self.repository, "fetch_threads", number=self.number)
-        return Batch[ReviewThread](items=tuple(state.threads))
+async def record_list_review_threads(pr: PullRequest) -> ReviewThreads:
+    state = record_call(pr.repository, "list_review_threads", number=pr.number)
+    return ReviewThreads(
+        repo=pr.repository.full_name, pr_number=pr.number, fetched_at=datetime.now(UTC),
+        threads=tuple(ReviewThread(pr, **thread.model_dump(exclude_unset=True))
+                      for thread in state.threads),
+    )
+
+
+async def record_fetch_threads(pr: PullRequest, *, cursor: str | None = None, limit: int = 100) -> Batch[ReviewThread]:
+    state = record_call(pr.repository, "fetch_threads", number=pr.number)
+    return Batch[ReviewThread](items=tuple(state.threads))
 
 
 class RecordingReviewThread(ReviewThread):

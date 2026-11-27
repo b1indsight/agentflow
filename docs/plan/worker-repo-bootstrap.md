@@ -233,7 +233,7 @@ credential helper 注入。实现时确认命令级 helper 设置不会屏蔽当
 | RPC `flow.open_pr` | worker 连接认证及当前 assignment 身份 | controler 校验 worker/job/epoch/租约 | 已有：复核远端 SHA 并持久化交付意图 |
 | 查找/创建 PR | controler 自己的 App installation 认证 | 创建需 Pull requests write | 已有：通过终态校验后由 controler 创建或复用 |
 
-签发与校验见 [`Repository.create_push_capability`](../../app/github/repositories.py)、
+签发与校验见 [`Installation.create_push_capability`](../../app/github/apps.py#L159-L183)、
 [`JobCoordinator._assignment_secret`](../../app/controler/workflow/coordinator.py) 及
 [`PushSecret`](../../app/contracts/protocol.py)。现有 `origin/main` 已接受 GitHub 隐含的
 `metadata: read`，它不增加写权限；本功能保留单仓库和其他权限拒绝规则，不回退这项修复。

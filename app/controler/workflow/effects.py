@@ -42,9 +42,11 @@ from app.github import (
     GitHubErrorKind,
     Issue,
     PullRequest,
+    Repository,
     ReviewThread,
     retry_delay,
 )
+from app.github import pull_requests as pr_api
 from app.persistence.activity import ActivityStore
 from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
@@ -295,12 +297,12 @@ class ResultEffects:
         """Observe dispatched writes after merge/cancel; never reissue a mutation."""
         effect = record.payload
         installation, repo = effect.installation_id, effect.repo
-        repository = self.github.installation(installation).repository(repo)
+        repository = Repository(self.github.installation(installation), repo)
         if isinstance(effect, (CommentEffect, ThreadReplyEffect)):
             # This path already reconciles by marker and forbids resending a dispatched comment.
             return await self._execute(plan, record, records)
         if isinstance(effect, PullRequestEffect):
-            found = await repository.find_pull_request_by_head(effect.branch)
+            found = await pr_api.find_pull_request_by_head(repository, effect.branch)
             delivery = self.deliveries.get_delivery(plan.flow_id)
             flow = self.flows.get_flow(plan.flow_id)
             cancelled_opening = (
@@ -314,7 +316,7 @@ class ResultEffects:
                     or found.head_branch != effect.branch or found.base_branch != effect.base_branch):
                 raise ResultPending("retired PR creation awaits its remote identity")
             if cancelled_opening:
-                remote = await repository.fetch_pull_request(found.number)
+                remote = await found.refetch()
                 if plan.delivery is None:
                     raise ResultPending("cancelled PR intent is missing")
                 try:
@@ -360,7 +362,7 @@ class ResultEffects:
     ) -> EffectReceipt:
         effect = record.payload
         installation, repo = effect.installation_id, effect.repo
-        repository = self.github.installation(installation).repository(repo)
+        repository = Repository(self.github.installation(installation), repo)
         if isinstance(effect, (CommentEffect, ThreadReplyEffect)):
             marker = self._comment_marker(plan, effect)
 
@@ -390,23 +392,25 @@ class ResultEffects:
             return EffectReceipt(comment_id=comment_id,
                                  thread_id=effect.thread_id if isinstance(effect, ThreadReplyEffect) else None)
         if isinstance(effect, PullRequestEffect):
-            pull_request = await repository.find_pull_request_by_head(effect.branch)
+            pull_request = await pr_api.find_pull_request_by_head(repository, effect.branch)
             if pull_request is None:
                 if record.dispatched_at is not None:
                     raise ResultPending("pull request outcome is unknown; waiting for its head")
                 self._dispatch(plan, record)
                 try:
-                    pull_request = await repository.open_pull_request(head=effect.branch, base=effect.base_branch, title=effect.title, body=effect.body)
+                    pull_request = await pr_api.open_pull_request(
+                        repository, head=effect.branch, base=effect.base_branch, title=effect.title, body=effect.body,
+                    )
                 except GitHubError as exc:
                     if exc.kind not in {GitHubErrorKind.CONFLICT, GitHubErrorKind.VALIDATION}:
                         raise
-                    pull_request = await repository.find_pull_request_by_head(effect.branch)
+                    pull_request = await pr_api.find_pull_request_by_head(repository, effect.branch)
                     if pull_request is None:
                         raise
             if pull_request.state == "closed":
                 # PR creation may have succeeded before INITIAL's final local commit.
                 # Bind its verified identity and retire intent instead of re-opening it.
-                remote = await repository.fetch_pull_request(pull_request.number)
+                remote = await pull_request.refetch()
                 if plan.delivery is None:
                     raise ResultPending("INITIAL PR intent is missing")
                 validate_created_pull_request(remote, repo, pull_request.number, plan.delivery)

@@ -18,11 +18,13 @@ from app.github import (
     Issue,
     PullRequest,
     RemoteFeedback,
+    Repository,
     ReviewComment,
     ReviewThread,
     ReviewThreads,
     retry_delay,
 )
+from app.github import threads as thread_api
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 from app.persistence.reconciliation import FeedbackCheck, ReconcileStore
@@ -126,7 +128,7 @@ class FeedbackReconciler:
             bot_login = (await self.github.resolve_bot_login()).casefold()
             number = flow.issue_number if check.source == "issue_comments" else delivery.pr_number
             assert number is not None
-            repo = self.github.installation(flow.installation_id).repository(flow.repo)
+            repo = Repository(self.github.installation(flow.installation_id), flow.repo)
             threads, diagnostic = None, None
             page: Batch[RemoteFeedback] | None = None
             updates: list[FeedbackUpdate] = []
@@ -213,7 +215,7 @@ class FeedbackReconciler:
             repo=pr.repository.full_name, pr_number=pr.number, fetched_at=self.database.now(),
         )
         if state.thread is None:
-            batch = await pr.fetch_threads(cursor=state.cursor, limit=1)
+            batch = await thread_api.fetch_threads(pr, cursor=state.cursor, limit=1)
             following = batch.next_cursor
             threads = batch.items
         else:

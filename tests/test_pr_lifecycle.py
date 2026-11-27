@@ -15,7 +15,16 @@ from app.domain.delivery_models import PreparedDelivery
 from app.domain.flow_policy import FlowEvent
 from app.domain.models import ArchiveReason, DeliveryState, FlowState, JobKind, JobState, VcsKind
 from app.domain.review_models import BatchState
-from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, RemoteRef, Repository
+from app.github import (
+    GitHubError,
+    GitHubErrorKind,
+    Installation,
+    Issue,
+    PullRequest,
+    RemoteRef,
+    Repository,
+)
+from app.github import repositories as repo_api
 from app.persistence.activity import ActivityStore
 from app.persistence.assignments import AssignmentStore
 from tests.flow_fixtures import apply_flow_event, enqueue_job
@@ -66,12 +75,12 @@ def lifecycle_resources(recording_resources, monkeypatch):
             state.before_return()
         return PullRequest(pr.repository, **state.remote.model_dump(exclude_unset=True))
 
-    async def fetch_ref(repo, branch, *, retry_transient=False):
-        state = record_call(repo, "fetch_ref", branch=branch)
+    async def fetch_ref(installation, full_name, branch, *, retry_transient=False):
+        state = record_call(Repository(installation, full_name), "fetch_ref", branch=branch)
         return RemoteRef(branch=branch, sha=state.remote.head_sha)
 
     monkeypatch.setattr(PullRequest, "refetch", refetch)
-    monkeypatch.setattr(Repository, "fetch_ref", fetch_ref)
+    monkeypatch.setattr(repo_api, "fetch_ref", fetch_ref)
 
 
 async def check(store, flow, github):
@@ -410,10 +419,10 @@ def test_late_pr_merge_records_only_its_original_attempt(store, lifecycle_flow):
 
 async def test_close_during_capability_preparation_never_dispatches(store, pending_revision, monkeypatch, server_runtime):
     flow, job, _, github, _subject = pending_revision
-    original = Repository.create_push_capability
+    original = Installation.create_push_capability
 
-    async def close_before_return(repo):
-        secret = await original(repo)
+    async def close_before_return(installation, full_name):
+        secret = await original(installation, full_name)
         with store.transaction() as tx:
             tx.lock_workflow(flow.id)
             pause_delivery(
@@ -421,7 +430,7 @@ async def test_close_during_capability_preparation_never_dispatches(store, pendi
             )
         return secret
 
-    monkeypatch.setattr(Repository, "create_push_capability", close_before_return)
+    monkeypatch.setattr(Installation, "create_push_capability", close_before_return)
     runtime = server_runtime(github=github, clock=store.now)
     handler = server_callbacks(runtime, "worker-a", "epoch")
     prepared = await handler._prepare_assignment(job, "token")

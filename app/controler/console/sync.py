@@ -11,7 +11,7 @@ from psycopg_pool import PoolTimeout
 
 from app.contracts.conversation import ConversationFailure, ConversationItem
 from app.controler.workers.conversation import ConversationService
-from app.github import GitHubApp, GitHubError, retry_delay
+from app.github import GitHubApp, GitHubError, Repository, retry_delay
 from app.github.console import Observation, read_source, sources
 from app.persistence.console_sync import ConsoleSyncStore, SyncClaim
 from app.persistence.database import Database
@@ -122,7 +122,7 @@ class ConsoleSynchronizer:
                     assert claim.installation_id is not None
                     if not await self.db(lambda: self.store.remote_read_allowed(claim)):
                         return
-                    repo = self.github.installation(claim.installation_id).repository(claim.repo)
+                    repo = Repository(self.github.installation(claim.installation_id), claim.repo)
                     page_remote = await read_source(
                         repo, claim.issue_number, claim.pr_number, claim.source, claim.cursor, 20
                     )

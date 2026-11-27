@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -10,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from app.github._fields import unobserved_field
-from app.github.errors import translate_errors
+from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
 from app.github.feedback import RemoteFeedback, decode_feedback
 from app.github.issues import (
     _add_label,
@@ -20,21 +19,11 @@ from app.github.issues import (
     _find_comment,
     _remove_label,
 )
-from app.github.pagination import Batch, next_cursor, validate_limit
-from app.github.review_threads import ReviewThread
-from app.github.threads import (
-    _THREADS,
-    MAX_THREAD_BYTES,
-    ReviewThreads,
-    ThreadReader,
-    belongs_to_pr,
-    decode_thread,
-)
+from app.github.pagination import Batch, validate_limit
+from app.github.repositories import Repository, normalize_branch
 
 if TYPE_CHECKING:
     from githubkit_schemas.latest.models import DiffEntry, PullRequestReviewComment
-
-    from app.github.repositories import Repository
 
 _REVIEWS = """
 query($owner:String!,$name:String!,$number:Int!,$cursor:String,$limit:Int!){
@@ -110,11 +99,8 @@ class PullRequest(BaseModel):
     def __init__(
         self, repository: Repository | None = None, number: int | None = None, **facts: Any,
     ) -> None:
-        if repository is not None:
-            from app.github.repositories import Repository
-
-            if not isinstance(repository, Repository):
-                raise ValueError("repository must be a Repository resource")
+        if repository is not None and not isinstance(repository, Repository):
+            raise ValueError("repository must be a Repository resource")
         if number is not None:
             facts["number"] = number
         if repository is not None:
@@ -269,44 +255,36 @@ class PullRequest(BaseModel):
                 break
             page += 1
 
-    async def fetch_threads(
-        self, *, cursor: str | None = None, limit: int = 100,
-    ) -> Batch[ReviewThread]:
-        """Request threads with their first 20 comments and independent comment cursors."""
-        validate_limit(limit)
-        repo = self.repository
-        client = repo.installation._client(auto_retry=False)
-        with translate_errors("review_threads"):
-            data = await client.async_graphql(_THREADS, {
-                "owner": repo.owner, "name": repo.name, "pr": self.number, "cursor": cursor, "limit": limit,
-            })
-            if data.get("errors") or len(json.dumps(data).encode()) > MAX_THREAD_BYTES:
-                raise ValueError("partial or oversized thread batch")
-            connection = data["repository"]["pullRequest"]["reviewThreads"]
-            following = next_cursor(connection, cursor)
-            nodes = connection["nodes"]
-            if len(nodes) > limit or (not nodes and following):
-                raise ValueError("invalid thread batch size")
-            threads = []
-            for node in nodes:
-                if node is None or not belongs_to_pr(node, repo.full_name, self.number):
-                    raise ValueError("missing or foreign thread")
-                thread = decode_thread(node, self)
-                if thread.limitations:
-                    raise ValueError("missing or duplicate comment identity")
-                threads.append(thread)
-            if len({thread.thread_id for thread in threads}) != len(threads):
-                raise ValueError("duplicate thread identity")
-            return Batch[ReviewThread](items=tuple(threads), next_cursor=following)
-
-    async def list_review_threads(self) -> ReviewThreads:
-        reader = ThreadReader(self, auto_retry=False)
-        with translate_errors("list_review_threads"):
-            return await reader.all()
-
     comment = _comment
     find_comment = _find_comment
     fetch_comments = _fetch_comments
     fetch_labels = _fetch_labels
     add_label = _add_label
     remove_label = _remove_label
+
+
+async def find_pull_request_by_head(repo: Repository, branch: str) -> PullRequest | None:
+    """Return the unique PR for a local head branch, including closed PRs."""
+    branch = normalize_branch(branch)
+    client = repo.installation._client()
+    with translate_errors("find_pull_request_by_head"):
+        pulls: Any = (await client.rest.pulls.async_list(
+            repo.owner, repo.name, state="all", head=f"{repo.owner}:{branch}", per_page=2,
+        )).parsed_data
+        if not pulls:
+            return None
+        if len(pulls) != 1:
+            raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "find_pull_request_by_head")
+        return PullRequest._from_response(repo, pulls[0])
+
+
+async def open_pull_request(
+    repo: Repository, head: str, base: str, title: str, body: str,
+) -> PullRequest:
+    """Create a PR without automatically retrying the write."""
+    client = repo.installation._client(auto_retry=False)
+    with translate_errors("open_pull_request"):
+        data = (await client.rest.pulls.async_create(
+            repo.owner, repo.name, title=title, head=head, base=base, body=body,
+        )).parsed_data
+        return PullRequest._from_response(repo, data)

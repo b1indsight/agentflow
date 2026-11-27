@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, PrivateAttr
 
 from app.github._fields import unobserved_field
 from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
 from app.github.pagination import Batch, validate_limit
-
-if TYPE_CHECKING:
-    from app.github.pull_requests import PullRequest
+from app.github.pull_requests import PullRequest
 
 _RESOLVE = """mutation($threadId: ID!) {
   resolveReviewThread(input: {threadId: $threadId}) { thread { isResolved } }
@@ -60,8 +58,6 @@ class ReviewThread(BaseModel):
         root_comment_id: int | None = None, **facts: Any,
     ) -> None:
         if pull_request is not None:
-            from app.github.pull_requests import PullRequest
-
             if not isinstance(pull_request, PullRequest):
                 raise ValueError("review thread parent must be a PullRequest")
             repo, number = pull_request.repository.full_name, pull_request.number

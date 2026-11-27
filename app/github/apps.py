@@ -4,19 +4,50 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr
 
+from app.github._names import split_repo
 from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
 from app.github.pagination import Batch
-from app.github.projects import Project, ProjectConfig
-from app.github.repositories import Repository, _permissions, split_repo
 
 if TYPE_CHECKING:
     from githubkit import AppAuthStrategy, AppInstallationAuthStrategy, GitHub
 
-    from app.controler.config import ServerSettings
+
+class _AppSettings(Protocol):
+    github_app_id: int
+    github_private_key_path: Path
+    github_request_timeout_seconds: float
+
+
+class PushCapability(BaseModel):
+    """A short-lived Git credential that redacts its token in repr and JSON."""
+
+    model_config = ConfigDict(frozen=True)
+    token: SecretStr
+    repository: str
+    permissions: dict[str, Literal["read", "write"]]
+    expires_at: datetime
+    bot_login: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
+    bot_user_id: int = Field(gt=0)
+
+
+def _permissions(value: Any) -> dict[str, Literal["read", "write"]]:
+    if isinstance(value, dict):
+        raw = value
+    elif hasattr(value, "model_dump"):
+        raw = value.model_dump(exclude_none=True, exclude_unset=True)
+    else:
+        raw = vars(value)
+    permissions: dict[str, Literal["read", "write"]] = {}
+    for key, item in raw.items():
+        if item in {"read", "write"}:
+            permissions[key] = item
+    return permissions
 
 
 class GitHubApp(BaseModel):
@@ -28,7 +59,7 @@ class GitHubApp(BaseModel):
     _bot_login: str | None = PrivateAttr(default=None)
     _bot_login_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
-    def __init__(self, settings: ServerSettings) -> None:
+    def __init__(self, settings: _AppSettings) -> None:
         from githubkit import AppAuthStrategy, GitHub
 
         if settings.github_app_id <= 0:
@@ -125,21 +156,28 @@ class Installation(BaseModel):
             client.config = replace(client.config, auto_retry=None)
         return client
 
-    def repository(self, full_name: str) -> Repository:
-        return Repository(self, full_name)
-
-    async def fetch_repositories(self, *, page: int = 1) -> Batch[Repository]:
-        """Read one page of granted repositories, omitting archived repositories."""
-        client = self._client(auto_retry=False)
-        with translate_errors("list_installation_repositories"):
-            data = (await client.rest.apps.async_list_repos_accessible_to_installation(
-                per_page=100, page=page,
+    async def create_push_capability(self, full_name: str) -> PushCapability:
+        """Issue a contents-write token scoped to one repository in this installation."""
+        _, name = split_repo(full_name)
+        bot_login = await self.app.resolve_bot_login()
+        client = self.app._client()
+        with translate_errors("create_push_capability"):
+            data = (await client.rest.apps.async_create_installation_access_token(
+                self.installation_id, repositories=[name], permissions={"contents": "write"},
             )).parsed_data
-            return Batch(
-                items=tuple(self.repository(item.full_name) for item in data.repositories
-                            if not item.archived),
-                next_cursor=str(page + 1) if len(data.repositories) == 100 else None,
+            permissions = _permissions(data.permissions)
+            repositories = [item.full_name for item in (data.repositories or [])]
+            # GitHub may include implicit read-only repository metadata access.
+            if permissions not in (
+                {"contents": "write"}, {"contents": "write", "metadata": "read"},
+            ) or repositories != [full_name]:
+                raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
+            installation_client = self._client()
+            bot = (await installation_client.rest.users.async_get_by_username(bot_login)).parsed_data
+            if bot.login.lower() != bot_login.lower() or bot.type != "Bot" or bot.id <= 0:
+                raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "create_push_capability")
+            return PushCapability(
+                token=SecretStr(data.token), repository=full_name,
+                permissions=permissions, expires_at=datetime.fromisoformat(data.expires_at),
+                bot_login=bot_login, bot_user_id=bot.id,
             )
-
-    def project(self, config: ProjectConfig) -> Project:
-        return Project(self, config)

@@ -235,16 +235,16 @@ async def test_initial_job_crosses_worker_boundary_and_opens_pr(store, prepared_
 
 async def test_issue_edits_change_prepared_text_without_resubmitting_title(store, prepared_initial, monkeypatch):
     # Edits are observed on preparation, not a new session trigger or persisted direct input.
-    from app.github import Issue, Repository
+    from app.github import Issue
 
     flow, subject, _, request, _ = prepared_initial
     coding = store.jobs.get_job(request.arguments.job_id)
     title_job = store.jobs.get_job(flow.title_job_id)
     for body in ("\n更新正文 β\r\n", ""):
-        async def fetch_issue(repo, number, body=body):
-            return Issue(repo, number, title="改名 α", body=body, state="open")
+        async def refetch(issue, body=body):
+            return Issue(issue.repository, issue.number, title="改名 α", body=body, state="open")
 
-        monkeypatch.setattr(Repository, "fetch_issue", fetch_issue)
+        monkeypatch.setattr(Issue, "refetch", refetch)
         task = await subject.prepare(coding)
         assert task.task_content == ("改名 α\n\n\n更新正文 β\r\n" if body else "改名 α")
         assert store.flows.get_flow(flow.id).task_content is None

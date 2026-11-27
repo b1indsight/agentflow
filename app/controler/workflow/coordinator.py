@@ -39,7 +39,7 @@ from app.domain.models import (
 )
 from app.domain.ports import Judge
 from app.domain.review_models import BatchState, ReviewBatch
-from app.github import GitHubApp
+from app.github import GitHubApp, PullRequest, Repository
 from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
@@ -85,7 +85,7 @@ class JobCoordinator:
             if not reviews_tx.current(batch):
                 return
         assert flow is not None and flow.installation_id is not None
-        repo = self.github.installation(flow.installation_id).repository(flow.repo)
+        repo = Repository(self.github.installation(flow.installation_id), flow.repo)
         context = batch.context or await build_review_context(
             repo, flow, batch, required_pr_number(flow, deliveries=self.deliveries),
         )
@@ -107,7 +107,7 @@ class JobCoordinator:
             verdict = TriageVerdict(verdict=Verdict.WAIT, confidence=verdict.confidence,
                 reason=f"low-confidence: {verdict.reason}"[:2000], open_points=verdict.open_points)
         # Remote reads can outlive close/merge or a changed PR baseline.
-        remote = (await repo.fetch_pull_request(context.pr_number)
+        remote = (await PullRequest(repo, context.pr_number).refetch()
                   if verdict.verdict in {Verdict.ANSWER, Verdict.REVISE} else None)
         with self.flows.locked(flow.id) as locked:
             tx = locked.database
@@ -259,7 +259,7 @@ class JobCoordinator:
         flow = self.flows.get_flow(job.required_flow_id)
         if flow is None or flow.installation_id is None:
             raise ValueError("coding assignment has no GitHub installation")
-        capability = await self.github.installation(flow.installation_id).repository(flow.repo).create_push_capability()
+        capability = await self.github.installation(flow.installation_id).create_push_capability(flow.repo)
         return AssignmentSecret(
             push=PushSecret(
                 token=capability.token,

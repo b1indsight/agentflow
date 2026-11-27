@@ -7,7 +7,15 @@ from collections.abc import Awaitable, Callable
 
 from loguru import logger
 
-from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, ProjectConfig
+from app.github import (
+    GitHubApp,
+    GitHubError,
+    GitHubErrorKind,
+    Issue,
+    Project,
+    ProjectConfig,
+    Repository,
+)
 from app.persistence.database import Database
 from app.persistence.projects import Projection, ProjectStore
 
@@ -80,8 +88,8 @@ class ProjectSync:
             return
         row = refreshed
         installation = self.github.installation(config.installation_id)
-        repository = installation.repository(row.repo)
-        api = installation.project(config)
+        repository = Repository(installation, row.repo)
+        api = Project(installation, config)
         try:
             await self._call(row, config, lambda: api.validate(repository))
             if row.content_id is None:

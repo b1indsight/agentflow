@@ -15,7 +15,15 @@ from app.domain.context_models import MAX_CONTEXT_BYTES, ReviewContext
 from app.domain.inference_models import InferenceOutput
 from app.domain.models import Flow, FlowState, ReviewItemKind, Verdict
 from app.domain.review_models import BatchState, ReviewBatch, ReviewFeedback
-from app.github import GitHubApp, GitHubError, GitHubErrorKind, ReviewThreads
+from app.github import (
+    GitHubApp,
+    GitHubError,
+    GitHubErrorKind,
+    PullRequest,
+    Repository,
+    ReviewThreads,
+)
+from app.github.threads import fetch_threads, list_review_threads
 from tests.review_memory import review_context
 from tests.test_github_client import install_client, response, settings
 
@@ -103,7 +111,7 @@ def remote(tmp_path, monkeypatch):
         return client
 
     install_client(monkeypatch, installed)
-    repo = GitHubApp(settings(tmp_path)).installation(42).repository("owner/repo")
+    repo = Repository(GitHubApp(settings(tmp_path)).installation(42), "owner/repo")
     return repo, client, events
 
 
@@ -220,8 +228,8 @@ async def test_related_thread_pages_keep_order_authors_and_cutoff(remote):
 async def test_saved_thread_mapping_skips_unrelated_scanning(remote):
     repo, client, events = remote
     flow, batch = review_data()
-    pr = await repo.fetch_pull_request(17)
-    batch.threads = (await pr.list_review_threads()).model_copy(update={
+    pr = await PullRequest(repo, 17).refetch()
+    batch.threads = (await list_review_threads(pr)).model_copy(update={
         "limitations": ("unrelated-threads:incomplete",),
     })
     events.clear()
@@ -247,9 +255,9 @@ async def test_persisted_partial_mapping_rebinds_only_selected_thread_for_pagina
         return {"node": thread(rows=[comment(501, reply_to=499)])}
 
     client.async_graphql = graphql
-    pr = await repo.fetch_pull_request(17)
+    pr = await PullRequest(repo, 17).refetch()
     snapshot = ReviewThreads(repo="owner/repo", pr_number=17, fetched_at=batch.created_at,
-                             threads=(await pr.fetch_threads()).items)
+                             threads=(await fetch_threads(pr)).items)
     batch.threads = ReviewThreads.model_validate_json(snapshot.model_dump_json(exclude_unset=True))
     events.clear()
     result = await build_review_context(repo, flow, batch, 17)
@@ -279,8 +287,8 @@ async def test_thread_scan_reaches_later_metadata_page_without_unrelated_bodies(
 async def test_saved_mapping_from_another_pr_cannot_supply_context(remote, identity):
     repo, _, events = remote
     flow, batch = review_data()
-    pr = await repo.fetch_pull_request(17)
-    batch.threads = (await pr.list_review_threads()).model_copy(update={
+    pr = await PullRequest(repo, 17).refetch()
+    batch.threads = (await list_review_threads(pr)).model_copy(update={
         identity: "other/repo" if identity == "repo" else 18,
     })
     events.clear()
@@ -344,8 +352,8 @@ async def test_incomplete_selected_evidence_retains_limitations(remote, reason):
     elif reason == "selected-snippet":
         batch.feedback[0] = batch.feedback[0].model_copy(update={"diff_hunk": "x" * 5000})
     else:
-        pr = await repo.fetch_pull_request(17)
-        saved = await pr.list_review_threads()
+        pr = await PullRequest(repo, 17).refetch()
+        saved = await list_review_threads(pr)
         selected = saved.threads[0]
         if reason == "missing-page":
             selected = selected.model_copy(update={"complete": False,

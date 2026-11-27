@@ -16,7 +16,8 @@ from app.contracts.result_models import CommentEffect, EffectState, LabelEffect,
 from app.controler.workflow.archive import archive_effects, archive_progress
 from app.controler.workflow.service import ControlService
 from app.domain.models import Flow, FlowDelivery, FlowState, JobState
-from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest
+from app.github import GitHubApp, GitHubError, GitHubErrorKind, Issue, PullRequest, Repository
+from app.github.threads import list_review_threads
 from app.persistence.results import ResultStore
 from app.persistence.store import Store
 from app.plugins.hookspecs import hookimpl
@@ -416,11 +417,11 @@ async def test_archive_auth_failure_preserves_whether_comment_was_sent(
         due(store, job.id)
         # A failed lookup cannot clear evidence of the preceding uncertain write.
         monkeypatch.setattr(Issue, "find_comment", lambda issue, marker:
-            NATIVE_ISSUE_FIND_COMMENT(Issue(adapter.installation(issue.repository.installation.installation_id).repository(issue.repository.full_name), issue.number), marker))
+            NATIVE_ISSUE_FIND_COMMENT(Issue(Repository(adapter.installation(issue.repository.installation.installation_id), issue.repository.full_name), issue.number), marker))
     else:
         # Credentials can expire between the marker lookup and the comment request.
         monkeypatch.setattr(Issue, "comment", lambda issue, body:
-            NATIVE_ISSUE_COMMENT(Issue(adapter.installation(issue.repository.installation.installation_id).repository(issue.repository.full_name), issue.number), body))
+            NATIVE_ISSUE_COMMENT(Issue(Repository(adapter.installation(issue.repository.installation.installation_id), issue.repository.full_name), issue.number), body))
     with pytest.raises(ResultPending, match=("transient" if failure == "token_unavailable"
                                              else "authentication")):
         await subject.results.apply(job.id)
@@ -467,7 +468,7 @@ async def test_archive_keeps_dispatch_evidence_when_token_expires_after_post(sto
     adapter, cache = archive_adapter(tmp_path, monkeypatch, transport)
     monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
     monkeypatch.setattr(Issue, "comment", lambda issue, body:
-        NATIVE_ISSUE_COMMENT(Issue(adapter.installation(issue.repository.installation.installation_id).repository(issue.repository.full_name), issue.number), body))
+        NATIVE_ISSUE_COMMENT(Issue(Repository(adapter.installation(issue.repository.installation.installation_id), issue.repository.full_name), issue.number), body))
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     effect = store.results.list_effects(job.id)[2]
@@ -519,11 +520,12 @@ async def test_preparation_discovery_defers_retries_to_its_durable_owner(tmp_pat
 
     adapter, _ = archive_adapter(tmp_path, monkeypatch, transport)
     monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
+    pr = PullRequest(Repository(adapter.installation(42), "owner/repo"), 17)
     with pytest.raises(GitHubError) as caught:
-        await PullRequest(adapter.installation(42).repository("owner/repo"), 17).list_review_threads()
+        await list_review_threads(pr)
     assert caught.value.kind is GitHubErrorKind.TRANSIENT
     assert len(queries) == 1
-    snapshot = await PullRequest(adapter.installation(42).repository("owner/repo"), 17).list_review_threads()
+    snapshot = await list_review_threads(pr)
     assert snapshot.complete
     assert len(queries) == 2
 
@@ -557,7 +559,7 @@ async def test_add_label_retries_definition_read_but_not_write(tmp_path, monkeyp
     monkeypatch.setattr("githubkit.core.anyio.sleep", no_wait)
     # A transient definition lookup is safe to repeat; the subsequent write may have committed.
     with pytest.raises(GitHubError) as failure:
-        await Issue(adapter.installation(42).repository("owner/repo"), 17).add_label("flow:done")
+        await Issue(Repository(adapter.installation(42), "owner/repo"), 17).add_label("flow:done")
     assert failure.value.endpoint == "add_label"
     assert failure.value.status_code == 503
     assert requests == [("GET", definition_path), ("GET", definition_path), ("POST", write_path)]
@@ -579,7 +581,7 @@ async def test_archive_rate_limit_waits_until_reset_without_retry_after(store, t
 
     adapter, _ = archive_adapter(tmp_path, monkeypatch, transport)
     monkeypatch.setattr(Issue, "comment", lambda issue, body:
-        NATIVE_ISSUE_COMMENT(Issue(adapter.installation(issue.repository.installation.installation_id).repository(issue.repository.full_name), issue.number), body))
+        NATIVE_ISSUE_COMMENT(Issue(Repository(adapter.installation(issue.repository.installation.installation_id), issue.repository.full_name), issue.number), body))
     with pytest.raises(ResultPending):
         await subject.results.apply(job.id)
     effect = store.results.list_effects(job.id)[2]

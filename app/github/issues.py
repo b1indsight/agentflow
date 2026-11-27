@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
@@ -10,13 +10,20 @@ from app.github._fields import unobserved_field
 from app.github.errors import GitHubError, GitHubErrorKind, translate_errors
 from app.github.feedback import RemoteFeedback, decode_feedback
 from app.github.pagination import Batch, validate_limit
-
-if TYPE_CHECKING:
-    from app.github.pull_requests import PullRequest
-    from app.github.repositories import Repository
+from app.github.repositories import Repository
 
 
-async def _comment(target: Issue | PullRequest, body: str) -> int:
+class _IssueTarget(Protocol):
+    """GitHub addresses comments and labels by repository and issue number, also for PRs."""
+
+    @property
+    def repository(self) -> Repository: ...
+
+    @property
+    def number(self) -> int: ...
+
+
+async def _comment(target: _IssueTarget, body: str) -> int:
     """Create a child comment and return its actual database ID."""
     repo = target.repository
     client = repo.installation._client(auto_retry=False)
@@ -30,7 +37,7 @@ async def _comment(target: Issue | PullRequest, body: str) -> int:
         return data.id
 
 
-async def _find_comment(target: Issue | PullRequest, marker: str) -> int | None:
+async def _find_comment(target: _IssueTarget, marker: str) -> int | None:
     """Scan all pages for an exact recovery marker authored by this App's bot."""
     repo = target.repository
     bot_login = (await repo.installation.app.resolve_bot_login()).casefold()
@@ -70,7 +77,7 @@ query($owner:String!,$name:String!,$number:Int!,$cursor:String,$limit:Int!){
 
 
 async def _fetch_comments(
-    target: Issue | PullRequest, *, cursor: str | None = None, limit: int = 50,
+    target: _IssueTarget, *, cursor: str | None = None, limit: int = 50,
 ) -> Batch[RemoteFeedback]:
     """Request one GraphQL batch of discussion comments, preserving full bodies."""
     validate_limit(limit)
@@ -88,7 +95,7 @@ async def _fetch_comments(
         return decode_feedback(connection, cursor, limit)
 
 
-async def _fetch_labels(target: Issue | PullRequest) -> list[str]:
+async def _fetch_labels(target: _IssueTarget) -> list[str]:
     repo = target.repository
     client = repo.installation._client()
 
@@ -105,7 +112,7 @@ async def _fetch_labels(target: Issue | PullRequest) -> list[str]:
             page += 1
 
 
-async def _add_label(target: Issue | PullRequest, label: str) -> None:
+async def _add_label(target: _IssueTarget, label: str) -> None:
     """Check a configured repository label before adding it without replacement."""
     repo = target.repository
     client = repo.installation._client()
@@ -121,7 +128,7 @@ async def _add_label(target: Issue | PullRequest, label: str) -> None:
         raise GitHubError(GitHubErrorKind.UNEXPECTED_RESPONSE, "add_label")
 
 
-async def _remove_label(target: Issue | PullRequest, label: str) -> None:
+async def _remove_label(target: _IssueTarget, label: str) -> None:
     """A 404 confirms absence only if the target remains readable without the label."""
     repo = target.repository
     client = repo.installation._client(auto_retry=False)
@@ -151,11 +158,8 @@ class Issue(BaseModel):
     def __init__(
         self, repository: Repository | None = None, number: int | None = None, **facts: Any,
     ) -> None:
-        if repository is not None:
-            from app.github.repositories import Repository
-
-            if not isinstance(repository, Repository):
-                raise ValueError("repository must be a Repository resource")
+        if repository is not None and not isinstance(repository, Repository):
+            raise ValueError("repository must be a Repository resource")
         if number is not None:
             facts["number"] = number
         super().__init__(**facts)

@@ -5,7 +5,15 @@ import httpx
 import pytest
 from githubkit import GitHub
 
-from app.github import GitHubApp, GitHubError, GitHubErrorKind, PullRequest, ReviewThread
+from app.github import (
+    GitHubApp,
+    GitHubError,
+    GitHubErrorKind,
+    PullRequest,
+    Repository,
+    ReviewThread,
+)
+from app.github.threads import fetch_threads, list_review_threads
 from tests.test_github_client import install_client, settings
 from tests.test_github_feedback import adapter
 
@@ -40,10 +48,10 @@ async def test_all_thread_reads_preserve_the_same_comment_identity(tmp_path, mon
     client = Client(outer(thread), {"node": thread}, outer(thread))
     install_client(monkeypatch, lambda *args, **kwargs: client)
 
-    pr = PullRequest(app.installation(42).repository("owner/repo"), 17)
-    full = await pr.list_review_threads()
+    pr = PullRequest(Repository(app.installation(42), "owner/repo"), 17)
+    full = await list_review_threads(pr)
     single = await ReviewThread(pr, "T1").refetch()
-    page = await pr.fetch_threads(limit=1)
+    page = await fetch_threads(pr, limit=1)
 
     observations = (full.threads[0], single, page.items[0])
     assert all(type(item) is ReviewThread and item.pull_request is pr for item in observations)
@@ -89,7 +97,7 @@ async def test_other_graphql_errors_do_not_skip_unread_feedback(tmp_path, monkey
         if nested:
             await ReviewThread(app, "T1").fetch_comments(cursor="c20")
         else:
-            await app.fetch_threads(limit=1)
+            await fetch_threads(app, limit=1)
 
 
 async def test_thread_batches_and_comment_suffixes_have_independent_cursors(tmp_path, monkeypatch):
@@ -100,14 +108,14 @@ async def test_thread_batches_and_comment_suffixes_have_independent_cursors(tmp_
     )
     client = Client(data, {"node": node(number=21)}, outer(node("T3", 22)))
     app = adapter(tmp_path, monkeypatch, client)
-    first = await app.fetch_threads(cursor="threads-before", limit=2)
+    first = await fetch_threads(app, cursor="threads-before", limit=2)
     assert len(client.calls) == 1
     assert [thread.comments.next_cursor for thread in first.items] == ["comments-A", "comments-B"]
     assert [thread.comments.items[0].github_id for thread in first.items] == [2**33 + 1, 2**33 + 2]
     assert all(thread.pull_request is app and not thread.complete for thread in first.items)
     thread = first.items[0]
     second = await thread.fetch_comments(cursor=thread.comments.next_cursor, limit=20)
-    third = await app.fetch_threads(cursor=first.next_cursor, limit=1)
+    third = await fetch_threads(app, cursor=first.next_cursor, limit=1)
     assert thread.comments.items[0].github_id == 2**33 + 1
     assert thread.comments.next_cursor == "comments-A"
     assert second.items[0].github_id == 2**33 + 21 and second.next_cursor is None
@@ -136,5 +144,5 @@ async def test_invalid_pages_do_not_masquerade_as_complete(tmp_path, monkeypatch
         thread["comments"]["nodes"] = [None]
     app = adapter(tmp_path, monkeypatch, Client(data))
     with pytest.raises(GitHubError) as caught:
-        await app.fetch_threads(limit=1)
+        await fetch_threads(app, limit=1)
     assert caught.value.kind is GitHubErrorKind.UNEXPECTED_RESPONSE

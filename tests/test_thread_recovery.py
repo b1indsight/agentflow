@@ -29,6 +29,7 @@ from app.github import (
     ReviewThread,
     ReviewThreads,
 )
+from app.github import threads as thread_api
 from app.persistence.jobs import JobStore
 from tests.flow_fixtures import enqueue_job
 from tests.github import NATIVE_THREAD_REFETCH, record_call
@@ -99,7 +100,7 @@ def thread_resources(revision_resources, monkeypatch):
             raise GitHubError(GitHubErrorKind.TRANSIENT, "resolve")
         return thread.model_copy(update={"resolved": True})
 
-    monkeypatch.setattr(PullRequest, "list_review_threads", list_threads)
+    monkeypatch.setattr(thread_api, "list_review_threads", list_threads)
     monkeypatch.setattr(ReviewThread, "refetch", refetch)
     monkeypatch.setattr(ReviewThread, "find_reply", find_reply)
     monkeypatch.setattr(ReviewThread, "reply", reply)
@@ -190,7 +191,7 @@ async def test_auth_failure_after_resolve_waits_for_confirmation(
 
     async def auth_after_resolve(thread):
         if github.resolves:
-            repo = adapter.installation(thread.pull_request.repository.installation.installation_id).repository(
+            repo = Repository(adapter.installation(thread.pull_request.repository.installation.installation_id),
                 thread.pull_request.repository.full_name)
             return await NATIVE_THREAD_REFETCH(ReviewThread(PullRequest(repo, thread.pull_request.number),
                 thread.thread_id, root_comment_id=thread.root_comment_id))

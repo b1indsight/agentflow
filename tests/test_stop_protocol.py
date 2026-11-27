@@ -43,7 +43,8 @@ from app.contracts.result_models import ResultPending
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.service import ControlService
 from app.domain.models import FlowState, JobKind, JobState, VcsKind
-from app.github import GitHubError, GitHubErrorKind, Repository
+from app.github import GitHubError, GitHubErrorKind
+from app.github import pull_requests as pr_api
 from app.persistence.records import required
 from app.worker.config import WorkerSettings
 from app.worker.execution.lifecycle import WorkerExecution, WorkerProtocolError
@@ -414,13 +415,13 @@ async def test_stopping_consumes_a_and_requires_real_r_before_b(
     job = required(store.jobs.get_job(request.arguments.job_id))
     terminal = Failed(job_id=job.id, assignment_token=job.assignment_token, error="cancelled")
     if delivery == "effects_pending":
-        create = Repository.open_pull_request
+        create = pr_api.open_pull_request
 
         async def lost_response(repo, head, base, title, body):
             await create(repo, head, base, title, body)
             raise GitHubError(GitHubErrorKind.TRANSIENT, "open_pull_request")
 
-        monkeypatch.setattr(Repository, "open_pull_request", lost_response)
+        monkeypatch.setattr(pr_api, "open_pull_request", lost_response)
         terminal = Succeeded(job_id=job.id, assignment_token=job.assignment_token, result=initial_result)
         assert store.assignments.record_assignment_result(
             job.id, "worker-a", job.assignment_token, "epoch", terminal,

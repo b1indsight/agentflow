@@ -8,7 +8,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Literal
 
 from app.domain.models import Flow, FlowDelivery, Job, JobState
-from app.github import GitHubError, GitHubErrorKind, Repository
+from app.github import GitHubError, GitHubErrorKind, Issue, Repository
 from app.persistence.database import Database
 from app.persistence.deliveries import DeliveryStore
 
@@ -78,5 +78,5 @@ class PreparationReads:
             return flow.task_content
         number = flow.issue_number
         assert number is not None
-        issue = await self.read(job, lambda: repository.fetch_issue(number))
+        issue = await self.read(job, Issue(repository, number).refetch)
         return f"{issue.title}\n\n{issue.body}" if issue.body else issue.title

@@ -18,6 +18,7 @@ from app.contracts.protocol import (
 from app.domain.delivery_models import DeliveryReceipt, OpenedDelivery, PreparedDelivery
 from app.domain.models import DeliveryState, FlowDelivery, JobKind
 from app.github import GitHubApp, GitHubError, GitHubErrorKind
+from app.github import repositories as repo_api
 from app.persistence.assignments import AssignmentStore
 from app.persistence.console import ConsoleStore
 from app.persistence.database import Database
@@ -207,8 +208,8 @@ class FlowToolService:
                 FlowToolErrorKind.AUTHORIZATION,
                 "Flow has no GitHub installation",
             )
-        repo = self.github.installation(installation_id).repository(flow.repo)
-        remote = await repo.fetch_ref(delivery.branch, retry_transient=True)
+        installation = self.github.installation(installation_id)
+        remote = await repo_api.fetch_ref(installation, flow.repo, delivery.branch, retry_transient=True)
         if remote.branch != delivery.branch:
             raise FlowToolRejected(
                 FlowToolErrorKind.UPSTREAM,

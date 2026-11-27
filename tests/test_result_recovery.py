@@ -31,7 +31,8 @@ from app.domain.models import (
     JobKind,
     JobState,
 )
-from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest, Repository
+from app.github import GitHubError, GitHubErrorKind, Issue, PullRequest
+from app.github import pull_requests as pr_api
 from app.persistence.jobs import JobStore
 from tests.test_coordinator import apply_result, coordinator
 from tests.test_merge import route_merge
@@ -265,13 +266,13 @@ async def test_closed_pr_after_lost_creation_response_finishes_without_new_write
     initial_scenario, result_clock, monkeypatch
 ):
     store, github, job, result = initial_scenario
-    create = Repository.open_pull_request
+    create = pr_api.open_pull_request
 
     async def create_then_lose_response(repo, head, base, title, body):
         await create(repo, head, base, title, body)
         raise GitHubError(GitHubErrorKind.TRANSIENT, "open_pull_request")
 
-    monkeypatch.setattr(Repository, "open_pull_request", create_then_lose_response)
+    monkeypatch.setattr(pr_api, "open_pull_request", create_then_lose_response)
     subject = coordinator(store, github)
     with pytest.raises(ResultPending):
         await apply_result(subject, job, result)

@@ -19,9 +19,11 @@ from app.github import (
     GitHubError,
     GitHubErrorKind,
     Issue,
+    Project,
     ProjectConfig,
     ProjectItem,
     ProjectItemsPage,
+    Repository,
 )
 from tests.test_github_client import AsyncEndpoint, app_client, install_client, response, settings
 
@@ -77,7 +79,7 @@ def adapter(tmp_path, monkeypatch, *responses, installation=42):
 
     install_client(monkeypatch, installed)
     app_client(monkeypatch, app_sdk)
-    return app.installation(42).project(config()), client, lookup
+    return Project(app.installation(42), config()), client, lookup
 
 
 def test_config_is_optional_and_strict(tmp_path, monkeypatch):
@@ -94,7 +96,7 @@ def test_config_is_optional_and_strict(tmp_path, monkeypatch):
 
 async def test_validate_uses_stable_ids_and_actual_repository_installation(tmp_path, monkeypatch):
     api, client, lookup = adapter(tmp_path, monkeypatch, target())
-    checked = await api.validate(api.installation.repository("owner/repo"))
+    checked = await api.validate(Repository(api.installation, "owner/repo"))
     assert checked.title == "Renamed board" and checked.status_name == "Renamed status"
     assert lookup.calls == [(("owner", "repo"), {})]
     assert client.calls[0][1] == {"project": "P", "field": "F"}
@@ -118,17 +120,17 @@ async def test_invalid_destination_is_explicit(tmp_path, monkeypatch, bad):
         data["field"]["options"].pop()
     api, client, _ = adapter(tmp_path, monkeypatch, data, installation=99 if bad == "installation" else 42)
     with pytest.raises(GitHubError):
-        await api.validate(api.installation.repository("owner/repo"))
+        await api.validate(Repository(api.installation, "owner/repo"))
     assert len(client.calls) == (0 if bad == "installation" else 1)
 
 
 async def test_issue_identity_is_read_and_validated(tmp_path, monkeypatch):
     good = {"repository": {"nameWithOwner": "owner/repo", "issue": {"id": "I", "number": 7}}}
     api, client, _ = adapter(tmp_path, monkeypatch, good, {"repository": None})
-    assert await Issue(api.installation.repository("owner/repo"), 7).fetch_content_id() == "I"
+    assert await Issue(Repository(api.installation, "owner/repo"), 7).fetch_content_id() == "I"
     assert client.calls[0][1] == {"owner": "owner", "name": "repo", "number": 7}
     with pytest.raises(GitHubError):
-        await Issue(api.installation.repository("owner/repo"), 7).fetch_content_id()
+        await Issue(Repository(api.installation, "owner/repo"), 7).fetch_content_id()
 
 
 async def test_membership_pages_cover_invisible_and_archived_items(tmp_path, monkeypatch):
@@ -267,7 +269,7 @@ async def test_real_sdk_never_retries_or_accepts_partial_mutation(tmp_path, monk
         return GitHub("test-token", auto_retry=False, async_transport=httpx.MockTransport(transport))
 
     install_client(monkeypatch, installed)
-    api = app.installation(42).project(config())
+    api = Project(app.installation(42), config())
     call = api.add_issue("I") if operation == "add" else ProjectItem(api, "ITEM").set_status(ProjectStatus.DONE)
     with pytest.raises(GitHubError) as caught:
         await asyncio.wait_for(call, 1)

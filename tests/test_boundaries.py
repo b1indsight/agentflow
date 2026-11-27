@@ -56,7 +56,7 @@ def test_worker_data_paths_do_not_load_control_plane_dependencies(operation: str
     )
 
 
-def imported_modules(package: Path) -> set[str]:
+def imported_modules(package: Path, *, include_types: bool = False) -> set[str]:
     modules: set[str] = set()
     paths = [package] if package.is_file() else package.rglob("*.py")
     for path in paths:
@@ -64,7 +64,7 @@ def imported_modules(package: Path) -> set[str]:
         # Configuration types can be referenced across packages without loading
         # those packages at runtime; retain the check on executable imports.
         for node in ast.walk(tree):
-            if (isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+            if (not include_types and isinstance(node, ast.If) and isinstance(node.test, ast.Name)
                     and node.test.id == "TYPE_CHECKING"):
                 node.body = []
         for node in ast.walk(tree):
@@ -85,6 +85,7 @@ def contains_forbidden(modules: set[str], prefixes: set[str]) -> bool:
 
 
 _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
+_THREAD_MODULES = {"app.github.review_threads", "app.github.threads"}
 
 
 @pytest.mark.parametrize(("package", "forbidden"), [
@@ -96,6 +97,10 @@ _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
                    "app.telemetry", "psycopg", "githubkit", "fastapi"}),
     ("persistence", {"app.controler", "app.worker", "githubkit"}),
     ("github", {"app.controler", "app.worker", "app.persistence", "psycopg"}),
+    ("github/apps.py", {"app.github.repositories", "app.github.projects", "app.controler"}),
+    ("github/repositories.py", {"app.github.issues", "app.github.pull_requests"} | _THREAD_MODULES),
+    ("github/issues.py", {"app.github.pull_requests"} | _THREAD_MODULES),
+    ("github/pull_requests.py", _THREAD_MODULES),
     ("controler", {"app.worker"}),
     ("worker", {"app.controler", "app.persistence", "app.github", "app.telemetry.metrics",
                 "psycopg", "githubkit", "bub", "app.contracts.control"}),
@@ -121,8 +126,12 @@ _SERVER_ENTRYPOINTS = {"app.controler.api", "app.controler.runtime"}
     }),
 ])
 def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[str]) -> None:
-    modules = imported_modules(Path("app") / package)
+    github_layer = package.startswith("github/")
+    modules = imported_modules(Path("app") / package, include_types=github_layer)
     assert modules, f"No imports found in {package}; check the package path"
+    if github_layer:
+        # The public facade also re-exports the higher-level resources.
+        assert "app.github" not in modules
     if package == "controler/workflow/initial.py":
         # INITIAL owns preparation and plans; neither leaf may depend on orchestration.
         leaves = {"app.controler.workflow.preparation", "app.controler.workflow.plans"}
@@ -149,8 +158,7 @@ def test_flow_lifecycle_sql_writes_have_one_runtime_owner():
 
 
 def test_persistence_stores_import_each_other_at_module_level():
-    # A function-level import hides a dependency cycle between stores. The one left keeps
-    # review cancellation inside the Flow state write's transaction (flows -> reviews).
+    # Function-local imports can hide cycles between stores.
     deferred = set()
     for path in Path("app/persistence").glob("*.py"):
         for scope in ast.walk(ast.parse(path.read_text())):
@@ -159,4 +167,4 @@ def test_persistence_stores_import_each_other_at_module_level():
             for node in ast.walk(scope):
                 if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("app.persistence"):
                     deferred.add((path.name, node.module))
-    assert deferred == {("flows.py", "app.persistence.reviews")}
+    assert not deferred

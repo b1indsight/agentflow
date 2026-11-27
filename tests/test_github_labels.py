@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.github import GitHubApp, GitHubError, PullRequest
+from app.github import GitHubApp, GitHubError, PullRequest, Repository
 from tests.test_github_client import (
     AsyncEndpoint,
     install_client,
@@ -22,7 +22,7 @@ async def test_add_label_requires_existing_definition_and_uses_incremental_api(t
         async_get_label=get, async_add_labels=add,
     )))
     install_client(monkeypatch, lambda _, **kwargs: client)
-    await PullRequest(github.installation(42).repository("octo/repo"), 7).add_label("flow:done")
+    await PullRequest(Repository(github.installation(42), "octo/repo"), 7).add_label("flow:done")
     assert get.calls == [(("octo", "repo", "flow:done"), {})]
     assert add.calls == [(("octo", "repo", 7), {"labels": ["flow:done"]})]
 
@@ -31,7 +31,7 @@ async def test_add_label_requires_existing_definition_and_uses_incremental_api(t
 
     client.rest.issues.async_get_label = missing
     with pytest.raises(GitHubError, match="label"):
-        await PullRequest(github.installation(42).repository("octo/repo"), 7).add_label("missing")
+        await PullRequest(Repository(github.installation(42), "octo/repo"), 7).add_label("missing")
     assert len(add.calls) == 1
 
 
@@ -52,7 +52,7 @@ async def test_remove_label_404_requires_positive_target_lookup(tmp_path, monkey
     install_client(monkeypatch, lambda _, **kwargs: client)
     # A concurrent removal is success; a hidden repo or a still-present label is not.
     if remaining == []:
-        await PullRequest(github.installation(42).repository("octo/repo"), 7).remove_label("flow:in-review")
+        await PullRequest(Repository(github.installation(42), "octo/repo"), 7).remove_label("flow:in-review")
     else:
         with pytest.raises(GitHubError):
-            await PullRequest(github.installation(42).repository("octo/repo"), 7).remove_label("flow:in-review")
+            await PullRequest(Repository(github.installation(42), "octo/repo"), 7).remove_label("flow:in-review")

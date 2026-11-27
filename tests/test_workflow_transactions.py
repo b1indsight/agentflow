@@ -142,22 +142,21 @@ def test_admin_cli_creates_only_valid_task_inputs(store, monkeypatch, source):
     from typer.testing import CliRunner
 
     from app import cli
-    from app.github import Installation, Repository
+    from app.github import Installation
 
     monkeypatch.setenv("AGENTFLOW_DATABASE_URL", store.database.database_url)
     monkeypatch.setenv("AGENTFLOW_WORKER_TOKENS", '{"worker":"test-token"}')
     monkeypatch.setattr(cli.github, "GitHubApp", lambda settings: RecordingGitHub())
 
-    async def refetch(repo):
-        return repo.model_copy(update={"default_branch": "main", "archived": False})
-
     # Exercise the shared Issue reader, including PR responses from the Issues endpoint.
     sdk = Mock()
+    sdk.rest.repos.async_get = AsyncMock(return_value=SimpleNamespace(parsed_data=SimpleNamespace(
+        full_name="owner/repo", default_branch="main", archived=False,
+    )))
     sdk.rest.issues.async_get = AsyncMock(return_value=SimpleNamespace(parsed_data=SimpleNamespace(
         number=7, title="Source", body="", state="open", pull_request={"url": "pr"} if source == "pull_request" else None,
     )))
     monkeypatch.setattr(Installation, "_client", lambda *args, **kwargs: sdk)
-    monkeypatch.setattr(Repository, "refetch", refetch)
     runner = CliRunner()
     content = "正文 α\n完整保留 β\n"
     options = ["--content-file", "-"] if source == "content" else ["--issue-number", "7"]
