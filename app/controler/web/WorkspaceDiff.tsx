@@ -14,7 +14,7 @@ export function WorkspaceDiff({
   id: number;
   refresh: number;
 }) {
-  const [counts, setCounts] = useState<Counts | null | undefined>();
+  const [counts, setCounts] = useState<Counts | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     let timer: number;
@@ -37,14 +37,16 @@ export function WorkspaceDiff({
     };
   }, [id, refresh]);
 
-  if (counts === undefined) return null;
-  const total = counts ? counts.added + counts.deleted + counts.modified : 0;
-  const label = counts
-    ? `工作区相对起点：新增 ${counts.added} 行，删除 ${counts.deleted} 行，修改 ${counts.modified} 行`
-    : "工作区差异暂不可用";
-  const values = counts ? [counts.added, counts.deleted, counts.modified] : [];
+  if (!counts) return null;
+  const total = counts.added + counts.deleted + counts.modified;
+  if (total === 0) return null;
+  const label = `工作区相对起点：新增 ${counts.added} 行，删除 ${counts.deleted} 行，修改 ${counts.modified} 行`;
+  const values = [counts.added, counts.deleted, counts.modified];
   const colors = ["added", "deleted", "modified"];
-  let offset = 0;
+  const segments = values.filter((value) => value > 0).length;
+  const gap = segments > 1 ? 5 : 0;
+  const coloredLength = 100 - segments * gap;
+  let offset = gap / 2;
   return (
     <span
       className="workspace-diff"
@@ -60,38 +62,33 @@ export function WorkspaceDiff({
         fill="none"
         strokeWidth="3"
       >
-        <circle cx="10" cy="10" r="7.5" stroke="var(--line)" />
-        {total > 0 &&
-          values.map((value, i) => {
-            const start = offset;
-            const fraction = (value / total) * 100;
-            offset += fraction;
-            return (
-              value > 0 && (
-                <circle
-                  key={i}
-                  className={colors[i]}
-                  cx="10"
-                  cy="10"
-                  r="7.5"
-                  pathLength="100"
-                  stroke="currentColor"
-                  transform="rotate(-90 10 10)"
-                  strokeDasharray={`${fraction} ${100 - fraction}`}
-                  strokeDashoffset={-start}
-                />
-              )
-            );
-          })}
+        {values.map((value, i) => {
+          if (!value) return null;
+          const start = offset;
+          const length = (value / total) * coloredLength;
+          offset += length + gap;
+          return (
+            <circle
+              key={i}
+              className={colors[i]}
+              cx="10"
+              cy="10"
+              r="7.5"
+              pathLength="100"
+              stroke="currentColor"
+              transform="rotate(-90 10 10)"
+              strokeDasharray={`${length} ${100 - length}`}
+              strokeDashoffset={-start}
+            />
+          );
+        })}
       </svg>
-      {counts
-        ? values.map((value, i) => (
-            <span key={i} className={colors[i]}>
-              {["+", "−", "~"][i]}
-              {compact.format(value).toLowerCase()}
-            </span>
-          ))
-        : "差异暂不可用"}
+      {values.map((value, i) => (
+        <span key={i} className={colors[i]}>
+          {["+", "−", "~"][i]}
+          {compact.format(value).toLowerCase()}
+        </span>
+      ))}
     </span>
   );
 }

@@ -1119,6 +1119,9 @@ svg {
 .pr-and-diff {
   gap: inherit;
 }
+.pr-and-diff:empty {
+  display: none;
+}
 .workspace-diff {
   gap: 4px;
   font: var(--text-small) / 1.5 var(--mono);

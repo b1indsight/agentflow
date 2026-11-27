@@ -261,6 +261,7 @@ test.beforeEach(async ({ page }) => {
 test("workspace diff shares the PR row and links the repository", async ({
   page,
 }) => {
+  await page.clock.install();
   await page.goto("/#flow/42/conversation");
   const header = page.locator(".detail-head-full");
   const badge = header.getByRole("img", {
@@ -282,23 +283,26 @@ test("workspace diff shares the PR row and links the repository", async ({
       path: `../../../.amp/in/artifacts/workspace-diff-${width}.png`,
     });
   }
-  for (const [state, body, label] of [
-    [
-      "clean",
-      '{"added":0,"deleted":0,"modified":0}',
-      "工作区相对起点：新增 0 行，删除 0 行，修改 0 行",
-    ],
-    ["offline", "null", "工作区差异暂不可用"],
-  ]) {
-    await page.route("**/workspace-diff", (route) =>
-      route.fulfill({ contentType: "application/json", body }),
-    );
-    await page.reload();
-    await expect(header.getByRole("img", { name: label })).toBeVisible();
-    await header.screenshot({
-      path: `../../../.amp/in/artifacts/workspace-diff-${state}.png`,
-    });
-  }
+  // Changes can disappear and return without navigation while the agent edits.
+  let body = '{"added":0,"deleted":0,"modified":0}';
+  await page.route("**/workspace-diff", (route) =>
+    route.fulfill({ contentType: "application/json", body }),
+  );
+  const indicator = header.getByRole("img", { name: /工作区/ });
+  await page.clock.fastForward(15000);
+  await expect(indicator).toHaveCount(0);
+  await header.screenshot({
+    path: "../../../.amp/in/artifacts/workspace-diff-clean.png",
+  });
+  body = '{"added":0,"deleted":7,"modified":0}';
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
+  await expect(indicator).toHaveText("+0−7~0");
+  await header.screenshot({
+    path: "../../../.amp/in/artifacts/workspace-diff-single.png",
+  });
+  body = "null";
+  await page.clock.fastForward(15000);
+  await expect(indicator).toHaveCount(0);
 });
 
 test("switching flows keeps navigation stable while only the detail panel loads or fails", async ({
