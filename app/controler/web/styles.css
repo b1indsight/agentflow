@@ -1,4 +1,12 @@
 @font-face {
+  font-family: "Monaspace Neon";
+  src: url("/fonts/monaspace-v1.400/MonaspaceNeonVar.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+
+/* Keep the local alias available to explicitly saved font preferences. */
+@font-face {
   font-family: monaco-nerd-font-mono;
   src: local("Monaco Nerd Font Mono"), local("MonacoNFM");
 }
@@ -25,8 +33,8 @@
   --status-red: #ff5f57;
   --status-green: #28c840;
   --mono:
-    var(--code-font, monaco-nerd-font-mono), "Microsoft Sans Serif",
-    ui-monospace, SFMono-Regular, Consolas, monospace;
+    var(--code-font, "Monaspace Neon"), "Microsoft Sans Serif", ui-monospace,
+    SFMono-Regular, Consolas, monospace;
   --text-body: 1rem;
   --text-nav: 0.9375rem;
   --text-control: 0.875rem;

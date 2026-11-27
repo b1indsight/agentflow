@@ -185,8 +185,16 @@ for (const width of [1440, 390]) {
     const apply = form.getByRole("button", { name: "保存字体" });
     await expect(form).toHaveCSS("font-family", /^Inter,/);
     const defaultCode =
-      /^monaco-nerd-font-mono, "Microsoft Sans Serif", ui-monospace,/;
+      /^"Monaspace Neon", "Microsoft Sans Serif", ui-monospace,/;
     await expect(code).toHaveCSS("font-family", defaultCode);
+    // Computed CSS still lists Neon when the bundled font is missing.
+    expect(
+      await page.evaluate(async () =>
+        (await document.fonts.load('14px "Monaspace Neon"')).map(
+          (face) => face.status,
+        ),
+      ),
+    ).toContain("loaded");
     await form.scrollIntoViewIfNeeded();
     await page.screenshot({
       path: `${artifactRoot}/fonts-default-${width}.png`,

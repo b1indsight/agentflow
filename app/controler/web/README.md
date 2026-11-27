@@ -82,9 +82,7 @@ API 错误显式显示，已有内容不会被示例数据替换；Worker 离线
 点击条目保留当前详情页签，手机点击后关闭任务导航；刷新当前视图同时更新 Inbox。
 Inbox 可折叠，原有阶段分组保留；它只提供导航，不自动重试、归档或修改 GitHub。
 
-「显示字体」分别设置正文和代码的本机字体，点「保存字体」后在当前浏览器生效。清空其中一项并保存即可恢复该项默认值：正文沿用原系统字体栈，代码依次尝试 `monaco-nerd-font-mono`、`Microsoft Sans Serif` 和原等宽字体栈。
-
-`monaco-nerd-font-mono` 对应本机安装的 [Monaco Nerd Font Mono 字体文件](https://github.com/Karmenzind/monaco-nerd-fonts/blob/cc39ad6314e0ba0035a9110160086eb5b6ff03ee/fonts/MonacoNerdFontMono-Regular.ttf)。[上游安装说明](https://github.com/Karmenzind/monaco-nerd-fonts/tree/cc39ad6314e0ba0035a9110160086eb5b6ff03ee#usage)未提供 Web 再分发许可，因此控制台不内置该文件，也不从第三方自动下载。
+「显示字体」分别设置正文和代码字体，点「保存字体」后在当前浏览器生效。清空其中一项并保存即可恢复该项默认值：正文沿用原系统字体栈，代码优先使用内置的 [GitHub Monaspace Neon v1.400](https://github.com/githubnext/monaspace/tree/v1.400/fonts/Web%20Fonts/Variable%20Web%20Fonts/Monaspace%20Neon)，其次为 `Microsoft Sans Serif` 和原等宽字体栈。控制台从同源加载官方 WOFF2，无需安装或访问第三方字体服务。[OFL 1.1 许可证](public/fonts/monaspace-v1.400/LICENSE.txt)与字体随包分发。
 
 在「设置 → Skill 仓库」从当前授权项目中选择一个仓库，点击「保存仓库」即可生效，无需重启。选择「不指定」可取消。此选择独立于模型设置，不会下载或安装 skill。
 已有 v3 数据库首次启动时会自动添加缺少的 `runtime_settings.skill_repository` 列，保留现有设置，Skill 仓库默认为「不指定」。首次补列需要应用数据库账号有权修改 `runtime_settings` 表。
