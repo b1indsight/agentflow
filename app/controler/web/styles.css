@@ -19,7 +19,9 @@
   --status-yellow: #febc2e;
   --status-red: #ff5f57;
   --status-green: #28c840;
-  --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --mono:
+    var(--code-font, monaco-nerd-font-mono), "Microsoft Sans Serif",
+    ui-monospace, SFMono-Regular, Consolas, monospace;
   --text-body: 1rem;
   --text-nav: 0.9375rem;
   --text-control: 0.875rem;
@@ -27,7 +29,7 @@
   --text-small: 0.75rem;
   --text-title: 1.75rem;
   font-family:
-    Inter,
+    var(--body-font, Inter),
     -apple-system,
     BlinkMacSystemFont,
     "Segoe UI",
@@ -72,6 +74,12 @@
 body {
   margin: 0;
   background: var(--bg);
+}
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--mono);
 }
 :root:has(.detail-shell) {
   overflow-y: clip;
@@ -1863,7 +1871,6 @@ svg {
   margin: 0;
   padding: 16px;
   background: #f6f8fa;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: var(--text-control);
   color: var(--code-ink);
   line-height: 1.45;

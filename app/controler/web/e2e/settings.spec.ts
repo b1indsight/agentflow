@@ -172,6 +172,57 @@ const save = (page: Page) =>
   page.getByRole("button", { name: "保存设置", exact: true });
 
 for (const width of [1440, 390]) {
+  test(`body and code fonts persist and reset independently at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 950 });
+    await server(page);
+    await page.goto("/console/#settings");
+    const form = page.getByRole("form", { name: "显示字体" });
+    const code = form.locator("code");
+    const bodyInput = form.getByLabel("正文字体");
+    const codeInput = form.getByLabel("代码字体");
+    const apply = form.getByRole("button", { name: "保存字体" });
+    await expect(form).toHaveCSS("font-family", /^Inter,/);
+    const defaultCode =
+      /^monaco-nerd-font-mono, "Microsoft Sans Serif", ui-monospace,/;
+    await expect(code).toHaveCSS("font-family", defaultCode);
+    await form.scrollIntoViewIfNeeded();
+    await page.screenshot({
+      path: `${artifactRoot}/fonts-default-${width}.png`,
+    });
+
+    await bodyInput.fill("Georgia, serif");
+    await apply.click();
+    await expect(form).toHaveCSS("font-family", /^Georgia, serif,/);
+    await expect(code).toHaveCSS("font-family", defaultCode);
+    await codeInput.fill('"Courier New", monospace');
+    await apply.click();
+    await expect(code).toHaveCSS("font-family", /^"Courier New", monospace,/);
+    await page.screenshot({
+      path: `${artifactRoot}/fonts-custom-${width}.png`,
+    });
+
+    await page.goto("/console/#board");
+    await page.reload();
+    await expect(page.locator("body")).toHaveCSS(
+      "font-family",
+      /^Georgia, serif,/,
+    );
+    await expect(page.locator(".card-ref").first()).toHaveCSS(
+      "font-family",
+      /^"Courier New", monospace,/,
+    );
+    await page.getByRole("link", { name: "设置", exact: true }).click();
+    await expect(bodyInput).toHaveValue("Georgia, serif");
+    await expect(codeInput).toHaveValue('"Courier New", monospace');
+    await codeInput.fill("");
+    await apply.click();
+    await page.reload();
+    await expect(code).toHaveCSS("font-family", defaultCode);
+    await expect(form).toHaveCSS("font-family", /^Georgia, serif,/);
+  });
+
   test(`skill repository can be saved, reloaded and cleared at ${width}px`, async ({
     page,
   }) => {
@@ -323,7 +374,11 @@ for (const width of [1440, 390]) {
     await expect(codexEffort(page).locator("option:checked")).toHaveText("mid");
     await expect(ampEffort(page)).toHaveValue("");
     await expect(ampEffort(page)).toBeDisabled();
-    await expect(page.getByRole("textbox")).toHaveCount(0);
+    await expect(
+      page
+        .getByRole("region", { name: "Code agent 模型" })
+        .getByRole("textbox"),
+    ).toHaveCount(0);
     await expect(
       amp(page).locator(
         'option:is([value="low"], [value="medium"], [value="high"], [value="ultra"])',

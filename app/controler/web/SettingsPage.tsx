@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { ArrowLeft, Check, RefreshCw, Save } from "lucide-react";
 import { ApiError, getModelCatalog, getSettings, updateSettings } from "./api";
 import { Button } from "./components/ui/button";
+import { FontSettings } from "./FontSettings";
 import { SettingSelect } from "./SettingSelect";
 import { SkillRepositorySetting } from "./SkillRepositorySetting";
 import type { CodingModelSettings, ModelCatalog } from "./types";
@@ -470,6 +471,7 @@ export function SettingsPage({
           </form>
         </section>
         <SkillRepositorySetting refresh={refresh} />
+        <FontSettings />
       </div>
     </main>
   );

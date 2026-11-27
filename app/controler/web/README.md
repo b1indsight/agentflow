@@ -69,7 +69,7 @@ Worker 会话中的编码结果展示摘要和按原序排列的待澄清问题�
 - `/console/#board`：五列看板、组合查询、服务端分页和各阶段全集计数，PR 优先编号。
 - `/console/#flow/<id>/conversation`：GitHub + Agent 时间线、工具摘要、Review 线程、下滑加载和末尾刷新。
 - `/console/#flow/<id>/overview`、`/jobs`：概览、来源同步状态、当前动作/下一条件与执行记录。
-- `/console/#settings`：Codex / Amp 默认模型、推理强度和 Skill 仓库，从顶栏可进入；刷新不会保存修改。
+- `/console/#settings`：从顶栏进入，可设置 Codex / Amp 默认模型、推理强度、Skill 仓库和显示字体；刷新不会保存修改。
 - `/console/#flow/<id>/file-<文件ID>`：当前 Flow 内按文件名打开的编辑器页签，可切换和关闭；刷新或离开 Flow 后回到会话重新选择。
 - `/console/?q=repo%3Aagentflow+is%3Aactive+pr%3A95#board`：可分享、刷新后恢复的组合查询。
 
@@ -81,6 +81,8 @@ API 错误显式显示，已有内容不会被示例数据替换；Worker 离线
 计数使用服务端完整结果，列表复用各阶段的分页；加载失败会提示重试，不显示为空。
 点击条目保留当前详情页签，手机点击后关闭任务导航；刷新当前视图同时更新 Inbox。
 Inbox 可折叠，原有阶段分组保留；它只提供导航，不自动重试、归档或修改 GitHub。
+
+「显示字体」分别设置正文和代码的本机字体，点「保存字体」后在当前浏览器生效。清空其中一项并保存即可恢复该项默认值：正文沿用原系统字体栈，代码依次尝试 `monaco-nerd-font-mono`、`Microsoft Sans Serif` 和原等宽字体栈。
 
 在「设置 → Skill 仓库」从当前授权项目中选择一个仓库，点击「保存仓库」即可生效，无需重启。选择「不指定」可取消。此选择独立于模型设置，不会下载或安装 skill。
 已有 v3 数据库首次启动时会自动添加缺少的 `runtime_settings.skill_repository` 列，保留现有设置，Skill 仓库默认为「不指定」。首次补列需要应用数据库账号有权修改 `runtime_settings` 表。
