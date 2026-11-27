@@ -2,6 +2,7 @@
   --bg: #f5f7f9;
   --paper: #fff;
   --ink: #26333f;
+  --code-ink: #1f2328;
   --muted: #758391;
   --subtle: #96a2ae;
   --line: #e2e8ee;
@@ -1494,6 +1495,7 @@ svg {
 .markdown-body pre code {
   padding: 0;
   background: none;
+  color: var(--code-ink);
 }
 .markdown-table {
   max-width: 100%;
@@ -1849,7 +1851,7 @@ svg {
   background: #f6f8fa;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: var(--text-control);
-  color: #1f2328;
+  color: var(--code-ink);
   line-height: 1.45;
 }
 .tool pre {
@@ -2201,10 +2203,9 @@ pre code {
   background: var(--paper);
   border: 0;
 }
-/* GitHub Light: @primer/primitives light theme, including its Prettylights syntax colors. */
 .numbered-code {
   padding: 20px 0;
-  color: #1f2328;
+  color: var(--code-ink);
 }
 .numbered-code code {
   display: grid;
@@ -2213,22 +2214,23 @@ pre code {
 .numbered-code .code-line {
   display: contents;
 }
-.numbered-code .syntax-keyword {
+/* GitHub Light Prettylights colors for file previews, fenced code and diffs. */
+.syntax-keyword {
   color: #cf222e;
 }
-.numbered-code .syntax-string {
+.syntax-string {
   color: #0a3069;
 }
-.numbered-code .syntax-regexp {
+.syntax-regexp {
   color: #116329;
 }
-.numbered-code .syntax-entity {
+.syntax-entity {
   color: #6639ba;
 }
-.numbered-code .syntax-value {
+.syntax-value {
   color: #0550ae;
 }
-.numbered-code .syntax-comment,
+.syntax-comment,
 .code-line-number {
   color: #59636e;
 }
@@ -2569,7 +2571,7 @@ pre code {
 }
 .diff-window {
   --diff-font-family: var(--mono);
-  --diff-text-color: var(--ink);
+  --diff-text-color: var(--code-ink);
   --diff-code-insert-background-color: #dafbe1;
   --diff-code-delete-background-color: #ffebe9;
   --diff-code-insert-edit-background-color: #aceebb;

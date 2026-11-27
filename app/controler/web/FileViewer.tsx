@@ -4,7 +4,7 @@ import { Download, RefreshCw } from "lucide-react";
 import { ApiError } from "./api";
 import { Button } from "./components/ui/button";
 import { readFile, type FilePreview } from "./files";
-import { parseSource, sourceLines } from "./fileSyntax";
+import { parserForFile, sourceLines } from "./fileSyntax";
 import { CODE_LINES, textEnd, WindowList } from "./windowing";
 
 type FileState =
@@ -43,7 +43,10 @@ function FileSource({
   text: string;
   filename: string | null;
 }) {
-  const tree = useMemo(() => parseSource(filename, text), [filename, text]);
+  const tree = useMemo(
+    () => parserForFile(filename)?.parse(text),
+    [filename, text],
+  );
   const [end, setEnd] = useState(() => textEnd(text, 0, true));
   const sentinel = useRef<HTMLDivElement>(null);
   const starts = useMemo(() => {

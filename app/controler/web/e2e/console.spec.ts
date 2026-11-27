@@ -3255,7 +3255,10 @@ test("thread comments show archived code context automatically with optional lin
     "background-color",
     "rgb(218, 251, 225)",
   );
-  await expect(diff.locator(".diff-code-edit")).toHaveText("self.gateway.");
+  // One inline edit can span several syntax tokens.
+  expect(
+    (await diff.locator(".diff-code-edit").allTextContents()).join(""),
+  ).toBe("self.gateway.");
   await expect(contexts.nth(1).locator(".diff-code-insert")).toHaveText(
     "archived_value = 1",
   );
@@ -3813,8 +3816,21 @@ test("visible Markdown grows one review diff across reads without scrolling", as
   page,
 }) => {
   // An archive preview can end in the middle of an added line inside a review hunk.
-  const preview =
-    "这个字段什么作用？\n\n```diff\n@@ -8,2 +8,3 @@\n def setup():\n-    enabled = False\n+    enabled = True\n+    ret";
+  const preview = [
+    "这个字段什么作用？",
+    "```python",
+    "def setup():",
+    "    return True",
+    "```",
+    "```diff",
+    "--- a/config.py",
+    "+++ b/config.py",
+    "@@ -8,2 +8,3 @@",
+    " def setup():",
+    "-    enabled = False",
+    "+    enabled = True",
+    "+    ret",
+  ].join("\n");
   const body = preview + "urn enabled\n```\n\n+ **普通列表**";
   const points = Array.from(body);
   let resume!: () => void;
@@ -3868,6 +3884,19 @@ test("visible Markdown grows one review diff across reads without scrolling", as
   await expect(message.locator(".diff-code-delete")).toHaveText(
     "enabled = False",
   );
+  for (const block of [
+    message.locator("pre code"),
+    message.getByLabel("版本差异"),
+  ]) {
+    await expect(block.getByText("setup", { exact: true })).toHaveCSS(
+      "color",
+      "rgb(102, 57, 186)",
+    );
+    await expect(block.getByText("True", { exact: true })).toHaveCSS(
+      "color",
+      "rgb(5, 80, 174)",
+    );
+  }
   await expect(message.locator("li")).toHaveText(["普通列表"]);
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
