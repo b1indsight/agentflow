@@ -34,8 +34,18 @@ const parsers = new Map(
 );
 
 const colors = tagHighlighter([
-  { tag: [tags.keyword, tags.tagName, tags.heading], class: "syntax-keyword" },
+  { tag: tags.keyword, class: "syntax-keyword" },
   { tag: [tags.string, tags.link], class: "syntax-string" },
+  { tag: tags.regexp, class: "syntax-regexp" },
+  {
+    tag: [
+      tags.function(tags.variableName),
+      tags.function(tags.propertyName),
+      tags.typeName,
+      tags.className,
+    ],
+    class: "syntax-entity",
+  },
   {
     tag: [
       tags.number,
@@ -43,6 +53,8 @@ const colors = tagHighlighter([
       tags.null,
       tags.propertyName,
       tags.attributeName,
+      tags.tagName,
+      tags.heading,
     ],
     class: "syntax-value",
   },

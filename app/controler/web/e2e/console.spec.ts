@@ -6874,14 +6874,17 @@ for (const width of [1440, 390]) {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     const id = "d".repeat(32);
     const body = `[查看代码](/api/files/${id}#name=example.ts)`;
-    const lines = Array.from({ length: 235 }, (_, i) =>
-      i === 0
-        ? 'const message = "带行号的只读代码预览";'
-        : i === 1
-          ? ""
-          : i === 2
-            ? '\tconst description = "长行自动换行，仍然只显示一个原文件行号。";'
-            : `// 原文件第 ${i + 1} 行`,
+    const example = [
+      'const message = "带行号的只读代码预览";',
+      "",
+      '\tconst description = "长行自动换行，仍然只显示一个原文件行号。";',
+      "function isShort(text: string) {",
+      "  return text.length < 80 && /预览/.test(text);",
+      "}",
+    ];
+    const lines = Array.from(
+      { length: 235 },
+      (_, i) => example[i] ?? `// 原文件第 ${i + 1} 行`,
     );
     const source = lines.join("\r\n") + "\r\n";
     const first = lines.slice(0, 200).join("\r\n") + "\r\n";
@@ -6920,6 +6923,10 @@ for (const width of [1440, 390]) {
     );
     await expect(preview.locator(".syntax-string").first()).toHaveText(
       '"带行号的只读代码预览"',
+    );
+    await expect(preview.getByText("isShort", { exact: true })).toHaveCSS(
+      "color",
+      "rgb(102, 57, 186)",
     );
     expect(
       await numbers

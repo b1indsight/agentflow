@@ -2201,8 +2201,10 @@ pre code {
   background: var(--paper);
   border: 0;
 }
+/* GitHub Light: @primer/primitives light theme, including its Prettylights syntax colors. */
 .numbered-code {
   padding: 20px 0;
+  color: #1f2328;
 }
 .numbered-code code {
   display: grid;
@@ -2212,23 +2214,29 @@ pre code {
   display: contents;
 }
 .numbered-code .syntax-keyword {
-  color: #704487;
+  color: #cf222e;
 }
 .numbered-code .syntax-string {
-  color: #24634e;
+  color: #0a3069;
+}
+.numbered-code .syntax-regexp {
+  color: #116329;
+}
+.numbered-code .syntax-entity {
+  color: #6639ba;
 }
 .numbered-code .syntax-value {
-  color: var(--accent-hover);
+  color: #0550ae;
 }
-.numbered-code .syntax-comment {
-  color: #606f7c;
+.numbered-code .syntax-comment,
+.code-line-number {
+  color: #59636e;
 }
 .code-line-number {
   min-width: 3ch;
   padding: 0 12px 0 16px;
-  border-right: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--muted);
+  border-right: 1px solid #d1d9e0;
+  background: #f6f8fa;
   text-align: right;
   font-variant-numeric: tabular-nums;
   user-select: none;
