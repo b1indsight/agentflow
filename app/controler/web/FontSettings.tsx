@@ -8,7 +8,7 @@ const fields = [
   {
     name: "code-font",
     label: "代码字体",
-    placeholder: "默认：monaco-nerd-font-mono",
+    placeholder: "默认：Monaco Nerd Font Mono",
   },
 ] as const;
 
@@ -61,6 +61,17 @@ export function FontSettings() {
       </div>
       <p className="settings-catalog-notice">
         输入本机字体名称，多个字体用英文逗号分隔。留空恢复默认，仅保存在当前浏览器。
+      </p>
+      <p className="settings-catalog-notice">
+        默认代码字体需在本机安装：{" "}
+        <a
+          href="https://github.com/Karmenzind/monaco-nerd-fonts/blob/cc39ad6314e0ba0035a9110160086eb5b6ff03ee/fonts/MonacoNerdFontMono-Regular.ttf"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Monaco Nerd Font Mono（字体文件）
+        </a>
+        。未安装时优先尝试 Microsoft Sans Serif。
       </p>
       <div className="settings-agent">
         {fields.map(({ name, label, placeholder }) => (
