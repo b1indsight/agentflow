@@ -3255,7 +3255,10 @@ test("thread comments show archived code context automatically with optional lin
     "background-color",
     "rgb(218, 251, 225)",
   );
-  await expect(diff.locator(".diff-code-edit")).toHaveText("self.gateway.");
+  // One inline edit can span several syntax tokens.
+  expect(
+    (await diff.locator(".diff-code-edit").allTextContents()).join(""),
+  ).toBe("self.gateway.");
   await expect(contexts.nth(1).locator(".diff-code-insert")).toHaveText(
     "archived_value = 1",
   );
@@ -3813,8 +3816,21 @@ test("visible Markdown grows one review diff across reads without scrolling", as
   page,
 }) => {
   // An archive preview can end in the middle of an added line inside a review hunk.
-  const preview =
-    "这个字段什么作用？\n\n```diff\n@@ -8,2 +8,3 @@\n def setup():\n-    enabled = False\n+    enabled = True\n+    ret";
+  const preview = [
+    "这个字段什么作用？",
+    "```python",
+    "def setup():",
+    "    return True",
+    "```",
+    "```diff",
+    "--- a/config.py",
+    "+++ b/config.py",
+    "@@ -8,2 +8,3 @@",
+    " def setup():",
+    "-    enabled = False",
+    "+    enabled = True",
+    "+    ret",
+  ].join("\n");
   const body = preview + "urn enabled\n```\n\n+ **普通列表**";
   const points = Array.from(body);
   let resume!: () => void;
@@ -3868,6 +3884,19 @@ test("visible Markdown grows one review diff across reads without scrolling", as
   await expect(message.locator(".diff-code-delete")).toHaveText(
     "enabled = False",
   );
+  for (const block of [
+    message.locator("pre code"),
+    message.getByLabel("版本差异"),
+  ]) {
+    await expect(block.getByText("setup", { exact: true })).toHaveCSS(
+      "color",
+      "rgb(102, 57, 186)",
+    );
+    await expect(block.getByText("True", { exact: true })).toHaveCSS(
+      "color",
+      "rgb(5, 80, 174)",
+    );
+  }
   await expect(message.locator("li")).toHaveText(["普通列表"]);
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
@@ -6874,14 +6903,17 @@ for (const width of [1440, 390]) {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     const id = "d".repeat(32);
     const body = `[查看代码](/api/files/${id}#name=example.ts)`;
-    const lines = Array.from({ length: 235 }, (_, i) =>
-      i === 0
-        ? 'const message = "带行号的只读代码预览";'
-        : i === 1
-          ? ""
-          : i === 2
-            ? '\tconst description = "长行自动换行，仍然只显示一个原文件行号。";'
-            : `// 原文件第 ${i + 1} 行`,
+    const example = [
+      'const message = "带行号的只读代码预览";',
+      "",
+      '\tconst description = "长行自动换行，仍然只显示一个原文件行号。";',
+      "function isShort(text: string) {",
+      "  return text.length < 80 && /预览/.test(text);",
+      "}",
+    ];
+    const lines = Array.from(
+      { length: 235 },
+      (_, i) => example[i] ?? `// 原文件第 ${i + 1} 行`,
     );
     const source = lines.join("\r\n") + "\r\n";
     const first = lines.slice(0, 200).join("\r\n") + "\r\n";
@@ -6920,6 +6952,10 @@ for (const width of [1440, 390]) {
     );
     await expect(preview.locator(".syntax-string").first()).toHaveText(
       '"带行号的只读代码预览"',
+    );
+    await expect(preview.getByText("isShort", { exact: true })).toHaveCSS(
+      "color",
+      "rgb(102, 57, 186)",
     );
     expect(
       await numbers

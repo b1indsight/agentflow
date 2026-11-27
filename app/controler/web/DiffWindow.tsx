@@ -1,4 +1,5 @@
 import { type ReactNode, useMemo } from "react";
+import { highlightCode } from "@lezer/highlight";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import {
   Decoration,
@@ -8,20 +9,25 @@ import {
   markEdits,
   parseDiff,
   tokenize,
+  type TokenizeEnhancer,
+  type TokenPath,
 } from "react-diff-view";
+import { parserForFile, syntaxColors } from "./fileSyntax";
 import { CODE_CHARS, CODE_LINES, useReadingState } from "./windowing";
 
 // The tokenizer allocates space up to the absolute line number, even for a one-line patch.
 const MAX_TOKEN_LINE = 65536;
 
 /** Parse a patch or standalone GitHub hunk; window rows without losing their original line numbers. */
-export function DiffWindow({
+export default function DiffWindow({
   text,
   stateKey,
+  path,
   fallback = <p>没有文本差异。</p>,
 }: {
   text: string;
   stateKey: string;
+  path?: string;
   fallback?: ReactNode;
 }) {
   const files = useMemo(() => {
@@ -30,7 +36,12 @@ export function DiffWindow({
       const parsed = parseDiff(
         text.startsWith("@@ ") ? `--- a/code\n+++ b/code\n${text}` : text,
       );
+      // parseDiff drops paths from plain unified headers without timestamps.
+      const headers =
+        /^--- ([^\t\r\n]+)(?:\t[^\r\n]*)?\r?\n\+\+\+ ([^\t\r\n]+)/.exec(text);
       for (const file of parsed) {
+        file.oldPath ||= headers?.[1] ?? path ?? "";
+        file.newPath ||= headers?.[2] ?? path ?? "";
         for (const hunk of file.hunks) {
           for (const change of hunk.changes) {
             if (change.content.length > CODE_CHARS) change.content = "字符太多";
@@ -42,7 +53,7 @@ export function DiffWindow({
       // A fenced diff can be an incomplete patch or just an illustrative snippet.
       return [];
     }
-  }, [text]);
+  }, [text, path]);
   if (
     !files.length ||
     files.some((file) => !file.hunks.some((hunk) => hunk.changes.length))
@@ -56,6 +67,44 @@ export function DiffWindow({
       showPath={files.length > 1}
     />
   ));
+}
+
+/** Parse each side of a hunk separately: missing lines between hunks are not source context. */
+function highlightHunks(file: FileData): TokenizeEnhancer {
+  return (pair) => {
+    for (const side of ["old", "new"] as const) {
+      const old = side === "old";
+      const parser = parserForFile(old ? file.oldPath : file.newPath);
+      if (!parser) continue;
+      const lines = pair[old ? 0 : 1];
+      for (const hunk of file.hunks) {
+        const text = hunk.changes
+          .filter((change) => change.type !== (old ? "insert" : "delete"))
+          .map((change) => change.content)
+          .join("\n");
+        if (!text) continue;
+        let index = (old ? hunk.oldStart : hunk.newStart) - 1;
+        let line: TokenPath[] = [];
+        highlightCode(
+          text,
+          parser.parse(text),
+          syntaxColors,
+          (value, className) => {
+            const leaf = { type: "text", value };
+            line.push(
+              className ? [{ type: "element", className }, leaf] : [leaf],
+            );
+          },
+          () => {
+            lines[index++] = line;
+            line = [];
+          },
+        );
+        lines[index] = line;
+      }
+    }
+    return pair;
+  };
 }
 
 function FileDiffWindow({
@@ -75,7 +124,9 @@ function FileDiffWindow({
           MAX_TOKEN_LINE,
       )
         ? undefined
-        : tokenize(file.hunks, { enhancers: [markEdits(file.hunks)] }),
+        : tokenize(file.hunks, {
+            enhancers: [highlightHunks(file), markEdits(file.hunks)],
+          }),
     [file],
   );
   const [saved, setStart] = useReadingState(stateKey, 0);
