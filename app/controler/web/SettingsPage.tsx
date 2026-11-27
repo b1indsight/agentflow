@@ -1,8 +1,9 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { ArrowLeft, Check, RefreshCw, Save } from "lucide-react";
+import { ArrowLeft, Check, RefreshCw } from "lucide-react";
 import { ApiError, getModelCatalog, getSettings, updateSettings } from "./api";
 import { Button } from "./components/ui/button";
-import { SettingSelect } from "./SettingSelect";
+import { FontSettings } from "./FontSettings";
+import { SettingActions, SettingSelect } from "./SettingControls";
 import { SkillRepositorySetting } from "./SkillRepositorySetting";
 import type { CodingModelSettings, ModelCatalog } from "./types";
 
@@ -441,7 +442,17 @@ export function SettingsPage({
                 </Button>
               </section>
             )}
-            <div className="settings-actions">
+            <SettingActions
+              submitLabel={pending ? "正在保存…" : "保存设置"}
+              disabled={
+                !saved ||
+                !dirty ||
+                pending ||
+                loading ||
+                locked ||
+                missingEffort
+              }
+            >
               <Button
                 type="button"
                 className="btn"
@@ -451,25 +462,11 @@ export function SettingsPage({
                 <RefreshCw aria-hidden="true" />
                 {write.kind === "unknown" ? "回读核对" : "重新读取设置"}
               </Button>
-              <Button
-                type="submit"
-                className="btn settings-save"
-                disabled={
-                  !saved ||
-                  !dirty ||
-                  pending ||
-                  loading ||
-                  locked ||
-                  missingEffort
-                }
-              >
-                <Save aria-hidden="true" />
-                {pending ? "正在保存…" : "保存设置"}
-              </Button>
-            </div>
+            </SettingActions>
           </form>
         </section>
         <SkillRepositorySetting refresh={refresh} />
+        <FontSettings />
       </div>
     </main>
   );

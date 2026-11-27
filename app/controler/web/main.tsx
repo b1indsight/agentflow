@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { restoreFonts } from "./FontSettings";
 import { ReadingState } from "./windowing";
 import "./theme.css";
 import "react-diff-view/style/index.css";
@@ -8,6 +9,7 @@ import "./styles.css";
 
 const root = document.getElementById("app");
 if (!root) throw new Error("Missing application root");
+restoreFonts();
 createRoot(root).render(
   <StrictMode>
     <ReadingState>
