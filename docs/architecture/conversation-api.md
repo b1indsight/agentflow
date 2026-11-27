@@ -71,6 +71,8 @@ Amp 的例子展示了另一个区别。一条原生消息可以含多个块：�
 | [Codex](../../app/worker/execution/codex.py#L315-L398) | 在执行所用的 `CODEX_HOME`（默认 `~/.codex`）先查 `sessions` 再查 `archived_sessions`，验证 rollout 文件身份和 `session_meta.id`。按 JSONL 行提取公开 `response_item` 消息和工具操作，跳过重复事件及内部推理；末尾尚未写完的一行留待下次查询。目录最多检查 50,000 项，单页扫描预算 8 MiB，单条记录上限 256 KiB。 |
 | [Amp](../../app/worker/execution/amp_history.py) | 编码首轮与续聊把输入、助手消息和工具活动脱敏后追加到 `worker_root/amp-history/`，按字节游标分页。旧会话没有文件、文件损坏或写入中断时，空闲 worker 用 `threads export` 流式回填；原始导出和候选文件各限 64 MiB，导出限时 20 秒。只有覆盖已知条目且没有并发续写才替换。回填后的旧游标返回 `cursor_invalid`；失败保留旧数据，可再次查询。正常分页不调用 Amp，不跟踪其他客户端的新增或编辑。 |
 
+Amp 新采集的条目用工具调用 ID 区分调用与结果，普通文本的 ID 取最近工具锚点及段内序号。回填在两个已知锚点间按顺序匹配，保留已发布的 ID；补入中段的记录不会改变后续文本的序号。若有多种匹配，返回 `history_unreadable`，不替换本地文件。仅从 export 读取的旧会话继续使用原生条目 ID。见[回填验收测试](../../tests/test_amp_driver.py)。
+
 两端读取器的条目页预算为 256 KiB，文本和工具参数最多 8,192 字符；已知凭据会脱敏，但不要把响应当作已排除所有秘密的公开日志。Broker 限全局 64 个、每连接 4 个待响应查询；回复条目加共享协议头上限 512 KiB，单次往返预算 30 秒。工具或结果处理占用连接时会拖慢历史查询，查询超时不说明编码任务失败。[Codex 测试](../../tests/test_conversation_history.py#L136-L160) · [Amp 测试](../../tests/test_conversation_history.py#L247-L275) · [慢回调测试](../../tests/test_conversation_e2e.py#L104-L145)
 
 ### 方法契约：什么样的回包可以交给调用者？

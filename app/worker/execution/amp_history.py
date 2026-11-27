@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -35,13 +34,39 @@ Project = Callable[[dict[str, Any], str, tuple[str, ...]], tuple[list[HistoryIte
 Export = Callable[[str, Callable[[bytes], None]], bool]
 
 
-def block_key(item: HistoryItem) -> str:
-    """Match ordered public records, including distinct call and result identities."""
-    return hashlib.sha256(
-        json.dumps(
-            [item.role, item.kind, item.call_id, item.content.model_dump()], sort_keys=True
-        ).encode()
-    ).hexdigest()
+def record_key(item: HistoryItem) -> str:
+    """Tool identity is shared across formats; only visible text participates in text alignment."""
+    if item.call_id is None:
+        return f"{item.role}:{item.content.text}"
+    call = item.call_id
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,38}", call):
+        # Keep unusual call IDs inside the wire ID length/alphabet without truncating them.
+        call = "~" + uuid.uuid5(uuid.NAMESPACE_OID, call).hex
+    return ("c-" if item.kind == "tool_call" else "r-") + call
+
+
+class RecordIds:
+    """Allocate new IDs without renumbering text already published in this segment."""
+
+    def __init__(self, sid: str, anchors: list[tuple[str, str]], *, resume: bool) -> None:
+        self.sid = sid
+        self.used = {published for _, published in anchors}
+        self.anchor = "start"
+        if resume:
+            self.anchor = next((k for k, _ in reversed(anchors) if k.startswith(("c-", "r-"))), "start")
+        self.offset = 0
+
+    def assign(self, item: HistoryItem, key: str, published: str | None = None) -> None:
+        if item.call_id is not None:
+            self.anchor, self.offset = key, 0
+            new = f"{self.sid}:{key}"
+        else:
+            while (new := f"{self.sid}:{self.anchor}/{self.offset}") in self.used:
+                self.offset += 1
+        if published is None and new in self.used:
+            raise ConversationFailure("history_unreadable")
+        item.id = published or new
+        self.used.add(item.id)
 
 
 @dataclass
@@ -53,6 +78,13 @@ class Checkpoint:
     unsupported: bool = False
     # Ordered evidence of turns, independent of whether the JSONL survives.
     anchors: list[tuple[str, str]] = field(default_factory=list)
+    # A later export cannot redact an expired assignment secret. Keep its public replacement.
+    protected: dict[str, str] = field(default_factory=dict)
+
+    def remember(self, key: str, item: HistoryItem) -> None:
+        self.anchors.append((key, item.id))
+        if item.truncated or "[REDACTED]" in item.content.text or "[REDACTED]" in (item.content.arguments or ""):
+            self.protected[item.id] = item.model_dump_json()
 
     def matches(self, path: Path) -> bool:
         try:
@@ -64,6 +96,26 @@ class Checkpoint:
     def stamp(self, path: Path) -> None:
         info = path.stat()
         self.size, self.modified = info.st_size, info.st_mtime_ns
+
+
+def align_text(known: list[tuple[str, str]], segment: list[tuple[str, HistoryItem]]) -> dict[int, str]:
+    """A subsequence is unique iff its leftmost and rightmost placements are identical."""
+    def locate(indices: range, reverse: bool) -> dict[int, str]:
+        matches = {}
+        cursor = iter(indices)
+        for key, published in reversed(known) if reverse else known:
+            for i in cursor:
+                if key in (segment[i][0], segment[i][1].id):
+                    matches[i] = published
+                    break
+            else:
+                raise ConversationFailure("history_unreadable")
+        return matches
+
+    first = locate(range(len(segment)), False)
+    if first != locate(range(len(segment) - 1, -1, -1), True):
+        raise ConversationFailure("history_unreadable")
+    return first
 
 
 class AmpTranscript:
@@ -99,7 +151,7 @@ class AmpTranscript:
                         item = HistoryItem.model_validate_json(row)
                     except ValueError:
                         break
-                    state.anchors.append((block_key(item), item.id))
+                    state.remember(record_key(item), item)
                 state.size = data.tell()
         return state
 
@@ -127,24 +179,59 @@ class AmpTranscript:
                 tempfile.NamedTemporaryFile(dir=directory, delete=False) as candidate,
             ):
                 replacement = Checkpoint(complete=True)
-                matched = 0
+                ids = RecordIds(sid, state.anchors, resume=False)
+                known_tools = {k for k, _ in state.anchors if k.startswith(("c-", "r-"))}
+                seen_tools: set[str] = set()
+                position = byte_count = 0
+                segment: list[tuple[str, HistoryItem]] = []
+
+                def save_item(key: str, item: HistoryItem, published: str | None) -> None:
+                    native = item.id
+                    # Export-only legacy sessions may already have native IDs in Control.
+                    ids.assign(item, key, published or (native if not state.anchors else None))
+                    if protected := state.protected.get(item.id):
+                        item = HistoryItem.model_validate_json(protected)
+                    replacement.remember(native if item.call_id is None else key, item)
+                    candidate.write(item.model_dump_json().encode() + b"\n")
+                    if candidate.tell() > MAX_RECOVERY:
+                        raise ConversationFailure("history_limit")
+
+                def flush(boundary: str | None) -> None:
+                    """Between common tool anchors, earliest and latest ordered matches must agree."""
+                    nonlocal position
+                    end = position
+                    while end < len(state.anchors) and state.anchors[end][0] not in known_tools:
+                        end += 1
+                    expected = state.anchors[end][0] if end < len(state.anchors) else None
+                    if boundary != expected:
+                        raise ConversationFailure("history_unreadable")
+                    first = align_text(state.anchors[position:end], segment)
+                    for i, (key, item) in enumerate(segment):
+                        save_item(key, item, first.get(i))
+                    segment.clear()
+                    position = end
 
                 def message(row: dict) -> None:
-                    nonlocal matched
+                    nonlocal position, byte_count
                     public, unknown = self.project(row, sid, ())
                     replacement.unsupported |= unknown
                     for item in public:
-                        native_id = item.id
-                        if matched < len(state.anchors):
-                            key, published_id = state.anchors[matched]
-                            if key == native_id or key == block_key(item):
-                                # Control keys activity by item ID. Preserve already-published identities.
-                                item.id = published_id
-                                matched += 1
-                        replacement.anchors.append((native_id, item.id))
-                        candidate.write(item.model_dump_json().encode() + b"\n")
-                    if candidate.tell() > MAX_RECOVERY:
-                        raise ConversationFailure("history_limit")
+                        key = record_key(item)
+                        byte_count += len(item.model_dump_json().encode())
+                        if byte_count > MAX_RECOVERY:
+                            raise ConversationFailure("history_limit")
+                        if item.call_id is not None:
+                            if key in seen_tools:
+                                raise ConversationFailure("history_unreadable")
+                            seen_tools.add(key)
+                        if key in known_tools:
+                            flush(key)
+                            save_item(key, item, state.anchors[position][1])
+                            position += 1
+                        elif position == len(state.anchors):
+                            save_item(key, item, None)
+                        else:
+                            segment.append((key, item))
 
                 if not read_export(sid, self.export, message):
                     if stamp is not None or path.exists():
@@ -152,8 +239,7 @@ class AmpTranscript:
                     if query.cursor:
                         raise ConversationFailure("cursor_invalid")
                     return HistoryPage(session_id=sid, status="not_found")
-                if matched != len(state.anchors):
-                    raise ConversationFailure("history_unreadable")
+                flush(None)
                 candidate.flush()
                 os.fsync(candidate.fileno())
                 candidate.close()
@@ -258,7 +344,7 @@ class Capture:
         self.failed = False
         self.echo = True
         self.last = ""
-        self.turn = uuid.uuid4().hex
+        self.ids: RecordIds
 
     def feed(self, chunk: bytes) -> None:
         if self.failed:
@@ -311,6 +397,7 @@ class Capture:
                 self.file = os.fdopen(fd, "ab", buffering=0)
                 self.sid = sid
                 self.store.active[sid] = state
+                self.ids = RecordIds(sid, state.anchors, resume=True)
                 self.write("user", [{"type": "text", "text": self.prompt}])
             elif kind in ("user", "assistant"):
                 message = event["message"]
@@ -352,7 +439,7 @@ class Capture:
             {
                 "role": role,
                 "createdAt": datetime.now(UTC).isoformat(),
-                "protocolMessageID": f"{self.turn}-{self.file.tell()}",
+                "protocolMessageID": "stream",  # projection only; stream events have no native message ID
                 "content": blocks,
             },
             self.sid,
@@ -360,7 +447,9 @@ class Capture:
         )
         state.unsupported |= unknown
         for item in items:
-            state.anchors.append((block_key(item), item.id))
+            key = record_key(item)
+            self.ids.assign(item, key)
+            state.remember(key, item)
             self.file.write(item.model_dump_json().encode() + b"\n")
         state.size = self.file.tell()
 

@@ -76,6 +76,60 @@ async def test_worker_pages_captured_turns_and_repairs_only_from_a_covering_expo
     assert [(i.id, i.content) for i in repaired.items] == [(i.id, i.content) for i in page.items]
 
 
+async def test_amp_backfill_matches_call_and_result_before_assigning_text_offsets(tmp_path, monkeypatch):
+    # Recovery no longer has the capture-time credential. The public tool result must stay redacted.
+    agent = AmpCodingAgent(trusted_host=True, history_root=tmp_path)
+    secret = 'ephemeral-fixture-value'
+    query = HistoryQuery(session_id=THREAD)
+    rows: list[dict] = []
+
+    async def run(args, **kw):
+        if args[:2] == ['threads', 'export']:
+            kw['stream_stdout'](json.dumps({'id': THREAD, 'messages': rows}).encode())
+            return AmpProcessResult(b'', b'', 0)
+        init, final = stream(result='C').splitlines()
+        events = []
+        for role, block in [
+            ('user', {'type': 'text', 'text': kw['input_text']}),
+            ('assistant', {'type': 'tool_use', 'id': 'TU-X', 'name': 'shell', 'input': {}}),
+            ('user', {'type': 'tool_result', 'tool_use_id': 'TU-X', 'content': json.dumps(secret)}),
+            ('assistant', {'type': 'text', 'text': 'A'}),
+            ('assistant', {'type': 'text', 'text': 'C'}),
+        ]:
+            events.append(json.dumps({'type': role, 'message': {'content': [block]}}).encode())
+            if block['type'] == 'tool_result':
+                block = {'type': 'tool_result', 'toolUseID': 'TU-X', 'run': {'result': secret}}
+            rows.append({'role': role, 'protocolMessageID': str(len(rows)), 'content': [block]})
+        data = b'\n'.join([init, *events, final, b''])
+        kw['observe_stdout'](data)
+        return AmpProcessResult(data, b'', 0)
+
+    monkeypatch.setenv('AMP_API_KEY', secret)
+    monkeypatch.setattr(AmpCodingAgent, 'run_process', staticmethod(run))
+    await agent.start('begin', tmp_path, context=CodingExecutionContext())
+    original = (await asyncio.to_thread(agent.read_history, query)).items
+    monkeypatch.delenv('AMP_API_KEY')
+    path = tmp_path / f'{THREAD}.jsonl'
+    damaged = path.read_bytes().splitlines(keepends=True)
+    path.write_bytes(b''.join(damaged[:-1]))
+    call = rows.pop(1)  # A result alone cannot cover the missing call with the same TU ID.
+    with pytest.raises(ConversationFailure, match='history_unreadable'):
+        await asyncio.to_thread(agent.read_history, query)
+    rows.insert(1, call)
+    rows.insert(-1, dict(rows[-1], protocolMessageID='extra'))  # two equally plausible C's
+    with pytest.raises(ConversationFailure, match='history_unreadable'):
+        await asyncio.to_thread(agent.read_history, query)
+    assert path.read_bytes() == b''.join(damaged[:-1])
+    rows[-2]['content'] = [{'type': 'text', 'text': 'B'}]
+    repaired = (await asyncio.to_thread(agent.read_history, query)).items
+    assert [i.id for i in repaired[:4] + repaired[-1:]] == [i.id for i in original]
+    assert [i.content.text for i in repaired[3:]] == ['A', 'B', 'C']
+    assert [i.id for i in repaired[3:]] == [f'{THREAD}:r-TU-X/{n}' for n in (0, 2, 1)]
+    assert repaired[1].id == f'{THREAD}:c-TU-X' and repaired[2].id == f'{THREAD}:r-TU-X'
+    assert secret.encode() not in path.read_bytes()
+    assert repaired[2].content == original[2].content
+
+
 def stream(*, result=None, session=THREAD, tools=None, **overrides):
     final = {"type": "result", "subtype": "success", "is_error": False,
              "session_id": session,
