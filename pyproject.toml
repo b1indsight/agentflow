@@ -23,6 +23,7 @@ dependencies = [
     "markdown-it-py>=4,<5",
     "mdit-py-plugins>=0.6,<0.7",
     "pyyaml>=6",
+    "ijson>=3.3,<4",
 ]
 
 [project.scripts]

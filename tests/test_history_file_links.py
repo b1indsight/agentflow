@@ -81,7 +81,8 @@ async def test_amp_repeat_and_next_page_keep_native_cursor_and_cache(worker, mon
     ]}
 
     async def export(*args, **kwargs):
-        return AmpProcessResult(stdout=json.dumps(payload).encode(), stderr=b"", exit_code=0)
+        kwargs["stream_stdout"](json.dumps(payload).encode())
+        return AmpProcessResult(stdout=b"", stderr=b"", exit_code=0)
 
     monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
     monkeypatch.setattr(worker, "register_file", AsyncMock(return_value=LINK))
@@ -113,7 +114,8 @@ async def test_private_amp_images_register_without_downloading_or_trusting_sourc
     ]}
 
     async def export(*args, **kwargs):
-        return AmpProcessResult(stdout=json.dumps(payload).encode(), stderr=b"", exit_code=0)
+        kwargs["stream_stdout"](json.dumps(payload).encode())
+        return AmpProcessResult(stdout=b"", stderr=b"", exit_code=0)
 
     async def register(source, backend):
         assert source == url and backend == "amp"
