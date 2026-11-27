@@ -93,7 +93,12 @@ async def test_register_read_restart_and_path_privacy(server_runtime, tmp_path, 
         assert result.headers["x-content-type-options"] == "nosniff"
         assert "sandbox" in result.headers["content-security-policy"]
         assert result.headers["cache-control"] == "no-store"
-        denied = await http.get(link, headers={"cf-access-jwt-assertion": "invalid"})
+        # Reopening an unchanged attachment validates the bytes without resending them.
+        validator = {"If-None-Match": result.headers["etag"]}
+        unchanged = await http.get(link, headers=validator)
+        assert unchanged.status_code == 304 and unchanged.content == b""
+        assert unchanged.headers["etag"] == result.headers["etag"]
+        denied = await http.get(link, headers={**validator, "cf-access-jwt-assertion": "invalid"})
         assert denied.status_code == 401
         assert (await http.get("/api/files/" + "0" * 32)).status_code == 404
         assert (await http.get("/api/files/not-an-id")).status_code == 404
@@ -103,10 +108,13 @@ async def test_register_read_restart_and_path_privacy(server_runtime, tmp_path, 
     # Both services are reconstructed; persisted mappings keep the original URL usable.
     async with connected_files(server_runtime, root) as (worker, runtime, http, _):
         assert await worker.register_file(path) == link
-        path.write_bytes(b"updated")
-        assert (await http.get(link)).content == b"updated"
+        updated = b"y" * (len(content) or 1)
+        path.write_bytes(updated)
+        changed = await http.get(link, headers=validator)
+        assert changed.status_code == 200 and changed.content == updated
+        assert changed.headers["etag"] != result.headers["etag"]
         path.unlink()
-        missing = await http.get(link)
+        missing = await http.get(link, headers=validator)
         assert missing.status_code == 404
         assert missing.json() == {"detail": "file_not_found"}
         await runtime.gateway.unregister(runtime.gateway.get("worker-1"))

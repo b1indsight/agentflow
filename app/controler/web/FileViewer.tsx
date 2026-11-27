@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Download, RefreshCw } from "lucide-react";
 import { ApiError } from "./api";
 import { Button } from "./components/ui/button";
-import { previewFile, readFile, type Preview } from "./files";
-import { parseSource, sourceLines } from "./fileSyntax";
+import { readFile, type FilePreview } from "./files";
+import { parserForFile, sourceLines } from "./fileSyntax";
 import { CODE_LINES, textEnd, WindowList } from "./windowing";
 
 type FileState =
   | { kind: "loading" }
   | { kind: "error"; error: Error }
-  | { kind: "ready"; preview: Preview; size: number };
+  | ({ kind: "ready" } & FilePreview);
 
 function failureMessage(error: Error) {
   if (error instanceof ApiError) {
@@ -42,7 +43,10 @@ function FileSource({
   text: string;
   filename: string | null;
 }) {
-  const tree = useMemo(() => parseSource(filename, text), [filename, text]);
+  const tree = useMemo(
+    () => parserForFile(filename)?.parse(text),
+    [filename, text],
+  );
   const [end, setEnd] = useState(() => textEnd(text, 0, true));
   const sentinel = useRef<HTMLDivElement>(null);
   const starts = useMemo(() => {
@@ -105,13 +109,15 @@ function FileSource({
   );
 }
 
-/** Only the active document is read; switching or retrying aborts and fences previous reads/decodes. */
+/** Keep the read with its open tab, including when its preview moves into the primary panel. */
 export default function FileViewer({
   linkId,
   filename,
+  target,
 }: {
   linkId: string;
   filename: string | null;
+  target: "inline" | HTMLElement | null;
 }) {
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<FileState>({ kind: "loading" });
@@ -119,21 +125,20 @@ export default function FileViewer({
     const request = new AbortController();
     setState({ kind: "loading" });
     void readFile(linkId, request.signal)
-      .then(async (bytes) => {
-        const preview = await previewFile(bytes);
-        if (!request.signal.aborted)
-          setState({ kind: "ready", preview, size: bytes.byteLength });
+      .then((file) => {
+        if (!request.signal.aborted) setState({ kind: "ready", ...file });
       })
       .catch((error: Error) => {
         if (!request.signal.aborted) setState({ kind: "error", error });
       });
     return () => request.abort();
   }, [linkId, attempt]);
+  if (!target) return null;
   const authError =
     state.kind === "error" &&
     state.error instanceof ApiError &&
     [401, 403].includes(state.error.status);
-  return (
+  const viewer = (
     <section
       className="file-viewer"
       aria-label="文件查看器"
@@ -142,7 +147,7 @@ export default function FileViewer({
       <div className="file-toolbar">
         <div
           className="file-status"
-          title="读取 Worker 当前内容，需在线；上限 512 KiB。HTML 和 SVG 仅显示源码。"
+          title="显示上次读取的内容，重新读取需要 Worker 在线。上限 512 KiB。HTML 和 SVG 仅显示源码。"
         >
           <span>只读</span>
           {state.kind === "ready" && (
@@ -209,4 +214,5 @@ export default function FileViewer({
       </div>
     </section>
   );
+  return target === "inline" ? viewer : createPortal(viewer, target);
 }

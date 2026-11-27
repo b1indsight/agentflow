@@ -8,6 +8,10 @@
 
 ## Unreleased
 
+- Flow 详情中的文件页签可以拖到任意已显示的页签栏。拖到「执行记录」后可在主栏读文件，再点「会话」回到原来的阅读位置。
+
+- 会话详情区宽度达到 960 px 时，打开文件默认在会话旁预览；空间足够时可并排阅读多个文件。窄屏沿用原来的文件页签切换。
+
 - GitHub 适配器改为显式绑定 `Issue(repo, number)` 和 `PullRequest(repo, number)` 后调用 `refetch()`。按分支查找或创建 PR、读取审核线程改用[对应资源模块的函数](docs/architecture/github-app.md#a1-认证链)。
 
 - Amp 推理结束后归档一次性 thread；Attempt 结束后通知原 worker 归档编码 thread。服务端归档状态不等待 worker 清理，工作区仍需安全释放后才能复用。Control 和 worker 需一起升级到协议 33。

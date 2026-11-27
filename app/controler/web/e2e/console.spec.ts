@@ -3255,7 +3255,10 @@ test("thread comments show archived code context automatically with optional lin
     "background-color",
     "rgb(218, 251, 225)",
   );
-  await expect(diff.locator(".diff-code-edit")).toHaveText("self.gateway.");
+  // One inline edit can span several syntax tokens.
+  expect(
+    (await diff.locator(".diff-code-edit").allTextContents()).join(""),
+  ).toBe("self.gateway.");
   await expect(contexts.nth(1).locator(".diff-code-insert")).toHaveText(
     "archived_value = 1",
   );
@@ -3813,8 +3816,21 @@ test("visible Markdown grows one review diff across reads without scrolling", as
   page,
 }) => {
   // An archive preview can end in the middle of an added line inside a review hunk.
-  const preview =
-    "这个字段什么作用？\n\n```diff\n@@ -8,2 +8,3 @@\n def setup():\n-    enabled = False\n+    enabled = True\n+    ret";
+  const preview = [
+    "这个字段什么作用？",
+    "```python",
+    "def setup():",
+    "    return True",
+    "```",
+    "```diff",
+    "--- a/config.py",
+    "+++ b/config.py",
+    "@@ -8,2 +8,3 @@",
+    " def setup():",
+    "-    enabled = False",
+    "+    enabled = True",
+    "+    ret",
+  ].join("\n");
   const body = preview + "urn enabled\n```\n\n+ **普通列表**";
   const points = Array.from(body);
   let resume!: () => void;
@@ -3868,6 +3884,19 @@ test("visible Markdown grows one review diff across reads without scrolling", as
   await expect(message.locator(".diff-code-delete")).toHaveText(
     "enabled = False",
   );
+  for (const block of [
+    message.locator("pre code"),
+    message.getByLabel("版本差异"),
+  ]) {
+    await expect(block.getByText("setup", { exact: true })).toHaveCSS(
+      "color",
+      "rgb(102, 57, 186)",
+    );
+    await expect(block.getByText("True", { exact: true })).toHaveCSS(
+      "color",
+      "rgb(5, 80, 174)",
+    );
+  }
   await expect(message.locator("li")).toHaveText(["普通列表"]);
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
@@ -6696,8 +6725,14 @@ for (const width of [1440, 390]) {
     await expect(
       page.getByRole("button", { name: `关闭 ${names[0]}`, exact: true }),
     ).toBeInViewport({ ratio: 1 });
-    await expect(page).toHaveURL(new RegExp(`#flow/42/file-${ids[0]}$`));
-    const panel = page.getByRole("tabpanel");
+    await expect(page).toHaveURL(
+      width === 390
+        ? new RegExp(`#flow/42/file-${ids[0]}$`)
+        : /#flow\/42\/conversation$/,
+    );
+    const panel = page
+      .getByRole("tabpanel")
+      .filter({ has: page.getByRole("region", { name: "文件查看器" }) });
     await expect(panel).toHaveAccessibleName(names[0]);
     await expect(panel.getByRole("heading")).toHaveCount(0);
     await expect(page.getByLabel("文件源码", { exact: true })).toContainText(
@@ -6721,7 +6756,10 @@ for (const width of [1440, 390]) {
       path: `../../../.amp/in/artifacts/numbered-file-long-${width}.png`,
     });
     const readsBeforeScroll = reads.length;
-    await root.evaluate((node) => (node.scrollTop = node.scrollHeight));
+    await panel.evaluate((node) => {
+      const root = node.closest("[data-scroll-root]")!;
+      root.scrollTop = root.scrollHeight;
+    });
     await expect
       .poll(() => page.getByLabel("文件源码", { exact: true }).textContent())
       .toBe(source);
@@ -6746,12 +6784,8 @@ for (const width of [1440, 390]) {
 
     const open = async (label: string, index: number) => {
       await message.getByRole("link", { name: label, exact: true }).click();
-      await expect(
-        page.getByRole("tab", { name: names[index], exact: true }),
-      ).toHaveAttribute("aria-selected", "true");
-      await expect(
-        page.getByRole("tab", { name: names[index], exact: true }),
-      ).toHaveCount(1);
+      // Returning to an already scrolled file can collapse the mobile tab strip.
+      await expect(panel).toHaveAccessibleName(names[index]);
     };
     const conversation = async () => {
       const expand = page.getByRole("button", { name: "展开详情标题" });
@@ -6759,7 +6793,7 @@ for (const width of [1440, 390]) {
       await page.getByRole("tab", { name: "会话", exact: true }).click();
     };
     await open("源码", 0);
-    await expect(page.getByRole("tab")).toHaveCount(4);
+    await expect(page.getByRole("tab", { includeHidden: true })).toHaveCount(4);
     await conversation();
     await open("位图", 1);
     const image = panel.getByRole("img", { name: "文件图片预览" });
@@ -6869,14 +6903,17 @@ for (const width of [1440, 390]) {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     const id = "d".repeat(32);
     const body = `[查看代码](/api/files/${id}#name=example.ts)`;
-    const lines = Array.from({ length: 235 }, (_, i) =>
-      i === 0
-        ? 'const message = "带行号的只读代码预览";'
-        : i === 1
-          ? ""
-          : i === 2
-            ? '\tconst description = "长行自动换行，仍然只显示一个原文件行号。";'
-            : `// 原文件第 ${i + 1} 行`,
+    const example = [
+      'const message = "带行号的只读代码预览";',
+      "",
+      '\tconst description = "长行自动换行，仍然只显示一个原文件行号。";',
+      "function isShort(text: string) {",
+      "  return text.length < 80 && /预览/.test(text);",
+      "}",
+    ];
+    const lines = Array.from(
+      { length: 235 },
+      (_, i) => example[i] ?? `// 原文件第 ${i + 1} 行`,
     );
     const source = lines.join("\r\n") + "\r\n";
     const first = lines.slice(0, 200).join("\r\n") + "\r\n";
@@ -6916,6 +6953,10 @@ for (const width of [1440, 390]) {
     await expect(preview.locator(".syntax-string").first()).toHaveText(
       '"带行号的只读代码预览"',
     );
+    await expect(preview.getByText("isShort", { exact: true })).toHaveCSS(
+      "color",
+      "rgb(102, 57, 186)",
+    );
     expect(
       await numbers
         .first()
@@ -6939,9 +6980,10 @@ for (const width of [1440, 390]) {
     await expect(
       page.getByRole("button", { name: /^(上一段|下一段)$/ }),
     ).toHaveCount(0);
-    await page
-      .locator(".detail-body")
-      .evaluate((node) => (node.scrollTop = node.scrollHeight));
+    const fileRoot = page
+      .locator("[data-scroll-root]")
+      .filter({ has: preview });
+    await fileRoot.evaluate((node) => (node.scrollTop = node.scrollHeight));
     await expect(numbers).toHaveCount(235);
     await expect(numbers.last()).toHaveAttribute("data-line-number", "235");
     expect(await preview.textContent()).toBe(source);
@@ -6951,15 +6993,13 @@ for (const width of [1440, 390]) {
       ),
     ).toBe(true);
     expect(
-      await page
-        .locator(".detail-body")
-        .evaluate((node) => node.scrollWidth <= node.clientWidth),
+      await fileRoot.evaluate((node) => node.scrollWidth <= node.clientWidth),
     ).toBe(true);
     await numbers.last().scrollIntoViewIfNeeded();
     await page.screenshot({
       path: `../../../.amp/in/artifacts/numbered-file-next-${width}.png`,
     });
-    await page.locator(".detail-body").evaluate((node) => (node.scrollTop = 0));
+    await fileRoot.evaluate((node) => (node.scrollTop = 0));
     await expect(numbers.first()).toBeInViewport();
     content = "";
     await page.getByRole("button", { name: "重新读取", exact: true }).click();
@@ -6969,6 +7009,160 @@ for (const width of [1440, 390]) {
     expect(await preview.textContent()).toBe("");
   });
 }
+
+async function mockEditorLinks(
+  page: Page,
+  ids: string[],
+  names: string[],
+  history: ActivityItem[] = [],
+) {
+  const body = ids
+    .map(
+      (id, i) =>
+        `[打开${i}](/api/files/${id}#name=${encodeURIComponent(names[i])})`,
+    )
+    .join("\n\n");
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({
+      json: activityPage(
+        [
+          ...history,
+          {
+            ...activity,
+            source: "worker",
+            kind: "message",
+            body,
+            body_length: body.length,
+            previous_version: null,
+          },
+        ],
+        0,
+        history.length + 1,
+      ),
+    }),
+  );
+}
+
+test("drag a file tab into any visible detail column", async ({ page }) => {
+  const ids = ["a".repeat(32), "b".repeat(32), "c".repeat(32)];
+  const names = ["view.ts", "colors.css", "notes.md"];
+  const contents = [
+    "export const view = 'detail';",
+    ".tab { color: navy; }",
+    "# 阅读笔记\n\n拖动文件页签后，正文跟随页签显示。",
+  ];
+  const history = Array.from({ length: 12 }, (_, i) => ({
+    ...activity,
+    key: `earlier-${i}`,
+    body: `先前的会话记录 ${i}`,
+    previous_version: null,
+  }));
+  await mockEditorLinks(page, ids, names, history);
+  const reads: string[] = [];
+  await page.route("**/api/files/*", (route) => {
+    const id = route.request().url().slice(-32);
+    reads.push(id);
+    return route.fulfill({ body: contents[ids.indexOf(id)] });
+  });
+  await page.setViewportSize({ width: 1900, height: 800 });
+  await page.goto("/console/#flow/42/conversation");
+  const tab = (name: string) => page.getByRole("tab", { name, exact: true });
+  const link = (i: number) =>
+    page.getByRole("link", { name: `打开${i}`, exact: true });
+  const panels = page.getByRole("tabpanel");
+  const primary = page.getByRole("tablist", { name: "Flow 详情" });
+  const tabsIn = (column: number) =>
+    page.getByRole("tablist", { name: `文件栏 ${column}` }).getByRole("tab");
+  const jobs = tab("执行记录");
+  const a = tab(names[2]);
+  const startDrag = async (from: Locator, to: Locator, after: boolean) => {
+    await from.locator("svg").hover();
+    await page.mouse.down();
+    const box = (await to.boundingBox())!;
+    await page.mouse.move(
+      box.x + (after ? box.width - 1 : 1),
+      box.y + box.height / 2,
+      { steps: 6 },
+    );
+  };
+  const screenshot = (name: string) =>
+    page
+      .locator("main.detail")
+      .screenshot({ path: `../../../.amp/in/artifacts/tab-merge-${name}.png` });
+  await scrollToSnapshotEnd(page);
+  await link(2).click();
+  await expect(panels.last()).toContainText("# 阅读笔记");
+  await expect(
+    page.getByText("先前的会话记录 0", { exact: true }),
+  ).not.toBeInViewport();
+  const initialReads = [...reads];
+  await startDrag(a, jobs, true);
+  await screenshot("insertion");
+  await page.mouse.up();
+  await expect(primary.getByRole("tab")).toHaveText([
+    "概览",
+    "会话",
+    "执行记录",
+    names[2],
+  ]);
+  await expect(a).toBeFocused();
+  await expect(panels).toHaveCount(1);
+  await expect(panels).toContainText("# 阅读笔记");
+  expect((await panels.boundingBox())!.width).toBeCloseTo(
+    (await page.locator("main.detail").boundingBox())!.width,
+    0,
+  );
+  await screenshot("full");
+  await tab("会话").click();
+  await expect(link(2)).toBeInViewport();
+  await a.click();
+  await expect(panels).toContainText("# 阅读笔记");
+  expect(reads).toEqual(initialReads);
+  await a.press("Delete");
+
+  // The right strip has two tabs. Closing that column or replacing the middle
+  // file instead of inserting would both lose a visible document.
+  for (const i of [0, 1, 2]) await link(i).click();
+  await expect(tabsIn(2)).toHaveText([names[1], names[2]]);
+  await expect(page.getByRole("tabpanel", { name: names[2] })).toContainText(
+    "# 阅读笔记",
+  );
+  const opened = [...reads];
+  await startDrag(tab(names[1]), tab(names[0]), false);
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await expect(a).toHaveAttribute("aria-selected", "true");
+  await expect(tabsIn(1)).toHaveText([names[0]]);
+  await startDrag(a, jobs, true);
+  await page.mouse.move(5, 5);
+  await page.mouse.up();
+  await expect(tabsIn(2)).toHaveText([names[1], names[2]]);
+  await startDrag(a, tab(names[0]), true);
+  await page.mouse.up();
+  await expect(tabsIn(1)).toHaveText([names[0], names[2]]);
+  await expect(tabsIn(2)).toHaveText([names[1]]);
+  await expect(panels.nth(0)).toContainText("打开2");
+  await expect(page.getByRole("tabpanel", { name: names[2] })).toContainText(
+    "# 阅读笔记",
+  );
+  await expect(page.getByRole("tabpanel", { name: names[1] })).toContainText(
+    contents[1],
+  );
+  await screenshot("middle");
+  await startDrag(a, jobs, true);
+  await page.mouse.up();
+  await expect(panels).toHaveCount(3);
+  await expect(panels.first()).toContainText("# 阅读笔记");
+  await expect(page.getByRole("tabpanel", { name: names[0] })).toContainText(
+    contents[0],
+  );
+  await startDrag(a, tab(names[1]), false);
+  await page.mouse.up();
+  await expect(tabsIn(2)).toHaveText([names[2], names[1]]);
+  await expect(a).toBeFocused();
+  await expect(link(2)).toBeInViewport();
+  expect(reads).toEqual(opened);
+});
 
 for (const width of [1440, 390]) {
   test(`editor file tabs switch, deduplicate and close with keyboard focus at ${width}px`, async ({
@@ -6981,35 +7175,111 @@ for (const width of [1440, 390]) {
       "README.md",
       "一段很长的文件名称用来验证页签截断与局部滚动的行为.tsx",
     ];
-    const body = ids
-      .map(
-        (id, i) =>
-          `[打开${i}](/api/files/${id}#name=${encodeURIComponent(names[i])})`,
-      )
-      .join("\n\n");
-    await page.route("**/api/flows/42/activity?**", (route) =>
-      route.fulfill({
-        json: activityPage(
-          [
-            {
-              ...activity,
-              source: "worker",
-              kind: "message",
-              body,
-              body_length: body.length,
-              previous_version: null,
-            },
-          ],
-          0,
-          1,
-        ),
-      }),
-    );
-    await page.route("**/api/files/*", (route) =>
-      route.fulfill({ body: `source ${route.request().url().slice(-32)}` }),
-    );
+    await mockEditorLinks(page, ids, names);
+    const reads: string[] = [];
+    const unchanged: string[] = [];
+    let version = 1;
+    await page.route("**/api/files/*", (route) => {
+      const id = route.request().url().slice(-32);
+      reads.push(id);
+      const revision = id === ids[1] ? version : 1;
+      const headers = { ETag: `"${id}:${revision}"` };
+      if (route.request().headers()["if-none-match"] === headers.ETag) {
+        unchanged.push(id);
+        return route.fulfill({ status: 304, headers });
+      }
+      return route.fulfill({ headers, body: `source ${id} v${revision}` });
+    });
     await page.goto("/console/#flow/42/conversation");
     const conversation = page.getByRole("tab", { name: "会话", exact: true });
+    if (width === 1440) {
+      // A failed refresh replaces the detail header even though the Flow data is retained.
+      await expect(conversation).toBeVisible();
+      await page.route(
+        "**/api/flows/42",
+        (route) => route.fulfill({ status: 503 }),
+        { times: 1 },
+      );
+      const refresh = page.getByRole("button", { name: "刷新当前视图" });
+      await refresh.click();
+      await expect(
+        page.getByText("无法读取 Flow", { exact: true }),
+      ).toBeVisible();
+      await refresh.click();
+      await expect(conversation).toBeVisible();
+      // Measure the detail, not the viewport: the task rail takes part of the width.
+      const rail = await page
+        .locator(".rail")
+        .evaluate((node) => node.getBoundingClientRect().width);
+      const resize = (detailWidth: number) =>
+        page.setViewportSize({ width: detailWidth + rail, height: 900 });
+      const link = (i: number) =>
+        page.getByRole("link", { name: `打开${i}`, exact: true });
+      const source = (i: number) =>
+        page.getByText(`source ${ids[i]} v1`, { exact: true });
+      await resize(960);
+      await link(0).press("Enter");
+      await expect(source(0)).toBeInViewport();
+      await expect(link(0)).toBeInViewport();
+      // Opening a preview narrows the conversation tab; its jump button must stay inside it.
+      const jump = page.getByRole("button", { name: "跳到最新回复" });
+      await expect(jump).toBeInViewport({ ratio: 1 });
+      const bounds = await jump.boundingBox();
+      const preview = await page
+        .getByRole("tabpanel", { name: names[0] })
+        .boundingBox();
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(preview!.x);
+      await page.screenshot({
+        path: "../../../.amp/in/artifacts/side-preview-two.png",
+      });
+      await resize(1440);
+      await link(1).click();
+      await expect(conversation).toHaveAttribute("aria-selected", "true");
+      await expect(page).toHaveURL(/#flow\/42\/conversation$/);
+      const bodies = [link(0), source(0), source(1)];
+      for (const body of bodies) await expect(body).toBeInViewport();
+      const boxes = await Promise.all(bodies.map((body) => body.boundingBox()));
+      expect(boxes[1]!.x).toBeGreaterThan(boxes[0]!.x + boxes[0]!.width);
+      expect(boxes[2]!.x).toBeGreaterThan(boxes[1]!.x + boxes[1]!.width);
+      await page.screenshot({
+        path: "../../../.amp/in/artifacts/side-preview-three.png",
+      });
+      await link(2).click();
+      await expect(source(0)).toBeInViewport();
+      await expect(source(1)).toHaveCount(0);
+      await expect(source(2)).toBeInViewport();
+      const openedReads = [...reads];
+      await link(0).click();
+      await expect(
+        page.getByRole("tab", { name: "README.md aaaaaa" }),
+      ).toBeFocused();
+      await resize(960);
+      await link(1).click();
+      await expect(source(0)).toHaveCount(0);
+      await expect(source(1)).toBeInViewport();
+      await expect(link(0)).toBeInViewport();
+      await page
+        .getByRole("tab", { name: "README.md bbbbbb" })
+        .press("ArrowLeft");
+      await expect(source(0)).toBeInViewport();
+      await resize(959);
+      await expect(source(0)).toHaveCount(0);
+      await expect(link(0)).toBeInViewport();
+      await page.screenshot({
+        path: "../../../.amp/in/artifacts/side-preview-recovered-959.png",
+      });
+      await resize(1440);
+      await expect(page.getByRole("tabpanel")).toHaveCount(1);
+      await link(2).click();
+      await page.getByRole("tab", { name: names[2] }).press("Delete");
+      await expect(
+        page.getByRole("tab", { name: "README.md bbbbbb" }),
+      ).toBeFocused();
+      await expect(source(1)).toBeInViewport();
+      expect(reads).toEqual(openedReads);
+      await resize(959);
+      // Continue with the existing single-pane keyboard and history checks.
+    }
     const panel = page.getByRole("tabpanel");
     for (let i = 0; i < ids.length; i++) {
       await conversation.click();
@@ -7031,6 +7301,9 @@ for (const width of [1440, 390]) {
     await page.screenshot({
       path: `../../../.amp/in/artifacts/editor-file-tabs-${width}.png`,
     });
+    // Open tabs keep the version already read, even if the Worker file changes.
+    const initialReads = [...reads];
+    version++;
     await conversation.click();
     await page.getByRole("link", { name: "打开0", exact: true }).click();
     await expect(page.getByRole("tab")).toHaveCount(6);
@@ -7045,7 +7318,10 @@ for (const width of [1440, 390]) {
     await expect(first).toBeFocused();
     await first.press("ArrowRight");
     await expect(second).toBeFocused();
-    await expect(panel).toContainText(`source ${ids[1]}`);
+    await expect(panel).toContainText(`source ${ids[1]} v1`);
+    expect(reads).toEqual(initialReads);
+    await panel.getByRole("button", { name: "重新读取" }).click();
+    await expect(panel).toContainText(`source ${ids[1]} v2`);
     await page.goBack();
     await expect(first).toHaveAttribute("aria-selected", "true");
     await page.goForward();
@@ -7056,9 +7332,13 @@ for (const width of [1440, 390]) {
     await expect(
       page.getByRole("tab", { name: "README.md", exact: true }),
     ).toBeFocused();
-    await expect(panel).toContainText(`source ${ids[1]}`);
+    await expect(panel).toContainText(`source ${ids[1]} v2`);
+    expect(reads).toEqual([...initialReads, ids[1]]);
     await conversation.click();
     await page.getByRole("link", { name: "打开0", exact: true }).click();
+    // Closing discarded the tab, but a 304 can still restore its decoded preview.
+    await expect(panel).toContainText(`source ${ids[0]} v1`);
+    expect(unchanged).toContain(ids[0]);
     await expect(page.getByRole("tab")).toHaveCount(6);
     await second.click();
     // Closing an inactive file must not switch the current document.
@@ -7086,11 +7366,13 @@ for (const width of [1440, 390]) {
   });
 }
 
-test("worker file requests cancel on tab changes and cannot overwrite a later file", async ({
+test("pending worker file reads survive switching tabs and cancel on close", async ({
   page,
 }) => {
   const ids = ["a".repeat(32), "b".repeat(32)];
-  const body = ids.map((id, i) => `[文件${i}](/api/files/${id})`).join("\n\n");
+  const body = ids
+    .map((id, i) => `[文件${i}](/api/files/${id}#name=file-${i})`)
+    .join("\n\n");
   await page.route("**/api/flows/42/activity?**", (route) =>
     route.fulfill({
       json: activityPage(
@@ -7113,9 +7395,11 @@ test("worker file requests cancel on tab changes and cannot overwrite a later fi
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
+  let rereading = false;
   let pending = 0;
   let completed = 0;
   await page.route(`**/api/files/${ids[0]}`, async (route) => {
+    if (!rereading) return route.fulfill({ body: "original response" });
     pending++;
     await gate;
     try {
@@ -7130,19 +7414,27 @@ test("worker file requests cancel on tab changes and cannot overwrite a later fi
     route.fulfill({ body: "current response" }),
   );
   await page.goto("/console/#flow/42/conversation");
-  const started = page.waitForRequest(`**/api/files/${ids[0]}`);
   await page.getByRole("link", { name: "文件0", exact: true }).click();
-  const request = await started;
   const viewer = page.getByRole("region", { name: "文件查看器" });
+  await expect(viewer).toContainText("original response");
+  rereading = true;
+  const started = page.waitForRequest(`**/api/files/${ids[0]}`);
+  await viewer.getByRole("button", { name: "重新读取" }).click();
+  const request = await started;
   await expect(viewer.getByRole("status")).toContainText("正在读取文件");
   await page.getByRole("tab", { name: "会话", exact: true }).click();
-  await expect.poll(() => request.failure()?.errorText).toBeTruthy();
   await page.getByRole("link", { name: "文件1", exact: true }).click();
   await expect(page.getByLabel("文件源码", { exact: true })).toHaveText(
     "current response",
   );
+  await page.getByRole("tab", { name: "file-0", exact: true }).click();
+  await expect(viewer.getByRole("status")).toContainText("正在读取文件");
+  expect(request.failure()).toBeNull();
+  await page.getByRole("button", { name: "关闭 file-0" }).click();
+  await expect.poll(() => request.failure()?.errorText).toBeTruthy();
   release();
   await expect.poll(() => completed).toBe(pending);
+  expect(pending).toBe(1);
   await expect(page.getByLabel("文件源码", { exact: true })).toHaveText(
     "current response",
   );

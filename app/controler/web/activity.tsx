@@ -1,6 +1,8 @@
 import {
   createContext,
   type ComponentProps,
+  lazy,
+  Suspense,
   useContext,
   useEffect,
   useId,
@@ -25,13 +27,7 @@ import Markdown, {
 } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getContent, getDiff, getThread } from "./api";
-import { DiffWindow } from "./DiffWindow";
-import {
-  previewFile,
-  readFile,
-  workerFileLink,
-  type WorkerFile,
-} from "./files";
+import { readFile, workerFileLink, type WorkerFile } from "./files";
 import type {
   ActivityIdentity,
   ActivityItem,
@@ -52,6 +48,17 @@ import {
   textEnd,
   useReadingState,
 } from "./windowing";
+
+const FencedCode = lazy(() => import("./fileSyntax"));
+const LazyDiffWindow = lazy(() => import("./DiffWindow"));
+
+function DiffWindow(props: ComponentProps<typeof LazyDiffWindow>) {
+  return (
+    <Suspense fallback={props.fallback ?? <p>正在显示差异…</p>}>
+      <LazyDiffWindow {...props} />
+    </Suspense>
+  );
+}
 
 function MarkdownImage({ src, alt, title }: ComponentProps<"img">) {
   return src ? (
@@ -81,8 +88,7 @@ function WorkerImage({
   useEffect(() => {
     const controller = new AbortController();
     void readFile(fileId, controller.signal)
-      .then(previewFile)
-      .then((preview) => {
+      .then(({ preview }) => {
         if (!controller.signal.aborted && preview.kind === "image")
           setSrc(preview.url);
       })
@@ -132,21 +138,29 @@ const MessageDiff = createContext<{
 
 function MarkdownPre({ node, children }: ComponentProps<"pre"> & ExtraProps) {
   const message = useContext(MessageDiff);
+  const id = useId();
   const code = node?.children[0];
   const raw = <pre tabIndex={0}>{children}</pre>;
-  if (
-    !message ||
-    code?.type !== "element" ||
-    !Array.isArray(code.properties.className) ||
-    !code.properties.className.includes("language-diff")
-  )
+  if (code?.type !== "element" || !Array.isArray(code.properties.className))
     return raw;
+  const className = code.properties.className.find(
+    (name) => typeof name === "string" && name.startsWith("language-"),
+  );
   const literal = code.children[0];
-  if (literal?.type !== "text") return raw;
+  if (typeof className !== "string" || literal?.type !== "text") return raw;
+  const language = className.slice("language-".length).toLowerCase();
+  if (language !== "diff")
+    return (
+      <pre tabIndex={0}>
+        <Suspense fallback={children}>
+          <FencedCode language={language} text={literal.value} />
+        </Suspense>
+      </pre>
+    );
   // Markdown adds a terminal newline even when the response ended halfway through a diff line.
   let patch = literal.value;
   if (
-    message.partialEnd !== undefined &&
+    message?.partialEnd !== undefined &&
     node?.position?.end.offset === message.partialEnd &&
     patch.endsWith(message.tail + "\n")
   )
@@ -154,7 +168,7 @@ function MarkdownPre({ node, children }: ComponentProps<"pre"> & ExtraProps) {
   return (
     <DiffWindow
       text={patch}
-      stateKey={`${message.key}-diff-${node?.position?.start.offset}`}
+      stateKey={`${message?.key ?? id}-diff-${node?.position?.start.offset}`}
       fallback={
         <pre tabIndex={0}>
           <code>{patch}</code>
@@ -824,6 +838,11 @@ function ThreadReplies({
                 {item.metadata.code_excerpt && (
                   <DiffWindow
                     text={item.metadata.code_excerpt}
+                    path={
+                      typeof item.metadata.path === "string"
+                        ? item.metadata.path
+                        : undefined
+                    }
                     stateKey={`${flowId}-${item.key}-${item.version}-code`}
                   />
                 )}

@@ -2,6 +2,7 @@
   --bg: #f5f7f9;
   --paper: #fff;
   --ink: #26333f;
+  --code-ink: #1f2328;
   --muted: #758391;
   --subtle: #96a2ae;
   --line: #e2e8ee;
@@ -901,11 +902,27 @@ svg {
   background: white;
   overflow: hidden;
 }
-.detail-body {
+.detail-panes {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   flex: 1;
   min-height: 0;
+}
+.primary-pane {
+  /* Anchor tab actions outside the scrolling body, within this grid column. */
+  position: relative;
+  display: grid;
+  min-height: 0;
+}
+.detail-body,
+.file-pane {
+  min-width: 0;
   overflow: auto;
   overflow-anchor: none;
+}
+.file-pane {
+  border-left: 1px solid var(--line);
 }
 .flow-input {
   flex-shrink: 0;
@@ -1000,9 +1017,10 @@ svg {
   color: var(--destructive);
 }
 .detail-head {
+  --head-inset: 42px;
   position: relative;
   flex-shrink: 0;
-  padding: 24px 42px 0;
+  padding: 24px var(--head-inset) 0;
   background: var(--bg);
 }
 /* The active tab covers the shared seam to join its content surface. */
@@ -1077,6 +1095,20 @@ svg {
 .detail-head .tabs-list {
   margin-top: 20px;
 }
+.split-tab-row {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  margin-inline: calc(-1 * var(--head-inset));
+}
+.split-tab-row .tabs-list {
+  max-width: 100%;
+  margin-inline: 0;
+  padding-inline: 8px;
+}
+.split-tab-row > .tabs-list {
+  padding-left: var(--head-inset);
+}
 .tabs-list {
   display: flex;
   max-width: calc(100% + 8px);
@@ -1119,7 +1151,7 @@ svg {
   border: 1px solid transparent;
   border-bottom: 0;
 }
-.file-tab[data-active="true"] {
+.file-tab:has(.tabs-trigger[data-state="active"]) {
   z-index: 1;
   background: var(--paper);
   border-color: var(--line);
@@ -1129,9 +1161,23 @@ svg {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  cursor: grab;
   padding-right: 6px;
   border: 0;
   font-weight: 400;
+}
+.tabs-list [data-drop-edge]::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  border-left: 2px solid var(--accent);
+  pointer-events: none;
+}
+.tabs-list [data-drop-edge="before"]::after {
+  left: 0;
+}
+.tabs-list [data-drop-edge="after"]::after {
+  right: 0;
 }
 .file-tab-name {
   max-width: 180px;
@@ -1463,6 +1509,7 @@ svg {
 .markdown-body pre code {
   padding: 0;
   background: none;
+  color: var(--code-ink);
 }
 .markdown-table {
   max-width: 100%;
@@ -1722,9 +1769,6 @@ svg {
 .new-records {
   margin: 12px 0;
 }
-.conversation-nav {
-  position: relative;
-}
 .jump-to-latest {
   position: absolute;
   right: clamp(16px, 2vw, 24px);
@@ -1821,7 +1865,7 @@ svg {
   background: #f6f8fa;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: var(--text-control);
-  color: #1f2328;
+  color: var(--code-ink);
   line-height: 1.45;
 }
 .tool pre {
@@ -2175,6 +2219,7 @@ pre code {
 }
 .numbered-code {
   padding: 20px 0;
+  color: var(--code-ink);
 }
 .numbered-code code {
   display: grid;
@@ -2183,24 +2228,31 @@ pre code {
 .numbered-code .code-line {
   display: contents;
 }
-.numbered-code .syntax-keyword {
-  color: #704487;
+/* GitHub Light Prettylights colors for file previews, fenced code and diffs. */
+.syntax-keyword {
+  color: #cf222e;
 }
-.numbered-code .syntax-string {
-  color: #24634e;
+.syntax-string {
+  color: #0a3069;
 }
-.numbered-code .syntax-value {
-  color: var(--accent-hover);
+.syntax-regexp {
+  color: #116329;
 }
-.numbered-code .syntax-comment {
-  color: #606f7c;
+.syntax-entity {
+  color: #6639ba;
+}
+.syntax-value {
+  color: #0550ae;
+}
+.syntax-comment,
+.code-line-number {
+  color: #59636e;
 }
 .code-line-number {
   min-width: 3ch;
   padding: 0 12px 0 16px;
-  border-right: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--muted);
+  border-right: 1px solid #d1d9e0;
+  background: #f6f8fa;
   text-align: right;
   font-variant-numeric: tabular-nums;
   user-select: none;
@@ -2275,8 +2327,7 @@ pre code {
 }
 @media (min-width: 1600px) {
   .detail-head {
-    padding-left: 58px;
-    padding-right: 58px;
+    --head-inset: 58px;
   }
 }
 @media (max-width: 1100px) {
@@ -2287,7 +2338,8 @@ pre code {
     width: 225px;
   }
   .detail-head {
-    padding: 26px 25px 0;
+    --head-inset: 25px;
+    padding-top: 26px;
   }
   .content {
     padding: 22px 25px 40px;
@@ -2533,7 +2585,7 @@ pre code {
 }
 .diff-window {
   --diff-font-family: var(--mono);
-  --diff-text-color: var(--ink);
+  --diff-text-color: var(--code-ink);
   --diff-code-insert-background-color: #dafbe1;
   --diff-code-delete-background-color: #ffebe9;
   --diff-code-insert-edit-background-color: #aceebb;

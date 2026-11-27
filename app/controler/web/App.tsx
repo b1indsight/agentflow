@@ -16,7 +16,6 @@ import {
   ArrowDownToLine,
   ArrowLeft,
   ChevronDown,
-  FileText,
   Inbox,
   LoaderCircle,
   Menu,
@@ -24,7 +23,6 @@ import {
   PanelLeftOpen,
   RefreshCw,
   Settings,
-  X,
 } from "lucide-react";
 import {
   appendAgentTask,
@@ -52,6 +50,7 @@ import {
 import { ConversationSources, SourceList } from "./ConversationSources";
 import { CreateFlow } from "./CreateFlow";
 import { AgentTaskInput } from "./AgentTaskInput";
+import { FileTab, FileTabRow } from "./FileTab";
 import type { WorkerFile } from "./files";
 import { InferenceNotices } from "./InferenceNotices";
 import { actionLabel, archiveReasonLabels, flowLabel, phases } from "./phases";
@@ -110,6 +109,8 @@ const flowTabs = [
   { value: "jobs", label: "执行记录" },
 ] as const;
 type Tab = (typeof flowTabs)[number]["value"] | `file-${string}`;
+// Column zero uses the Flow URL for selection; side columns select independently.
+type FilePane = { files: WorkerFile[]; active: string | null };
 const positions = new Map<string, number>();
 const route = () => {
   const m = location.hash.match(/^#flow\/(\d+)(?:\/([^/]+))?$/);
@@ -476,6 +477,7 @@ function DetailPanel({
     [error, setError] = useState("");
   // A previously visited conversation can mount while its mutable detail revalidates.
   const flow = freshFlow ?? (tab === "conversation" ? summary : null);
+  const showDetail = !!flow && !error;
   const [pending, setPending] = useState<
     "archive" | "resume" | "retry" | "agent-task" | null
   >(null);
@@ -532,33 +534,117 @@ function DetailPanel({
     }
   };
   const [compactHead, setCompactHead] = useState(false);
-  const [openFiles, setFiles] = useState<WorkerFile[]>([]);
-  const files = flow?.history_only ? [] : openFiles;
-  const activeFile = files.find((file) => `file-${file.id}` === tab);
+  const [panes, setPanes] = useState<FilePane[]>([{ files: [], active: null }]);
+  const visiblePanes = flow?.history_only
+    ? [{ files: [], active: null }]
+    : panes;
+  const files = visiblePanes.flatMap((pane) => pane.files);
+  const activeFile = visiblePanes[0].files.find(
+    (file) => `file-${file.id}` === tab,
+  );
   const baseTab =
     flowTabs.find(({ value }) => value === tab)?.value ?? "conversation";
   const selectedTab = activeFile ? tab : baseTab;
+  const head = useRef<HTMLElement>(null);
+  const paneCapacity = () =>
+    Math.max(
+      1,
+      Math.floor((head.current?.getBoundingClientRect().width ?? 0) / 480),
+    );
+  useLayoutEffect(() => {
+    if (!head.current) return;
+    const observer = new ResizeObserver(() => {
+      const count = paneCapacity();
+      setPanes((prior) => {
+        if (prior.length <= count) return prior;
+        const remaining = prior.slice(count - 1);
+        return [
+          ...prior.slice(0, count - 1),
+          {
+            active: remaining[0].active,
+            files: remaining.flatMap((pane) => pane.files),
+          },
+        ];
+      });
+    });
+    observer.observe(head.current);
+    return () => observer.disconnect();
+  }, [showDetail]);
   const focusTab = useRef<string | null>(null);
+  const compactOnFileOpen = useRef(false);
   const openFile = useCallback(
     (file: WorkerFile) => {
-      setFiles((prior) =>
-        prior.some(({ id }) => id === file.id) ? prior : [...prior, file],
+      const existing = panes.findIndex((pane) =>
+        pane.files.some((item) => item.id === file.id),
       );
+      const column =
+        existing >= 0 ? existing : Math.min(panes.length, paneCapacity() - 1);
+      const next = panes.slice();
+      next[column] = {
+        files:
+          existing >= 0
+            ? panes[column].files
+            : [...(panes[column]?.files ?? []), file],
+        active: column ? file.id : null,
+      };
       focusTab.current = `file-${file.id}`;
-      location.hash = `flow/${id}/file-${file.id}`;
+      setPanes(next);
+      if (column === 0) {
+        compactOnFileOpen.current =
+          head.current?.classList.contains("compact") ?? false;
+        location.hash = `flow/${id}/file-${file.id}`;
+      }
     },
-    [id],
+    [id, panes],
   );
-  const closeFile = (fileId: string) => {
-    const index = files.findIndex((file) => file.id === fileId);
-    const remaining = files.filter((file) => file.id !== fileId);
-    focusTab.current = selectedTab;
-    if (activeFile?.id === fileId) {
-      const next = remaining[index] ?? remaining[index - 1];
-      focusTab.current = next ? `file-${next.id}` : "conversation";
-      location.hash = `flow/${id}/${focusTab.current}`;
+  // Removing a tab from its source has the same neighbor and empty-column rules
+  // whether the user drops it in another strip or closes it.
+  const placeFile = (fileId: string, destination?: number, before?: string) => {
+    const source = panes.findIndex((pane) =>
+      pane.files.some((file) => file.id === fileId),
+    );
+    if (source < 0) return; // A tab can be closed while the browser owns the drag.
+    const peers = panes[source].files;
+    const index = peers.findIndex((file) => file.id === fileId);
+    const file = peers[index];
+    if (
+      source === destination &&
+      (before === file.id || before === peers[index + 1]?.id)
+    )
+      return;
+    const next = panes.slice();
+    const neighbor = peers[index + 1] ?? peers[index - 1];
+    next[source] = {
+      files: peers.filter((item) => item !== file),
+      active:
+        panes[source].active === fileId
+          ? (neighbor?.id ?? null)
+          : panes[source].active,
+    };
+    if (activeFile === file && destination !== 0) {
+      const value = neighbor ? `file-${neighbor.id}` : "conversation";
+      location.hash = `flow/${id}/${value}`;
+      focusTab.current = value;
+    } else if (destination === undefined) {
+      const other =
+        next[source].active ?? next.findLast((pane) => pane.active)?.active;
+      focusTab.current = source && other ? `file-${other}` : selectedTab;
     }
-    setFiles(remaining);
+    if (destination !== undefined) {
+      const group = [...next[destination].files];
+      group.splice(
+        before ? group.findIndex((item) => item.id === before) : group.length,
+        0,
+        file,
+      );
+      next[destination] = {
+        files: group,
+        active: destination ? file.id : null,
+      };
+      if (!destination) location.hash = `flow/${id}/file-${file.id}`;
+      focusTab.current = `file-${file.id}`;
+    }
+    setPanes(next.filter((pane, i) => i === 0 || pane.files.length));
   };
   useEffect(() => {
     // Open documents are local to this Flow visit; stale history entries return to the conversation.
@@ -570,7 +656,6 @@ function DetailPanel({
     )
       location.replace(`#flow/${id}/conversation`);
   });
-  const head = useRef<HTMLElement>(null);
   const expandedHeight = useRef(0);
   const headTransition = useRef<{ height: number; scroll: number } | null>(
     null,
@@ -581,21 +666,18 @@ function DetailPanel({
     [jobMore, setJobMore] = useState(true),
     [jobError, setJobError] = useState("");
   const detail = useRef<HTMLDivElement>(null);
-  const [conversationNav, setConversationNav] = useState<HTMLDivElement | null>(
-    null,
-  );
   const jobsRequest = useRef<AbortController | null>(null);
   const jobsBusy = useRef(false);
+  const [mainFileHost, setMainFileHost] = useState<HTMLElement | null>(null);
   useLayoutEffect(() => {
-    if (compactHead || focusTab.current !== selectedTab) return;
-    // A clicked message or closed tab unmounts; hand focus to the current editor tab.
+    if (compactHead || !focusTab.current) return;
     const trigger = head.current?.querySelector<HTMLButtonElement>(
-      '[role="tab"][data-state="active"]',
+      `[data-tab="${focusTab.current}"][data-state="active"]`,
     );
     if (!trigger) return;
     focusTab.current = null;
     trigger.focus({ preventScroll: true });
-  }, [selectedTab, files, Boolean(flow), compactHead]);
+  }, [selectedTab, panes, Boolean(flow), compactHead]);
   useLayoutEffect(() => {
     const node = detail.current;
     if (!node) return;
@@ -641,6 +723,8 @@ function DetailPanel({
     if (!node) return;
     expandedAt.current = null;
     const mobile = matchMedia("(max-width: 760px)");
+    let restoreCompact = tab === "conversation" && compactOnFileOpen.current;
+    if (tab === "conversation") compactOnFileOpen.current = false;
     const update = () => {
       const header = head.current;
       if (!header) return;
@@ -658,12 +742,17 @@ function DetailPanel({
           ? node.scrollTop > 8
           : node.scrollTop > expandedHeight.current + 96);
       if (shrink !== header.classList.contains("compact")) {
-        headTransition.current = {
-          height: header.offsetHeight,
-          scroll: node.scrollTop,
-        };
+        // The saved conversation offset already accounts for its original compact header.
+        headTransition.current =
+          restoreCompact && shrink
+            ? null
+            : {
+                height: header.offsetHeight,
+                scroll: node.scrollTop,
+              };
         setCompactHead(shrink);
       }
+      if (shrink) restoreCompact = false;
     };
     node.addEventListener("scroll", update, { passive: true });
     mobile.addEventListener("change", update);
@@ -716,7 +805,7 @@ function DetailPanel({
     if (tab === "jobs") moreJobs(true);
     return () => jobsRequest.current?.abort();
   }, [id, tab, refresh]);
-  if (error || !flow)
+  if (!showDetail)
     return (
       <main className="detail">
         <div className="empty-state">
@@ -823,310 +912,352 @@ function DetailPanel({
                 </a>
               )}
             </div>
-            <TabsList aria-label="Flow 详情">
-              {flowTabs.map(({ value, label }) => (
-                <TabsTrigger value={value} key={value}>
-                  {label}
-                </TabsTrigger>
-              ))}
-              {files.map((file) => {
-                const value = `file-${file.id}`;
-                const filename = file.name ?? file.id.slice(0, 8);
-                const duplicate =
-                  file.name !== null &&
-                  files.some(
-                    (other) => other.id !== file.id && other.name === file.name,
-                  );
-                const label = duplicate
-                  ? `${filename} ${file.id.slice(0, 6)}`
-                  : filename;
-                return (
-                  <div
-                    className="file-tab"
-                    data-active={tab === value}
-                    key={file.id}
-                    onFocus={(event) =>
-                      event.currentTarget.scrollIntoView({
-                        block: "nearest",
-                        inline: "nearest",
-                      })
+            <FileTabRow split={visiblePanes.length > 1} move={placeFile}>
+              {visiblePanes.map((pane, column) => {
+                const list = (
+                  <TabsList
+                    key="primary"
+                    data-file-column={column}
+                    aria-label={column ? `文件栏 ${column}` : "Flow 详情"}
+                  >
+                    {!column &&
+                      flowTabs.map(({ value, label }) => (
+                        <TabsTrigger value={value} data-tab={value} key={value}>
+                          {label}
+                        </TabsTrigger>
+                      ))}
+                    {pane.files.map((file) => (
+                      <FileTab
+                        key={file.id}
+                        file={file}
+                        side={column !== 0}
+                        duplicate={
+                          file.name !== null &&
+                          files.some(
+                            (other) =>
+                              other.id !== file.id && other.name === file.name,
+                          )
+                        }
+                        select={() => openFile(file)}
+                        close={() => placeFile(file.id)}
+                      />
+                    ))}
+                  </TabsList>
+                );
+                return column ? (
+                  <Tabs
+                    key={column}
+                    value={`file-${pane.active}`}
+                    onValueChange={(value) =>
+                      openFile(
+                        pane.files.find((file) => `file-${file.id}` === value)!,
+                      )
                     }
                   >
-                    <TabsTrigger
-                      value={value}
-                      title={filename}
-                      onKeyDown={(event) => {
-                        if (event.key === "Delete") {
-                          event.preventDefault();
-                          closeFile(file.id);
-                        }
-                      }}
-                    >
-                      <FileText aria-hidden="true" />
-                      <span className="file-tab-name">{filename}</span>
-                      {duplicate && <small> {file.id.slice(0, 6)}</small>}
-                    </TabsTrigger>
-                    <button
-                      type="button"
-                      className="file-tab-close"
-                      aria-label={`关闭 ${label}`}
-                      tabIndex={-1}
-                      onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => closeFile(file.id)}
-                    >
-                      <X aria-hidden="true" />
-                    </button>
-                  </div>
+                    {list}
+                  </Tabs>
+                ) : (
+                  list
                 );
               })}
-            </TabsList>
+            </FileTabRow>
           </div>
         </header>
-        <div className="detail-body" data-scroll-root ref={detail}>
-          <TabsContent value={selectedTab} asChild>
-            <section className={`content${activeFile ? " file-content" : ""}`}>
-              {activeFile ? (
-                <Suspense fallback={<p role="status">正在加载文件查看器…</p>}>
-                  <FileViewer
-                    key={activeFile.id}
-                    linkId={activeFile.id}
-                    filename={activeFile.name}
-                  />
-                </Suspense>
-              ) : (
-                (
-                  {
-                    overview: freshFlow && (
-                      <>
-                        {!flow.history_only && (
-                          <section
-                            className={`execution-summary phase-${flow.phase}`}
-                          >
-                            <span className="eyebrow">当前动作</span>
-                            <h2>{actionLabel(flow)}</h2>
-                            <p>{freshFlow.reason}</p>
-                            <div className="next-step">
-                              <span>下一步条件</span>
-                              <p>{freshFlow.next_condition}</p>
-                            </div>
-                            <div className="round-actions">
-                              {flow.lifecycle === "blocked" && (
-                                <Button
-                                  className="btn"
-                                  aria-label={
-                                    pending === "retry"
-                                      ? "正在提交重试…"
-                                      : "重试"
-                                  }
-                                  title={
-                                    pending === "retry"
-                                      ? "正在提交重试…"
-                                      : "重试"
-                                  }
-                                  disabled={pending !== null}
-                                  onClick={() => void submit("retry")}
-                                >
-                                  <RefreshCw />
-                                  {pending === "retry" && "正在提交重试…"}
-                                </Button>
-                              )}
-                              {flow.lifecycle === "archived" ? (
-                                <>
-                                  <p id="resume-hint">
-                                    重新开工将在同一 Flow
-                                    开始新的执行，从待处理开始并使用新
-                                    PR，保留历史记录；不会重试已结束的执行。
-                                  </p>
+        <div className="detail-panes">
+          <div className="primary-pane">
+            <TabsContent
+              value={selectedTab}
+              className="detail-body"
+              data-scroll-root
+              ref={detail}
+            >
+              <section
+                className={activeFile ? "content file-content" : "content"}
+                ref={setMainFileHost}
+              >
+                {!activeFile &&
+                  (
+                    {
+                      overview: freshFlow && (
+                        <>
+                          {!flow.history_only && (
+                            <section
+                              className={`execution-summary phase-${flow.phase}`}
+                            >
+                              <span className="eyebrow">当前动作</span>
+                              <h2>{actionLabel(flow)}</h2>
+                              <p>{freshFlow.reason}</p>
+                              <div className="next-step">
+                                <span>下一步条件</span>
+                                <p>{freshFlow.next_condition}</p>
+                              </div>
+                              <div className="round-actions">
+                                {flow.lifecycle === "blocked" && (
                                   <Button
                                     className="btn"
-                                    aria-describedby="resume-hint"
+                                    aria-label={
+                                      pending === "retry"
+                                        ? "正在提交重试…"
+                                        : "重试"
+                                    }
+                                    title={
+                                      pending === "retry"
+                                        ? "正在提交重试…"
+                                        : "重试"
+                                    }
                                     disabled={pending !== null}
-                                    onClick={() => void submit("resume")}
+                                    onClick={() => void submit("retry")}
                                   >
                                     <RefreshCw />
-                                    {pending === "resume"
-                                      ? "正在重新开工…"
-                                      : "重新开工"}
+                                    {pending === "retry" && "正在提交重试…"}
                                   </Button>
-                                </>
-                              ) : flow.lifecycle === "finalizing" ? (
-                                <p>
-                                  正在结束本次执行。停止确认、结果对账及收尾未完成前不会归档，请刷新查看进展。
-                                </p>
-                              ) : (
-                                <Button
-                                  className="btn"
-                                  disabled={pending !== null}
-                                  onClick={() => void submit("archive")}
-                                >
-                                  <Archive />
-                                  {pending === "archive"
-                                    ? "正在请求归档…"
-                                    : "归档"}
-                                </Button>
+                                )}
+                                {flow.lifecycle === "archived" ? (
+                                  <>
+                                    <p id="resume-hint">
+                                      重新开工将在同一 Flow
+                                      开始新的执行，从待处理开始并使用新
+                                      PR，保留历史记录；不会重试已结束的执行。
+                                    </p>
+                                    <Button
+                                      className="btn"
+                                      aria-describedby="resume-hint"
+                                      disabled={pending !== null}
+                                      onClick={() => void submit("resume")}
+                                    >
+                                      <RefreshCw />
+                                      {pending === "resume"
+                                        ? "正在重新开工…"
+                                        : "重新开工"}
+                                    </Button>
+                                  </>
+                                ) : flow.lifecycle === "finalizing" ? (
+                                  <p>
+                                    正在结束本次执行。停止确认、结果对账及收尾未完成前不会归档，请刷新查看进展。
+                                  </p>
+                                ) : (
+                                  <Button
+                                    className="btn"
+                                    disabled={pending !== null}
+                                    onClick={() => void submit("archive")}
+                                  >
+                                    <Archive />
+                                    {pending === "archive"
+                                      ? "正在请求归档…"
+                                      : "归档"}
+                                  </Button>
+                                )}
+                              </div>
+                              {writeError && <p role="alert">{writeError}</p>}
+                              {writeNotice && (
+                                <p role="status">{writeNotice}</p>
                               )}
-                            </div>
-                            {writeError && <p role="alert">{writeError}</p>}
-                            {writeNotice && <p role="status">{writeNotice}</p>}
-                          </section>
-                        )}
-                        {freshFlow.task_content && (
-                          <section
-                            className="task-content"
-                            aria-label="原始任务内容"
-                          >
-                            <h2 className="panel-title">原始任务内容</h2>
-                            <OpenWorkerFile
-                              value={flow.history_only ? "history-only" : null}
+                            </section>
+                          )}
+                          {freshFlow.task_content && (
+                            <section
+                              className="task-content"
+                              aria-label="原始任务内容"
                             >
-                              <ActivityMarkdown
-                                text={freshFlow.task_content}
-                                url={null}
-                              />
-                            </OpenWorkerFile>
-                          </section>
-                        )}
-                        <h2 className="panel-title">任务信息</h2>
-                        <dl className="task-facts">
-                          <dt>生命周期 / 阶段</dt>
-                          <dd>
-                            {flow.lifecycle} /{" "}
-                            {phases.find(([p]) => p === flow.phase)?.[1]}
-                          </dd>
-                          <dt>开工时间</dt>
-                          <dd>
-                            {new Date(flow.attempt_started_at).toLocaleString()}
-                          </dd>
-                          {flow.archive_reason && (
-                            <>
-                              <dt>
-                                {flow.lifecycle === "archived"
-                                  ? "归档结果"
-                                  : "结束目标"}
-                              </dt>
-                              <dd>
-                                {archiveReasonLabels[flow.archive_reason]}
-                              </dd>
-                            </>
-                          )}
-                          {flow.archive_summary && (
-                            <>
-                              <dt>本次执行结论</dt>
-                              <dd className="round-summary">
-                                {flow.archive_summary}
-                              </dd>
-                            </>
-                          )}
-                          <dt>Worker</dt>
-                          <dd>
-                            {flow.worker_id ?? "尚未绑定"}
-                            {flow.worker_historical ? "（历史归属）" : ""}
-                          </dd>
-                          <dt>分支</dt>
-                          <dd>{flow.branch ?? "尚未创建"}</dd>
-                          <dt>修订轮数</dt>
-                          <dd>{flow.revision_cycles}</dd>
-                          <dt>创建</dt>
-                          <dd>{new Date(flow.created_at).toLocaleString()}</dd>
-                          <dt>更新</dt>
-                          <dd>{new Date(flow.updated_at).toLocaleString()}</dd>
-                          {flow.archived_at && (
-                            <>
-                              <dt>归档时间</dt>
-                              <dd>
-                                {new Date(flow.archived_at).toLocaleString()}
-                              </dd>
-                            </>
-                          )}
-                          <dt>当前状态版本</dt>
-                          <dd>{flow.state_version}（与阅读快照独立）</dd>
-                        </dl>
-                        <h2 className="panel-title">数据来源</h2>
-                        <SourceList sources={freshFlow.sources} />
-                      </>
-                    ),
-                    conversation: (
-                      <OpenWorkerFile
-                        value={flow.history_only ? "history-only" : openFile}
-                      >
-                        <Conversation
-                          key={id}
-                          id={id}
-                          root={detail}
-                          navigation={conversationNav}
-                          refresh={
-                            flow.history_only ? null : refresh + acceptedInputs
-                          }
-                          lastRefresh={lastActivityRefresh}
-                        />
-                      </OpenWorkerFile>
-                    ),
-                    jobs: (
-                      <>
-                        <InferenceNotices key={`${id}:${refresh}`} id={id} />
-                        <h2 className="panel-title">任务执行</h2>
-                        <div className="timeline">
-                          <WindowList
-                            count={jobs.length}
-                            label="执行记录"
-                            itemKey={(i) => jobs[i].id}
-                          >
-                            {(i) => (
-                              <article
-                                className="timeline-item"
-                                data-state={jobs[i].state}
+                              <h2 className="panel-title">原始任务内容</h2>
+                              <OpenWorkerFile
+                                value={
+                                  flow.history_only ? "history-only" : null
+                                }
                               >
-                                <div className="job-top">
-                                  <strong>
-                                    {jobs[i].kind === "inference"
-                                      ? `推理 · 派发次数 ${jobs[i].attempt}`
-                                      : `${jobs[i].kind} #${jobs[i].attempt}`}
-                                  </strong>
-                                  <span className="badge">{jobs[i].state}</span>
-                                </div>
-                                <time dateTime={jobs[i].created_at}>
-                                  创建于{" "}
-                                  {new Date(
-                                    jobs[i].created_at,
-                                  ).toLocaleString()}
-                                </time>
-                                <p>
-                                  {jobs[i].worker_id ?? "无 Worker"}
-                                  {jobs[i].error_code
-                                    ? ` · ${jobs[i].error_code}`
-                                    : ""}
-                                </p>
-                              </article>
+                                <ActivityMarkdown
+                                  text={freshFlow.task_content}
+                                  url={null}
+                                />
+                              </OpenWorkerFile>
+                            </section>
+                          )}
+                          <h2 className="panel-title">任务信息</h2>
+                          <dl className="task-facts">
+                            <dt>生命周期 / 阶段</dt>
+                            <dd>
+                              {flow.lifecycle} /{" "}
+                              {phases.find(([p]) => p === flow.phase)?.[1]}
+                            </dd>
+                            <dt>开工时间</dt>
+                            <dd>
+                              {new Date(
+                                flow.attempt_started_at,
+                              ).toLocaleString()}
+                            </dd>
+                            {flow.archive_reason && (
+                              <>
+                                <dt>
+                                  {flow.lifecycle === "archived"
+                                    ? "归档结果"
+                                    : "结束目标"}
+                                </dt>
+                                <dd>
+                                  {archiveReasonLabels[flow.archive_reason]}
+                                </dd>
+                              </>
                             )}
-                          </WindowList>
-                        </div>
-                        {jobError && (
-                          <button className="btn" onClick={() => moreJobs()}>
-                            <RefreshCw aria-hidden="true" />
-                            <span>读取失败：{jobError}（重试）</span>
-                          </button>
-                        )}
-                        {jobMore && (
-                          <button
-                            className="btn"
-                            aria-label="读取更多执行记录"
-                            title="读取更多执行记录"
-                            onClick={() => moreJobs()}
-                          >
-                            <ArrowDown aria-hidden="true" />
-                          </button>
-                        )}
-                      </>
-                    ),
-                  } satisfies Record<typeof baseTab, ReactNode>
-                )[baseTab]
-              )}
-            </section>
-          </TabsContent>
+                            {flow.archive_summary && (
+                              <>
+                                <dt>本次执行结论</dt>
+                                <dd className="round-summary">
+                                  {flow.archive_summary}
+                                </dd>
+                              </>
+                            )}
+                            <dt>Worker</dt>
+                            <dd>
+                              {flow.worker_id ?? "尚未绑定"}
+                              {flow.worker_historical ? "（历史归属）" : ""}
+                            </dd>
+                            <dt>分支</dt>
+                            <dd>{flow.branch ?? "尚未创建"}</dd>
+                            <dt>修订轮数</dt>
+                            <dd>{flow.revision_cycles}</dd>
+                            <dt>创建</dt>
+                            <dd>
+                              {new Date(flow.created_at).toLocaleString()}
+                            </dd>
+                            <dt>更新</dt>
+                            <dd>
+                              {new Date(flow.updated_at).toLocaleString()}
+                            </dd>
+                            {flow.archived_at && (
+                              <>
+                                <dt>归档时间</dt>
+                                <dd>
+                                  {new Date(flow.archived_at).toLocaleString()}
+                                </dd>
+                              </>
+                            )}
+                            <dt>当前状态版本</dt>
+                            <dd>{flow.state_version}（与阅读快照独立）</dd>
+                          </dl>
+                          <h2 className="panel-title">数据来源</h2>
+                          <SourceList sources={freshFlow.sources} />
+                        </>
+                      ),
+                      conversation: (
+                        <OpenWorkerFile
+                          value={flow.history_only ? "history-only" : openFile}
+                        >
+                          <Conversation
+                            key={id}
+                            id={id}
+                            root={detail}
+                            refresh={
+                              flow.history_only
+                                ? null
+                                : refresh + acceptedInputs
+                            }
+                            lastRefresh={lastActivityRefresh}
+                          />
+                        </OpenWorkerFile>
+                      ),
+                      jobs: (
+                        <>
+                          <InferenceNotices key={`${id}:${refresh}`} id={id} />
+                          <h2 className="panel-title">任务执行</h2>
+                          <div className="timeline">
+                            <WindowList
+                              count={jobs.length}
+                              label="执行记录"
+                              itemKey={(i) => jobs[i].id}
+                            >
+                              {(i) => (
+                                <article
+                                  className="timeline-item"
+                                  data-state={jobs[i].state}
+                                >
+                                  <div className="job-top">
+                                    <strong>
+                                      {jobs[i].kind === "inference"
+                                        ? `推理 · 派发次数 ${jobs[i].attempt}`
+                                        : `${jobs[i].kind} #${jobs[i].attempt}`}
+                                    </strong>
+                                    <span className="badge">
+                                      {jobs[i].state}
+                                    </span>
+                                  </div>
+                                  <time dateTime={jobs[i].created_at}>
+                                    创建于{" "}
+                                    {new Date(
+                                      jobs[i].created_at,
+                                    ).toLocaleString()}
+                                  </time>
+                                  <p>
+                                    {jobs[i].worker_id ?? "无 Worker"}
+                                    {jobs[i].error_code
+                                      ? ` · ${jobs[i].error_code}`
+                                      : ""}
+                                  </p>
+                                </article>
+                              )}
+                            </WindowList>
+                          </div>
+                          {jobError && (
+                            <button className="btn" onClick={() => moreJobs()}>
+                              <RefreshCw aria-hidden="true" />
+                              <span>读取失败：{jobError}（重试）</span>
+                            </button>
+                          )}
+                          {jobMore && (
+                            <button
+                              className="btn"
+                              aria-label="读取更多执行记录"
+                              title="读取更多执行记录"
+                              onClick={() => moreJobs()}
+                            >
+                              <ArrowDown aria-hidden="true" />
+                            </button>
+                          )}
+                        </>
+                      ),
+                    } satisfies Record<typeof baseTab, ReactNode>
+                  )[baseTab]}
+              </section>
+            </TabsContent>
+          </div>
+          {files.map((file) => {
+            const index = visiblePanes.findIndex(
+              (pane) => pane.active === file.id,
+            );
+            const target =
+              file === activeFile
+                ? mainFileHost
+                : index !== -1
+                  ? "inline"
+                  : null;
+            const loading = <p role="status">正在加载文件查看器…</p>;
+            return (
+              <section
+                key={file.id}
+                className="file-pane"
+                style={{ order: index }}
+                hidden={index === -1}
+                data-scroll-root
+                role="tabpanel"
+                id={`panel-file-${file.id}`}
+                aria-labelledby={`tab-file-${file.id}`}
+                tabIndex={0}
+              >
+                <Suspense
+                  fallback={
+                    target && target !== "inline"
+                      ? createPortal(loading, target)
+                      : loading
+                  }
+                >
+                  <FileViewer
+                    linkId={file.id}
+                    filename={file.name}
+                    target={target}
+                  />
+                </Suspense>
+              </section>
+            );
+          })}
         </div>
-        {selectedTab === "conversation" && (
-          <div className="conversation-nav" ref={setConversationNav} />
-        )}
         {freshFlow && !flow.history_only && (
           <AgentTaskInput
             busy={pending !== null}
@@ -1174,13 +1305,11 @@ function DetailPanel({
 function Conversation({
   id,
   root,
-  navigation,
   refresh,
   lastRefresh,
 }: {
   id: number;
   root: React.RefObject<HTMLElement | null>;
-  navigation: HTMLElement | null;
   refresh: number | null;
   lastRefresh: React.RefObject<number>;
 }) {
@@ -1474,30 +1603,26 @@ function Conversation({
           {state.busy ? "正在检查更新…" : "已到当前本地快照末尾 · 点击刷新"}
         </button>
       )}
-      {navigation &&
-        state.records.length > 0 &&
-        !state.error &&
-        createPortal(
-          <button
-            type="button"
-            className="btn jump-to-latest"
-            aria-label="跳到最新回复"
-            title="跳到最新回复"
-            aria-busy={jumping}
-            disabled={jumping}
-            onClick={() => setJumping(true)}
-          >
-            {jumping ? (
-              <LoaderCircle
-                className="motion-safe:animate-spin"
-                aria-hidden="true"
-              />
-            ) : (
-              <ArrowDownToLine aria-hidden="true" />
-            )}
-          </button>,
-          navigation,
-        )}
+      {state.records.length > 0 && !state.error && (
+        <button
+          type="button"
+          className="btn jump-to-latest"
+          aria-label="跳到最新回复"
+          title="跳到最新回复"
+          aria-busy={jumping}
+          disabled={jumping}
+          onClick={() => setJumping(true)}
+        >
+          {jumping ? (
+            <LoaderCircle
+              className="motion-safe:animate-spin"
+              aria-hidden="true"
+            />
+          ) : (
+            <ArrowDownToLine aria-hidden="true" />
+          )}
+        </button>
+      )}
     </>
   );
 }
