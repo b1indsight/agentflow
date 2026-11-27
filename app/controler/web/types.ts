@@ -55,6 +55,7 @@ export interface FlowDetail extends FlowSummary {
   next_condition: string;
   sources: SourceStatus[];
   task_content: string | null;
+  workspace_diff: { added: number; deleted: number; modified: number } | null;
 }
 export interface FlowTarget {
   repo: string;

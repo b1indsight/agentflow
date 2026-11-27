@@ -40,11 +40,12 @@ from app.domain.models import (
     FeedbackRef,
     RevisionCodingOutput,
     VcsKind,
+    WorkspaceDiff,
     WorkspaceInventory,
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[33] = 33
+PROTOCOL_VERSION: Literal[34] = 34
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -153,7 +154,12 @@ ExecutionTask = Annotated[
 ]
 
 
-class InitialTaskResult(ProtocolModel):
+class CodingTaskResult(ProtocolModel):
+    # Omitting absent snapshots keeps historical result receipts and their digests unchanged.
+    workspace_diff: WorkspaceDiff | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+class InitialTaskResult(CodingTaskResult):
     kind: Literal["initial"] = "initial"
     session_id: str | None
     last_message: str
@@ -170,7 +176,7 @@ class InitialTaskResult(ProtocolModel):
     input_request: str | None = Field(default=None, min_length=1, max_length=4000, exclude_if=lambda v: v is None)
 
 
-class RevisionTaskResult(ProtocolModel):
+class RevisionTaskResult(CodingTaskResult):
     batch_id: int = Field(gt=0)
     feedback_refs: list[FeedbackRef]
     kind: Literal["revision"] = "revision"
@@ -754,7 +760,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[33]
+    protocol_version: Literal[34]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -961,7 +967,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[33]
+    protocol_version: Literal[34]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

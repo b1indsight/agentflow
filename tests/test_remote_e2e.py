@@ -11,6 +11,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.contracts.receipts import decode_result_inbox
+from app.controler.api import create_app
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobState
@@ -21,6 +22,7 @@ from app.persistence.records import required
 from app.persistence.settings import SettingsStore, TextSetting
 from app.worker.config import WorkerSettings
 from app.worker.runtime import WorkerRuntime
+from tests.access import AccessIssuer
 from tests.github import RecordingGitHub, record_open_pull_request
 from tests.test_vcs import _git, _git_fixture
 from tests.test_worker_executor import RecordingAgent
@@ -163,6 +165,25 @@ async def remote_connection(server, worker):
         for outcome in outcomes:
             if isinstance(outcome, Exception):
                 raise outcome
+
+
+async def test_console_detail_keeps_the_completed_workspace_snapshot(store, remote_flow):
+    # Later local edits and disconnects must not change the last completed execution's counts.
+    flow, server, _, worker, agent = remote_flow
+    issuer = AccessIssuer()
+    await server.access.close()
+    server.access = issuer.auth
+    app = create_app(server)
+    app.state.runtime = server
+    endpoint = f"/api/flows/{flow.id}"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+                                 headers=issuer.headers()) as http:
+        assert (await http.get(endpoint)).json()["workspace_diff"] is None
+        async with remote_connection(server, worker):
+            await wait_until(lambda: store.flows.get_flow(flow.id).state is FlowState.REVIEW)
+            (_, repo), = agent.started
+            (repo / "draft").write_text("one\ntwo\n")
+        assert (await http.get(endpoint)).json()["workspace_diff"] == {"added": 0, "deleted": 0, "modified": 1}
 
 
 @pytest.mark.parametrize("remote_flow", ["codex", "amp"], indirect=True)

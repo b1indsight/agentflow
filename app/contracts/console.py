@@ -19,7 +19,7 @@ from pydantic import (
 
 from app.contracts.input_images import InputImage
 from app.domain.inference_models import AdapterVersion, FailureCode, StopReason
-from app.domain.models import ArchiveReason, FlowState
+from app.domain.models import ArchiveReason, FlowState, WorkspaceDiff
 
 Phase = Literal["queued", "running", "review", "blocked", "archived"]
 CodexEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
@@ -179,6 +179,7 @@ class FlowDetail(FlowSummary):
     next_condition: str
     sources: list[SourceStatus]
     task_content: str | None = None
+    workspace_diff: WorkspaceDiff | None = None
 
 
 class FlowPage(ConsoleModel):

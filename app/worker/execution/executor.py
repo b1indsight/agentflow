@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -53,7 +54,7 @@ from app.worker.execution.vcs import (
     verify_vcs_outcome,
 )
 from app.worker.execution.workspaces import RepositoryWorkspaces
-from app.worker.state.execution import ExecutionState
+from app.worker.state.execution import ExecutionState, ExecutionStateError
 from app.worker.transport.mcp import FlowToolCaller, WorkerMCP
 
 VCS_VERIFICATION_EXIT_CODE = 65
@@ -98,10 +99,6 @@ class WorkerExecutor:
         *, tool_caller: FlowToolCaller
     ) -> ExecutionResult:
         """Use the execution owner's tool caller, independent of the current connection."""
-        if isinstance(task, InitialTask):
-            return await self._initial(task, secret, tool_caller)
-        if isinstance(task, RevisionTask):
-            return await self._revision(task, secret)
         if isinstance(task, ArchiveTask):
             if (self.worker_id != task.worker_id
                     or task.repo_identity != f"{self.worker_id}:{task.repo}"):
@@ -113,7 +110,19 @@ class WorkerExecutor:
                 binding, job_id=record.job_id, token=record.assignment_token,
             )
             return ArchiveResult(**task.model_dump(), cleanup=cleanup)
-        raise TypeError(f"unsupported execution task: {type(task).__name__}")
+
+        if isinstance(task, InitialTask):
+            result: InitialTaskResult | RevisionTaskResult = await self._initial(task, secret, tool_caller)
+        else:
+            result = await self._revision(task, secret)
+        try:
+            record = self.state.load()
+            if record is not None and record.workspace is not None:
+                result.workspace_diff = await self.workspaces.diff(record.workspace)
+        except (OSError, ExecutionStateError, VcsVerificationError, subprocess.CalledProcessError) as error:
+            # Display metadata must not turn a completed coding task into a failure.
+            logger.debug("workspace diff unavailable after execution: {}", type(error).__name__)
+        return result
 
     async def _initial(
         self, task: InitialTask, secret: AssignmentSecret | None, tool_caller: FlowToolCaller

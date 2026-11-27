@@ -509,6 +509,9 @@ async def test_revision_verifies_real_git_delivery(revision_workspace, monkeypat
     assert (result.exit_code == 0) is success
     assert pool.manifest_path.read_bytes() == before
     assert ExecutionState(root, 1).load().workspace == binding
+    if behavior in {"dirty", "push"}:
+        # Count the initial delivery and this revision's new line, even when it was not committed.
+        assert result.workspace_diff.model_dump() == {"added": 2, "deleted": 0, "modified": 0}
     assert agent.calls[0][1].github.token.get_secret_value() == "fresh-token"
     assert "flow.open_pr" not in agent.calls[0][2]
     if success:

@@ -267,7 +267,12 @@ class ConsoleStore(Repository):
             row = connection.execute(
                 "SELECT c.flow_id,c.facts-'delivery_body'-'delivery_title' AS facts,"
                 "coalesce(c.facts->>'task_title',c.title,c.facts->>'delivery_title') AS title,"
-                "c.state_version,f.task_content,diagnostic.*"
+                "c.state_version,f.task_content,diagnostic.*,"
+                " (SELECT j.result_payload#>'{terminal,result,workspace_diff}' FROM jobs j"
+                " JOIN flow_executions x ON x.flow_id=j.flow_id AND x.released_at IS NULL"
+                " AND (x.worker_id,x.workspace,x.generation)=(j.assigned_worker_id,j.workspace,j.generation)"
+                " WHERE j.attempt_id=f.current_attempt_id AND j.kind IN ('initial','revision')"
+                " AND j.result_payload->>'source'='worker' ORDER BY j.id DESC LIMIT 1) AS workspace_diff"
                 " FROM console_flows c JOIN flows f ON f.id=c.flow_id LEFT JOIN LATERAL ("
                 " SELECT j.id AS diagnostic_job_id,j.kind AS diagnostic_kind,"
                 " j.state AS diagnostic_state,j.started_at IS NOT NULL AS execution_started,"
@@ -291,6 +296,7 @@ class ConsoleStore(Repository):
         return FlowDetail(
             **flow.model_dump(),
             task_content=row["task_content"],
+            workspace_diff=row["workspace_diff"],
             reason=reason,
             next_condition=condition,
             sources=self.sources(flow_id),
