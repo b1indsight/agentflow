@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
+from app.contracts.conversation import ConversationFailure, HistoryQuery
 from app.domain.models import CodingExecutionContext, GitHubCapability
 from app.worker.execution.amp_agent import AmpCodingAgent, AmpProcessResult, amp_environment
 from app.worker.execution.git_identity import configure_git_identity
@@ -19,6 +20,60 @@ from app.worker.execution.prompts import build_revision_retry_prompt
 from tests.flow_fixtures import PNG_IMAGE
 
 THREAD = "T-01a15d70-eb3d-722c-9f6d-563dd65eb0a8"
+
+
+async def test_worker_pages_captured_turns_and_repairs_only_from_a_covering_export(tmp_path, monkeypatch):
+    # The CLI echoes stdin and repeats the final assistant text in result. Neither is a new message.
+    root = tmp_path / "history"
+    agent = AmpCodingAgent(trusted_host=True, history_root=root)
+    query = HistoryQuery(session_id=THREAD, limit=1)
+    native: list[dict] = []
+    exports: list[dict] | None = None
+
+    async def run(args, **kw):
+        if args[:2] == ['threads', 'export']:
+            assert exports is not None, 'a healthy local history must not export'
+            kw['stream_stdout'](json.dumps({'id': THREAD, 'messages': exports}).encode())
+            return AmpProcessResult(b'', b'', 0)
+        prompt = kw['input_text']
+        answer = 'same reply'
+        init, final = stream(result=answer).splitlines()
+        rows = [init]
+        for role, text in [('user', prompt), ('assistant', answer)]:
+            blocks = [{'type': 'text', 'text': text}]
+            rows.append(json.dumps({'type': role, 'message': {'content': blocks}}).encode())
+            native.append({'role': role, 'protocolMessageID': str(len(native)), 'content': blocks})
+        rows.append(final)
+        data = b'\n'.join(rows) + b'\n'
+        for offset in range(0, len(data), 71):
+            kw['observe_stdout'](data[offset:offset+71])
+        return AmpProcessResult(data, b'', 0)
+
+    monkeypatch.setattr(AmpCodingAgent, 'run_process', staticmethod(run))
+    await agent.start('first', tmp_path, context=CodingExecutionContext())
+    cursor = (await asyncio.to_thread(agent.read_history, query)).next_cursor
+    await agent.resume(THREAD, 'second', cwd=tmp_path)
+    await agent.resume(THREAD, 'third', cwd=tmp_path)
+    reader = AmpCodingAgent(history_root=root)
+    full = query.model_copy(update={'limit': 100})
+    page = await asyncio.to_thread(reader.read_history, full)
+    assert [item.role for item in page.items] == ['user', 'assistant'] * 3
+    assert [item.content.text for item in page.items[1::2]] == ['same reply'] * 3
+
+    path = root / f'{THREAD}.jsonl'
+    lines = path.read_bytes().splitlines(keepends=True)
+    damaged = b''.join(lines[:2] + lines[4:])
+    path.write_bytes(damaged)
+    exports = native[:2] + native[4:]
+    with pytest.raises(ConversationFailure, match='history_unreadable'):
+        await asyncio.to_thread(reader.read_history, full)
+    assert path.read_bytes() == damaged
+    exports = native
+    with pytest.raises(ConversationFailure, match='cursor_invalid'):
+        await asyncio.to_thread(reader.read_history, HistoryQuery(session_id=THREAD, cursor=cursor))
+    exports = None
+    repaired = await asyncio.to_thread(reader.read_history, full)
+    assert [(i.id, i.content) for i in repaired.items] == [(i.id, i.content) for i in page.items]
 
 
 def stream(*, result=None, session=THREAD, tools=None, **overrides):

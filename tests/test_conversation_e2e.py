@@ -89,7 +89,8 @@ async def test_http_history_queues_behind_callbacks_but_not_execution(
             messages = [{"role": role, "protocolMessageID": f"M-{index}",
                          "content": [{"type": "text", "text": text}]}
                         for index, (role, text) in enumerate(entries)]
-            return AmpProcessResult(json.dumps({"id": args[2], "messages": messages}).encode(), b"", 0)
+            kwargs["stream_stdout"](json.dumps({"id": args[2], "messages": messages}).encode())
+            return AmpProcessResult(b"", b"", 0)
 
         monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
     broker = runtime.conversations.broker

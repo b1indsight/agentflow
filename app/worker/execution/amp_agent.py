@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import re
@@ -13,9 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
-from collections import OrderedDict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -36,6 +33,7 @@ from app.contracts.conversation import (
 from app.contracts.files import MAX_FILE_BYTES, FileFailure
 from app.domain.models import CodingExecutionContext, CodingExecutionResult
 from app.worker.coding_agent import CodingAgent
+from app.worker.execution.amp_history import MAX_RECOVERY, AmpTranscript, Capture
 from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 from app.worker.execution.gh import github_environment
 from app.worker.execution.git_identity import disables_amp_coauthor
@@ -53,11 +51,7 @@ from app.worker.state.file_links import FileLinks
 _SESSION_ID = TypeAdapter(SessionId)
 AMP_BIN = "amp"
 TERMINATION_GRACE = 3.0
-MAX_EXPORT = 2 * 1024 * 1024
 EXPORT_TIMEOUT = 20
-CACHE_SIZE = 16
-CACHE_SECONDS = 2
-MAX_PAGE = 256 * 1024
 _SECRET_PATTERN = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sgamp_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{16,})"
 )
@@ -253,13 +247,14 @@ class AmpCodingAgent(CodingAgent):
     backend = "amp"
 
     def __init__(self, *, trusted_host: bool = False, timeout: float = 1200.0,
-                 max_output_bytes: int = 8 * 1024 * 1024, permissions: PermissionProfile = FULL_ACCESS):
+                 max_output_bytes: int = 8 * 1024 * 1024, permissions: PermissionProfile = FULL_ACCESS,
+                 history_root: Path | None = None):
         require_supported_permissions(permissions, agent="Amp")
         self.permissions = permissions
         self.trusted_host = trusted_host
         self.timeout = timeout
         self.max_output_bytes = max_output_bytes
-        self._history = AmpHistory()
+        self._history = AmpHistory(history_root)
 
     async def discover_models(self) -> list[CatalogModel]:
         def parse(row: dict) -> CatalogModel | None:
@@ -317,6 +312,8 @@ class AmpCodingAgent(CodingAgent):
         max_stdout: int = 8 * 1024 * 1024,
         timeout_kind: Literal["total", "idle"] = "total",
         max_file_bytes: int | None = None,
+        observe_stdout: Callable[[bytes], None] | None = None,
+        stream_stdout: Callable[[bytes], None] | None = None,
     ) -> AmpProcessResult:
         """Supervise coding, read-only exports and downloads with bounded pipes and cleanup.
 
@@ -346,10 +343,17 @@ class AmpCodingAgent(CodingAgent):
         async def read(stream: asyncio.StreamReader | None, buffer: bytearray) -> None:
             nonlocal last_activity
             assert stream is not None
+            received = 0
             while chunk := await stream.read(65536):
                 last_activity = loop.time()
-                available = max_stdout - len(buffer)
-                buffer.extend(chunk[:available])
+                available = max_stdout - received
+                received += len(chunk)
+                if buffer is stdout and stream_stdout is not None:
+                    stream_stdout(chunk[:available])
+                else:
+                    buffer.extend(chunk[:available])
+                    if buffer is stdout and observe_stdout is not None:
+                        observe_stdout(chunk[:available])
                 if len(chunk) > available:
                     raise _OutputLimit
 
@@ -481,13 +485,22 @@ class AmpCodingAgent(CodingAgent):
                 args.extend(["--model", model] if model is not None else ["--mode", "low"])
                 if effort is not None:
                     args.extend(["--effort", effort])
-            process = await AmpCodingAgent.run_process(args, cwd=cwd, env=environment, input_text=prompt,
-                                                       timeout=self.timeout, timeout_kind="idle")
-            result = _outcome(process, session_id, self.timeout)
-            # No SessionUnavailable fallback: the observed CLI stderr alone has not
-            # proven that every missing-thread rejection precedes all execution.
             secrets = [value for key, value in environment.items()
                        if key in {"AMP_API_KEY", "AGENTFLOW_MCP_TOKEN", "AGENTFLOW_PUSH_TOKEN", "GH_TOKEN"} and value]
+            capture = (Capture(self._history.store, session_id, prompt, tuple(secrets))
+                       if self._history.store and (context is not None or session_id) else None)
+            complete = False
+            try:
+                process = await AmpCodingAgent.run_process(args, cwd=cwd, env=environment, input_text=prompt,
+                                                           timeout=self.timeout, timeout_kind="idle",
+                                                           observe_stdout=capture.feed if capture else None)
+                result = _outcome(process, session_id, self.timeout)
+                if capture:
+                    capture.feed(b"\n")
+                complete = result.exit_code == 0
+            finally:
+                if capture:
+                    capture.close(complete)
             result.last_message = redact_amp_text(result.last_message, secrets)
             if result.failure_detail:
                 result.failure_detail = redact_amp_text(result.failure_detail, secrets)[-4000:]
@@ -550,32 +563,21 @@ class AmpAttachment(BaseModel):
             raise FileFailure("file_unreadable") from None
 
 
-@dataclass
-class _Snapshot:
-    items: list[HistoryItem]
-    unsupported: bool
-    fetched_at: float
-
-
 class AmpHistory:
-    """Fetch an Amp thread on demand without depending on Amp's local storage.
+    """Adapt native Amp exports and live blocks to the worker's public transcript."""
 
-    Cursors hold a digest of every consumed public block. This lets an external
-    Amp client append messages, while a changed earlier message invalidates a stale
-    cursor rather than silently replaying a different history.
-    """
-
-    def __init__(self) -> None:
+    def __init__(self, root: Path | None) -> None:
+        self.store = AmpTranscript(root, self._items, self._export) if root else None
         self._reads = threading.BoundedSemaphore(2)
-        self._lock = threading.Lock()
-        self._cache: OrderedDict[str, _Snapshot] = OrderedDict()
 
     def query(self, query: HistoryQuery) -> HistoryPage:
         """Synchronously export and page a thread; callers run this in ``to_thread``."""
         if not self._reads.acquire(blocking=False):
             raise ConversationFailure("query_busy")
         try:
-            return self._page(query, self._refresh(query.session_id))
+            if self.store is None:
+                raise ConversationFailure("history_unreadable")
+            return self.store.query(query)
         except ConversationFailure:
             raise
         except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
@@ -583,81 +585,24 @@ class AmpHistory:
         finally:
             self._reads.release()
 
-    def _refresh(self, session_id: str) -> _Snapshot | None:
-        """Cache only the public, redacted projection; refresh at most once per two seconds."""
-        with self._lock:
-            cached = self._cache.get(session_id)
-            if cached is not None and time.monotonic() - cached.fetched_at < CACHE_SECONDS:
-                self._cache.move_to_end(session_id)
-                return cached
+    @staticmethod
+    def _export(session_id: str, consume: Callable[[bytes], None]) -> bool:
         result = asyncio.run(AmpCodingAgent.run_process(
-            ["threads", "export", session_id, "--log-file", os.devnull],
-            env=amp_environment(), timeout=EXPORT_TIMEOUT, max_stdout=MAX_EXPORT,
+            ["threads", "export", session_id, "--log-file", os.devnull], env=amp_environment(),
+            timeout=EXPORT_TIMEOUT, max_stdout=MAX_RECOVERY, stream_stdout=consume,
         ))
         if result.timed_out:
             raise ConversationFailure("query_timeout")
         if result.overflow:
             raise ConversationFailure("history_limit")
-        if result.exit_code != 0:
+        if result.exit_code:
             if result.stderr.strip() == f"Thread https://ampcode.com/threads/{session_id} does not exist.".encode():
-                return None
+                return False
             raise ConversationFailure("history_unreadable")
-        payload = json.loads(result.stdout)
-        if not isinstance(payload, dict) or payload.get("id") != session_id:
-            raise ConversationFailure("history_unreadable")
-        messages = payload.get("messages")
-        if not isinstance(messages, list) or len(messages) > MAX_EXPORT // 32:
-            raise ConversationFailure("history_limit")
-        if not all(isinstance(message, dict) for message in messages):
-            raise ConversationFailure("history_unreadable")
-        items: list[HistoryItem] = []
-        unsupported = False
-        for message in messages:
-            public, unknown = self._items(message, session_id)
-            items.extend(public)
-            unsupported |= unknown
-        current = _Snapshot(items, unsupported, time.monotonic())
-        with self._lock:
-            # A shorter authoritative snapshot may be an edit, not just replication
-            # lag. Do not silently retain a deleted tail from a previous export.
-            self._cache[session_id] = current
-            self._cache.move_to_end(session_id)
-            while len(self._cache) > CACHE_SIZE:
-                self._cache.popitem(last=False)
-        return current
+        return True
 
-    def _page(self, query: HistoryQuery, snapshot: _Snapshot | None) -> HistoryPage:
-        if snapshot is None:
-            if query.cursor is not None:
-                raise ConversationFailure("cursor_invalid")
-            return HistoryPage(session_id=query.session_id, status="not_found")
-        offset, previous_identity = query.position
-        if offset > len(snapshot.items):
-            raise ConversationFailure("cursor_invalid")
-        if previous_identity is not None and previous_identity != self._identity(snapshot.items[:offset]):
-            raise ConversationFailure("cursor_invalid")
-
-        page = HistoryPage(session_id=query.session_id, status="unsupported" if snapshot.unsupported else "available")
-        index = offset
-        size = 0
-        while index < len(snapshot.items):
-            item = snapshot.items[index]
-            item_size = len(item.model_dump_json().encode())
-            if len(page.items) >= query.limit or size + item_size > MAX_PAGE:
-                break
-            page.items.append(item)
-            size += item_size
-            index += 1
-        page.has_more = index < len(snapshot.items)
-        page.next_cursor = query.cursor_at(index, self._identity(snapshot.items[:index]))
-        return page
-
-    @staticmethod
-    def _identity(items: list[HistoryItem]) -> str:
-        canonical = json.dumps([item.model_dump() for item in items], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        return hashlib.sha256(canonical.encode()).hexdigest()
-
-    def _items(self, message: dict[str, Any], session_id: str) -> tuple[list[HistoryItem], bool]:
+    def _items(self, message: dict[str, Any], session_id: str,
+               secrets: tuple[str, ...] = ()) -> tuple[list[HistoryItem], bool]:
         role = message.get("role")
         message_id = message.get("protocolMessageID")
         blocks = message.get("content")
@@ -671,7 +616,7 @@ class AmpHistory:
         timestamp = message.get("createdAt") if isinstance(message.get("createdAt"), str) else None
         items: list[HistoryItem] = []
         unsupported = False
-        secrets = tuple(os.environ.get(key, "") for key in (
+        secrets += tuple(os.environ.get(key, "") for key in (
             "AMP_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
             "AGENTFLOW_WORKER_TOKEN", "AGENTFLOW_PUSH_TOKEN", "AGENTFLOW_MCP_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
         ))

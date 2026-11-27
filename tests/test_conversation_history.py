@@ -16,6 +16,21 @@ SESSION = "019eac3b-a60c-7a93-a442-3718f660fc8c"
 AMP_SESSION = "T-019eac3b-a60c-7a93-a442-3718f660fc8c"
 
 
+def test_long_amp_session_backfills_once_and_survives_restart(tmp_path, monkeypatch):
+    # An old Flow has no capture; its native export exceeds the former 2 MiB cap.
+    binary = tmp_path / "amp"
+    binary.write_text(f'#!{sys.executable}\nimport json\nprint(json.dumps({{"id": {AMP_SESSION!r}, '
+                      '"messages": [{"role":"assistant","protocolMessageID":"M-1","content": '
+                      '[{"type":"thinking","thinking":"x"*2300000},{"type":"text","text":"answer"}]}]}))')
+    binary.chmod(0o700)
+    monkeypatch.setattr("app.worker.execution.amp_agent.AMP_BIN", str(binary))
+    query = HistoryQuery(session_id=AMP_SESSION)
+    for _ in range(2):
+        page = AmpCodingAgent(history_root=tmp_path / "history").read_history(query)
+        assert [item.content.text for item in page.items] == ["answer"]
+        binary.unlink(missing_ok=True)
+
+
 def codex_agent(root: Path, monkeypatch: pytest.MonkeyPatch) -> CodingAgent:
     """Read test rollouts through the public agent API, without coding authorization."""
     monkeypatch.setenv("CODEX_HOME", str(root))
@@ -182,7 +197,7 @@ def test_history_refuses_special_files_and_racing_directory_symlink(tmp_path: Pa
         reader.read_history(HistoryQuery(session_id=SESSION))
 
 
-def test_amp_export_keeps_total_deadline_despite_continuous_progress(monkeypatch):
+def test_amp_export_keeps_total_deadline_despite_continuous_progress(monkeypatch, tmp_path):
     # A slow export must not consume an unlimited history request budget.
     monkeypatch.setattr("app.worker.execution.amp_agent.AMP_BIN", sys.executable)
     monkeypatch.setattr("app.worker.execution.amp_agent.EXPORT_TIMEOUT", 0.4)
@@ -197,10 +212,10 @@ def test_amp_export_keeps_total_deadline_despite_continuous_progress(monkeypatch
 
     monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
     with pytest.raises(ConversationFailure, match="query_timeout"):
-        AmpCodingAgent().read_history(HistoryQuery(session_id=AMP_SESSION))
+        AmpCodingAgent(history_root=tmp_path).read_history(HistoryQuery(session_id=AMP_SESSION))
 
 
-def test_amp_history_maps_public_blocks_and_invalidates_edited_prefix(monkeypatch) -> None:
+def test_amp_history_maps_public_blocks_and_invalidates_edited_prefix(monkeypatch, tmp_path) -> None:
     def native(role: str, message_id: str, content: list[dict]) -> dict:
         return {"role": role, "protocolMessageID": message_id,
                 "createdAt": "2026-10-21T00:00:00Z", "content": content}
@@ -219,13 +234,13 @@ def test_amp_history_maps_public_blocks_and_invalidates_edited_prefix(monkeypatc
     human = native("user", "M-human", notice["content"])
     human["meta"] = {"fromAutomation": False}
     second["meta"] = {"fromAutomation": True}
-    reader = AmpCodingAgent()
+    reader = AmpCodingAgent(history_root=tmp_path)
     monkeypatch.setenv("AMP_API_KEY", "private-key-value")
-    monkeypatch.setattr("app.worker.execution.amp_agent.CACHE_SECONDS", 0)
-    messages = [first]
+    messages = [first, second, notice, human]
 
     async def export(*args, **kwargs):
-        return AmpProcessResult(json.dumps({"id": AMP_SESSION, "messages": messages}).encode(), b"", 0)
+        kwargs['stream_stdout'](json.dumps({"id": AMP_SESSION, "messages": messages}).encode())
+        return AmpProcessResult(b"", b"", 0)
 
     monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
     page = reader.read_history(HistoryQuery(session_id=AMP_SESSION, limit=2))
@@ -235,7 +250,6 @@ def test_amp_history_maps_public_blocks_and_invalidates_edited_prefix(monkeypatc
     ]
     assert "private-key-value" not in page.items[0].content.text
     # A native user tool_result is deliberately exposed as the existing tool role.
-    messages.extend([second, notice, human])
     next_page = reader.read_history(HistoryQuery(session_id=AMP_SESSION, cursor=page.next_cursor))
     assert [(item.role, item.kind, item.call_id) for item in next_page.items] == [
         ("tool", "tool_result", "TU-1"),
@@ -244,21 +258,22 @@ def test_amp_history_maps_public_blocks_and_invalidates_edited_prefix(monkeypatc
     ]
     assert next_page.items[1].content.text == next_page.items[2].content.text == notice["content"][0]["text"]
 
-    edited = native("assistant", "M-first", [{"type": "text", "text": "changed"}])
-    messages[0] = edited
+    first["content"][1]["text"] = "changed"
+    (tmp_path / f"{AMP_SESSION}.jsonl").unlink()
     with pytest.raises(ConversationFailure, match="cursor_invalid"):
         reader.read_history(HistoryQuery(session_id=AMP_SESSION, cursor=page.next_cursor))
 
 
-def test_amp_history_pages_inside_native_messages_and_bounds_bytes(monkeypatch) -> None:
+def test_amp_history_pages_inside_native_messages_and_bounds_bytes(monkeypatch, tmp_path) -> None:
     # One native message may contain more blocks than a page: the cursor must advance.
-    reader = AmpCodingAgent()
+    reader = AmpCodingAgent(history_root=tmp_path)
     message = {"role": "assistant", "protocolMessageID": "M-many", "content": [
         {"type": "text", "text": "字" * 8192} for _ in range(50)
     ]}
 
     async def export(*args, **kwargs):
-        return AmpProcessResult(json.dumps({"id": AMP_SESSION, "messages": [message]}, ensure_ascii=False).encode(), b"", 0)
+        kwargs['stream_stdout'](json.dumps({"id": AMP_SESSION, "messages": [message]}, ensure_ascii=False).encode())
+        return AmpProcessResult(b"", b"", 0)
 
     monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
     first = reader.read_history(HistoryQuery(session_id=AMP_SESSION, limit=1))
@@ -268,7 +283,7 @@ def test_amp_history_pages_inside_native_messages_and_bounds_bytes(monkeypatch) 
     assert len(rest.model_dump_json().encode()) < 262144
 
 
-def test_amp_history_redacts_other_clients_access_tokens(monkeypatch) -> None:
+def test_amp_history_redacts_other_clients_access_tokens(monkeypatch, tmp_path) -> None:
     # External continuation can introduce a credential absent from this worker's environment.
     monkeypatch.delenv("AMP_API_KEY", raising=False)
     token = "sgamp_external-client_123456789"
@@ -286,10 +301,11 @@ def test_amp_history_redacts_other_clients_access_tokens(monkeypatch) -> None:
     ]}
 
     async def export(*args, **kwargs):
-        return AmpProcessResult(json.dumps({"id": AMP_SESSION, "messages": [message]}).encode(), b"", 0)
+        kwargs['stream_stdout'](json.dumps({"id": AMP_SESSION, "messages": [message]}).encode())
+        return AmpProcessResult(b"", b"", 0)
 
     monkeypatch.setattr(AmpCodingAgent, "run_process", staticmethod(export))
-    reader = AmpCodingAgent()
+    reader = AmpCodingAgent(history_root=tmp_path)
     for _ in range(2):
         page = reader.read_history(HistoryQuery(session_id=AMP_SESSION))
         assert len(page.items) == 3

@@ -187,6 +187,7 @@ class WorkerRuntime:
                                 timeout=self.settings.codex_run_timeout_seconds),
             "amp": AmpCodingAgent(trusted_host=self.settings.trusted_host_execution,
                                   permissions=FULL_ACCESS,
+                                  history_root=self.settings.worker_root / "amp-history",
                                   timeout=self.settings.amp_run_timeout_seconds),
         }
         self.gateway = Gateway[ServerMessageUnion, WorkerMessageUnion]()

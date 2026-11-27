@@ -9,7 +9,7 @@
 - **HTTP 入口**在 control 上。它识别 owner，校验 Flow ID 和分页参数，启动一次只读查询，把查不到 Flow、等待超时等结果译成 HTTP 状态。调用者只需要能访问 control，不需要知道执行机的地址，更不需要在浏览器里持有 Worker 的连接凭据。[入口实现](../../app/controler/api.py#L139-L171)
 - **归属与分页服务**把一个 Flow 下的多轮执行整理成有序的会话清单。Flow 是用户跟踪的任务，Attempt 是该任务的一轮执行；后端 session 是编码工具实际写对话的地方。三者不能互换：一轮尚未启动时可能还没有 session，重新开工后还是原来的 Flow，却可能要去另一台机器找另一份记录。[清单构造](../../app/controler/workers/conversation.py#L114-L150)
 - **Broker 和 Worker 传输层**负责一次有期限的问答。Broker 在 control 的已注册连接中找到指定 Worker；Worker 收到请求后交给自己的历史读取逻辑。连接上还可能有其他请求或业务结果，所以仅仅收到一个看起来像历史页的回复，并不代表能把它交给这次 GET。[发起请求](../../app/controler/workers/conversation.py#L48-L82) · [回包关联测试](../../tests/test_conversation_proxy.py#L429)
-- **源记录读取器**在 Worker 进程一侧工作。Codex 读取本机日志，Amp 导出 thread；两者统一成同一种 `HistoryPage`。因此消费者可以用同一个工具活动视图展示两种后端，但不能假设每种后端的条目 ID 都是文件行号，也不能把一次导出的内部位置用于另一种后端。[公共模型](../../app/contracts/conversation.py#L66-L100) · [两种来源的条目测试](../../tests/test_conversation_history.py#L197-L246)
+- **源记录读取器**在 Worker 进程一侧工作。Codex 读取本机 rollout，Amp 读取 worker 采集的公开事件；两者都返回 [`HistoryPage`](../../app/contracts/conversation.py)。消费者应原样使用 `next_cursor`；条目 ID 不是文件行号。
 
 还有一个容易混淆的读者：control 的后台采集器也调用这个服务，但它会另外把归一化的条目交给活动存储。网页请求 `/activity` 时看的是那次发布的内容；直接请求 `/conversation` 时，则会触发本次 Worker 读取。比如 Worker 掉线后，前者仍能给出早先保存的说明，后者可能返回 503。选择接口取决于要核对「已保存了什么」还是「现在还能从源头读到什么」。[采集与发布](../../app/controler/console/sync.py#L102-L121)
 
@@ -69,7 +69,7 @@ Amp 的例子展示了另一个区别。一条原生消息可以含多个块：�
 | Worker 上的读取器 | 读什么、何时返回不完整结果 |
 |---|---|
 | [Codex](../../app/worker/execution/codex.py#L315-L398) | 在执行所用的 `CODEX_HOME`（默认 `~/.codex`）先查 `sessions` 再查 `archived_sessions`，验证 rollout 文件身份和 `session_meta.id`。按 JSONL 行提取公开 `response_item` 消息和工具操作，跳过重复事件及内部推理；末尾尚未写完的一行留待下次查询。目录最多检查 50,000 项，单页扫描预算 8 MiB，单条记录上限 256 KiB。 |
-| [Amp](../../app/worker/execution/amp_agent.py#L580-L638) | 在 Worker 上用 `amp threads export` 读取指定 thread 的公开消息块。导出上限 2 MiB、超时 20 秒，短暂缓存 2 秒（最多 16 个会话）；已读前缀被编辑时原游标失效。[限制常量](../../app/worker/execution/amp_agent.py#L52-L61) |
+| [Amp](../../app/worker/execution/amp_history.py) | 编码首轮与续聊把输入、助手消息和工具活动脱敏后追加到 `worker_root/amp-history/`，按字节游标分页。旧会话没有文件、文件损坏或写入中断时，空闲 worker 用 `threads export` 流式回填；原始导出和候选文件各限 64 MiB，导出限时 20 秒。只有覆盖已知条目且没有并发续写才替换。回填后的旧游标返回 `cursor_invalid`；失败保留旧数据，可再次查询。正常分页不调用 Amp，不跟踪其他客户端的新增或编辑。 |
 
 两端读取器的条目页预算为 256 KiB，文本和工具参数最多 8,192 字符；已知凭据会脱敏，但不要把响应当作已排除所有秘密的公开日志。Broker 限全局 64 个、每连接 4 个待响应查询；回复条目加共享协议头上限 512 KiB，单次往返预算 30 秒。工具或结果处理占用连接时会拖慢历史查询，查询超时不说明编码任务失败。[Codex 测试](../../tests/test_conversation_history.py#L136-L160) · [Amp 测试](../../tests/test_conversation_history.py#L247-L275) · [慢回调测试](../../tests/test_conversation_e2e.py#L104-L145)
 
