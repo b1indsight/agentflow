@@ -7054,6 +7054,14 @@ for (const width of [1440, 390]) {
       await link(0).press("Enter");
       await expect(source(0)).toBeInViewport();
       await expect(link(0)).toBeInViewport();
+      // Opening a preview narrows the conversation tab; its jump button must stay inside it.
+      const jump = page.getByRole("button", { name: "跳到最新回复" });
+      await expect(jump).toBeInViewport({ ratio: 1 });
+      const bounds = await jump.boundingBox();
+      const preview = await page
+        .getByRole("tabpanel", { name: names[0] })
+        .boundingBox();
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(preview!.x);
       await page.screenshot({
         path: "../../../.amp/in/artifacts/side-preview-two.png",
       });

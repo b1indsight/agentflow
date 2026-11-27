@@ -908,6 +908,12 @@ svg {
   flex: 1;
   min-height: 0;
 }
+.primary-pane {
+  /* Anchor tab actions outside the scrolling body, within this grid column. */
+  position: relative;
+  display: grid;
+  min-height: 0;
+}
 .detail-body,
 .file-pane {
   min-width: 0;
@@ -1746,9 +1752,6 @@ svg {
 }
 .new-records {
   margin: 12px 0;
-}
-.conversation-nav {
-  position: relative;
 }
 .jump-to-latest {
   position: absolute;

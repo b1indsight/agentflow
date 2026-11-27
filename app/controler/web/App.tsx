@@ -623,9 +623,6 @@ function DetailPanel({
     [jobMore, setJobMore] = useState(true),
     [jobError, setJobError] = useState("");
   const detail = useRef<HTMLDivElement>(null);
-  const [conversationNav, setConversationNav] = useState<HTMLDivElement | null>(
-    null,
-  );
   const jobsRequest = useRef<AbortController | null>(null);
   const jobsBusy = useRef(false);
   const [mainFileHost, setMainFileHost] = useState<HTMLElement | null>(null);
@@ -925,8 +922,13 @@ function DetailPanel({
           </div>
         </header>
         <div className="detail-panes">
-          <div className="detail-body" data-scroll-root ref={detail}>
-            <TabsContent value={selectedTab} asChild>
+          <div className="primary-pane">
+            <TabsContent
+              value={selectedTab}
+              className="detail-body"
+              data-scroll-root
+              ref={detail}
+            >
               <section
                 className={activeFile ? "content file-content" : "content"}
                 ref={setMainFileHost}
@@ -1101,7 +1103,6 @@ function DetailPanel({
                             key={id}
                             id={id}
                             root={detail}
-                            navigation={conversationNav}
                             refresh={
                               flow.history_only
                                 ? null
@@ -1213,9 +1214,6 @@ function DetailPanel({
             );
           })}
         </div>
-        {selectedTab === "conversation" && (
-          <div className="conversation-nav" ref={setConversationNav} />
-        )}
         {freshFlow && !flow.history_only && (
           <AgentTaskInput
             busy={pending !== null}
@@ -1263,13 +1261,11 @@ function DetailPanel({
 function Conversation({
   id,
   root,
-  navigation,
   refresh,
   lastRefresh,
 }: {
   id: number;
   root: React.RefObject<HTMLElement | null>;
-  navigation: HTMLElement | null;
   refresh: number | null;
   lastRefresh: React.RefObject<number>;
 }) {
@@ -1563,30 +1559,26 @@ function Conversation({
           {state.busy ? "正在检查更新…" : "已到当前本地快照末尾 · 点击刷新"}
         </button>
       )}
-      {navigation &&
-        state.records.length > 0 &&
-        !state.error &&
-        createPortal(
-          <button
-            type="button"
-            className="btn jump-to-latest"
-            aria-label="跳到最新回复"
-            title="跳到最新回复"
-            aria-busy={jumping}
-            disabled={jumping}
-            onClick={() => setJumping(true)}
-          >
-            {jumping ? (
-              <LoaderCircle
-                className="motion-safe:animate-spin"
-                aria-hidden="true"
-              />
-            ) : (
-              <ArrowDownToLine aria-hidden="true" />
-            )}
-          </button>,
-          navigation,
-        )}
+      {state.records.length > 0 && !state.error && (
+        <button
+          type="button"
+          className="btn jump-to-latest"
+          aria-label="跳到最新回复"
+          title="跳到最新回复"
+          aria-busy={jumping}
+          disabled={jumping}
+          onClick={() => setJumping(true)}
+        >
+          {jumping ? (
+            <LoaderCircle
+              className="motion-safe:animate-spin"
+              aria-hidden="true"
+            />
+          ) : (
+            <ArrowDownToLine aria-hidden="true" />
+          )}
+        </button>
+      )}
     </>
   );
 }
