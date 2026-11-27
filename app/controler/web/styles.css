@@ -1161,9 +1161,23 @@ svg {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  cursor: grab;
   padding-right: 6px;
   border: 0;
   font-weight: 400;
+}
+.tabs-list [data-drop-edge]::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  border-left: 2px solid var(--accent);
+  pointer-events: none;
+}
+.tabs-list [data-drop-edge="before"]::after {
+  left: 0;
+}
+.tabs-list [data-drop-edge="after"]::after {
+  right: 0;
 }
 .file-tab-name {
   max-width: 180px;

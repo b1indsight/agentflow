@@ -7010,6 +7010,160 @@ for (const width of [1440, 390]) {
   });
 }
 
+async function mockEditorLinks(
+  page: Page,
+  ids: string[],
+  names: string[],
+  history: ActivityItem[] = [],
+) {
+  const body = ids
+    .map(
+      (id, i) =>
+        `[打开${i}](/api/files/${id}#name=${encodeURIComponent(names[i])})`,
+    )
+    .join("\n\n");
+  await page.route("**/api/flows/42/activity?**", (route) =>
+    route.fulfill({
+      json: activityPage(
+        [
+          ...history,
+          {
+            ...activity,
+            source: "worker",
+            kind: "message",
+            body,
+            body_length: body.length,
+            previous_version: null,
+          },
+        ],
+        0,
+        history.length + 1,
+      ),
+    }),
+  );
+}
+
+test("drag a file tab into any visible detail column", async ({ page }) => {
+  const ids = ["a".repeat(32), "b".repeat(32), "c".repeat(32)];
+  const names = ["view.ts", "colors.css", "notes.md"];
+  const contents = [
+    "export const view = 'detail';",
+    ".tab { color: navy; }",
+    "# 阅读笔记\n\n拖动文件页签后，正文跟随页签显示。",
+  ];
+  const history = Array.from({ length: 12 }, (_, i) => ({
+    ...activity,
+    key: `earlier-${i}`,
+    body: `先前的会话记录 ${i}`,
+    previous_version: null,
+  }));
+  await mockEditorLinks(page, ids, names, history);
+  const reads: string[] = [];
+  await page.route("**/api/files/*", (route) => {
+    const id = route.request().url().slice(-32);
+    reads.push(id);
+    return route.fulfill({ body: contents[ids.indexOf(id)] });
+  });
+  await page.setViewportSize({ width: 1900, height: 800 });
+  await page.goto("/console/#flow/42/conversation");
+  const tab = (name: string) => page.getByRole("tab", { name, exact: true });
+  const link = (i: number) =>
+    page.getByRole("link", { name: `打开${i}`, exact: true });
+  const panels = page.getByRole("tabpanel");
+  const primary = page.getByRole("tablist", { name: "Flow 详情" });
+  const tabsIn = (column: number) =>
+    page.getByRole("tablist", { name: `文件栏 ${column}` }).getByRole("tab");
+  const jobs = tab("执行记录");
+  const a = tab(names[2]);
+  const startDrag = async (from: Locator, to: Locator, after: boolean) => {
+    await from.locator("svg").hover();
+    await page.mouse.down();
+    const box = (await to.boundingBox())!;
+    await page.mouse.move(
+      box.x + (after ? box.width - 1 : 1),
+      box.y + box.height / 2,
+      { steps: 6 },
+    );
+  };
+  const screenshot = (name: string) =>
+    page
+      .locator("main.detail")
+      .screenshot({ path: `../../../.amp/in/artifacts/tab-merge-${name}.png` });
+  await scrollToSnapshotEnd(page);
+  await link(2).click();
+  await expect(panels.last()).toContainText("# 阅读笔记");
+  await expect(
+    page.getByText("先前的会话记录 0", { exact: true }),
+  ).not.toBeInViewport();
+  const initialReads = [...reads];
+  await startDrag(a, jobs, true);
+  await screenshot("insertion");
+  await page.mouse.up();
+  await expect(primary.getByRole("tab")).toHaveText([
+    "概览",
+    "会话",
+    "执行记录",
+    names[2],
+  ]);
+  await expect(a).toBeFocused();
+  await expect(panels).toHaveCount(1);
+  await expect(panels).toContainText("# 阅读笔记");
+  expect((await panels.boundingBox())!.width).toBeCloseTo(
+    (await page.locator("main.detail").boundingBox())!.width,
+    0,
+  );
+  await screenshot("full");
+  await tab("会话").click();
+  await expect(link(2)).toBeInViewport();
+  await a.click();
+  await expect(panels).toContainText("# 阅读笔记");
+  expect(reads).toEqual(initialReads);
+  await a.press("Delete");
+
+  // The right strip has two tabs. Closing that column or replacing the middle
+  // file instead of inserting would both lose a visible document.
+  for (const i of [0, 1, 2]) await link(i).click();
+  await expect(tabsIn(2)).toHaveText([names[1], names[2]]);
+  await expect(page.getByRole("tabpanel", { name: names[2] })).toContainText(
+    "# 阅读笔记",
+  );
+  const opened = [...reads];
+  await startDrag(tab(names[1]), tab(names[0]), false);
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await expect(a).toHaveAttribute("aria-selected", "true");
+  await expect(tabsIn(1)).toHaveText([names[0]]);
+  await startDrag(a, jobs, true);
+  await page.mouse.move(5, 5);
+  await page.mouse.up();
+  await expect(tabsIn(2)).toHaveText([names[1], names[2]]);
+  await startDrag(a, tab(names[0]), true);
+  await page.mouse.up();
+  await expect(tabsIn(1)).toHaveText([names[0], names[2]]);
+  await expect(tabsIn(2)).toHaveText([names[1]]);
+  await expect(panels.nth(0)).toContainText("打开2");
+  await expect(page.getByRole("tabpanel", { name: names[2] })).toContainText(
+    "# 阅读笔记",
+  );
+  await expect(page.getByRole("tabpanel", { name: names[1] })).toContainText(
+    contents[1],
+  );
+  await screenshot("middle");
+  await startDrag(a, jobs, true);
+  await page.mouse.up();
+  await expect(panels).toHaveCount(3);
+  await expect(panels.first()).toContainText("# 阅读笔记");
+  await expect(page.getByRole("tabpanel", { name: names[0] })).toContainText(
+    contents[0],
+  );
+  await startDrag(a, tab(names[1]), false);
+  await page.mouse.up();
+  await expect(tabsIn(2)).toHaveText([names[2], names[1]]);
+  await expect(a).toBeFocused();
+  await expect(link(2)).toBeInViewport();
+  expect(reads).toEqual(opened);
+});
+
 for (const width of [1440, 390]) {
   test(`editor file tabs switch, deduplicate and close with keyboard focus at ${width}px`, async ({
     page,
@@ -7021,30 +7175,7 @@ for (const width of [1440, 390]) {
       "README.md",
       "一段很长的文件名称用来验证页签截断与局部滚动的行为.tsx",
     ];
-    const body = ids
-      .map(
-        (id, i) =>
-          `[打开${i}](/api/files/${id}#name=${encodeURIComponent(names[i])})`,
-      )
-      .join("\n\n");
-    await page.route("**/api/flows/42/activity?**", (route) =>
-      route.fulfill({
-        json: activityPage(
-          [
-            {
-              ...activity,
-              source: "worker",
-              kind: "message",
-              body,
-              body_length: body.length,
-              previous_version: null,
-            },
-          ],
-          0,
-          1,
-        ),
-      }),
-    );
+    await mockEditorLinks(page, ids, names);
     const reads: string[] = [];
     const unchanged: string[] = [];
     let version = 1;

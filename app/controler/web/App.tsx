@@ -50,7 +50,7 @@ import {
 import { ConversationSources, SourceList } from "./ConversationSources";
 import { CreateFlow } from "./CreateFlow";
 import { AgentTaskInput } from "./AgentTaskInput";
-import { FileTab } from "./FileTab";
+import { FileTab, FileTabRow } from "./FileTab";
 import type { WorkerFile } from "./files";
 import { InferenceNotices } from "./InferenceNotices";
 import { actionLabel, archiveReasonLabels, flowLabel, phases } from "./phases";
@@ -109,6 +109,8 @@ const flowTabs = [
   { value: "jobs", label: "执行记录" },
 ] as const;
 type Tab = (typeof flowTabs)[number]["value"] | `file-${string}`;
+// Column zero uses the Flow URL for selection; side columns select independently.
+type FilePane = { files: WorkerFile[]; active: string | null };
 const positions = new Map<string, number>();
 const route = () => {
   const m = location.hash.match(/^#flow\/(\d+)(?:\/([^/]+))?$/);
@@ -532,30 +534,38 @@ function DetailPanel({
     }
   };
   const [compactHead, setCompactHead] = useState(false);
-  const [openFiles, setFiles] = useState<WorkerFile[]>([]);
-  const files = flow?.history_only ? [] : openFiles;
-  const activeFile = files.find((file) => `file-${file.id}` === tab);
+  const [panes, setPanes] = useState<FilePane[]>([{ files: [], active: null }]);
+  const visiblePanes = flow?.history_only
+    ? [{ files: [], active: null }]
+    : panes;
+  const files = visiblePanes.flatMap((pane) => pane.files);
+  const activeFile = visiblePanes[0].files.find(
+    (file) => `file-${file.id}` === tab,
+  );
   const baseTab =
     flowTabs.find(({ value }) => value === tab)?.value ?? "conversation";
   const selectedTab = activeFile ? tab : baseTab;
   const head = useRef<HTMLElement>(null);
-  // Each entry selects a file beside the primary tab. Overflow tabs share the last pane.
-  const [sideFiles, setSideFiles] = useState<string[]>([]);
-  const sides = activeFile || flow?.history_only ? [] : sideFiles;
-  const paneFor = (fileId: string) =>
-    sides.includes(fileId) ? fileId : (sides.at(-1) ?? null);
-  const sideCapacity = () =>
+  const paneCapacity = () =>
     Math.max(
-      0,
-      Math.floor((head.current?.getBoundingClientRect().width ?? 0) / 480) - 1,
+      1,
+      Math.floor((head.current?.getBoundingClientRect().width ?? 0) / 480),
     );
   useLayoutEffect(() => {
     if (!head.current) return;
     const observer = new ResizeObserver(() => {
-      const limit = sideCapacity();
-      setSideFiles((prior) =>
-        prior.length > limit ? prior.slice(0, limit) : prior,
-      );
+      const count = paneCapacity();
+      setPanes((prior) => {
+        if (prior.length <= count) return prior;
+        const remaining = prior.slice(count - 1);
+        return [
+          ...prior.slice(0, count - 1),
+          {
+            active: remaining[0].active,
+            files: remaining.flatMap((pane) => pane.files),
+          },
+        ];
+      });
     });
     observer.observe(head.current);
     return () => observer.disconnect();
@@ -564,44 +574,77 @@ function DetailPanel({
   const compactOnFileOpen = useRef(false);
   const openFile = useCallback(
     (file: WorkerFile) => {
-      setFiles((prior) =>
-        prior.some(({ id }) => id === file.id) ? prior : [...prior, file],
+      const existing = panes.findIndex((pane) =>
+        pane.files.some((item) => item.id === file.id),
       );
+      const column =
+        existing >= 0 ? existing : Math.min(panes.length, paneCapacity() - 1);
+      const next = panes.slice();
+      next[column] = {
+        files:
+          existing >= 0
+            ? panes[column].files
+            : [...(panes[column]?.files ?? []), file],
+        active: column ? file.id : null,
+      };
       focusTab.current = `file-${file.id}`;
-      const limit = sideCapacity();
-      if (limit) {
-        setSideFiles((prior) =>
-          prior.includes(file.id)
-            ? [...prior]
-            : [...prior.slice(0, limit - 1), file.id],
-        );
-      } else {
+      setPanes(next);
+      if (column === 0) {
         compactOnFileOpen.current =
           head.current?.classList.contains("compact") ?? false;
         location.hash = `flow/${id}/file-${file.id}`;
       }
     },
-    [id],
+    [id, panes],
   );
-  const closeFile = (fileId: string) => {
-    const pane = paneFor(fileId);
-    const peers = files.filter((file) => paneFor(file.id) === pane);
+  // Removing a tab from its source has the same neighbor and empty-column rules
+  // whether the user drops it in another strip or closes it.
+  const placeFile = (fileId: string, destination?: number, before?: string) => {
+    const source = panes.findIndex((pane) =>
+      pane.files.some((file) => file.id === fileId),
+    );
+    if (source < 0) return; // A tab can be closed while the browser owns the drag.
+    const peers = panes[source].files;
     const index = peers.findIndex((file) => file.id === fileId);
+    const file = peers[index];
+    if (
+      source === destination &&
+      (before === file.id || before === peers[index + 1]?.id)
+    )
+      return;
+    const next = panes.slice();
     const neighbor = peers[index + 1] ?? peers[index - 1];
-    focusTab.current = pane ? `file-${pane}` : selectedTab;
-    if (pane === fileId) {
-      const next = sides.flatMap((id) =>
-        id !== fileId ? [id] : neighbor ? [neighbor.id] : [],
-      );
-      const target = neighbor?.id ?? next.at(-1);
-      focusTab.current = target ? `file-${target}` : selectedTab;
-      setSideFiles(next);
-    } else if (activeFile?.id === fileId) {
-      focusTab.current = neighbor ? `file-${neighbor.id}` : "conversation";
-      location.hash = `flow/${id}/${focusTab.current}`;
+    next[source] = {
+      files: peers.filter((item) => item !== file),
+      active:
+        panes[source].active === fileId
+          ? (neighbor?.id ?? null)
+          : panes[source].active,
+    };
+    if (activeFile === file && destination !== 0) {
+      const value = neighbor ? `file-${neighbor.id}` : "conversation";
+      location.hash = `flow/${id}/${value}`;
+      focusTab.current = value;
+    } else if (destination === undefined) {
+      const other =
+        next[source].active ?? next.findLast((pane) => pane.active)?.active;
+      focusTab.current = source && other ? `file-${other}` : selectedTab;
     }
-    if (!sides.length) setSideFiles([]);
-    setFiles(files.filter((file) => file.id !== fileId));
+    if (destination !== undefined) {
+      const group = [...next[destination].files];
+      group.splice(
+        before ? group.findIndex((item) => item.id === before) : group.length,
+        0,
+        file,
+      );
+      next[destination] = {
+        files: group,
+        active: destination ? file.id : null,
+      };
+      if (!destination) location.hash = `flow/${id}/file-${file.id}`;
+      focusTab.current = `file-${file.id}`;
+    }
+    setPanes(next.filter((pane, i) => i === 0 || pane.files.length));
   };
   useEffect(() => {
     // Open documents are local to this Flow visit; stale history entries return to the conversation.
@@ -634,7 +677,7 @@ function DetailPanel({
     if (!trigger) return;
     focusTab.current = null;
     trigger.focus({ preventScroll: true });
-  }, [selectedTab, files, sideFiles, Boolean(flow), compactHead]);
+  }, [selectedTab, panes, Boolean(flow), compactHead]);
   useLayoutEffect(() => {
     const node = detail.current;
     if (!node) return;
@@ -869,25 +912,25 @@ function DetailPanel({
                 </a>
               )}
             </div>
-            <div className={sides.length ? "split-tab-row" : undefined}>
-              {[null, ...sides].map((side, column) => {
-                const group = files.filter((file) => paneFor(file.id) === side);
+            <FileTabRow split={visiblePanes.length > 1} move={placeFile}>
+              {visiblePanes.map((pane, column) => {
                 const list = (
                   <TabsList
                     key="primary"
-                    aria-label={side ? `文件栏 ${column}` : "Flow 详情"}
+                    data-file-column={column}
+                    aria-label={column ? `文件栏 ${column}` : "Flow 详情"}
                   >
-                    {!side &&
+                    {!column &&
                       flowTabs.map(({ value, label }) => (
                         <TabsTrigger value={value} data-tab={value} key={value}>
                           {label}
                         </TabsTrigger>
                       ))}
-                    {group.map((file) => (
+                    {pane.files.map((file) => (
                       <FileTab
                         key={file.id}
                         file={file}
-                        side={side !== null}
+                        side={column !== 0}
                         duplicate={
                           file.name !== null &&
                           files.some(
@@ -895,20 +938,19 @@ function DetailPanel({
                               other.id !== file.id && other.name === file.name,
                           )
                         }
-                        close={() => closeFile(file.id)}
+                        select={() => openFile(file)}
+                        close={() => placeFile(file.id)}
                       />
                     ))}
                   </TabsList>
                 );
-                return side ? (
+                return column ? (
                   <Tabs
                     key={column}
-                    value={`file-${side}`}
+                    value={`file-${pane.active}`}
                     onValueChange={(value) =>
-                      setSideFiles((prior) =>
-                        prior.map((item, i) =>
-                          i === column - 1 ? value.slice(5) : item,
-                        ),
+                      openFile(
+                        pane.files.find((file) => `file-${file.id}` === value)!,
                       )
                     }
                   >
@@ -918,7 +960,7 @@ function DetailPanel({
                   list
                 );
               })}
-            </div>
+            </FileTabRow>
           </div>
         </header>
         <div className="detail-panes">
@@ -1177,7 +1219,9 @@ function DetailPanel({
             </TabsContent>
           </div>
           {files.map((file) => {
-            const index = sides.indexOf(file.id);
+            const index = visiblePanes.findIndex(
+              (pane) => pane.active === file.id,
+            );
             const target =
               file === activeFile
                 ? mainFileHost
@@ -1189,7 +1233,7 @@ function DetailPanel({
               <section
                 key={file.id}
                 className="file-pane"
-                style={{ order: index + 1 }}
+                style={{ order: index }}
                 hidden={index === -1}
                 data-scroll-root
                 role="tabpanel"
