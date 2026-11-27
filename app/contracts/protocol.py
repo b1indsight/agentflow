@@ -44,7 +44,7 @@ from app.domain.models import (
 )
 from app.domain.review_models import ReviewFeedback
 
-PROTOCOL_VERSION: Literal[33] = 33
+PROTOCOL_VERSION: Literal[34] = 34
 MAX_PAYLOAD_ITEMS = 32
 MessageId = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{32}$")]
 ConnectionEpoch = Annotated[str, Field(strict=True, min_length=1, max_length=64)]
@@ -387,6 +387,26 @@ class CatalogQuery(ToolCall):
     method: Literal["worker.model_catalog"]
 
 
+class WorkspaceDiffQuery(ToolCall):
+    method: Literal["worker.workspace_diff"]
+    flow_id: int = Field(gt=0)
+    workspace: str = Field(pattern=r"^[0-9a-f]{32}$")
+    generation: int = Field(gt=0)
+
+
+class WorkspaceDiff(ProtocolModel):
+    """Disjoint text-line counts relative to the workspace's allocation baseline."""
+
+    added: int = Field(ge=0, strict=True)
+    deleted: int = Field(ge=0, strict=True)
+    modified: int = Field(ge=0, strict=True)
+
+
+class WorkspaceDiffResult(ToolResult):
+    method: Literal["worker.workspace_diff"]
+    diff: WorkspaceDiff | None
+
+
 class CatalogResult(ToolResult):
     method: Literal["worker.model_catalog"]
     # Null means discovery failed; an empty list is a successful, empty catalog.
@@ -680,11 +700,11 @@ class FlowToolResponse(ToolResult):
 # the only list of its members; directional parsing and _FIXED_METHODS derive from them.
 type WorkerCalls = (
     Assignment | StopExecution | ConversationQuery | FileQuery | InferenceRequest
-    | RecoveryRejected | RepositoryDemand | CatalogQuery | SyncSkills | ArchiveAmpThread
+    | RecoveryRejected | RepositoryDemand | CatalogQuery | WorkspaceDiffQuery | SyncSkills | ArchiveAmpThread
 )
 type WorkerResults = (
     ExecuteResult | StopResult | ConversationResult | FileResult | InferenceResult | ProvisionResult
-    | CatalogResult
+    | CatalogResult | WorkspaceDiffResult
 )
 type ServerCalls = Started | AcceptResultRequest | AcceptStop | FileRegister | FlowSearchCall
 type ServerResults = AcceptResultResponse | StopAccepted | FileRegistered | FlowSearchResult
@@ -754,7 +774,7 @@ class Message[Payload: ToolCall | ToolResult](ProtocolModel):
     performs static checks only; receipt ACKs confer no business completion or authority.
     """
 
-    protocol_version: Literal[33]
+    protocol_version: Literal[34]
     message_id: MessageId
     connection_epoch: ConnectionEpoch | None
     ack: StrictBool
@@ -961,7 +981,7 @@ def accept_stop_id(receipt_id: MessageId) -> MessageId:
 
 
 class MessageHeader(TypedDict):
-    protocol_version: Literal[33]
+    protocol_version: Literal[34]
     message_id: MessageId
     connection_epoch: str | None
     ack: bool

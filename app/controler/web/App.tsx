@@ -57,6 +57,7 @@ import { actionLabel, archiveReasonLabels, flowLabel, phases } from "./phases";
 import { SearchBox } from "./SearchBox";
 import { matchesSearch, parseSearch } from "./search";
 import { SettingsPage } from "./SettingsPage";
+import { WorkspaceDiff } from "./WorkspaceDiff";
 import { Button } from "./components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
 import type { FlowDetail, FlowSummary, JobSummary, Phase } from "./types";
@@ -897,7 +898,13 @@ function DetailPanel({
               </span>
             </div>
             <div className="links">
-              <span>{flow.repo}</span>
+              <a
+                href={`https://github.com/${flow.repo}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {flow.repo} ↗
+              </a>
               {flow.issue_number !== null && flow.issue_url && (
                 <a href={flow.issue_url} target="_blank" rel="noreferrer">
                   Issue #{flow.issue_number} ↗
@@ -906,11 +913,22 @@ function DetailPanel({
               {flow.issue_number === null && !flow.pr_number && (
                 <span>Flow #{flow.id}</span>
               )}
-              {flow.pr_url && (
-                <a href={flow.pr_url} target="_blank" rel="noreferrer">
-                  PR #{flow.pr_number} ↗
-                </a>
-              )}
+              <span className="pr-and-diff">
+                {flow.pr_url && (
+                  <a href={flow.pr_url} target="_blank" rel="noreferrer">
+                    PR #{flow.pr_number} ↗
+                  </a>
+                )}
+                {flow.worker_id &&
+                  !flow.worker_historical &&
+                  !flow.history_only && (
+                    <WorkspaceDiff
+                      key={flow.current_attempt_id}
+                      id={id}
+                      refresh={refresh}
+                    />
+                  )}
+              </span>
             </div>
             <FileTabRow split={visiblePanes.length > 1} move={placeFile}>
               {visiblePanes.map((pane, column) => {

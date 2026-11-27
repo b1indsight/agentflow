@@ -11,6 +11,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.contracts.receipts import decode_result_inbox
+from app.controler.api import create_app
 from app.controler.workers.transport import serve_worker
 from app.controler.workflow.service import ControlService
 from app.domain.models import DeliveryState, FlowState, JobState
@@ -21,6 +22,7 @@ from app.persistence.records import required
 from app.persistence.settings import SettingsStore, TextSetting
 from app.worker.config import WorkerSettings
 from app.worker.runtime import WorkerRuntime
+from tests.access import AccessIssuer
 from tests.github import RecordingGitHub, record_open_pull_request
 from tests.test_vcs import _git, _git_fixture
 from tests.test_worker_executor import RecordingAgent
@@ -163,6 +165,32 @@ async def remote_connection(server, worker):
         for outcome in outcomes:
             if isinstance(outcome, Exception):
                 raise outcome
+
+
+async def test_console_workspace_diff_includes_committed_and_live_changes(store, remote_flow):
+    # A pushed PR may be clean locally while the agent starts editing again in its workspace.
+    flow, server, _, worker, agent = remote_flow
+    issuer = AccessIssuer()
+    await server.access.close()
+    server.access = issuer.auth
+    app = create_app(server)
+    app.state.runtime = server
+    endpoint = f"/api/flows/{flow.id}/workspace-diff"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+                                 headers=issuer.headers()) as http:
+        async with remote_connection(server, worker):
+            await wait_until(lambda: store.flows.get_flow(flow.id).state is FlowState.REVIEW)
+            (_, repo), = agent.started
+            (repo / "draft").write_text("one\ntwo\n")
+            (repo / ".gitignore").write_text("build/\n")
+            _git("add", ".gitignore", cwd=repo)
+            (repo / "build").mkdir()
+            (repo / "build/cache").write_text("ignored\n")
+            status = ["git", "status", "--porcelain"]
+            before = await asyncio.to_thread(subprocess.check_output, status, cwd=repo)
+            assert (await http.get(endpoint)).json() == {"added": 2, "deleted": 1, "modified": 1}
+            assert await asyncio.to_thread(subprocess.check_output, status, cwd=repo) == before
+        assert (await http.get(endpoint)).json() is None
 
 
 @pytest.mark.parametrize("remote_flow", ["codex", "amp"], indirect=True)

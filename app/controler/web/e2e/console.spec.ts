@@ -222,6 +222,10 @@ test.beforeEach(async ({ page }) => {
           sources: [],
         },
       });
+    if (url.pathname.endsWith("/workspace-diff"))
+      return route.fulfill({
+        json: { added: 2021, deleted: 1800, modified: 1300 },
+      });
     if (url.pathname.endsWith("/jobs"))
       return route.fulfill({ json: pageOf([]) });
     if (url.pathname.endsWith("/inference-notices"))
@@ -252,6 +256,49 @@ test.beforeEach(async ({ page }) => {
       });
     return route.fulfill({ status: 500, json: { detail: "模拟失败" } });
   });
+});
+
+test("workspace diff shares the PR row and links the repository", async ({
+  page,
+}) => {
+  await page.goto("/#flow/42/conversation");
+  const header = page.locator(".detail-head-full");
+  const badge = header.getByRole("img", {
+    name: "工作区相对起点：新增 2021 行，删除 1800 行，修改 1300 行",
+  });
+  await expect(badge).toHaveText("+2k−1.8k~1.3k");
+  await expect(
+    header.getByRole("link", { name: /owner\/agentflow/ }),
+  ).toHaveAttribute("href", "https://github.com/owner/agentflow");
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const pr = (await header
+      .getByRole("link", { name: /PR #87/ })
+      .boundingBox())!;
+    const diff = (await badge.boundingBox())!;
+    expect(diff.y + diff.height / 2).toBeGreaterThanOrEqual(pr.y);
+    expect(diff.y + diff.height / 2).toBeLessThanOrEqual(pr.y + pr.height);
+    await header.screenshot({
+      path: `../../../.amp/in/artifacts/workspace-diff-${width}.png`,
+    });
+  }
+  for (const [state, body, label] of [
+    [
+      "clean",
+      '{"added":0,"deleted":0,"modified":0}',
+      "工作区相对起点：新增 0 行，删除 0 行，修改 0 行",
+    ],
+    ["offline", "null", "工作区差异暂不可用"],
+  ]) {
+    await page.route("**/workspace-diff", (route) =>
+      route.fulfill({ contentType: "application/json", body }),
+    );
+    await page.reload();
+    await expect(header.getByRole("img", { name: label })).toBeVisible();
+    await header.screenshot({
+      path: `../../../.amp/in/artifacts/workspace-diff-${state}.png`,
+    });
+  }
 });
 
 test("switching flows keeps navigation stable while only the detail panel loads or fails", async ({

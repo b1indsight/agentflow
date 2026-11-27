@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 
-from app.contracts.protocol import ProvisionError
+from app.contracts.protocol import ProvisionError, WorkspaceDiff
 from app.domain.models import WorkspaceInventory
 from app.worker.execution.git_identity import configure_git_identity
 from app.worker.execution.skills import clear_skill_links
@@ -30,6 +30,7 @@ from app.worker.execution.vcs import (
     require_repository,
     worktree_registered,
 )
+from app.worker.execution.workspace_diff import workspace_diff
 from app.worker.state.files import sync_directory, write_private_record
 
 Cleanup = Literal["released", "removed", "already_absent"]
@@ -61,6 +62,7 @@ class WorkspaceSlot(BaseModel):
     repository: str
     generation: int = Field(gt=0)
     binding: WorkspaceBinding | None = None
+    baseline: str | None = Field(default=None, pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
     relative_path: str
     kind: Literal["copy", "worktree"]
     directory_identity: tuple[int, int] | None = None
@@ -329,6 +331,18 @@ class RepositoryWorkspaces:
     def _repository_lock(self, repository: str) -> asyncio.Lock:
         return self._repository_locks.setdefault(repository, asyncio.Lock())
 
+    async def diff(self, flow_id: int, workspace: str, generation: int) -> WorkspaceDiff | None:
+        """Return counts only while the requested generation still owns this directory."""
+        slot = next((s for s in self._load().slots if s.slot_id == workspace), None)
+        if (slot is None or slot.binding is None or slot.binding.flow_id != flow_id
+                or slot.generation != generation or slot.baseline is None or slot.release_job_id is not None):
+            return None
+        path = self._verify_slot(slot)
+        require_repository(path)
+        result = await workspace_diff(path, slot.baseline)
+        current = self._owned(self._load(), slot.binding)
+        return result if current.release_job_id is None and self._verify_slot(current) == path else None
+
     async def configure_git_identity(
         self, binding: WorkspaceBinding, bot_login: str, bot_user_id: int,
     ) -> None:
@@ -379,13 +393,17 @@ class RepositoryWorkspaces:
                     previous.binding = None
             if generation > slot.generation:
                 slot.release_job_id = slot.release_assignment_token = None
-            slot.binding, slot.generation = binding, generation
+            slot.binding, slot.generation, slot.baseline = binding, generation, None
             self._write(manifest)
             path = self._materialize(slot)
             self._write(manifest)
             clear_skill_links(path, self.skill_receipt(binding))
             await self._prepare(binding, slot.kind, path, seed, revision)
-            self._verify_slot(self._owned(self._load(), binding))
+            manifest = self._load()
+            slot = self._owned(manifest, binding)
+            self._verify_slot(slot)
+            slot.baseline = revision
+            self._write(manifest)
             return binding
 
     async def _prepare(

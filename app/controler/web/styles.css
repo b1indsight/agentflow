@@ -27,6 +27,9 @@
   --surface: #f1f4f7;
   --surface-soft: #fafbfd;
   --destructive: #b42318;
+  --diff-added: #1a7f37;
+  --diff-deleted: #b42318;
+  --diff-modified: #926200;
   --status-gray: #8e8e93;
   --status-blue: #0a84ff;
   --status-yellow: #febc2e;
@@ -1106,6 +1109,29 @@ svg {
   gap: 14px;
   font-size: var(--text-meta);
   flex-wrap: wrap;
+}
+.pr-and-diff,
+.workspace-diff {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.pr-and-diff {
+  gap: inherit;
+}
+.workspace-diff {
+  gap: 4px;
+  font: var(--text-small) / 1.5 var(--mono);
+  color: var(--muted);
+}
+.workspace-diff .added {
+  color: var(--diff-added);
+}
+.workspace-diff .deleted {
+  color: var(--diff-deleted);
+}
+.workspace-diff .modified {
+  color: var(--diff-modified);
 }
 .detail-activity {
   background: transparent;
