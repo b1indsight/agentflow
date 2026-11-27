@@ -1,8 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { ArrowDown, RefreshCw, Save } from "lucide-react";
+import { ArrowDown, RefreshCw } from "lucide-react";
 import { api, getFlowTargets, settingPath } from "./api";
 import { Button } from "./components/ui/button";
-import { SettingSelect } from "./SettingSelect";
+import { SettingActions, SettingSelect } from "./SettingControls";
 import type { FlowTarget } from "./types";
 
 const path = settingPath("skill-repository");
@@ -115,7 +115,10 @@ export function SkillRepositorySetting({ refresh }: { refresh: number }) {
         {readError && <p className="settings-error">{readError}</p>}
         {message && <p>{message}</p>}
       </div>
-      <div className="settings-actions">
+      <SettingActions
+        submitLabel="保存仓库"
+        disabled={saved === undefined || saving || choice === (saved ?? "")}
+      >
         {next && (
           <Button
             type="button"
@@ -139,15 +142,7 @@ export function SkillRepositorySetting({ refresh }: { refresh: number }) {
             重新读取仓库
           </Button>
         )}
-        <Button
-          type="submit"
-          className="btn settings-save"
-          disabled={saved === undefined || saving || choice === (saved ?? "")}
-        >
-          <Save />
-          保存仓库
-        </Button>
-      </div>
+      </SettingActions>
     </form>
   );
 }

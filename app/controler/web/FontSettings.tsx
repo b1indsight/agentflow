@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { Save } from "lucide-react";
-import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
+import { SettingActions, SettingField } from "./SettingControls";
 
 const fields = [
   { name: "body-font", label: "正文字体", placeholder: "默认：系统字体" },
@@ -75,8 +74,7 @@ export function FontSettings() {
       </p>
       <div className="settings-agent">
         {fields.map(({ name, label, placeholder }) => (
-          <div key={name} className="settings-field">
-            <label htmlFor={name}>{label}</label>
+          <SettingField key={name} id={name} label={label}>
             <Input
               id={name}
               name={name}
@@ -92,19 +90,15 @@ export function FontSettings() {
                 setMessage("");
               }}
             />
-          </div>
+          </SettingField>
         ))}
       </div>
       <p>
         预览：正文 AgentFlow · <code>const flow = 42;</code>
       </p>
-      <div className="settings-actions">
+      <SettingActions submitLabel="保存字体">
         <span aria-live="polite">{message}</span>
-        <Button type="submit" className="btn settings-save">
-          <Save aria-hidden="true" />
-          保存字体
-        </Button>
-      </div>
+      </SettingActions>
     </form>
   );
 }
