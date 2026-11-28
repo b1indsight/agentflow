@@ -12,11 +12,10 @@ import {
 } from "./activity";
 import type { ActivityItem, ActivityPage } from "./types";
 import {
-  ACTIVITY_CACHE_ROWS,
   ACTIVITY_PROVENANCE_ROWS,
   activityIdentity,
+  mergeActivityPage,
   readConversationProvenance,
-  refreshConversationSnapshot,
   type ConversationState,
 } from "./useConversation";
 
@@ -55,14 +54,15 @@ function record(
 }
 
 function stateFor(items: ActivityItem[], snapshot = 1): ConversationState {
+  const records = items.map(activityIdentity);
   return {
-    records: items.map(activityIdentity),
-    items: new Map(items.map((item, index) => [index, item])),
+    records,
+    items: new Map(items.map((item) => [item.key, item])),
     pages: Array.from({ length: Math.ceil(items.length / 20) }, (_, page) => ({
       cursor: page ? String(page * 20) : null,
-      indexes: items
-        .slice(page * 20, page * 20 + 20)
-        .map((_, i) => page * 20 + i),
+      records: records.slice(page * 20, page * 20 + 20),
+      snapshot,
+      upper: records[Math.min(items.length, page * 20 + 20) - 1],
     })),
     snapshot,
     total: items.length,
@@ -432,7 +432,7 @@ test("lazy provenance rereads only a bounded metadata page in its pinned snapsho
     }),
   );
   const state = stateFor(full, 2);
-  state.items = new Map([[44, full[44]]]);
+  state.items = new Map([[full[44].key, full[44]]]);
   const requested: (string | null)[] = [];
   mockActivity(t, (url) => {
     assert.equal(url.searchParams.get("snapshot"), "2");
@@ -473,159 +473,30 @@ test("lazy provenance rereads only a bounded metadata page in its pinned snapsho
   assert.equal(tail.items[6].key, "record-44");
 });
 
-test("refresh follows the latest logical target while a page is waiting, without any DOM anchor", async (t) => {
-  const full = ["a", "b", "c", "d"].map((key) => record(key));
-  const before = stateFor(full);
-  before.items.clear();
-  let anchor: string | null = "d";
-  let release!: (value: ActivityPage) => void;
-  let waiting!: () => void;
-  const blocked = new Promise<ActivityPage>((resolve) => {
-    release = resolve;
-  });
-  const started = new Promise<void>((resolve) => {
-    waiting = resolve;
-  });
-  const requested: (string | null)[] = [];
-  mockActivity(t, (url) => {
-    const cursor = url.searchParams.get("cursor");
-    requested.push(cursor);
-    if (!cursor) return page([full[0]], "next");
-    assert.equal(url.searchParams.get("snapshot"), "2");
-    assert.equal(cursor, "next");
-    waiting();
-    return blocked;
-  });
-  const refresh = refreshConversationSnapshot(
-    42,
+test("backfilled history can span two reads without losing its old end or duplicating the new tail", () => {
+  // x and y arrived late; z is already in the new tail when we revisit the old (a,c] range.
+  const a = record("a"),
+    b = record("b"),
+    c = record("c"),
+    z = record("z");
+  const x = record("a-1"),
+    y = record("a-2");
+  const wanted = new Set<string>();
+  const before = stateFor([a, b, c]);
+  let s = mergeActivityPage(
     before,
-    () => anchor,
-    new AbortController().signal,
+    { ...page([z], "Z"), has_more: false },
+    "C",
+    wanted,
   );
-  await started;
-  anchor = "a";
-  release(page([full[1]], "unrelated"));
-  const result = await refresh;
-  assert.deepEqual(requested, [null, "next"]);
-  assert.equal(result.anchorKey, "a");
+  s = mergeActivityPage(s, page([a, x, y], "Y"), null, wanted, s.pages[0]);
+  s = mergeActivityPage(s, page([b, c, z], "Z"), "Y", wanted, s.pages[1]);
   assert.deepEqual(
-    result.state.records.map((item) => item.key),
-    ["a", "b"],
+    s.records.map((i) => i.key),
+    ["a", "a-1", "a-2", "b", "c", "z"],
   );
-  assert.equal(before.items.size, 0);
-});
-
-test("refresh finds a newly selected later target and keeps identities after the body budget is exhausted", async (t) => {
-  const full = Array.from({ length: 300 }, (_, i) =>
-    record(`record-${String(i).padStart(3, "0")}`, {
-      occurred_at: new Date(
-        Date.parse("2026-10-27T00:00:00Z") + i * 1000,
-      ).toISOString(),
-    }),
-  );
-  const before = stateFor(full);
-  before.items.clear();
-  let anchor = full[0].key;
-  const requested: (string | null)[] = [];
-  mockActivity(t, (url) => {
-    const params = url.searchParams;
-    const cursor = params.get("cursor");
-    requested.push(cursor);
-    if (!cursor) {
-      anchor = full[259].key;
-      assert.equal(params.get("refresh"), "true");
-      assert.equal(params.get("since"), "1");
-    } else {
-      // Rebuilding a deep reading position must not queue another source sync for every page.
-      assert.equal(params.has("refresh"), false);
-      assert.equal(params.has("since"), false);
-      assert.equal(params.get("snapshot"), "2");
-    }
-    const start = Number(cursor ?? 0);
-    const end = start + Number(params.get("limit"));
-    return {
-      ...page(full.slice(start, end), end < full.length ? String(end) : null),
-      total: full.length,
-    };
-  });
-  const result = await refreshConversationSnapshot(
-    42,
-    before,
-    () => anchor,
-    new AbortController().signal,
-  );
-  assert.equal(requested.length, 13);
-  assert.equal(result.anchorKey, full[259].key);
-  assert.equal(result.state.records.length, 260);
-  assert.equal(result.state.items.size, ACTIVITY_CACHE_ROWS);
-  assert.equal(result.state.items.has(0), false);
-  const rows = buildConversationRows(result.state.records, new Set());
-  assert.equal(rows[0].kind, "summary");
-  if (rows[0].kind === "summary") assert.equal(rows[0].group.last, 259);
-});
-
-test("missing refresh targets fall back to known neighbors rather than fetching unrelated history", async (t) => {
-  const previous = ["a", "b", "c"].map((key) => record(key));
-  const before = stateFor(previous);
-  const requested: (string | null)[] = [];
-  let predecessorExists = true;
-  mockActivity(t, (url) => {
-    const cursor = url.searchParams.get("cursor");
-    requested.push(cursor);
-    if (!predecessorExists) return page([previous[2]], "unrelated");
-    return cursor
-      ? page([previous[2]], "unrelated")
-      : page([previous[0]], "neighbor");
-  });
-  const result = await refreshConversationSnapshot(
-    42,
-    before,
-    () => "b",
-    new AbortController().signal,
-  );
-  assert.equal(result.anchorKey, "a");
-  assert.deepEqual(requested, [null, "neighbor"]);
-  assert.equal(result.state.has_more, true);
-  requested.length = 0;
-  predecessorExists = false;
-  const successor = await refreshConversationSnapshot(
-    42,
-    before,
-    () => "b",
-    new AbortController().signal,
-  );
-  assert.equal(successor.anchorKey, "c");
-  assert.deepEqual(requested, [null]);
-});
-
-test("refresh reuses unchanged snapshots and rejects mixed snapshot pages", async (t) => {
-  const before = stateFor([record("a"), record("b")]);
-  let changed = false;
-  const unchanged = mockActivity(t, (url) => {
-    if (!changed) return { ...page([], null, 1), changes: { updated: 0 } };
-    return url.searchParams.has("cursor")
-      ? page([record("b")], null, 3)
-      : page([record("a")], "next");
-  });
-  const result = await refreshConversationSnapshot(
-    42,
-    before,
-    () => "b",
-    new AbortController().signal,
-  );
-  assert.equal(result.state.records, before.records);
-  assert.equal(result.state.items, before.items);
-  assert.equal(unchanged.mock.callCount(), 1);
-  changed = true;
-  await assert.rejects(
-    refreshConversationSnapshot(
-      42,
-      before,
-      () => "b",
-      new AbortController().signal,
-    ),
-    /快照/,
-  );
+  assert.equal(s.next_cursor, "Z");
+  assert.equal(s.has_more, false);
 });
 
 test("GitHub and Agent content cannot inject HTML or unsafe destinations", () => {

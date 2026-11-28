@@ -60,6 +60,33 @@ def test_archive_versions_snapshots_and_prior_interactions(store):
         archive.page(flow.id + 1, cursor=before.next_cursor, limit=20)
 
 
+def test_activity_tail_resumes_in_latest_or_explicit_snapshot(store):
+    # A late observation can fall before the reader's EOF while another arrives after it.
+    flow = store.flows.create_flow("octo/repo", 7, 1)
+    archive = ActivityStore(store._db)
+
+    def append(key, second):
+        timestamp = flow.created_at + timedelta(seconds=second)
+        archive.append(flow.id, Observation(key=key, source="worker", kind="message",
+                                           author="agent", occurred_at=timestamp, updated_at=timestamp))
+
+    for second, key in enumerate("abc"):
+        append(key, second)
+    old = archive.page(flow.id)
+    assert not old.has_more and old.next_cursor
+    append("x", 0)
+    backfill = archive.page(flow.id, cursor=old.next_cursor)
+    assert backfill.snapshot > old.snapshot and not backfill.items and backfill.next_cursor
+    append("d", 2)  # Same timestamp as c; the key breaks the tie.
+    tail = archive.page(flow.id, cursor=backfill.next_cursor)
+    assert [item.key for item in tail.items] == ["d"]
+    assert tail.snapshot > backfill.snapshot and not tail.has_more and tail.next_cursor
+    assert not archive.page(flow.id, cursor=tail.next_cursor).items
+    assert not archive.page(flow.id, cursor=old.next_cursor, snapshot=old.snapshot).items
+    assert archive.page(flow.id, cursor=old.next_cursor, snapshot=tail.snapshot).items == tail.items
+    assert [item.key for item in archive.page(flow.id, snapshot=tail.snapshot).items] == list("axbcd")
+
+
 def test_check_workflow_name_recovers_after_temporary_lookup_failure(store):
     # Actions enrichment can recover A→B→A without changing a completed check's remote clock.
     flow = store.flows.create_flow("octo/repo", 7, 1)

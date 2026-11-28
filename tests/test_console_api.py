@@ -1186,8 +1186,8 @@ def test_conversation_excludes_flow_audit_from_items_pagination_and_changes(cons
         second = client.get(
             path, headers=headers, params={"limit": 1, "cursor": first["next_cursor"]}
         ).json()
-        assert second["snapshot"] == first["snapshot"] and second["total"] == 2
-        assert not second["has_more"] and second["next_cursor"] is None
+        assert second["snapshot"] > first["snapshot"] and second["total"] == 2
+        assert not second["has_more"] and second["next_cursor"]
         assert {item["source"] for item in first["items"] + second["items"]} == {
             "issue.comments",
             "worker",

@@ -24,13 +24,13 @@
 4. **对照消息里的文件。** 直接点击 Worker 消息里的文件链接，或聚焦后按 Enter。详情区有 960 px 宽时，原消息留在左边，文件在右边独立滚动；达到 1440 px 时可以再打开一栏。栏位不足时，在最右栏的文件名页签之间切换。手机上仍是单栏，选「会话」回到阅读位置。[并排预览与窄屏切换测试](../../app/controler/web/e2e/console.spec.ts#L7168-L7281)
 5. **把文件移到想读的位置。** 按住侧栏文件的页签头，拖到「执行记录」右边的插入线处松开。若这是唯一的侧栏文件，正文会占满详情区；点「会话」回到原消息。三个区域并排时，也可以从右栏拖到中栏的某个文件前后，左栏不变。[跨栏拖放浏览器用例](../../app/controler/web/e2e/console.spec.ts#L7046-L7164)
 
-翻页和刷新在[活动接口 `activity`](../../app/controler/console/api.py#L395-L420)分开：有 `refresh` 时先登记要同步这个 Flow，再调用 [`ActivityStore.page`](../../app/persistence/activity.py#L303-L338)。它用 Flow ID、页大小、快照版本和游标读出 `ActivityPage`；首次读取以已提交的活动版本为上限，续页沿用游标中的版本。后台稍后领取同步任务，[`ConsoleSynchronizer.sync`](../../app/controler/console/sync.py#L102-L121)用另一套游标向 worker 读一页，将记录、下一游标和缺口说明交给 [`ConsoleSyncStore.finish`](../../app/persistence/console_sync.py#L98-L144)。后者在事务内核对自己仍有权发布本页，再写活动；旧任务迟到会返回 `False`。[未提交页面对读者不可见的测试](../../tests/test_console_sync.py#L700)解释了为什么同一页不会显示一半新、一半旧的同步结果。
+翻页和刷新都从已读页尾读最新已提交的活动；显式传 `snapshot` 可从同一位置读指定版本。只有 `refresh=true` 会在[活动接口](../../app/controler/console/api.py#L395-L420)登记后台同步。后台稍后领取任务，[`ConsoleSynchronizer.sync`](../../app/controler/console/sync.py#L102-L121)用另一套游标向 worker 读一页，将记录、下一游标和缺口说明交给 [`ConsoleSyncStore.finish`](../../app/persistence/console_sync.py#L98-L144)。后者在事务内核对自己仍有权发布本页，再写活动；旧任务迟到会返回 `False`。[未提交页面对读者不可见的测试](../../tests/test_console_sync.py#L700)解释了为什么同一页不会显示一半新、一半旧的同步结果。
 
 ### 实例：刷新之前和之后各看什么
 
 假设第一次打开页面时已经有「修复键盘导航」这段讨论，但没有测试输出。先记下你查看的是哪个 Flow、哪次执行以及来源提示。如果状态是「尚无执行会话」，即使 GitHub 评论已经可见，采集器也还拿不到编码记录；如果是「会话读取超时」，说明最近一次读取没有按时完成。两种情况都可以继续读已保存的评论，不要先重发任务来试探 Agent 是否在线。[来源状态与已存正文的界面断言](../../app/controler/web/e2e/console.spec.ts#L2137-L2165)
 
-若要看浏览器到底在等谁，可以在已经通过 owner 认证的同源页面查看网络请求。以 `GET /api/flows/42/activity?refresh=true&limit=20` 为例，`refresh=true` 登记一次后台同步需求；响应仍是从活动存储读出的页面。比如发布版本停在 12，本次返回完全可以仍是版本 12。在这一快照里续页时，后台即使已经提交了版本 13，续页也沿用原版本。下一次不带旧游标读取已提交的新快照，才有机会看到新采集的内容。这里的 12、13 是说明读法的假设值，并非每次点击都会增加版本。[活动路由参数](../../app/controler/console/api.py#L394-L420) · [快照上限校验](../../app/persistence/activity.py#L303-L338)
+在浏览器 Network 面板中，假设版本 605 已读到 `a,b,c`，版本 734 补录了 `x`、追加了 `d`。刷新发出 `GET /api/flows/42/activity?cursor=C&refresh=true&since=605`，其中 `C` 是 `c` 的游标。响应只返回 `d`，不会为了找回阅读位置而从头翻页。向上翻回旧页时，浏览器才在 734 中读这段区间，显示 `a,x,b,c`。如果只有补录而没有追加，刷新返回空页和新版本，上翻仍能看到 `x`。[游标和快照的数据库回归](../../tests/test_console_archive.py#L63-L87) · [浏览器请求与阅读位置回归](../../app/controler/web/e2e/console.spec.ts)
 
 如果旧快照的工具调用没有结果，先展开同一执行里相邻的工具活动，确认缺的是结果还是折叠的正文。若只有较长正文加载失败，点正文自己的重试；若当前已发布页本身没有后续记录，看来源状态并刷新。两个操作影响的范围不同：前者尝试读回已存的文字，后者让后台有机会发现新的来源内容。若仍有缺口，再用第三节的方法查原 session。[工具折叠行为](../../app/controler/web/e2e/console.spec.ts#L2645-L2699) · [重试读取正文](../../app/controler/web/e2e/console.spec.ts#L3580-L3650)
 
