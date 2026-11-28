@@ -194,6 +194,7 @@ class JobStore(Repository):
             )
             if retired.rowcount != 1:
                 raise ValueError("cannot retire an executing preparation")
+            self._db.job_finished(job.required_flow_id, job.id, job.kind, JobState.DONE)
             connection.execute(
                 "UPDATE workers w SET current_job_id=NULL FROM jobs j WHERE j.id=%s"
                 " AND w.worker_id=j.assigned_worker_id AND w.workspace=j.workspace"
@@ -284,6 +285,7 @@ class JobStore(Repository):
                 (state, now, now, job_id, JobState.RUNNING),
             ).fetchone()
             if completed is not None:
+                tx.job_finished(candidate.required_flow_id, job_id, candidate.kind, state)
                 # Unstarted control outcomes are preparation failures or explicit
                 # request-validation refusals, neither of which has a worker journal.
                 # A worker terminal proves exit; a started control failure does not.

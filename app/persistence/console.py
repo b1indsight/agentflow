@@ -5,9 +5,13 @@ import hashlib
 import json
 import re
 import shlex
+from collections.abc import Callable
+
+from psycopg import Connection
 
 from app.contracts.console import (
     ConsoleFailure,
+    FlowChange,
     FlowDetail,
     FlowPage,
     FlowSummary,
@@ -23,6 +27,10 @@ from app.persistence.repository import Repository
 
 PHASES: tuple[Phase, ...] = ("queued", "running", "review", "blocked", "archived")
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_CARD = (
+    "SELECT flow_id,facts-'delivery_body'-'delivery_title' AS facts,"
+    "coalesce(facts->>'task_title',title,facts->>'delivery_title') AS title,state_version FROM console_flows"
+)
 
 
 class PageCursor(Cursor):
@@ -94,6 +102,15 @@ def _filters(q: str) -> tuple[str, list[object]]:
     except ValueError as error:
         raise ConsoleFailure("search_invalid", 422) from error
     return " AND ".join(clauses), values
+
+
+def _counts(connection: Connection[Row], where: str, values: list[object]) -> dict[Phase, int]:
+    counts = dict.fromkeys(PHASES, 0)
+    for row in connection.execute(
+        f"SELECT facts->>'phase' AS phase,count(*) AS total FROM console_flows WHERE {where} GROUP BY 1", values
+    ):
+        counts[row["phase"]] = row["total"]
+    return counts
 
 
 def _summary(row: Row) -> FlowSummary:
@@ -205,6 +222,17 @@ def _explanation(row: Row) -> tuple[str, str]:
 class ConsoleStore(Repository):
     """Own console display state without changing execution or making network calls."""
 
+    def watch_flows(self, q: str) -> Callable[[int], FlowChange]:
+        """Validate the search before streaming; read each changed card and totals at one snapshot."""
+        where, values = _filters(q)
+
+        def read(flow_id: int) -> FlowChange:
+            with self._db.read_snapshot() as tx, tx.connection() as connection:
+                row = connection.execute(f"{_CARD} WHERE flow_id=%s AND {where}", (flow_id, *values)).fetchone()
+                return FlowChange(item=_summary(row) if row else None, counts=_counts(connection, where, values))
+
+        return read
+
     def flows(
         self, *, q: str = "", phase: Phase | None = None, cursor: str | None = None, limit: int = 50,
         repo_scope: str | None = None,
@@ -219,12 +247,7 @@ class ConsoleStore(Repository):
             values.extend(repo_values)
         scope = _scope("flows", q, phase, *repo_values)
         with self._db.read_snapshot() as tx, tx.connection() as connection:
-            counts = {key: 0 for key in PHASES}
-            for row in connection.execute(
-                f"SELECT facts->>'phase' AS phase,count(*) AS total FROM console_flows WHERE {where} GROUP BY 1",
-                values,
-            ).fetchall():
-                counts[row["phase"]] = row["total"]
+            counts = _counts(connection, where, values)
             ceiling = connection.execute(
                 f"SELECT coalesce(max(flow_id),0) AS n FROM console_flows WHERE {repo_where}", repo_values,
             ).fetchone()
@@ -236,12 +259,8 @@ class ConsoleStore(Repository):
             )
             column = " AND facts->>'phase'=%s" if phase else ""
             rows = connection.execute(
-                "SELECT flow_id,facts-'delivery_body'-'delivery_title' AS facts,"
-                "coalesce(facts->>'task_title',title,facts->>'delivery_title') AS title,state_version"
-                " FROM console_flows WHERE "
-                + where
-                + column
-                + " AND flow_id<=%s AND flow_id<%s ORDER BY flow_id DESC LIMIT %s",
+                f"{_CARD} WHERE {where}{column}"
+                " AND flow_id<=%s AND flow_id<%s ORDER BY flow_id DESC LIMIT %s",
                 (
                     *values,
                     *((phase,) if phase else ()),

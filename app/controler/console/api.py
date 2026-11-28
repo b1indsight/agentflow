@@ -6,6 +6,7 @@ from functools import partial
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.catalog import CatalogGroup
@@ -29,6 +30,7 @@ from app.contracts.console import (
     UpdateSettingsRequest,
     UpdateSkillRepositoryRequest,
 )
+from app.controler.console.events import flow_events
 from app.controler.runtime import ServerRuntime
 from app.controler.workers.catalog import read_catalog
 from app.controler.workflow.service import AgentTaskRejected, ControlService, RetryRejected
@@ -129,6 +131,14 @@ async def repos(
     return await runtime.console.db(
         partial(ConsoleStore(runtime.database).repos, cursor=cursor, limit=limit)
     )
+
+
+@router.get("/flow-events", response_class=StreamingResponse)
+async def events(request: Request, q: str = Query(default="", max_length=2000)) -> StreamingResponse:
+    runtime: ServerRuntime = request.app.state.runtime
+    frames = flow_events(runtime, ConsoleStore(runtime.database).watch_flows(q), request.state.owner_expires_at,
+                         request.headers.get("last-event-id"))
+    return StreamingResponse(frames, media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
 
 @router.get("/flows/{flow_id}", response_model=FlowDetail)

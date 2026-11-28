@@ -12,6 +12,7 @@ from psycopg import Connection
 from psycopg.rows import class_row, dict_row
 from psycopg_pool import ConnectionPool
 
+from app.communication.flow_events import DisplayEvent
 from app.domain.models import Flow, Job, utcnow
 from app.persistence.console_schema import CONSOLE_FACTS_VIEW
 from app.persistence.records import Row
@@ -95,6 +96,12 @@ def _pending_schema_updates(connection: Connection[Row], relations: dict[str, st
             require_worker_key(connection)
             updates = [ddl for column, ddl in COLUMN_ADDITIONS.items() if column not in columns]
             if connection.execute(
+                "SELECT 1 FROM pg_trigger WHERE (tgrelid,tgname) IN "
+                "(('jobs'::regclass,'console_job_finished'),('console_flows'::regclass,'console_notify_flow'))"
+            ).fetchone():
+                updates.append("DROP TRIGGER IF EXISTS console_job_finished ON jobs; "
+                               "DROP TRIGGER IF EXISTS console_notify_flow ON console_flows;")
+            if connection.execute(
                 "SELECT 1 WHERE strpos(pg_get_viewdef('console_facts'::regclass), quote_literal('awaiting_input')) = 0"
             ).fetchone():
                 updates.append(CONSOLE_FACTS_VIEW)
@@ -136,6 +143,8 @@ class Database:
         self._clock = clock
         self.lease_duration = lease_duration
         self.recovery_grace = recovery_grace
+        self.on_flow_events: Callable[[list[DisplayEvent]], None] | None = None
+        self._finished_jobs: list[DisplayEvent] = []
         self._bound_connection: Connection[Row] | None = None
         self._transaction_closed = False
         self._read_snapshot = False
@@ -172,10 +181,24 @@ class Database:
         with self.connection() as connection, connection.transaction():
             bound = copy(self)
             bound._bound_connection = connection
+            bound._finished_jobs = []
             try:
                 yield bound
             finally:
                 bound._transaction_closed = True
+        if self._bound_connection is not None:
+            # A successful savepoint can still be rolled back by its parent.
+            self._finished_jobs.extend(bound._finished_jobs)
+        elif bound._finished_jobs and (notify := self.on_flow_events) is not None:
+            notify(bound._finished_jobs)
+
+    def job_finished(self, flow_id: int, job_id: int, kind: str, state: str) -> None:
+        """Hold a display notice until the outer workflow transaction commits."""
+        if self._bound_connection is None or self._transaction_closed:
+            raise RuntimeError("job completion requires an active workflow transaction")
+        if self.on_flow_events is not None:
+            self._finished_jobs.append(DisplayEvent(event_type="flow.job.finished.v1", flow_id=flow_id,
+                                                   payload={"job_id": job_id, "kind": kind, "state": state}))
 
     @contextmanager
     def read_snapshot(self) -> Iterator[Database]:

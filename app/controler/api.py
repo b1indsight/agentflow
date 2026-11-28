@@ -61,7 +61,7 @@ async def _wait_for_disconnect(request: Request, cancel_scope: anyio.CancelScope
 async def _require_owner(request: Request) -> None:
     runtime: ServerRuntime = request.app.state.runtime
     assertions = request.headers.getlist("cf-access-jwt-assertion")
-    await runtime.access.authenticate(assertions[0] if len(assertions) == 1 else None)
+    request.state.owner_expires_at = await runtime.access.authenticate(assertions[0] if len(assertions) == 1 else None)
 
 
 def create_app(runtime: ServerRuntime | None = None) -> FastAPI:

@@ -500,7 +500,7 @@ class AssignmentStore(Repository):
                 " AND kind<>'inference'"
                 " AND assignment_token=%s AND EXISTS (SELECT 1 FROM workers"
                 " WHERE repository IS NULL AND worker_id=%s AND connection_epoch=%s) AND "
-                + CURRENT_WORKSPACE_SQL,
+                + CURRENT_WORKSPACE_SQL + " RETURNING flow_id,kind",
                 (
                     state,
                     self._db.now(),
@@ -512,14 +512,15 @@ class AssignmentStore(Repository):
                     worker_id,
                     connection_epoch,
                 ),
-            )
-            if result.rowcount == 1:
+            ).fetchone()
+            if result is not None:
+                tx.job_finished(result["flow_id"], job_id, result["kind"], state)
                 connection.execute(
                     "UPDATE workers w SET current_job_id=NULL FROM jobs j WHERE j.id=%s"
                     " AND w.worker_id=j.assigned_worker_id AND w.workspace=j.workspace"
                     " AND w.generation=j.generation AND w.current_job_id=j.id", (job_id,),
                 )
-        return result.rowcount == 1
+        return result is not None
 
     def _lock_preparation(self, job_id: int, worker: str, token: str, epoch: str) -> Job | None:
         job = JobStore(self._db).get_job(job_id)
@@ -694,14 +695,14 @@ class AssignmentStore(Repository):
         with self._db.transaction() as tx, tx.connection() as connection:
             tx.lock_workflow(flow_id)
             ReviewStore(tx).cancel(flow_id)
-            connection.execute(
+            retired = connection.execute(
                 "WITH retired AS (UPDATE jobs SET state=%s, last_error=%s, updated_at=%s WHERE flow_id=%s"
                 " AND kind<>'inference'"
                 " AND (state=%s OR (state='running' AND started_at IS NULL AND dispatch_authorized_at IS NULL"
                 " AND EXISTS (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.archive_reason IS NOT NULL)))"
-                " AND result_received_at IS NULL RETURNING id)"
-                " UPDATE workers SET current_job_id=NULL"
-                " WHERE current_job_id IN (SELECT id FROM retired)",
+                " AND result_received_at IS NULL RETURNING id,kind),"
+                " released AS (UPDATE workers SET current_job_id=NULL WHERE current_job_id IN (SELECT id FROM retired))"
+                " SELECT id,kind FROM retired ORDER BY id",
                 (
                     JobState.FAILED,
                     reason,
@@ -709,7 +710,9 @@ class AssignmentStore(Repository):
                     flow_id,
                     JobState.QUEUED,
                 ),
-            )
+            ).fetchall()
+            for row in retired:
+                tx.job_finished(flow_id, row["id"], row["kind"], JobState.FAILED)
             InferenceStore(tx).cancel_flow_inference(flow_id)
 
     def sweep_expired_assignments(self) -> tuple[int, int]:

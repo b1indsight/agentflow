@@ -189,6 +189,13 @@ class FlowPage(ConsoleModel):
     has_more: bool
 
 
+class FlowChange(ConsoleModel):
+    """One committed card and query-wide counts; null removes it from this search."""
+
+    item: FlowSummary | None
+    counts: dict[Phase, int]
+
+
 class RepositoryPage(ConsoleModel):
     items: list[str]
     next_cursor: str | None

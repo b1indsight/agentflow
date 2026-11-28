@@ -168,8 +168,13 @@ class StopStore(Repository):
                     " AND generation=%s AND current_job_id=%s",
                     (worker_id, intent.workspace, intent.generation, intent.job_id),
                 )
-                conn.execute("UPDATE jobs SET state='failed',last_error='execution stopped',updated_at=%s"
-                             " WHERE id=%s AND result_received_at IS NULL", (tx.now(), intent.job_id))
+                stopped = conn.execute(
+                    "UPDATE jobs j SET state='failed',last_error='execution stopped',updated_at=%s"
+                    " FROM jobs prior WHERE j.id=%s AND j.result_received_at IS NULL AND prior.id=j.id"
+                    " RETURNING prior.state,j.kind", (tx.now(), intent.job_id),
+                ).fetchone()
+                if stopped and stopped["state"] in ("queued", "running"):
+                    tx.job_finished(intent.flow_id, intent.job_id, stopped["kind"], "failed")
                 if JobStore(tx).has_pending_result(receipt.flow_id) or conn.execute(
                         "SELECT 1 FROM result_effects e JOIN jobs j ON j.id=e.job_id"
                         f" WHERE j.flow_id=%s AND {RESOURCE_JOB_SQL} AND {UNCONFIRMED_EFFECT_SQL} LIMIT 1",

@@ -60,7 +60,13 @@ import { SettingsPage } from "./SettingsPage";
 import { WorkspaceDiff } from "./WorkspaceDiff";
 import { Button } from "./components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
-import type { FlowDetail, FlowSummary, JobSummary, Phase } from "./types";
+import type {
+  FlowDetail,
+  FlowJobFinishedV1,
+  FlowSummary,
+  JobSummary,
+  Phase,
+} from "./types";
 import { useConversation } from "./useConversation";
 import { SavedDetails, WindowList } from "./windowing";
 import { focusableControls } from "./focus";
@@ -1761,7 +1767,9 @@ export default function App() {
     }
     return { columns, counts };
   }, [pages, pageCounts, updates, query]);
-  const boardRequests = useRef(new Map<Phase, AbortController>());
+  const boardRequests = useRef(
+    new Map<Phase, { controller: AbortController; changed: Set<number> }>(),
+  );
   useEffect(() => {
     const sync = () => {
       setCurrent(route());
@@ -1793,9 +1801,10 @@ export default function App() {
   const load = (phase: Phase, reset = false) => {
     const prior = columns[phase];
     if ((prior.busy || !prior.more) && !reset) return;
-    boardRequests.current.get(phase)?.abort();
+    boardRequests.current.get(phase)?.controller.abort();
     const c = new AbortController();
-    boardRequests.current.set(phase, c);
+    const changed = new Set<number>();
+    boardRequests.current.set(phase, { controller: c, changed });
     setColumns((x) => ({
       ...x,
       [phase]: {
@@ -1816,13 +1825,15 @@ export default function App() {
       c.signal,
     )
       .then((page) => {
-        if (c.signal.aborted || boardRequests.current.get(phase) !== c) return;
+        if (c.signal.aborted) return;
         const first = reset || prior.next === null;
-        if (first) setCounts((x) => ({ ...x, [phase]: page.counts[phase] }));
-        // A flow moved here can reappear below the old cursor. Keep its original
-        // list membership as the baseline for the count adjustment.
-        let items = page.items;
+        if (first && !changed.size)
+          setCounts((x) => ({ ...x, [phase]: page.counts[phase] }));
+        // A delayed page must not restore a card already moved by the stream.
+        let items = page.items.filter((item) => !changed.has(item.id));
         if (!first) {
+          // A move inferred from a detail read can reappear below the old cursor.
+          // Keep its original membership as the baseline for the count adjustment.
           const known = new Set(
             phases.flatMap(([p]) => pages[p].items.map((f) => f.id)),
           );
@@ -1832,32 +1843,86 @@ export default function App() {
             return false;
           });
         }
-        setColumns((x) => ({
-          ...x,
-          [phase]: {
-            items: first ? items : [...x[phase].items, ...items],
-            next: page.next_cursor,
-            more: page.has_more,
-            busy: false,
-            error: "",
-          },
-        }));
+        setColumns((x) => {
+          const keep = first
+            ? x[phase].items.filter((row) => changed.has(row.id))
+            : x[phase].items;
+          return {
+            ...x,
+            [phase]: {
+              items: keep.length
+                ? [...keep, ...items].sort((a, b) => b.id - a.id)
+                : items,
+              next: page.next_cursor,
+              more: page.has_more,
+              busy: false,
+              error: "",
+            },
+          };
+        });
       })
       .catch(
         (e) =>
           !c.signal.aborted &&
-          boardRequests.current.get(phase) === c &&
           setColumns((x) => ({
             ...x,
             [phase]: { ...x[phase], busy: false, error: e.message },
           })),
-      );
+      )
+      .finally(() => {
+        if (!c.signal.aborted) boardRequests.current.delete(phase);
+      });
   };
   useEffect(() => {
     if (!boardStarted) return;
-    setUpdates(new Map());
-    phases.forEach(([p]) => load(p, true));
-    return () => boardRequests.current.forEach((c) => c.abort());
+    let initialized = false;
+    const snapshot = () => {
+      initialized = true;
+      setUpdates(new Map());
+      phases.forEach(([p]) => load(p, true));
+    };
+    const events = new EventSource(
+      `/api/flow-events?${new URLSearchParams({ q: query })}`,
+    );
+    events.addEventListener("ready", snapshot); // Only a new or invalid cursor needs a snapshot.
+    events.onerror = () => {
+      if (!initialized) snapshot(); // Keep manual reads usable without SSE.
+    };
+    events.addEventListener(
+      "flow.job.finished.v1",
+      (event: MessageEvent<string>) => {
+        const {
+          flow_id,
+          board: { item, counts },
+        }: FlowJobFinishedV1 = JSON.parse(event.data);
+        boardRequests.current.forEach(({ changed }) => changed.add(flow_id));
+        setCounts(counts);
+        setColumns((prior) => {
+          const next = { ...prior };
+          for (const [phase] of phases) {
+            if (
+              item?.phase !== phase &&
+              !prior[phase].items.some((row) => row.id === flow_id)
+            )
+              continue;
+            const items = prior[phase].items.filter(
+              (row) => row.id !== flow_id,
+            );
+            if (item?.phase === phase) {
+              items.push(item);
+              items.sort((a, b) => b.id - a.id);
+            }
+            next[phase] = { ...prior[phase], items };
+          }
+          return next;
+        });
+      },
+    );
+    return () => {
+      events.close();
+      boardRequests.current.forEach(({ controller }) => controller.abort());
+      boardRequests.current.clear();
+    };
   }, [query, boardRevision, boardStarted]);
   const changeQuery = (value: string) => {
     // Hash navigation in the same action must already see the new query in the URL.

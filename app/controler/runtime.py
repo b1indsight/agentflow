@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from loguru import logger
 
+from app.communication.flow_events import FlowEventStream
 from app.communication.gateway import Gateway
 from app.communication.session import Session
 from app.contracts.protocol import Register, ServerMessageUnion, WorkerMessageUnion
@@ -176,6 +177,8 @@ class ServerRuntime:
 
     def startup(self) -> None:
         self.database.init_db()
+        self.flow_events = FlowEventStream()
+        self.database.on_flow_events = self.flow_events.publish
         self.result_store.recover_claims()
         self.workers.recover_abandoned_assignments()
         self._tasks = [
@@ -300,4 +303,5 @@ class ServerRuntime:
                 try:
                     await self.access.close()
                 finally:
+                    self.database.on_flow_events = None
                     self.database.close()

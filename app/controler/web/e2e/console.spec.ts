@@ -216,6 +216,8 @@ test.beforeEach(async ({ page }) => {
       next_cursor: null,
       has_more: false,
     });
+    if (url.pathname === "/api/flow-events")
+      return route.fulfill({ status: 204 });
     if (url.pathname === "/api/repos")
       return route.fulfill({ json: pageOf([flow.repo]) });
     if (url.pathname === "/api/flows")
@@ -1208,7 +1210,7 @@ test("shared virtual lists preserve distant focus, omitted gaps and keyboard ord
       json: {
         items: Array.from({ length: Math.min(50, total - start) }, (_, i) => ({
           ...flow,
-          id: (phase === "running" ? 42 : 200) + start + i,
+          id: (phase === "running" ? 180 : 400) - start - i,
           lifecycle: phase,
           phase,
           title: `${phase} Flow ${start + i}`,
@@ -1528,6 +1530,69 @@ test("overview identifies coding paused without a PR", async ({ page }) => {
   await card.screenshot({
     path: "../../../.amp/in/artifacts/paused-action.png",
   });
+});
+
+test("Flow SSE moves a sibling into Inbox despite late pages, and repairs a reconnect gap", async ({
+  page,
+}) => {
+  const selected = { ...flow, reason: "", next_condition: "", sources: [] };
+  let sibling: FlowDetail = { ...selected, id: 43, title: "另一项任务" };
+  await mockFlows(page, () => [selected, sibling]);
+  let listReads = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/flows") listReads++;
+  });
+  const counts = { queued: 0, running: 1, review: 0, blocked: 1, archived: 0 };
+  const item = {
+    ...sibling,
+    phase: "blocked",
+    lifecycle: "blocked",
+    state_version: 3,
+  };
+  const prefix = "1795856400000-000000000000000000";
+  const server = "eeab7756-8472-413c-bf9e-7d0b74c4c5e2";
+  const ready = `id: ${prefix}0-${server}\nevent: ready\ndata: {}\n\n`;
+  const finished = (
+    n: number,
+    card: typeof item | FlowDetail,
+    totals: typeof counts,
+  ) =>
+    `id: ${prefix}${n}-${server}\nevent: flow.job.finished.v1\ndata: ${JSON.stringify({ flow_id: sibling.id, payload: { job_id: n, kind: "initial", state: "done" }, board: { item: card, counts: totals } })}\n\n`;
+  let reconnect!: () => void;
+  const disconnected = new Promise<void>((resolve) => (reconnect = resolve));
+  let connections = 0;
+  await page.route("**/api/flow-events?**", async (route) => {
+    if (++connections > 1) await disconnected;
+    await route.fulfill({
+      contentType: "text/event-stream",
+      body:
+        connections === 1
+          ? `retry: 50\n${ready}${finished(1, item, counts)}: keep-alive\n\n`
+          : `retry: 60000\nevent: flow.result.v1\ndata: {}\n\n${finished(2, sibling, { ...counts, blocked: 0, archived: 1 })}`,
+    });
+  });
+  await page.goto("/#flow/42/overview");
+  // The running page still contains the old sibling, and the blocked page is empty.
+  await expect(page.locator(".phase-running.rail-group .flow-tab")).toHaveText([
+    selected.title!,
+  ]);
+  await expect(page.locator(".phase-blocked.rail-group .flow-tab")).toHaveText(
+    sibling.title!,
+  );
+  await expect(page.locator(".rail-inbox .count")).toHaveText("1");
+  expect(listReads).toBe(5);
+  sibling = {
+    ...sibling,
+    phase: "archived",
+    lifecycle: "archived",
+    state_version: 4,
+  };
+  reconnect();
+  await expect(page.locator(".phase-archived.rail-group .flow-tab")).toHaveText(
+    sibling.title!,
+  );
+  await expect(page.locator(".rail-inbox .count")).toHaveText("0");
+  expect(listReads).toBe(5);
 });
 
 test("detail reads synchronize sidebar and board without reloading the page", async ({

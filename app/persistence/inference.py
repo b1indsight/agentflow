@@ -253,6 +253,8 @@ class InferenceStore(Repository):
         if call.summary is not None and call.batch_id is not None and job.flow_id is not None:
             InferenceNoticeStore(self._db).append(job.flow_id, call.batch_id, call.summary)
         if job.flow_id is not None:
+            if state in (JobState.DONE, JobState.FAILED):
+                self._db.job_finished(job.flow_id, job.id, job.kind, state)
             flow = FlowStore(self._db).get_flow(job.flow_id)
             if flow is not None and job.attempt_id == flow.current_attempt_id:
                 FlowStore(self._db).try_archive(job.flow_id)
