@@ -72,10 +72,10 @@ export interface FlowPage {
   next_cursor: string | null;
   has_more: boolean;
 }
-export interface FlowChange {
+export interface FlowJobFinishedV1 {
   flow_id: number;
-  item: FlowSummary | null;
-  counts: Record<Phase, number>;
+  payload: { job_id: number; kind: string; state: "done" | "failed" };
+  board: { item: FlowSummary | null; counts: Record<Phase, number> };
 }
 export interface RepositoryPage {
   items: string[];

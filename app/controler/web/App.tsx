@@ -61,8 +61,8 @@ import { WorkspaceDiff } from "./WorkspaceDiff";
 import { Button } from "./components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
 import type {
-  FlowChange,
   FlowDetail,
+  FlowJobFinishedV1,
   FlowSummary,
   JobSummary,
   Phase,
@@ -1708,7 +1708,6 @@ export default function App() {
   const boardRequests = useRef(
     new Map<Phase, { controller: AbortController; changed: Set<number> }>(),
   );
-  const liveBoard = useRef(false);
   useEffect(() => {
     const sync = () => {
       setCurrent(route());
@@ -1823,39 +1822,42 @@ export default function App() {
     const events = new EventSource(
       `/api/flow-events?${new URLSearchParams({ q: query })}`,
     );
-    events.addEventListener("ready", () => {
-      liveBoard.current = true;
-      snapshot(); // LISTEN is active; repair any gap since the last connection.
-    });
+    events.addEventListener("ready", snapshot); // Only a new or invalid cursor needs a snapshot.
     events.onerror = () => {
-      liveBoard.current = false;
       if (!initialized) snapshot(); // Keep manual reads usable without SSE.
     };
-    events.addEventListener("flow", (event: MessageEvent<string>) => {
-      const { flow_id, item, counts }: FlowChange = JSON.parse(event.data);
-      boardRequests.current.forEach(({ changed }) => changed.add(flow_id));
-      setCounts(counts);
-      setColumns((prior) => {
-        const next = { ...prior };
-        for (const [phase] of phases) {
-          if (
-            item?.phase !== phase &&
-            !prior[phase].items.some((row) => row.id === flow_id)
-          )
-            continue;
-          const items = prior[phase].items.filter((row) => row.id !== flow_id);
-          if (item?.phase === phase) {
-            items.push(item);
-            items.sort((a, b) => b.id - a.id);
+    events.addEventListener(
+      "flow.job.finished.v1",
+      (event: MessageEvent<string>) => {
+        const {
+          flow_id,
+          board: { item, counts },
+        }: FlowJobFinishedV1 = JSON.parse(event.data);
+        boardRequests.current.forEach(({ changed }) => changed.add(flow_id));
+        setCounts(counts);
+        setColumns((prior) => {
+          const next = { ...prior };
+          for (const [phase] of phases) {
+            if (
+              item?.phase !== phase &&
+              !prior[phase].items.some((row) => row.id === flow_id)
+            )
+              continue;
+            const items = prior[phase].items.filter(
+              (row) => row.id !== flow_id,
+            );
+            if (item?.phase === phase) {
+              items.push(item);
+              items.sort((a, b) => b.id - a.id);
+            }
+            next[phase] = { ...prior[phase], items };
           }
-          next[phase] = { ...prior[phase], items };
-        }
-        return next;
-      });
-    });
+          return next;
+        });
+      },
+    );
     return () => {
       events.close();
-      liveBoard.current = false;
       boardRequests.current.forEach(({ controller }) => controller.abort());
       boardRequests.current.clear();
     };
@@ -1917,7 +1919,7 @@ export default function App() {
           </Button>
           <CreateFlow
             onCreated={(id) => {
-              if (!liveBoard.current) setBoardRevision((x) => x + 1);
+              setBoardRevision((x) => x + 1);
               openFlow(id);
             }}
             onVerify={() => {

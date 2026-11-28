@@ -86,7 +86,19 @@ API 错误显式显示，已有内容不会被示例数据替换；Worker 离线
 点击条目保留当前详情页签，手机点击后关闭任务导航；刷新当前视图同时更新 Inbox。
 Inbox 可折叠，原有阶段分组保留；它只提供导航，不自动重试、归档或修改 GitHub。
 
-看板与侧栏共用一条同源 SSE 连接 `GET /api/flow-events?q=…`。连接就绪后读取各阶段首页；此后 Flow 状态提交时，服务端推送当前筛选下的卡片和各阶段计数。卡片自动移入对应分组或移出筛选结果，无需轮询列表。重连时重新读取首页，补回断线期间的变化。事件流不可用时仍可手动刷新；会话和执行记录的读取方式不变。
+看板与侧栏共用同源 SSE 连接 `GET /api/flow-events?q=…`。首次连接收到 `ready` 后读取各阶段首页；之后只在属于 Flow 的 Job 进入 `done` 或 `failed` 并提交时推送。前端按 Flow ID 移动或移除卡片，无需轮询。仅编辑标题、排队或开始执行不会单独发事件，仍可手动刷新。每 15 秒发送一条 `: keep-alive` 注释，不改变浏览器记住的事件 ID。
+
+业务事件用 SSE 的 `event:` 区分类型和版本；下面是一次示例（当前筛选只看进行中，该任务已受阻）：
+
+```text
+id: 1795856400123-0000000000000000042-eeab7756-8472-413c-bf9e-7d0b74c4c5e2
+event: flow.job.finished.v1
+data: {"flow_id":43,"payload":{"job_id":71,"kind":"initial","state":"failed"},"board":{"item":null,"counts":{"queued":0,"running":2,"review":0,"blocked":0,"archived":0}}}
+```
+
+`id` 由毫秒时间戳、按事务提交顺序递增的序号、`server_id` 组成。`server_id` 标识数据库中持久化的事件流，同一部署的 API 实例共享，重启不变。`EventSource` 断线重连会自动带上 `Last-Event-ID`；服务端从日志按顺序补发严格晚于它的事件，然后继续监听。无游标、游标无效或属于另一事件流时，用带当前游标的 `ready` 重新取首页。事件日志目前不自动清理。
+
+`flow_id` 和 `payload` 是持久化的事件事实；`board` 是发送时按 `q` 读取的最新卡片和各阶段总数，补发时也按当前状态计算。将来可增加实时结果事件，复用 `id`、`flow_id` 和 `payload`，不用带 `board`。不兼容的字段变更使用新版本事件名；侧栏只订阅它理解的类型。
 
 「显示字体」分别设置正文和代码字体，点「保存字体」后在当前浏览器生效。清空其中一项并保存即可恢复该项默认值：正文沿用原系统字体栈，代码优先使用内置的 [GitHub Monaspace Neon v1.400](https://github.com/githubnext/monaspace/tree/v1.400/fonts/Web%20Fonts/Variable%20Web%20Fonts/Monaspace%20Neon)，其次为 `Microsoft Sans Serif` 和原等宽字体栈。控制台从同源加载官方 WOFF2，无需安装或访问第三方字体服务。[OFL 1.1 许可证](public/fonts/monaspace-v1.400/LICENSE.txt)与字体随包分发。
 

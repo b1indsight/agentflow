@@ -136,7 +136,8 @@ async def repos(
 @router.get("/flow-events", response_class=StreamingResponse)
 async def events(request: Request, q: str = Query(default="", max_length=2000)) -> StreamingResponse:
     runtime: ServerRuntime = request.app.state.runtime
-    frames = flow_events(runtime, ConsoleStore(runtime.database).watch_flows(q), request.state.owner_expires_at)
+    frames = flow_events(runtime, ConsoleStore(runtime.database).watch_flows(q), request.state.owner_expires_at,
+                         request.headers.get("last-event-id"))
     return StreamingResponse(frames, media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
 

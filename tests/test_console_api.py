@@ -296,30 +296,76 @@ def test_creation_targets_include_new_repositories_and_continue_empty_inventory_
     assert store.flows.list_flows() == []
 
 
-async def test_flow_stream_publishes_committed_cards_and_filtered_departures(console_runtime, store):
-    # On an existing installation, a worker transition must reach both an open board
-    # and a filtered tab, even though neither tab makes another list/detail request.
+async def test_flow_stream_replays_committed_job_ends_after_last_event_id(console_runtime, store):
+    # Two tabs disconnect at different points. Reopening either must not skip a job
+    # (even on the same flow), repeat the cursor, or publish a rolled-back finish.
     with store.connection() as connection:
-        connection.execute("DROP TRIGGER console_notify_flow ON console_flows")
+        connection.execute("DROP TRIGGER console_job_finished ON jobs")
     store.init_db()
     flow = store.flows.create_flow("owner/repo", 7, 42)
-    other = store.flows.create_flow("owner/repo", 8, 42)
+    first = enqueue_job(store, flow.id, JobKind.INITIAL)
+    second = enqueue_job(store, flow.id, JobKind.REVISION)
     expires = int(time.time()) + 60
     console = ConsoleStore(store.database)
-    async with (aclosing(flow_events(console_runtime, console.watch_flows(""), expires)) as board,
-                aclosing(flow_events(console_runtime, console.watch_flows("status:queued"), expires)) as queued,
-                asyncio.timeout(5)):
-        assert await anext(board) == await anext(queued) == "event: ready\ndata: {}\n\n"
-        with store.connection() as connection:
-            connection.execute("UPDATE flows SET title='rolled back' WHERE id=%s", (other.id,))
-            connection.rollback()
+
+    def stream(cursor=None, query=""):
+        return aclosing(flow_events(console_runtime, console.watch_flows(query), expires, cursor))
+
+    async with asyncio.timeout(5), stream() as board:
+        baseline, ready, _ = (await anext(board)).splitlines()[:3]
+        assert ready == "event: ready"
+        start = baseline.removeprefix("id: ")
         apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
-        event = json.loads((await anext(board)).split("data: ")[1])
-        assert event["flow_id"] == flow.id and event["item"]["phase"] == "blocked"
-        assert event["counts"]["queued"] == event["counts"]["blocked"] == 1
-        event = json.loads((await anext(queued)).split("data: ")[1])
-        assert event["flow_id"] == flow.id and event["item"] is None
-        assert event["counts"]["queued"] == 1 and event["counts"]["blocked"] == 0
+        with store.connection() as connection:
+            connection.execute("UPDATE jobs SET state='failed' WHERE id=%s", (second.id,))
+            connection.rollback()
+        with store.connection() as connection:
+            connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (first.id,))
+        frame = await anext(board)
+        identity, name, data = frame.splitlines()[:3]
+        last_id = identity.removeprefix("id: ")
+        assert name == "event: flow.job.finished.v1"
+        event = json.loads(data.removeprefix("data: "))
+        assert event["flow_id"] == flow.id and event["board"]["item"]["phase"] == "blocked"
+        assert event["payload"] == {"job_id": first.id, "kind": "initial", "state": "done"}
+
+    with store.connection() as connection:
+        connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (first.id,))
+        connection.execute("UPDATE jobs SET state='failed' WHERE id=%s", (second.id,))
+    async with asyncio.timeout(5), stream(start) as all_events, stream(last_id, "status:queued") as resumed:
+        replay = (await anext(all_events)).splitlines()
+        assert replay[:2] == [identity, name]
+        assert json.loads(replay[2].removeprefix("data: "))["payload"] == event["payload"]
+        final = (await anext(all_events)).splitlines()[0].removeprefix("id: ")
+        assert start < last_id < final
+        stamp, seq, server = final.split("-", 2)
+        assert int(stamp) > 0 and int(seq) == 2 and server == start.split("-", 2)[2]
+        identity, name, data = (await anext(resumed)).splitlines()[:3]
+        assert identity == f"id: {final}" and name == "event: flow.job.finished.v1"
+        event = json.loads(data.removeprefix("data: "))
+        assert event["payload"] == {"job_id": second.id, "kind": "revision", "state": "failed"}
+        assert event["board"]["item"] is None and event["board"]["counts"]["blocked"] == 0
+    async with stream(last_id.replace(server, str(uuid4()))) as reset:
+        assert await anext(reset) == f"id: {final}\nevent: ready\ndata: {{}}\n\n"
+
+
+async def test_flow_stream_heartbeats_do_not_advance_cursor(console_runtime, store, monkeypatch):
+    from app.controler.console import events
+
+    assert events.KEEP_ALIVE_SECONDS == 15
+    monkeypatch.setattr(events, "KEEP_ALIVE_SECONDS", 0.1)
+    async with asyncio.timeout(3), aclosing(flow_events(
+        console_runtime, ConsoleStore(store.database).watch_flows(""), int(time.time()) + 60, None
+    )) as stream:
+        assert "event: ready" in await anext(stream)
+        assert await anext(stream) == ": keep-alive\n\n"
+        flow = store.flows.create_flow("owner/repo", 7, 42)
+        job = enqueue_job(store, flow.id, JobKind.INITIAL)
+        with store.connection() as connection:
+            connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (job.id,))
+        while (frame := await anext(stream)).startswith(":"):
+            pass
+        assert "event: flow.job.finished.v1" in frame
 
 
 def test_console_and_every_public_read_require_owner_before_io(console_runtime, store):

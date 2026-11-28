@@ -43,15 +43,36 @@ LEFT JOIN LATERAL (SELECT candidate.*
  AND kind<>'inference' ORDER BY id DESC LIMIT 1) j ON TRUE;
 """
 
-CONSOLE_FLOW_NOTIFY = """
-CREATE OR REPLACE FUNCTION console_notify_flow() RETURNS TRIGGER AS $$
+CONSOLE_EVENT_LOG = """
+DROP TRIGGER IF EXISTS console_notify_flow ON console_flows;
+DROP FUNCTION IF EXISTS console_notify_flow();
+CREATE TABLE IF NOT EXISTS console_event_clock (
+ singleton BOOLEAN PRIMARY KEY CHECK (singleton), server_id UUID NOT NULL DEFAULT gen_random_uuid(),
+ seq BIGINT NOT NULL DEFAULT 0, timestamp_ms BIGINT NOT NULL DEFAULT 0
+);
+INSERT INTO console_event_clock(singleton) VALUES (true) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS console_flow_events (
+ seq BIGINT PRIMARY KEY, timestamp_ms BIGINT NOT NULL, event_type TEXT NOT NULL,
+ flow_id BIGINT NOT NULL, payload JSONB NOT NULL
+);
+CREATE OR REPLACE FUNCTION console_job_finished() RETURNS TRIGGER AS $$
 BEGIN
- PERFORM pg_notify('agentflow_flow', TG_TABLE_SCHEMA || ':' || NEW.flow_id);
+ -- Hold the clock row until commit: a reader must never see N+1 before N.
+ WITH tick AS (
+   UPDATE console_event_clock SET seq=seq+1,
+     timestamp_ms=greatest(timestamp_ms, floor(extract(epoch FROM clock_timestamp())*1000)::bigint)
+   WHERE singleton RETURNING seq,timestamp_ms
+ ) INSERT INTO console_flow_events SELECT seq,timestamp_ms,'flow.job.finished.v1',NEW.flow_id,
+     jsonb_build_object('job_id',NEW.id,'kind',NEW.kind,'state',NEW.state) FROM tick;
+ PERFORM pg_notify('agentflow_flow', TG_TABLE_SCHEMA);
  RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
-CREATE OR REPLACE TRIGGER console_notify_flow AFTER UPDATE OF state_version ON console_flows
- FOR EACH ROW WHEN (OLD.state_version <> NEW.state_version) EXECUTE FUNCTION console_notify_flow();
+DROP TRIGGER IF EXISTS console_job_finished ON jobs;
+CREATE CONSTRAINT TRIGGER console_job_finished AFTER UPDATE ON jobs
+ DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+ WHEN (NEW.flow_id IS NOT NULL AND OLD.state NOT IN ('done','failed') AND NEW.state IN ('done','failed'))
+ EXECUTE FUNCTION console_job_finished();
 """
 
 CONSOLE_SCHEMA = CONSOLE_FACTS_VIEW + """
@@ -210,4 +231,4 @@ END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE TRIGGER console_worker_changed AFTER INSERT OR UPDATE ON workers
  FOR EACH ROW EXECUTE FUNCTION console_worker_changed();
-""" + CONSOLE_FLOW_NOTIFY
+""" + CONSOLE_EVENT_LOG

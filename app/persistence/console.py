@@ -229,8 +229,7 @@ class ConsoleStore(Repository):
         def read(flow_id: int) -> FlowChange:
             with self._db.read_snapshot() as tx, tx.connection() as connection:
                 row = connection.execute(f"{_CARD} WHERE flow_id=%s AND {where}", (flow_id, *values)).fetchone()
-                return FlowChange(flow_id=flow_id, item=_summary(row) if row else None,
-                                  counts=_counts(connection, where, values))
+                return FlowChange(item=_summary(row) if row else None, counts=_counts(connection, where, values))
 
         return read
 

@@ -192,7 +192,6 @@ class FlowPage(ConsoleModel):
 class FlowChange(ConsoleModel):
     """One committed card and query-wide counts; null removes it from this search."""
 
-    flow_id: int
     item: FlowSummary | None
     counts: dict[Phase, int]
 

@@ -1541,7 +1541,15 @@ test("Flow SSE moves a sibling into Inbox despite late pages, and repairs a reco
     lifecycle: "blocked",
     state_version: 3,
   };
-  const ready = "event: ready\ndata: {}\n\n";
+  const prefix = "1795856400000-000000000000000000";
+  const server = "eeab7756-8472-413c-bf9e-7d0b74c4c5e2";
+  const ready = `id: ${prefix}0-${server}\nevent: ready\ndata: {}\n\n`;
+  const finished = (
+    n: number,
+    card: typeof item | FlowDetail,
+    totals: typeof counts,
+  ) =>
+    `id: ${prefix}${n}-${server}\nevent: flow.job.finished.v1\ndata: ${JSON.stringify({ flow_id: sibling.id, payload: { job_id: n, kind: "initial", state: "done" }, board: { item: card, counts: totals } })}\n\n`;
   let reconnect!: () => void;
   const disconnected = new Promise<void>((resolve) => (reconnect = resolve));
   let connections = 0;
@@ -1551,8 +1559,8 @@ test("Flow SSE moves a sibling into Inbox despite late pages, and repairs a reco
       contentType: "text/event-stream",
       body:
         connections === 1
-          ? `retry: 50\n${ready}event: flow\ndata: ${JSON.stringify({ flow_id: sibling.id, item, counts })}\n\n`
-          : `retry: 60000\n${ready}`,
+          ? `retry: 50\n${ready}${finished(1, item, counts)}: keep-alive\n\n`
+          : `retry: 60000\nevent: flow.result.v1\ndata: {}\n\n${finished(2, sibling, { ...counts, blocked: 0, archived: 1 })}`,
     });
   });
   await page.goto("/#flow/42/overview");
@@ -1576,6 +1584,7 @@ test("Flow SSE moves a sibling into Inbox despite late pages, and repairs a reco
     sibling.title!,
   );
   await expect(page.locator(".rail-inbox .count")).toHaveText("0");
+  expect(listReads).toBe(5);
 });
 
 test("detail reads synchronize sidebar and board without reloading the page", async ({
