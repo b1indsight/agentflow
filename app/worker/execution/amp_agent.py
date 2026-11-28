@@ -8,7 +8,6 @@ import os
 import re
 import signal
 import stat
-import subprocess
 import sys
 import tempfile
 import threading
@@ -48,6 +47,7 @@ from app.worker.execution.permissions import (
     PermissionProfile,
     require_supported_permissions,
 )
+from app.worker.execution.process_groups import process_groups, signal_groups
 from app.worker.execution.prompts import add_backend_instructions, history_text
 from app.worker.model_catalog import read_model_catalog
 from app.worker.state.file_links import FileLinks
@@ -130,48 +130,18 @@ class _OutputLimit(Exception):
     pass
 
 
-def _descendant_groups(pid: int) -> set[int]:
-    """Snapshot before signalling: orphaned shells otherwise lose their parent identity."""
-    try:
-        snapshot = subprocess.run(
-            ["ps", "-A", "-o", "pid=,ppid=,pgid="], capture_output=True, text=True,
-            check=True, timeout=1,
-        )
-    except (OSError, subprocess.SubprocessError):
-        logger.warning("Amp descendant snapshot unavailable; cleanup may leave detached processes")
-        return set()
-    rows = [tuple(map(int, row.split())) for row in snapshot.stdout.splitlines()]
-    descendants = {pid}
-    while True:
-        children = {child for child, parent, _ in rows if parent in descendants}
-        if children <= descendants:
-            break
-        descendants.update(children)
-    return {group for child, _, group in rows if child in descendants
-            and group > 1 and group != os.getpgrp()}
-
-
-def _signal_groups(groups: set[int], sig: signal.Signals) -> None:
-    for group in groups:
-        try:
-            os.killpg(group, sig)
-        except ProcessLookupError:
-            pass
-
-
 async def _stop_amp(proc: asyncio.subprocess.Process) -> None:
     """Bound cleanup before propagating cancellation; arbitrary daemons need external isolation."""
-    groups = await asyncio.to_thread(_descendant_groups, proc.pid)
-    groups.add(proc.pid)
-    _signal_groups({proc.pid}, signal.SIGTERM)
+    groups = await asyncio.to_thread(process_groups, proc.pid)
+    signal_groups({proc.pid}, signal.SIGTERM)
     try:
         await asyncio.wait_for(proc.wait(), timeout=TERMINATION_GRACE)
     except TimeoutError:
         logger.warning("Amp forced termination; detached-process cleanup is best effort")
     finally:
         # Include separate native shell PGIDs captured while the CLI still owned them.
-        _signal_groups(groups, signal.SIGTERM)
-        _signal_groups(groups, signal.SIGKILL)
+        signal_groups(groups, signal.SIGTERM)
+        signal_groups(groups, signal.SIGKILL)
         await asyncio.wait_for(proc.wait(), timeout=5)
 
 
