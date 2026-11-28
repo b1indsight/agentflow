@@ -1326,7 +1326,7 @@ function Conversation({
   lastRefresh: React.RefObject<number>;
 }) {
   const historyOnly = refresh === null;
-  const { state, load, onRange, onAnchor, readProvenance, retry } =
+  const { state, load, onRange, onLookBack, readProvenance, retry } =
     useConversation(id, refresh, lastRefresh);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -1384,19 +1384,75 @@ function Conversation({
     () => new Map(rows.map((row) => [row.key, row])),
     [rows],
   );
+  const visibleKeys = useRef<string[]>([]);
+  const scrollingUp = useRef(false);
+  useLayoutEffect(() => {
+    const viewport = root.current;
+    if (!viewport) return;
+    // WindowList may adjust scrollTop after appending a page to keep a row in place.
+    // Only user navigation after the new snapshot should invalidate visible old rows.
+    scrollingUp.current = false;
+    let navigating = false;
+    let top = viewport.scrollTop;
+    const direction = (up: boolean) => {
+      scrollingUp.current = up;
+      onLookBack(up ? visibleKeys.current : []);
+    };
+    const input = () => {
+      navigating = true;
+    };
+    const wheel = (event: WheelEvent) => {
+      input();
+      direction(event.deltaY < 0);
+    };
+    const keydown = (event: KeyboardEvent) => {
+      if (
+        [
+          "ArrowUp",
+          "PageUp",
+          "Home",
+          "ArrowDown",
+          "PageDown",
+          "End",
+          " ",
+        ].includes(event.key)
+      ) {
+        input();
+        direction(
+          ["ArrowUp", "PageUp", "Home"].includes(event.key) ||
+            (event.key === " " && event.shiftKey),
+        );
+      }
+    };
+    const scroll = () => {
+      if (navigating && viewport.scrollTop !== top)
+        direction(viewport.scrollTop < top);
+      top = viewport.scrollTop;
+    };
+    viewport.addEventListener("wheel", wheel, { passive: true });
+    viewport.addEventListener("pointerdown", input);
+    viewport.addEventListener("keydown", keydown);
+    viewport.addEventListener("scroll", scroll);
+    return () => {
+      viewport.removeEventListener("wheel", wheel);
+      viewport.removeEventListener("pointerdown", input);
+      viewport.removeEventListener("keydown", keydown);
+      viewport.removeEventListener("scroll", scroll);
+    };
+  }, [root, onLookBack, state.snapshot, refresh]);
   const mountedRange = useCallback(
     (indexes: number[]) => {
       onRange(
         indexes.flatMap((index) => {
           const row = rows[index];
-          return row.kind === "body" ? [row.rawIndex] : [];
+          return row.kind === "body" ? [state.records[row.rawIndex].key] : [];
         }),
       );
     },
-    [rows, onRange],
+    [rows, state.records, onRange],
   );
   const visibleRange = useCallback(
-    (keys: readonly (string | number)[], anchorKey: string | number | null) => {
+    (keys: readonly (string | number)[]) => {
       const members = new Map<string, string[]>();
       const summaries = new Set<string>();
       for (const key of keys) {
@@ -1427,13 +1483,19 @@ function Conversation({
           return before;
         return next;
       });
-      const anchor =
-        typeof anchorKey === "string" ? rowByKey.get(anchorKey) : undefined;
-      const index =
-        anchor?.kind === "summary" ? anchor.group.first : anchor?.rawIndex;
-      onAnchor(index === undefined ? null : state.records[index].key);
+      visibleKeys.current = keys.flatMap((key) => {
+        const row = typeof key === "string" && rowByKey.get(key);
+        return row
+          ? [
+              state.records[
+                row.kind === "summary" ? row.group.first : row.rawIndex
+              ].key,
+            ]
+          : [];
+      });
+      if (scrollingUp.current) onLookBack(visibleKeys.current);
     },
-    [rowByKey, state.records, onAnchor],
+    [rowByKey, state.records, onLookBack],
   );
   useEffect(() => {
     if (state.snapshot === null || state.busy || state.error || !state.has_more)
@@ -1554,8 +1616,8 @@ function Conversation({
                   />
                 );
               }
-              const e = state.items.get(row.rawIndex);
               const identity = state.records[row.rawIndex];
+              const e = state.items.get(identity.key);
               const provenance = conversationProvenanceRange(
                 state.records,
                 row.rawIndex,

@@ -124,16 +124,26 @@ function activityPage(
   total: number,
   snapshot = 2,
 ): ActivityPage {
-  const next = start + 20;
+  const next = start + items.length;
   return {
     items,
     snapshot,
     total,
-    next_cursor: next < total ? String(next) : null,
+    next_cursor: next ? String(next) : null,
     has_more: next < total,
     sources: [],
     changes: {},
   };
+}
+
+function activityAfter(url: string, items: ActivityItem[], snapshot = 2) {
+  const start = Number(new URL(url).searchParams.get("cursor") ?? 0);
+  return activityPage(
+    items.slice(start, start + 20),
+    start,
+    items.length,
+    snapshot,
+  );
 }
 
 async function scrollToSnapshotEnd(page: Page) {
@@ -230,13 +240,7 @@ test.beforeEach(async ({ page }) => {
       return route.fulfill({ json: { ...pageOf([]), snapshot: 2 } });
     if (url.pathname.endsWith("/activity"))
       return route.fulfill({
-        json: {
-          ...pageOf([activity]),
-          snapshot: 2,
-          total: 1,
-          sources: [],
-          changes: {},
-        },
+        json: activityAfter(url.href, [activity]),
       });
     if (
       url.pathname.endsWith("/content") &&
@@ -449,7 +453,11 @@ for (const width of [1440, 390]) {
     const messages: ActivityItem[] = [activity];
     await page.route("**/api/flows/42/activity?**", (route) =>
       route.fulfill({
-        json: activityPage(messages, 0, messages.length, messages.length + 1),
+        json: activityAfter(
+          route.request().url(),
+          messages,
+          messages.length + 1,
+        ),
       }),
     );
     let finish = () => {};
@@ -679,7 +687,7 @@ for (const width of [1440, 390]) {
       },
     ];
     await page.route("**/api/flows/42/activity?**", (route) =>
-      route.fulfill({ json: activityPage(rows, 0, rows.length) }),
+      route.fulfill({ json: activityAfter(route.request().url(), rows) }),
     );
     let writes = 0;
     await page.route("**/api/flows/42/agent-tasks", (route) => {
@@ -2127,13 +2135,8 @@ test("conversation sources keep routine diagnostics collapsed and surface action
   await page.route("**/api/flows/42/activity?**", (route) =>
     route.fulfill({
       json: {
-        items: [activity],
-        next_cursor: null,
-        has_more: false,
-        snapshot: 2,
-        total: 1,
+        ...activityAfter(route.request().url(), [activity]),
         sources,
-        changes: {},
       },
     }),
   );
@@ -2669,7 +2672,7 @@ for (const width of [1440, 390]) {
       };
     });
     expect(reading.remaining).toBeGreaterThan(reading.viewport * 3);
-    await expect.poll(() => cursors).toEqual(["page-2:2"]);
+    await expect.poll(() => cursors).toEqual(["page-2:null"]);
     await expect(list).toHaveAttribute("data-window-count", "20");
     const positions = root.evaluate(async (node, key) => {
       const values: number[] = [];
@@ -2689,7 +2692,7 @@ for (const width of [1440, 390]) {
     expect(
       Math.max(...(await positions).map((top) => Math.abs(top - reading.top))),
     ).toBeLessThan(2);
-    expect(cursors).toEqual(["page-2:2"]);
+    expect(cursors).toEqual(["page-2:null"]);
     await page.screenshot({
       path: `../../../.amp/in/artifacts/conversation-prefetch-${width}.png`,
     });
@@ -2746,7 +2749,7 @@ test("jump to latest scrolls through replies as the current snapshot loads", asy
   await expect
     .poll(() => positions.evaluate((seen) => seen.size))
     .toBeGreaterThan(2);
-  await expect.poll(() => cursors).toEqual(["20:2"]);
+  await expect.poll(() => cursors).toEqual(["20:null"]);
   await page.screenshot({
     path: "../../../.amp/in/artifacts/conversation-jump-pending.png",
   });
@@ -2759,7 +2762,7 @@ test("jump to latest scrolls through replies as the current snapshot loads", asy
     page.getByRole("button", { name: "已到当前本地快照末尾 · 点击刷新" }),
   ).toBeInViewport();
   await expect(jump).toBeEnabled();
-  expect(cursors).toEqual(["20:2", "40:2", "60:2"]);
+  expect(cursors).toEqual(["20:null", "40:null", "60:null"]);
 });
 
 test("conversation keeps loading when fast pages extend the same collapsed tool group", async ({
@@ -2821,46 +2824,36 @@ test("conversation keeps loading when fast pages extend the same collapsed tool 
 test("large activity stays windowed, re-reads evicted pages, and refreshes explicitly", async ({
   page,
 }) => {
-  let refreshed = false,
-    rebuilding = false;
-  let releaseRefresh!: () => void, releasePage!: () => void;
-  const refreshGate = new Promise<void>((resolve) => {
-    releaseRefresh = resolve;
-  });
-  const pageGate = new Promise<void>((resolve) => {
-    releasePage = resolve;
-  });
+  let headSnapshot = 2;
   const rereads: string[] = [],
     errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/api/flows/42/activity?**", async (route) => {
     const url = new URL(route.request().url());
-    const snapshot =
-      url.searchParams.get("refresh") === "true"
-        ? 3
-        : Number(url.searchParams.get("snapshot") ?? 2);
+    if (url.searchParams.get("refresh") === "true") headSnapshot = 3;
+    const snapshot = Number(url.searchParams.get("snapshot") ?? headSnapshot);
     const start = Number(url.searchParams.get("cursor") ?? 0);
-    if (url.searchParams.get("refresh") === "true") {
-      refreshed = true;
-      await refreshGate;
-    }
-    if (snapshot === 3 && start === 100) {
-      rebuilding = true;
-      await pageGate;
-    }
     rereads.push(`${start}:${url.searchParams.get("snapshot")}`);
-    const items = Array.from({ length: Math.min(20, 320 - start) }, (_, i) => ({
-      ...activity,
-      key: `large-${start + i}`,
-      // Refresh uses the archive's ascending (occurred_at, key) order to detect removed targets.
-      occurred_at: new Date(Date.parse(now) + (start + i) * 1000).toISOString(),
-      version: snapshot,
-      body: `归档正文 ${start + i}`,
-      body_length: `归档正文 ${start + i}`.length,
-    }));
+    const total = snapshot === 3 ? 321 : 320;
+    const items = Array.from(
+      { length: Math.min(20, total - start) },
+      (_, i) => ({
+        ...activity,
+        key: `large-${start + i}`,
+        occurred_at: new Date(
+          Date.parse(now) + (start + i) * 1000,
+        ).toISOString(),
+        version: snapshot,
+        body:
+          snapshot === 3 && start + i === 0
+            ? "补正的首条消息"
+            : `归档正文 ${start + i}`,
+        body_length: `归档正文 ${start + i}`.length,
+      }),
+    );
     return route.fulfill({
       json: {
-        ...activityPage(items, start, 320, snapshot),
+        ...activityPage(items, start, total, snapshot),
         changes: snapshot === 3 ? { edited: 1 } : {},
       },
     });
@@ -2897,50 +2890,25 @@ test("large activity stays windowed, re-reads evicted pages, and refreshes expli
       .count(),
   ).toBeLessThanOrEqual(60);
   expect((await page.locator(".detail-head").boundingBox())?.y).toBe(head?.y);
-  await page.getByRole("button", { name: "刷新当前视图" }).click();
-  await expect.poll(() => refreshed).toBe(true);
-  // Move after both the first response and a later pinned page begin waiting. Neither may restore old pixels.
-  await root.evaluate(async (node) => {
+  await root.evaluate((node) => {
     node.scrollTop = node.scrollHeight;
-    for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
   });
-  releaseRefresh();
-  await expect.poll(() => rebuilding).toBe(true);
-  const bounds = (await root.boundingBox())!;
-  await page.mouse.move(
-    bounds.x + bounds.width / 2,
-    bounds.y + bounds.height / 2,
-  );
-  await page.mouse.wheel(0, -3500);
-  const latest = await root.evaluate(async (node) => {
-    for (let i = 0; i < 6; i++) await new Promise(requestAnimationFrame);
-    const top = node.getBoundingClientRect().top + node.clientTop;
-    const entry = [
-      ...node.querySelectorAll<HTMLElement>("article[data-entry]"),
-    ].find((item) => {
-      const rect = item.parentElement!.getBoundingClientRect();
-      return rect.top >= top && rect.bottom <= top + node.clientHeight;
-    })!;
-    return {
-      key: entry.dataset.entry!,
-      offset: entry.getBoundingClientRect().top - top,
-    };
-  });
-  expect(Number(latest.key.slice("large-".length))).toBeGreaterThan(100);
-  expect(Number(latest.key.slice("large-".length))).toBeLessThan(300);
-  releasePage();
+  await expect(
+    page.getByText("归档正文 319", { exact: true }),
+  ).toBeInViewport();
+  rereads.length = 0;
+  await page.getByRole("button", { name: "刷新当前视图" }).click();
   await expect(
     page.getByRole("status").filter({ hasText: "快照更新" }),
   ).toBeVisible();
-  const frames = await sampleReadingFrames(
-    root,
-    `[data-entry="${latest.key}"]`,
-  );
-  expect(
-    Math.max(
-      ...frames.offsets.map((offset) => Math.abs(offset - latest.offset)),
-    ),
-  ).toBeLessThan(2);
+  await expect(page.getByText("归档正文 320", { exact: true })).toBeVisible();
+  expect(rereads).toEqual(["320:null"]);
+  await root.hover();
+  await page.mouse.wheel(0, -100000);
+  await expect(
+    page.getByText("补正的首条消息", { exact: true }),
+  ).toBeInViewport();
+  expect(rereads).toContain("0:3");
   expect(errors).toEqual([]);
 });
 
@@ -3552,23 +3520,18 @@ test("an oversized refreshed conversation stays readable without retaining its o
     if (new URL(route.request().url()).searchParams.get("refresh") === "true")
       snapshot = 3;
     return route.fulfill({
-      json: {
-        items: [
-          {
-            ...activity,
-            version: snapshot,
-            body: `快照 ${snapshot}`,
-            body_length: 4,
-            metadata: snapshot === 3 ? { payload: largeMetadata } : {},
-          },
-        ],
+      json: activityAfter(
+        route.request().url(),
+        Array.from({ length: snapshot - 1 }, (_, i) => ({
+          ...activity,
+          key: `message-${i}`,
+          version: i + 2,
+          body: `快照 ${i + 2}`,
+          body_length: 4,
+          metadata: i ? { payload: largeMetadata } : {},
+        })),
         snapshot,
-        total: 1,
-        next_cursor: null,
-        has_more: false,
-        sources: [],
-        changes: {},
-      },
+      ),
     });
   });
   await page.goto("/#flow/42/conversation");
@@ -3621,15 +3584,11 @@ test("refresh resets reply cursors even when the thread version is unchanged", a
       });
     }
     return route.fulfill({
-      json: {
-        items: [{ ...activity, kind: "thread" }],
+      json: activityAfter(
+        url.href,
+        [{ ...activity, kind: "thread" }],
         snapshot,
-        total: 1,
-        has_more: false,
-        next_cursor: null,
-        sources: [],
-        changes: {},
-      },
+      ),
     });
   });
   await page.goto("/#flow/42/conversation");
@@ -3696,7 +3655,7 @@ test("cached later-page errors retain a working retry after changing tabs", asyn
   await expect(retry).toBeVisible();
   await retry.click();
   await expect(page.getByText("后页正文", { exact: true })).toBeVisible();
-  expect(cursors).toEqual(["page-2:2", "page-2:2"]);
+  expect(cursors).toEqual(["page-2:null", "page-2:null"]);
   await expect(retry).toHaveCount(0);
 });
 
@@ -5085,7 +5044,7 @@ for (const kind of ["tool", "operation"] as const) {
     await expect(summary).toHaveAttribute("aria-expanded", "false");
     await expect(summary).toBeInViewport();
     expect(continuations).toEqual(
-      Array.from({ length: 6 }, (_, i) => `${(i + 1) * 20}:2`),
+      Array.from({ length: 6 }, (_, i) => `${(i + 1) * 20}:null`),
     );
     await expect(page.locator('article[data-entry^="folded-"]')).toHaveCount(0);
     await expect(
@@ -5159,24 +5118,26 @@ for (const change of [
       earlier,
       ...records.slice(removeFirst ? 21 : 20),
     ];
+    let head = 2;
     await page.route("**/api/flows/42/activity?**", (route) => {
       const url = new URL(route.request().url());
-      const snapshot =
-        url.searchParams.get("refresh") === "true"
-          ? 3
-          : Number(url.searchParams.get("snapshot") ?? 2);
-      const start = Number(url.searchParams.get("cursor") ?? 0);
+      if (url.searchParams.has("refresh")) head = 3;
+      const snapshot = Number(url.searchParams.get("snapshot") ?? head);
       const items = snapshot === 3 ? refreshed : original;
+      const cursor = url.searchParams.get("cursor");
+      const start = cursor
+        ? items.findIndex((item) => item.occurred_at > cursor)
+        : 0;
+      const result = start < 0 ? [] : items.slice(start, start + 20);
       return route.fulfill({
         json: {
           ...activityPage(
-            items
-              .slice(start, start + 20)
-              .map((entry) => ({ ...entry, version: snapshot })),
-            start,
+            result.map((entry) => ({ ...entry, version: snapshot })),
+            start < 0 ? items.length : start,
             items.length,
             snapshot,
           ),
+          next_cursor: result.at(-1)?.occurred_at ?? cursor,
           changes:
             snapshot === 3 ? { added: 5, removed: removeFirst ? 1 : 0 } : {},
         },
@@ -5196,13 +5157,13 @@ for (const change of [
       }),
     ).toHaveAttribute("aria-expanded", "false");
     await main.click();
-    const target = page.locator('article[data-entry="refresh-main-8"]');
-    await expect(target.locator("pre")).toContainText("刷新工具正文 8");
+    const target = page.locator('article[data-entry="refresh-main-2"]');
+    await expect(target.locator("pre")).toContainText("刷新工具正文 2");
     const before = await target.evaluate(async (entry) => {
       const node = entry.closest<HTMLElement>("[data-scroll-root]")!;
       const row = entry.closest("[data-window-row]")!;
       const previous = node
-        .querySelector('[data-entry="refresh-main-7"]')!
+        .querySelector('[data-entry="refresh-main-1"]')!
         .closest("[data-window-row]")!;
       node.scrollTop +=
         row.getBoundingClientRect().top -
@@ -5225,7 +5186,7 @@ for (const change of [
         first: first?.querySelector<HTMLElement>("article")?.dataset.entry,
       };
     });
-    expect(before.first).toBe("refresh-main-8");
+    expect(before.first).toBe("refresh-main-2");
     await expect(
       page.locator('article[data-entry="refresh-main-0"]'),
     ).not.toBeInViewport();
@@ -5233,18 +5194,23 @@ for (const change of [
     await expect(
       page.getByRole("status").filter({ hasText: "快照更新" }),
     ).toBeVisible();
+    // No head replay: the backfilled group appears only when we revisit its interval.
+    await root.hover();
+    await page.mouse.wheel(0, -1);
     await expect(
       page.getByRole("button", {
         name: `工具活动 · ${removeFirst ? 8 : 9} 次调用 · 8 条结果`,
         exact: true,
       }),
     ).toHaveAttribute("aria-expanded", "true");
-    await expect(target.locator("pre")).toContainText("刷新工具正文 8");
+    await expect(target.locator("pre")).toContainText("刷新工具正文 2");
     await expect(target).toBeInViewport();
     await expect
       .poll(() =>
         target.evaluate((entry, offset) => {
-          const node = entry.closest<HTMLElement>("[data-scroll-root]")!;
+          // A lazy interval replacement can remount this version between locator resolution and measurement.
+          const node = entry.closest<HTMLElement>("[data-scroll-root]");
+          if (!node) return Infinity;
           return Math.abs(
             entry.closest("[data-window-row]")!.getBoundingClientRect().top -
               node.getBoundingClientRect().top -
@@ -7078,21 +7044,17 @@ async function mockEditorLinks(
     .join("\n\n");
   await page.route("**/api/flows/42/activity?**", (route) =>
     route.fulfill({
-      json: activityPage(
-        [
-          ...history,
-          {
-            ...activity,
-            source: "worker",
-            kind: "message",
-            body,
-            body_length: body.length,
-            previous_version: null,
-          },
-        ],
-        0,
-        history.length + 1,
-      ),
+      json: activityAfter(route.request().url(), [
+        ...history,
+        {
+          ...activity,
+          source: "worker",
+          kind: "message",
+          body,
+          body_length: body.length,
+          previous_version: null,
+        },
+      ]),
     }),
   );
 }

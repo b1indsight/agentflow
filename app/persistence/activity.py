@@ -310,7 +310,7 @@ class ActivityStore(Repository):
         since: int | None = None,
         parent: str | None = None,
     ) -> ActivityPage:
-        """Read conversation versions at one watermark, excluding internal Flow audit records."""
+        """Read after a position at the requested (or latest) watermark; replies stay pinned."""
         head = self._head(flow_id)
         position = ActivityCursor.decode(cursor) if cursor else None
         if position:
@@ -318,11 +318,11 @@ class ActivityStore(Repository):
                 position.flow != flow_id
                 or position.parent != parent
                 or position.versions is not None
-                or snapshot is not None
-                and snapshot != position.snapshot
+                or (parent is not None and snapshot is not None and snapshot != position.snapshot)
             ):
                 raise ConsoleFailure("cursor_invalid")
-            snapshot = position.snapshot
+            if parent is not None:
+                snapshot = position.snapshot
         if snapshot is None:
             snapshot = head["activity_version"]
         if (
@@ -343,14 +343,16 @@ class ActivityStore(Repository):
                 (flow_id, snapshot, parent),
             ).fetchone()
             assert count is not None
-            after = " AND (occurred_at,key)>(%s,%s)" if position else ""
+            # Top-level cached intervals use the same UTF-8 key ordering in the browser.
+            order = 'occurred_at,key COLLATE "C"' if parent is None else 'occurred_at,key'
+            after = f" AND ({order})>(%s,%s)" if position else ""
             rows = connection.execute(
                 prefix
                 + "SELECT "
                 + _SELECT
                 + " FROM latest current WHERE parent_key IS NOT DISTINCT FROM %s"
                 + after
-                + " ORDER BY occurred_at,key LIMIT %s",
+                + f" ORDER BY {order} LIMIT %s",
                 (
                     flow_id,
                     snapshot,
@@ -361,20 +363,23 @@ class ActivityStore(Repository):
                 ),
             ).fetchall()
         more = len(rows) > limit
+        rows = rows[:limit]
+        # Live readers retain a tail position even at EOF; reply cursors still end there.
+        next_cursor = cursor if parent is None else None
+        if rows and (more or parent is None):
+            next_cursor = ActivityCursor(
+                flow=flow_id,
+                snapshot=snapshot,
+                time=rows[-1]["occurred_at"],
+                key=rows[-1]["key"],
+                parent=parent,
+            ).encode()
         return ActivityPage(
-            items=[ActivityItem.model_validate(row) for row in rows[:limit]],
+            items=[ActivityItem.model_validate(row) for row in rows],
             snapshot=snapshot,
             total=count["n"],
             has_more=more,
-            next_cursor=ActivityCursor(
-                flow=flow_id,
-                snapshot=snapshot,
-                time=rows[limit - 1]["occurred_at"],
-                key=rows[limit - 1]["key"],
-                parent=parent,
-            ).encode()
-            if more
-            else None,
+            next_cursor=next_cursor,
             sources=ConsoleStore(self._db).sources(flow_id),
             changes=self._changes(flow_id, since, snapshot) if since is not None else {},
         )
