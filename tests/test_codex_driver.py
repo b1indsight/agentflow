@@ -238,25 +238,31 @@ async def test_cancellation_reaps_codex_group_before_removing_config(monkeypatch
     assert not asyncio.all_tasks() - existing
 
 
-async def test_mcp_token_is_redacted_before_results_leave_driver(monkeypatch, tmp_path):
+@pytest.mark.parametrize("with_broker", [False, True])
+async def test_run_credentials_are_redacted_before_results_leave_driver(monkeypatch, tmp_path, with_broker):
+    # Inference has no assignment context, but the CLI can still echo its own login key.
+    monkeypatch.setenv("OPENAI_API_KEY", "provider-test-key")
+    echoed = "provider-test-key" + (" and mcp-secret" if with_broker else "")
+    expected = "[REDACTED]" + (" and [REDACTED]" if with_broker else "")
+
     class Process:
         pid = 999999999
         returncode = 1
         stdout = pipe()
-        stderr = pipe(b"failed with mcp-secret")
+        stderr = pipe(f"failed with {echoed}".encode())
 
         async def wait(self):
             return self.returncode
 
     async def spawn(*args, **kwargs):
-        Path(args[args.index("-o") + 1]).write_text("echoed mcp-secret")
+        Path(args[args.index("-o") + 1]).write_text(f"echoed {echoed}")
         return Process()
 
     monkeypatch.setattr("app.worker.execution.codex.asyncio.create_subprocess_exec", spawn)
     result = await CodexAgent(trusted_host=True).start(
         "task", tmp_path, context=CodingExecutionContext(
             mcp_url="http://127.0.0.1:12345/mcp", mcp_token=SecretStr("mcp-secret"),
-        ),
+        ) if with_broker else None,
     )
-    assert result.last_message == "echoed [REDACTED]"
-    assert result.failure_detail == "failed with [REDACTED]"
+    assert result.last_message == f"echoed {expected}"
+    assert result.failure_detail == f"failed with {expected}"

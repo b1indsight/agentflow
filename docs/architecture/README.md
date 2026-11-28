@@ -36,6 +36,7 @@ agentflow flow show 42
 | 想弄清楚的问题 | 从哪里读 |
 |---|---|
 | 一个请求到了服务端，哪个模块决定能不能执行？ | [沿着模块边界读代码](components.md)：从收件、事务到工作区和编码后端。 |
+| Codex 与 Amp 后端各有哪些限制？ | [两个 Worker 编码后端的实现差距](coding-backend-gaps.md)：进程清理、会话恢复、输入输出与凭据脱敏。 |
 | 服务中途重启，怎样知道哪些动作能重试？ | [三个容易混淆的完成时刻](decisions.md)，以及[Flow 事实账本](flow-ledger.md)。 |
 | 谁可以触发任务？为什么 worker 能推送却不用保管 App 私钥？ | [GitHub App 与仓库的边界](github-app.md)。 |
 | 多条评审评论如何变成一次修订？ | [评审循环](review-loop.md)：反馈版本、批次、判定和原线程回复。 |

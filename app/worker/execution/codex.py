@@ -31,7 +31,11 @@ from app.domain.models import (
     SessionUnavailable,
 )
 from app.worker.coding_agent import CodingAgent
-from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
+from app.worker.execution.credentials import (
+    credential_values,
+    git_credential_environment,
+    inherited_agent_environment,
+)
 from app.worker.execution.gh import github_environment
 from app.worker.execution.idle import wait_for_inactivity
 from app.worker.execution.input_images import write_images
@@ -289,13 +293,10 @@ class CodexAgent(CodingAgent):
                     failure_detail="Codex final answer exceeded byte limit", failure_kind="output_limit")
             last_message = raw.decode()
             detail = stderr.decode(errors="replace") if proc.returncode else None
-            if context is not None:
-                tokens = [context.mcp_token, context.github.token if context.github else None]
-                for token in tokens:
-                    if token is not None:
-                        last_message = last_message.replace(token.get_secret_value(), "[REDACTED]")
-                        if detail:
-                            detail = detail.replace(token.get_secret_value(), "[REDACTED]")
+            for secret in credential_values(environment):
+                last_message = last_message.replace(secret, "[REDACTED]")
+                if detail:
+                    detail = detail.replace(secret, "[REDACTED]")
             if proc.returncode != 0:
                 logger.error("codex exit={}", proc.returncode)
                 # Only a complete pre-execution rejection permits fallback. Generic errors or
@@ -464,10 +465,8 @@ class CodexHistory:
             if not isinstance(value, str):
                 raise TypeError("non-text history field")
             # Known runtime credentials and common token forms must not leak via tool text.
-            for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "AGENTFLOW_WORKER_TOKEN"):
-                secret = os.environ.get(key)
-                if secret:
-                    value = value.replace(secret, "[REDACTED]")
+            for secret in credential_values(os.environ):
+                value = value.replace(secret, "[REDACTED]")
             value = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,})",
                            "[REDACTED]", value)
             value = re.sub(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/-]+", r"\1[REDACTED]", value)

@@ -34,7 +34,11 @@ from app.contracts.files import MAX_FILE_BYTES, FileFailure
 from app.domain.models import CodingExecutionContext, CodingExecutionResult
 from app.worker.coding_agent import CodingAgent
 from app.worker.execution.amp_history import MAX_RECOVERY, AmpTranscript, Capture
-from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
+from app.worker.execution.credentials import (
+    credential_values,
+    git_credential_environment,
+    inherited_agent_environment,
+)
 from app.worker.execution.gh import github_environment
 from app.worker.execution.git_identity import disables_amp_coauthor
 from app.worker.execution.idle import wait_for_inactivity
@@ -485,9 +489,8 @@ class AmpCodingAgent(CodingAgent):
                 args.extend(["--model", model] if model is not None else ["--mode", "low"])
                 if effort is not None:
                     args.extend(["--effort", effort])
-            secrets = [value for key, value in environment.items()
-                       if key in {"AMP_API_KEY", "AGENTFLOW_MCP_TOKEN", "AGENTFLOW_PUSH_TOKEN", "GH_TOKEN"} and value]
-            capture = (Capture(self._history.store, session_id, prompt, tuple(secrets))
+            secrets = credential_values(environment)
+            capture = (Capture(self._history.store, session_id, prompt, secrets)
                        if self._history.store and (context is not None or session_id) else None)
             complete = False
             try:
@@ -616,10 +619,7 @@ class AmpHistory:
         timestamp = message.get("createdAt") if isinstance(message.get("createdAt"), str) else None
         items: list[HistoryItem] = []
         unsupported = False
-        secrets += tuple(os.environ.get(key, "") for key in (
-            "AMP_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
-            "AGENTFLOW_WORKER_TOKEN", "AGENTFLOW_PUSH_TOKEN", "AGENTFLOW_MCP_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
-        ))
+        secrets += credential_values(os.environ)
         for block_index, block in enumerate(blocks):
             if not isinstance(block, dict):
                 unsupported = True
