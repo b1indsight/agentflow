@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -64,7 +63,6 @@ from app.domain.inference_models import InferenceCapability
 from app.inference.transport import WorkerInferenceCallbacks
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.lifecycle import WorkerProtocolError
-from app.worker.execution.skills import clone_skills
 from app.worker.execution.workspaces import RepositoryProvisionError
 
 if TYPE_CHECKING:
@@ -125,7 +123,7 @@ class WorkerStateCallbacks:
         self._inventory_dirty = False
         self._unmatched_error_logged = False
         self._recovery_required = False
-        self._skill_clones: set[asyncio.Task[Path]] = set()
+        self._skill_clones: set[asyncio.Task[None]] = set()
         self._archives: set[asyncio.Task[None]] = set()
 
     def bind(self, routes: Dispatcher[ServerMessageUnion]) -> None:
@@ -253,7 +251,7 @@ class WorkerStateCallbacks:
                 if self._pages:
                     raise WorkerProtocolError("registration completed before all inventory pages")
                 self.ready = True
-                self.runtime.workspaces.skill_checkout = None
+                self.runtime.workspaces.skills.reset()
                 self.on_ready(True)
                 if self._inventory_dirty:
                     await self.report_inventory()
@@ -458,20 +456,14 @@ class WorkerStateCallbacks:
     async def on_sync_skills(self, call: SyncSkills, message: ServerMessageUnion) -> None:
         if not self.ready:
             raise WorkerProtocolError("skill synchronization requires completed registration")
-        pool = self.runtime.workspaces
-        if call.source is None:
-            pool.skill_checkout = None
-            return
-        # Stops, revisions and inference do not need to wait for an INITIAL's skill checkout.
-        clone = asyncio.create_task(clone_skills(pool.inference_path, call.source))
-        pool.skill_checkout = clone
+        clone = self.runtime.workspaces.skills.sync(call.source)
         self._skill_clones.add(clone)
         clone.add_done_callback(self._clone_finished)
 
-    def _clone_finished(self, clone: asyncio.Task[Path]) -> None:
+    def _clone_finished(self, clone: asyncio.Task[None]) -> None:
         self._skill_clones.discard(clone)
         if not clone.cancelled() and clone.exception() is not None:
-            logger.warning("skill repository sync failed; INITIAL cannot use this snapshot")
+            logger.warning("skill repository sync failed; no new snapshot published")
 
     async def on_provision(self, call: RepositoryDemand, message: ServerMessageUnion) -> None:
         if not self.ready:

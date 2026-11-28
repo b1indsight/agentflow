@@ -8,15 +8,15 @@
 
 按保存时，[`update_skill_repository`](../../app/controler/console/api.py#L177-L197)收到目标仓库、安装 ID 和页面读到的旧仓库名。它先向 GitHub 核对安装、重读仓库信息；已归档的仓库会被拒绝。然后 [`SettingsStore.set_value`](../../app/persistence/settings.py#L33-L41)只在数据库里的旧值仍与页面相同时改这一项。旧页面想覆盖刚保存的选择，会收到 `409 settings_conflict`；重读设置再决定要不要改。成功响应是 GitHub 确认的仓库全名，清除时是 `null`。[API 测试](../../tests/test_console_api.py#L123-L137)分别检查了错误授权、过期旧值和清除后的模型设置。
 
-配置写好后，控制端请求同步。[worker 连接的 `poll`](../../app/controler/workers/callbacks.py#L287-L312)才读取最新值，为来源申请只读凭据，发送 `worker.sync_skills`。worker 的 [`on_sync_skills`](../../app/worker/transport/state.py#L458-L474)收到空来源便清除供新任务使用的快照引用，否则在后台启动 [`clone_skills`](../../app/worker/execution/skills.py#L44-L78)。它返回一个以提交 SHA 命名的本地快照路径；没有凭据或克隆失败则报告准备错误。网页保存成功并不等待这次克隆。已开始的 Flow 继续指向原快照，[远程测试](../../tests/test_remote_e2e.py#L206-L223)在更新来源、随后清除来源后仍读到了原内容。
+配置写好后，控制端请求同步。[worker 连接的 `poll`](../../app/controler/workers/callbacks.py#L287-L312)读取最新值，为来源申请只读凭据，发送 `worker.sync_skills`。Worker 在后台克隆来源，成功后记录仓库名和提交 SHA。首次安装取当前来源最近成功同步的本地快照，不查询远端：即使下一版正在下载或下载失败，也能立即使用已有版本。没有该来源的本地版本时才等待首次同步，失败则报告准备错误。清空配置后，新 Flow 不安装共享 skill；已开始的 Flow 仍用原链接。
 
 为了看出差别，可以在自己的测试来源中准备三项：一项常驻的写作规范（`always_on: true`），两项可选的数据库和前端指引。创建一项明显涉及改表的任务，观察这次新工作区的 `.agents/skills/`。工作端先链接可用的常驻项，再请独立会话根据任务和候选说明选择可选项。选择器看到候选名称、描述及声明的工具范围，无需把所有指引的正文放进提示里。
 
-任务何时用到快照？[首次准备工作区的 `_initial`](../../app/worker/execution/executor.py#L154-L171)在构建编码提示前清理上次登记的链接，等待快照任务，随后把路径、工作区、任务正文和编码工具交给 `link_skills`。它先[读取每个 `SKILL.md` 的头部](../../app/worker/execution/skills.py#L81-L101)，校验名称与目录一致，再[跳过项目已有的名字，登记并链接常驻项](../../app/worker/execution/skills.py#L139-L167)。如果还有候选，才[调用独立的 `agent.start`](../../app/worker/execution/skills.py#L168-L192)，读取它返回的 JSON 名单。空列表是有效选择；不在候选里的名字或错误输出会终止这次准备，worker 返回 `bootstrap` 阶段的失败，不会带着未经校验的选择开始编码。
+任务何时用到快照？[首次安装](../../app/worker/execution/executor.py#L167-L173)在工作区准备好后清理上次登记的链接，取得本地版本，并在整个选择和建链过程中保护这个版本。[`link_skills`](../../app/worker/execution/skills.py)校验 `SKILL.md` 头部，跳过项目已有的同名项，再登记并链接常驻项。如果还有候选，才调用独立的 `agent.start`。空列表是有效选择；不在候选里的名字或错误输出会导致 `bootstrap` 失败。
 
 ### 怎样让选择器认出数据库指引？
 
-先让目录名和说明对得上。对于上面的改表任务，可以把可选指引放在来源仓库的 `database/SKILL.md`，在文件最前面写下面的头部，第二个 `---` 后面再写面向编码者的正文。若仓库使用 `.agents/skills/` 布局，就把整个 `database/` 移到该目录下。[目录扫描器](../../app/worker/execution/skills.py#L81-L101)在两种布局中只取一种：只要嵌套目录存在，就从那里读取直接子目录，不再合并仓库根目录的其他候选。
+先让目录名和说明对得上。对于上面的改表任务，可以把可选指引放在来源仓库的 `database/SKILL.md`，在文件最前面写下面的头部，第二个 `---` 后面再写面向编码者的正文。若仓库使用 `.agents/skills/` 布局，就把整个 `database/` 移到该目录下。[目录扫描器](../../app/worker/execution/skills.py#L220-L240)在两种布局中只取一种：只要嵌套目录存在，就从那里读取直接子目录，不再合并仓库根目录的其他候选。
 
 ```yaml
 ---
@@ -26,9 +26,9 @@ allowed-tools: Read Grep
 ---
 ```
 
-`description` 要让选择器只读一句就能判断适用情形。这里没有声明常驻，所以即使文件存在，选择器仍可以不选它。`allowed-tools` 是作者对使用范围的说明，本身不会授予凭据或工具权限。[元数据模型](../../app/worker/execution/skills.py#L23-L41)会整理描述和工具列表中的空白并转义特殊字符；测试特地把 `&` 放进描述，在选择提示中看到 `&amp;`，同时检查作者信息和正文都没有混入提示。[选择器输入断言](../../tests/test_workspace_skills.py#L13-L34)
+`description` 要让选择器只读一句就能判断适用情形。这里没有声明常驻，所以即使文件存在，选择器仍可以不选它。`allowed-tools` 是作者对使用范围的说明，本身不会授予凭据或工具权限。[元数据模型](../../app/worker/execution/skills.py#L35-L49)会整理描述和工具列表中的空白并转义特殊字符；测试特地把 `&` 放进描述，在选择提示中看到 `&amp;`，同时检查作者信息和正文都没有混入提示。[选择器输入断言](../../tests/test_workspace_skills.py#L13-L34)
 
-遇到缺项，区分“没有列入目录”和“整次准备失败”。例如只建了 `database/README.md`，扫描器会跳过这个目录，其他合法项仍能参与选择；若建的是 `database/SKILL.md` 却写了 `name: db`，扫描器会报告 `invalid skill frontmatter`，尚未走到模型选择。前一种情况应补上入口文件，后一种应改正名称。在这两个地方反复修改任务措辞，都改变不了扫描结果。[目录校验分支](../../app/worker/execution/skills.py#L86-L101)
+遇到缺项，区分“没有列入目录”和“整次准备失败”。例如只建了 `database/README.md`，扫描器会跳过这个目录，其他合法项仍能参与选择；若建的是 `database/SKILL.md` 却写了 `name: db`，扫描器会报告 `invalid skill frontmatter`，尚未走到模型选择。前一种情况应补上入口文件，后一种应改正名称。在这两个地方反复修改任务措辞，都改变不了扫描结果。[目录校验分支](../../app/worker/execution/skills.py#L225-L240)
 
 ## 用工作区里的链接判断结果
 
@@ -36,6 +36,6 @@ allowed-tools: Read Grep
 
 [工作区选择测试](../../tests/test_workspace_skills.py#L13)固定了选择结果，因此可以重复验证这三种情况。它还验证返回一个目录外的名字会被拒绝，而不会读任意路径。排查缺少的 skill 时，先分清是哪一步：控制台是否保存了正确来源，来源内是否有符合格式的 skill，以及该项是否常驻或被本次任务选中。[工作端实现](../../app/worker/execution/skills.py)分别处理快照、选择和链接。
 
-**核对项目是否会提交这些链接时，查看 Git 状态。** 在上面的测试里，选择器返回 `{"skills":["database"]}` 后，`git status --porcelain` 的输出为空。工作端在目标目录生成只覆盖本次安装项和忽略文件自身的 `.gitignore`；如果项目已经拥有这个忽略文件，安装器会报告 `project owns the skill ignore file`，不会改写项目规则。复用位置前，清理器读取安装收据，逐个比对链接现在的目标：若项目把某项换成普通文件或指向另一目录，清理器就保留它。因而不应手工清空整个 `.agents/skills/` 来模拟一次重新安装。[安装收据与清理条件](../../app/worker/execution/skills.py#L104-L126)及[安装后的 Git 状态断言](../../tests/test_workspace_skills.py#L35-L43)
+**核对项目是否会提交这些链接时，查看 Git 状态。** 在上面的测试里，选择器返回 `{"skills":["database"]}` 后，`git status --porcelain` 的输出为空。工作端在目标目录生成只覆盖本次安装项和忽略文件自身的 `.gitignore`；如果项目已经拥有这个忽略文件，安装器会报告 `project owns the skill ignore file`，不会改写项目规则。复用位置前，清理器读取安装收据，逐个比对链接现在的目标：若项目把某项换成普通文件或指向另一目录，清理器就保留它。因而不应手工清空整个 `.agents/skills/` 来模拟一次重新安装。[安装收据与清理条件](../../app/worker/execution/skills.py#L247-L265)及[安装后的 Git 状态断言](../../tests/test_workspace_skills.py#L35-L43)
 
-**要验证更新，分别看工作端的新快照和旧工作区的内容。** 在测试来源的默认分支更新写作规范后，[推送场景](../../tests/test_remote_e2e.py#L206-L223)先等工作端同步完成，读到快照里的新版文件，再清除配置，最后从已初始化的工作区读到旧版文件。另一个[通知过滤测试](../../tests/test_webhook_inbox.py#L60-L76)把默认分支设为 `trunk`，分别推送其他仓库、其他分支、同名 tag 和删除分支的事件：消费者处理了四张收据，一次也没有要求工作端同步。核查新规则为何没到时，先对照仓库与默认分支，再检查新任务用的快照；老 Flow 的文件内容只说明它当时用了哪一版。
+**要验证回收，分别看 A、B、C 三版。** 旧工作区链接 A，Worker 先后同步 B、C，且没有工作区使用 B：[推送场景](../../tests/test_remote_e2e.py#L232-L258)中，A 仍可读，B 已删除，C 作为最新快照保留。清空来源不会清空缓存；最后一个链接移除后，再次同步或清空时只保留最后发布的版本。正在选择 skill 的安装也算引用，即使尚未建链。归属或引用无法核实时不删除，不会为了只留一份而中断任务。

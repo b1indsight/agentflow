@@ -1,23 +1,37 @@
 """Worker-owned skill snapshots and the links installed for one Flow."""
 
+import asyncio
 import json
 import re
+import shutil
 import tempfile
+from collections import Counter
+from collections.abc import AsyncIterator, Callable, Iterable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 from xml.sax.saxutils import escape
 
 import yaml
+from loguru import logger
 from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, TypeAdapter
 
 from app.contracts.protocol import SkillRepositorySource
 from app.worker.coding_agent import CodingAgent
 from app.worker.execution.credentials import git_credential_environment
-from app.worker.execution.vcs import VcsVerificationError, _required_stdout, _run, _vcs_environment
+from app.worker.execution.vcs import (
+    VcsVerificationError,
+    _required_stdout,
+    _run,
+    _vcs_environment,
+    filesystem_operation,
+)
 from app.worker.state.files import write_private_record
 
 SkillName = Annotated[str, Field(pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")]
 _LINKS = TypeAdapter(dict[SkillName, str])
+_COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_VERSIONS = TypeAdapter(dict[str, Annotated[str, Field(pattern=rf"^{_COMMIT.pattern}$")]])
 
 
 class _Skill(BaseModel):
@@ -75,7 +89,132 @@ async def clone_skills(inference: Path, source: SkillRepositorySource) -> Path:
             raise VcsVerificationError("bootstrap", "skill snapshot is a symlink")
         if not target.exists():
             checkout.rename(target)
+        elif not _published_snapshot(target):
+            raise VcsVerificationError("bootstrap", "skill snapshot ownership is unclear")
         return target
+
+
+def _published_snapshot(path: Path) -> bool:
+    """Recognize our depth-one clones, including those created before the latest record existed."""
+    if not _COMMIT.fullmatch(path.name):
+        return False
+    shallow = path / ".git/shallow"
+    if any(p.is_symlink() for p in (path.parent, path, shallow.parent, shallow)) or not shallow.is_file():
+        return False
+    with shallow.open("rb") as handle:
+        return handle.read(66) == path.name.encode() + b"\n"
+
+
+class SkillSnapshots:
+    """Publish local versions and pin one for each installation on the worker's event loop."""
+
+    def __init__(self, inference: Callable[[], Path], workspaces: Callable[[], Iterable[Path]]):
+        self._inference = inference
+        self._workspaces = workspaces
+        self._pins: Counter[Path] = Counter()
+        self.repository: str | None = None
+        self.pending: asyncio.Task[None] | None = None
+
+    def reset(self) -> None:
+        """Wait for this connection's configuration without forgetting the last local version."""
+        self.repository = None
+        self.pending = None
+
+    def sync(self, source: SkillRepositorySource | None) -> asyncio.Task[None]:
+        self.repository = source.repository.casefold() if source else None
+        self.pending = asyncio.create_task(self._refresh(source))
+        return self.pending
+
+    def _versions(self, inference: Path) -> dict[str, str]:
+        record = inference / "skill-versions.json"
+        if record.is_symlink() or (record.exists() and not record.is_file()):
+            raise VcsVerificationError("bootstrap", "invalid skill snapshot record")
+        try:
+            return _VERSIONS.validate_json(record.read_bytes())
+        except FileNotFoundError:
+            return {}
+        except ValueError as error:
+            raise VcsVerificationError("bootstrap", "invalid skill snapshot record") from error
+
+    async def _refresh(self, source: SkillRepositorySource | None) -> None:
+        inference = self._inference()
+        if source is not None:
+            path = await clone_skills(inference, source)
+            if self.pending is asyncio.current_task():  # Late completions may prune, but never retarget installs.
+                versions = self._versions(inference)
+                repository = source.repository.casefold()
+                versions.pop(repository, None)
+                versions[repository] = path.name  # Last entry is the floor even after clearing the source.
+                write_private_record(inference / "skill-versions.json", json.dumps(versions))
+        try:
+            await self._prune(inference)
+        except (OSError, RuntimeError) as error:
+            logger.warning("skipping skill snapshot cleanup: {}", type(error).__name__)
+
+    @asynccontextmanager
+    async def acquire(self) -> AsyncIterator[Path | None]:
+        """Select at installation time; an existing local version never waits for a refresh."""
+        path = None
+        while self.repository is not None:
+            inference = self._inference()
+            sha = self._versions(inference).get(self.repository)
+            if sha is not None:
+                candidate = inference / "skill-repositories" / sha
+                if _published_snapshot(candidate):
+                    path = candidate
+                    self._pins[path] += 1
+                    break
+            pending = self.pending
+            assert pending is not None
+            if pending.done():
+                pending.result()  # Surface a first-sync failure if there is no local version to use.
+                raise VcsVerificationError("bootstrap", "synchronized skill snapshot unavailable")
+            try:
+                await asyncio.shield(pending)
+            except (OSError, VcsVerificationError):
+                if self.pending is pending:
+                    raise
+        try:
+            yield path
+        finally:
+            if path is not None:
+                self._pins[path] -= 1
+                if not self._pins[path]:
+                    del self._pins[path]
+
+    async def _prune(self, inference: Path) -> None:
+        root = inference / "skill-repositories"
+        if root.is_symlink() or not root.is_dir():
+            return
+        snapshots = {p for p in root.iterdir() if _published_snapshot(p)}
+        if len(snapshots) < 2:
+            return
+        versions = self._versions(inference)
+        last = root / next(reversed(versions.values()), "")
+        # On upgrade with no publication record, keep one even if all links are gone.
+        keep = set(self._pins) | {last if last in snapshots else min(snapshots)}
+        if self.repository in versions:
+            keep.add(root / versions[self.repository])
+        for workspace in self._workspaces():
+            links = workspace / ".agents/skills"
+            if links.is_symlink() or links.parent.is_symlink():
+                return  # Cannot account for these links without traversing a project symlink.
+            if links.is_dir():
+                for link in links.iterdir():
+                    if link.is_symlink():
+                        for target in (link.parent / link.readlink(), link.resolve()):
+                            if target.is_relative_to(root):
+                                keep.update(target.parents)
+                                keep.add(target)
+        obsolete = snapshots - keep
+        if obsolete:
+            # Detach before yielding: a concurrent sync of the same SHA can safely republish it.
+            retired = Path(tempfile.mkdtemp(dir=root, prefix=".retired-"))
+            try:
+                for path in obsolete:
+                    path.rename(retired / path.name)
+            finally:
+                await filesystem_operation(shutil.rmtree, retired)
 
 
 def _catalog(checkout: Path) -> dict[str, tuple[Path, _Skill]]:
