@@ -20,10 +20,10 @@ from app.contracts.protocol import (
     parse_worker_message,
 )
 from app.contracts.validation import parse_worker_input
-from app.domain.inference_models import LOCAL_BUB_WORKER_ID, InferenceCapability
-from app.domain.ports import Inference
+from app.domain.inference_models import LOCAL_BUB_WORKER_ID
 from app.inference.transport import InferenceProtocolError
-from app.worker.bub import ADAPTER_VERSION, BubInference
+from app.worker.bub import BubCodingAgent
+from app.worker.coding_agent import CodingAgent
 from app.worker.runtime import InferenceOnly, WorkerRuntime
 
 type ServeSession = Callable[[str, Register, Session[WorkerMessageUnion, ServerMessageUnion]], Awaitable[None]]
@@ -34,20 +34,19 @@ def start_local_bub(
     reconnect_interval: float,
 ) -> asyncio.Task[None] | None:
     """Start a configured infer-only peer; the controller owns and joins the returned task."""
-    provider = BubInference(model=model, api_key=api_key, api_base=api_base)
-    if not provider.configured:
+    agent = BubCodingAgent(model=model, api_key=api_key, api_base=api_base)
+    if not agent.configured:
         return None
-    if provider.configuration_failure() is not None:
+    if agent.configuration_failure() is not None:
         logger.warning("local bub worker unavailable: configuration preflight failed")
         return None
 
     async def supervise() -> None:
         # Keep one repository-free root across reconnects, until provider cleanup has joined.
         with TemporaryDirectory(prefix="agentflow-local-bub-") as directory:
-            provider.root = Path(directory)
             while True:
                 try:
-                    await serve_local_inference(serve, provider, provider.root)
+                    await serve_local_inference(serve, agent, Path(directory))
                 except Exception:  # noqa: BLE001 -- restart the local connection, not a model attempt
                     logger.exception("local bub worker disconnected; reconnecting")
                 await asyncio.sleep(reconnect_interval)
@@ -64,7 +63,7 @@ def _server_ack(message_id: str) -> ServerMessage:
 
 
 async def serve_local_inference(
-    serve: ServeSession, inference: Inference, workspace: Path,
+    serve: ServeSession, agent: CodingAgent, workspace: Path,
 ) -> None:
     """Serve a preflighted bub provider until disconnect or controller task cancellation.
 
@@ -80,8 +79,7 @@ async def serve_local_inference(
         host_transport, parse=parse_worker_input, make_ack=_server_ack, epoch=uuid4().hex,
     )
     worker = WorkerRuntime(InferenceOnly(
-        transport=worker_transport, worker_id=LOCAL_BUB_WORKER_ID, inference=inference,
-        capability=InferenceCapability(adapter_version=ADAPTER_VERSION),
+        transport=worker_transport, worker_id=LOCAL_BUB_WORKER_ID, agent=agent, workspace=workspace,
     ))
 
     async def serve_host() -> None:

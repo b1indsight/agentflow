@@ -23,7 +23,7 @@ from app.domain.models import (
     SessionUnavailable,
     VcsKind,
 )
-from app.worker.coding_agent import CodingAgent
+from app.worker.coding_agent import AgentPrompt, CodingAgent, cli_prompt
 from app.worker.execution.executor import InitialCodingOutput, WorkerExecutor
 from app.worker.execution.lifecycle import WorkerExecution
 from app.worker.execution.vcs import VcsOutcome
@@ -48,10 +48,11 @@ class RecordingAgent(CodingAgent):
         return HistoryPage(session_id=query.session_id, status="not_found")
 
     async def _run(
-        self, prompt: str, cwd: Path, *, session_id: str | None = None,
+        self, prompt: AgentPrompt, cwd: Path, *, session_id: str | None = None,
         output_schema=None, context=None, model=None, effort=None, max_output_bytes: int,
     ) -> CodingExecutionResult:
         """Script native execution while retaining the shared start/resume checks."""
+        prompt = cli_prompt(prompt)
         if session_id is not None:
             self.resumed.append((session_id, prompt))
             return CodingExecutionResult(session_id, "revision done", 0)
@@ -79,7 +80,7 @@ class RecordingAgent(CodingAgent):
 
 class BackendlessAgent(RecordingAgent):
     async def _run(
-        self, prompt: str, cwd: Path, *, session_id: str | None = None,
+        self, prompt: AgentPrompt, cwd: Path, *, session_id: str | None = None,
         output_schema=None, context=None, model=None, effort=None, max_output_bytes: int,
     ) -> CodingExecutionResult:
         # Valid JSON gets past the shared check but still lacks required VCS evidence.

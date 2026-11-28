@@ -23,7 +23,7 @@ from pydantic import (
 from pydantic_core import PydanticUseDefault
 
 from app.domain.delivery_models import DeliveryReceipt
-from app.domain.inference_models import InferenceCapability, InferenceJob
+from app.domain.inference_models import FailureCode, InferenceCapability, InferenceJob
 
 
 def utcnow() -> datetime:
@@ -368,9 +368,10 @@ class CodingExecutionResult:
     last_message: str
     exit_code: int
     failure_detail: str | None = None
-    failure_kind: Literal["timeout", "output_limit", "invalid_response", "configuration", "backend_error"] | None = None
+    failure_kind: Literal["timeout"] | FailureCode | None = None
     backend: str | None = None
     model: str | None = None
+    retry_after_seconds: float | None = None
 
 
 class SessionUnavailable(RuntimeError):

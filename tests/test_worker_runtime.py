@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import sys
@@ -225,8 +224,7 @@ async def test_runtime_inference_uses_shared_agent_with_call_local_configuration
                     effort=None, max_output_bytes=None, timeout_seconds=None):
         assert self is agent and cwd == runtime.workspaces.inference_path and cwd.is_dir()
         assert context is None and model is None and effort is None
-        assert "Return only the requested result" in prompt
-        assert prompt.endswith(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
+        assert [message.model_dump() for message in prompt] == messages
         calls.append((output_schema, max_output_bytes, timeout_seconds))
         return CodingExecutionResult("answer-session", '"Answer"', 0, model="observed-model")
 

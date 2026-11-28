@@ -13,7 +13,7 @@ import pytest
 @pytest.mark.parametrize("operation", [
     "import app.communication.gateway",
     "import app.worker.runtime",
-    "from app.worker.bub import BubInference",
+    "from app.worker.bub import BubCodingAgent",
     "import app.cli",
     """
 from pydantic import BaseModel

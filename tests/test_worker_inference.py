@@ -36,11 +36,12 @@ from app.domain.inference_models import (
     InferenceOutput,
     InferenceTask,
 )
-from app.domain.models import JobKind, JobState, utcnow
-from app.inference.local import serve_local_inference
+from app.domain.models import CodingExecutionResult, JobKind, JobState, utcnow
+from app.github import Batch
 from app.persistence.records import required
-from app.worker.bub import ADAPTER_VERSION
+from app.worker.bub import BubCodingAgent
 from app.worker.config import WorkerSettings
+from app.worker.execution.codex import CodexAgent
 from app.worker.execution.lifecycle import WorkerProtocolError
 from app.worker.runtime import InferenceOnly, WorkerRuntime
 from tests.flow_fixtures import enqueue_job
@@ -148,12 +149,10 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
 ):
     entered, release = asyncio.Event(), asyncio.Event()
 
-    class Local:
-        async def infer(self, task):
-            entered.set()
-            await release.wait()
-            return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
-                                   text="Local answer", adapter_version=ADAPTER_VERSION)
+    async def local_completion(self, prompt, cwd, **kwargs):
+        entered.set()
+        await release.wait()
+        return CodingExecutionResult(None, "Local answer", 0, model=self.model)
 
     class Remote:
         def inference_capability(self):
@@ -163,7 +162,9 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
             return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
                                    text="Remote answer", adapter_version="codex/v1")
 
-    server = server_runtime()
+    server = server_runtime(settings={"judge_model": "openai:test", "judge_api_key": "fake"})
+    monkeypatch.setattr(BubCodingAgent, "_run", local_completion)
+    monkeypatch.setattr(type(server.github), "fetch_installations", AsyncMock(return_value=Batch()))
     worker = WorkerRuntime(WorkerSettings(
         worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
         worker_root=tmp_path / "worker",
@@ -171,9 +172,7 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
     inference = Remote()
     monkeypatch.setattr(worker, "infer", inference.infer)
     monkeypatch.setattr(worker, "inference_capability", inference.inference_capability)
-    workspace = tmp_path / "local-default"
-    workspace.mkdir()
-    mini = asyncio.create_task(serve_local_inference(server.serve_worker_session, Local(), workspace))
+    server.startup()
     flow = store.flows.create_flow("owner/repo", 7, 42) if flow_bound else None
     flow_id = flow.id if flow is not None else None
     caller = JobInference(store.database, server.gateway.wake_all, flow_id=flow_id)
@@ -204,24 +203,23 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
                 assert connection.execute("SELECT count(*) AS n FROM flow_executions").fetchone()["n"] == 0
             assert not next(w for w in store.workers.list_workers() if w.worker_id == LOCAL_BUB_WORKER_ID).execute
     finally:
-        mini.cancel()
-        await asyncio.gather(mini, return_exceptions=True)
+        await server.shutdown()
     # A recreated caller reads saved answers with both workers gone, without a new attempt.
     recovered = JobInference(store.database, server.gateway.wake_all, flow_id=flow_id)
-    assert (await recovered.infer(local_task)).text == "Local answer"
+    answer = await recovered.infer(local_task)
+    assert (answer.text, answer.model, answer.adapter_version) == ("Local answer", "openai:test", "bub-0.4.1/v1")
     assert (await recovered.infer(remote_task)).text == "Remote answer"
     assert store.jobs.get_job(local.id).attempt == store.jobs.get_job(remote.id).attempt == 1
     if flow is not None:
         assert store.flows.get_flow(flow.id).title is None
 
 
-async def test_infer_only_worker_advertises_its_provider_and_refuses_coding():
+async def test_infer_only_worker_advertises_its_agent_and_refuses_coding(tmp_path):
     # A misrouted coding assignment must still be refused after a successful handshake.
     host, peer = in_process_transport_pair()
-    provider = NamingInference()
-    capability = provider.inference_capability()
+    agent = BubCodingAgent()
     worker = WorkerRuntime(InferenceOnly(
-        transport=peer, worker_id="inference-2", inference=provider, capability=capability,
+        transport=peer, worker_id="inference-2", agent=agent, workspace=tmp_path,
     ))
     async with asyncio.timeout(3), asyncio.TaskGroup() as tasks:
         async def serve():
@@ -230,19 +228,27 @@ async def test_infer_only_worker_advertises_its_provider_and_refuses_coding():
 
         tasks.create_task(serve())
         register = Register.model_validate_json(await host.receive_text())
-        assert register.worker_id == "inference-2" and register.inference == capability
+        assert register.worker_id == "inference-2" and register.inference.adapter_version == agent.adapter_version
         assert not register.execute and register.coding_agent is None
         await host.send_text(registered_message().model_dump_json())
         await host.send_text(assignment_message(_assignment()).model_dump_json())
 
 
-async def test_stopping_inference_only_worker_does_not_cancel_its_host():
+def test_inference_only_does_not_grant_full_host_access(monkeypatch, tmp_path):
+    # Injecting a CLI into an embedded worker must not bypass its normal startup guards.
+    _, peer = in_process_transport_pair()
+    monkeypatch.setenv("AGENTFLOW_DATABASE_URL", "postgresql://private")
+    with pytest.raises(ValueError, match="requires trusted-host"):
+        InferenceOnly(worker_id="local", transport=peer, agent=CodexAgent(), workspace=tmp_path)
+    with pytest.raises(RuntimeError, match="control-plane secrets"):
+        InferenceOnly(worker_id="local", transport=peer, agent=CodexAgent(trusted_host=True), workspace=tmp_path)
+
+
+async def test_stopping_inference_only_worker_does_not_cancel_its_host(tmp_path):
     # An embedding application can await run() inline and keep serving after worker.stop().
     host, peer = in_process_transport_pair()
-    provider = NamingInference()
     worker = WorkerRuntime(InferenceOnly(
-        worker_id="inference-2", transport=peer, inference=provider,
-        capability=provider.inference_capability(),
+        worker_id="inference-2", transport=peer, agent=BubCodingAgent(), workspace=tmp_path,
     ))
 
     async def stop_after_registration():

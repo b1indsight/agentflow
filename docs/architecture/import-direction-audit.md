@@ -37,6 +37,6 @@ GitHub 资源原有的四对互引已解除前三对：`repositories ↔ issues`
 
 ## 检查范围
 
-扫描 `app/` 的 164 个 Python 文件，用 AST 解析 `import` / `from … import …`（含包入口和函数体），按顶层、函数内、`TYPE_CHECKING` 区分直接边，再查互相可达的模块。另核对了动态导入；启动另一个进程不算导入，例如 [bub 以 `python -m` 启动 runner](../../app/worker/bub/__init__.py#L78)，[runner 导入 bub 的版本常量](../../app/worker/bub/__main__.py#L22)是单向的 Python 导入，但与进程启动方向相反。
+扫描 `app/` 的 164 个 Python 文件，用 AST 解析 `import` / `from … import …`（含包入口和函数体），按顶层、函数内、`TYPE_CHECKING` 区分直接边，再查互相可达的模块。另核对了动态导入；启动另一个进程不算导入，例如 [bub 以 `python -m` 启动 runner](../../app/worker/bub/__init__.py#L103-L107)，[runner 导入请求类型](../../app/worker/bub/__main__.py#L17)是单向的 Python 导入，但与进程启动方向相反。
 
 控制台另用 TypeScript 解析生产 `.ts` / `.tsx` 的本地导入（含类型、`@/` 别名和 `import()`）：29 个模块没有文件环，未见公共 UI 或数据模块反向导入页面入口。测试、构建配置、运维脚本、打包产物及第三方库不参与排序。以上是导入关系，不是每个请求的执行时序。

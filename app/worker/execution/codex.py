@@ -30,7 +30,7 @@ from app.domain.models import (
     CodingExecutionResult,
     SessionUnavailable,
 )
-from app.worker.coding_agent import CodingAgent
+from app.worker.coding_agent import AgentPrompt, CodingAgent, cli_prompt
 from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
 from app.worker.execution.gh import github_environment
 from app.worker.execution.idle import wait_for_inactivity
@@ -158,11 +158,12 @@ class CodexAgent(CodingAgent):
         return self._history.query(query)
 
     async def _run(
-        self, prompt: str, cwd: Path, *, session_id: str | None = None,
+        self, prompt: AgentPrompt, cwd: Path, *, session_id: str | None = None,
         output_schema: Path | None = None, context: CodingExecutionContext | None = None,
         model: str | None = None, effort: str | None = None, max_output_bytes: int,
     ) -> CodingExecutionResult:
         """Supervise Codex's native stream and bounded final-message file."""
+        prompt = cli_prompt(prompt)
         if not self.trusted_host:
             raise RuntimeError(
                 "Codex trusted-host full-access execution requires "
