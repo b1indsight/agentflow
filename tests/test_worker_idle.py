@@ -1,7 +1,9 @@
 """Observable CLI activity, through both public CodingAgent implementations."""
 
 import asyncio
+import os
 import sys
+from contextlib import suppress
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -51,6 +53,60 @@ async def test_silent_cli_reports_timeout_even_after_process_exit(monkeypatch, t
     result = await agent.resume(THREAD if backend == "amp" else "session-1", "task", cwd=tmp_path)
     assert result.exit_code == 124
     assert result.failure_detail == f"{backend.title()}: no new stdout/stderr for 0.01s; execution timed out"
+
+
+@pytest.mark.parametrize("backend", ["amp", "codex"])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_interrupted_cli_cleans_separate_child_group(monkeypatch, tmp_path, backend, cancel):
+    # A shell can start its own PGID and go silent after the CLI has announced its session.
+    existing = asyncio.all_tasks()
+    cli = tmp_path / backend
+    sid = THREAD.removeprefix("T-") if backend == "codex" else THREAD
+    init = (f'{{"type":"thread.started","thread_id":"{sid}"}}'.encode()
+            if backend == "codex" else stream().split(b"\n")[0])
+    cli.write_text(f"""#!{sys.executable}
+import os, pathlib, signal, subprocess, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                         start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+os.write(1, {init!r} + b'\\n')
+pathlib.Path('child.pid').write_text(str(child.pid))
+time.sleep(60)
+""")
+    cli.chmod(0o700)
+    if backend == "amp":
+        monkeypatch.setattr("app.worker.execution.amp_agent.AMP_BIN", str(cli))
+        monkeypatch.setattr("app.worker.execution.amp_agent.TERMINATION_GRACE", 0.1)
+        run = AmpCodingAgent(trusted_host=True, timeout=2).resume(sid, "task", cwd=tmp_path)
+    else:
+        monkeypatch.setattr("app.worker.execution.codex.CODEX_BIN", str(cli))
+        run = CodexAgent(trusted_host=True, timeout=2).start("task", tmp_path)
+    task = asyncio.create_task(run)
+    pidfile = tmp_path / "child.pid"
+    async with asyncio.timeout(5):
+        while not pidfile.exists() or not pidfile.read_text():
+            await asyncio.sleep(0.01)
+    child = int(pidfile.read_text())
+    try:
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            result = await task
+            assert (result.exit_code, result.failure_kind, result.session_id) == (124, "timeout", sid)
+        async with asyncio.timeout(2):
+            while True:
+                ps = await asyncio.create_subprocess_exec(
+                    "ps", "-o", "stat=", "-p", str(child), stdout=asyncio.subprocess.PIPE)
+                state, _ = await ps.communicate()
+                if not state.strip() or state.strip().startswith(b"Z"):
+                    break
+                await asyncio.sleep(0.01)
+        assert not asyncio.all_tasks() - existing
+    finally:
+        with suppress(ProcessLookupError):
+            os.killpg(child, 9)
 
 
 @pytest.mark.parametrize("completed", [False, True])

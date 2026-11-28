@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal, Self
 from uuid import uuid4
@@ -18,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, m
 from app.contracts.protocol import ProvisionError
 from app.domain.models import WorkspaceDiff, WorkspaceInventory
 from app.worker.execution.git_identity import configure_git_identity
-from app.worker.execution.skills import clear_skill_links
+from app.worker.execution.skills import SkillSnapshots, clear_skill_links
 from app.worker.execution.vcs import (
     VcsVerificationError,
     _required_stdout,
@@ -121,7 +122,7 @@ class RepositoryWorkspaces:
         self.root = root.absolute()
         self.worker_id = worker_id
         self.limit = limit
-        self.skill_checkout: asyncio.Task[Path] | None = None
+        self.skills = SkillSnapshots(lambda: self.inference_path, self._skill_workspaces)
         self.manifest_path = self.root / "workspace-pool.json"
         self._repository_locks: dict[str, asyncio.Lock] = {}
         self._release_locks: dict[str, asyncio.Lock] = {}
@@ -310,6 +311,13 @@ class RepositoryWorkspaces:
 
     def skill_receipt(self, binding: WorkspaceBinding) -> Path:
         return self.root / f"skill-links-{binding.slot_id}.json"
+
+    def _skill_workspaces(self) -> Iterator[Path]:
+        manifest = self._load()
+        yield self._verify_inference(manifest)
+        for slot in manifest.slots:
+            if slot.directory_identity is not None or self._managed(Path(slot.relative_path)).exists():
+                yield self._verify_slot(slot)
 
     def _owned(self, manifest: WorkspaceManifest, binding: WorkspaceBinding) -> WorkspaceSlot:
         for slot in manifest.slots:

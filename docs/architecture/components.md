@@ -47,7 +47,7 @@
 
 工作端上报的是具体[工作区库存](../../app/worker/execution/workspaces.py)。控制端在[领取事务](../../app/persistence/assignments.py)中保存 worker 身份、位置和该次绑定的代次。后续修订由原位置继续，另一项 Flow 则可以用同机其他位置。代次用于区分同一路径先后两位使用者：旧任务迟到的结果不能仅因目录名相同就被接纳。
 
-[执行器](../../app/worker/execution/executor.py)通过同一个[编码接口](../../app/worker/coding_agent.py)启动或恢复 Codex、Amp。新会话使用本次任务指定的设置，恢复已有会话不会把后来的全局默认设置强加给它。项目也可配置 skill 仓库：工作端用单独的只读授权获取快照，再把常驻或选中的 skill 链接到工作区，见[安装逻辑](../../app/worker/execution/skills.py)。
+[执行器](../../app/worker/execution/executor.py)通过同一个[编码接口](../../app/worker/coding_agent.py)启动或恢复 Codex、Amp。新会话使用本次任务指定的设置，恢复已有会话不会把后来的全局默认设置强加给它。共享 skill 由工作端后台同步，使用来源仓库单独的只读授权。安装器取当前来源最近成功发布的本地快照，选择并链接 skill，不查询远端。同步时依据工作区链接和正在进行的安装回收旧版，至少保留一份快照，见[安装与回收逻辑](../../app/worker/execution/skills.py)。
 
 只需要模型判断的工作有另一条路径。比如给任务命名，或判断评论是在提问还是要求修改，都不需要占用原 Flow 的代码目录。[推理调度](../../app/controler/workflow/inference.py)将它们作为推理 Job 派发给可用执行者：符合条件时优先使用控制端托管的 bub 推理 worker，也可以由支持推理的普通 worker 在独立会话中完成。如何由判断变成下一轮编码，见[评审循环](review-loop.md)。
 

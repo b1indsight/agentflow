@@ -10,6 +10,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from app.contracts.protocol import SkillRepositorySource
 from app.contracts.receipts import decode_result_inbox
 from app.controler.api import create_app
 from app.controler.workers.transport import serve_worker
@@ -21,6 +22,8 @@ from app.github import repositories as repo_api
 from app.persistence.records import required
 from app.persistence.settings import SettingsStore, TextSetting
 from app.worker.config import WorkerSettings
+from app.worker.execution import skills
+from app.worker.execution.vcs import VcsVerificationError, _required_stdout
 from app.worker.runtime import WorkerRuntime
 from tests.access import AccessIssuer
 from tests.github import RecordingGitHub, record_open_pull_request
@@ -231,19 +234,28 @@ async def test_control_gateway_and_worker_client_complete_one_remote_job(store, 
         linked = workspace / ".agents/skills/style/SKILL.md"
         published.write_text(original + "Updated\n")
         _git("commit", "-am", "refresh skill", cwd=skill_repository)
-        first = worker.workspaces.skill_checkout
+        snapshots = linked.resolve().parents[2]
+        refreshed = snapshots / await _required_stdout("bootstrap", "git", "rev-parse", "HEAD", cwd=skill_repository)
         await subject.receive_webhook("push", "skill-push", {
             "repository": {"full_name": "Owner/Skills", "default_branch": "main"},
             "ref": "refs/heads/main", "sender": {"type": "Bot"},
         }, "digest")
         assert await asyncio.to_thread(subject.webhooks.sweep, asyncio.get_running_loop()) == 1
-        await wait_until(lambda: worker.workspaces.skill_checkout is not first)
-        refreshed = await required(worker.workspaces.skill_checkout)
+        await wait_until(refreshed.is_dir)
         assert (refreshed / "style/SKILL.md").read_text() == published.read_text()
+        # A later sync can reclaim the unused intermediate version, but not the live Flow's.
+        published.write_text(original + "Newest\n")
+        _git("commit", "-am", "publish newest", cwd=skill_repository)
+        newest = snapshots / await _required_stdout("bootstrap", "git", "rev-parse", "HEAD", cwd=skill_repository)
+        subject.request_skill_sync()
+        await wait_until(newest.is_dir)
+        assert not refreshed.exists()
         settings.set_value(TextSetting.SKILL_REPOSITORY, None, expected="owner/skills")
         subject.request_skill_sync()
-        await wait_until(lambda: worker.workspaces.skill_checkout is None)
+        await wait_until(lambda: worker.workspaces.skills.repository is None)
+        await required(worker.workspaces.skills.pending)
         assert linked.read_text() == original
+        assert (newest / "style/SKILL.md").read_text() == published.read_text()
 
     persisted = required(store.jobs.get_job(job.id))
     assert persisted.state is JobState.DONE and persisted.started_at is not None
@@ -384,3 +396,71 @@ def skill_repository(tmp_path, monkeypatch):
                         lambda: _vcs_environment() | {"GIT_CONFIG_GLOBAL": str(config)})
     monkeypatch.setattr(RecordingGitHub, "repository_read_token", AsyncMock(return_value=SecretStr("read")))
     return publisher
+
+
+async def test_install_uses_local_skills_and_sync_retains_the_last_snapshot(tmp_path, skill_repository, monkeypatch):
+    workspace = tmp_path / "project"
+    links = workspace / ".agents/skills"
+    links.mkdir(parents=True)
+    cache = skills.SkillSnapshots(lambda: tmp_path, lambda: [workspace])
+    source = SkillRepositorySource(repository="owner/skills", token=SecretStr("read"))
+    await cache.sync(source)
+    unrelated = tmp_path / "skill-repositories" / ("0" * 40)
+    unrelated.mkdir()  # A SHA-shaped name alone is not permission to delete.
+    original = (skill_repository / "style/SKILL.md").read_text()
+    (skill_repository / "style/SKILL.md").write_text(original + "B\n")
+    _git("commit", "-am", "B", cwd=skill_repository)
+
+    # A cold worker with a warm disk can start selection while the publisher is unreachable.
+    cache = skills.SkillSnapshots(lambda: tmp_path, lambda: [workspace])
+    resume = asyncio.Event()
+    clone = skills.clone_skills
+
+    async def blocked(*args):
+        await resume.wait()
+        return await clone(*args)
+
+    monkeypatch.setattr(skills, "clone_skills", blocked)
+    refresh = cache.sync(source)
+    async with asyncio.timeout(5), cache.acquire() as a:
+        assert (a / "style/SKILL.md").read_text() == original
+        resume.set()
+        await refresh  # No symlink yet: the selector alone keeps A alive.
+        assert (a / "style/SKILL.md").read_text() == original
+        (links / "style").symlink_to(a / "style")
+
+    # Restart through an alias of the parent (e.g. /var vs /private/var on macOS).
+    alias = tmp_path / "worker-path-alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    cache = skills.SkillSnapshots(lambda: alias, lambda: [alias / workspace.name])
+    await cache.sync(source)
+    with pytest.raises(VcsVerificationError, match="read credential unavailable"):
+        await cache.sync(source.model_copy(update={"token": None}))
+    async with cache.acquire() as b:
+        assert (b / "style/SKILL.md").read_text() == original + "B\n"
+        assert (links / "style/SKILL.md").read_text() == original
+    (links / "style").unlink()
+    other_style = tmp_path / "elsewhere" / a.name / "style"
+    other_style.mkdir(parents=True)
+    (links / "style").symlink_to(other_style)  # Same SHA in a different directory does not pin A.
+    await cache.sync(None)
+    assert not a.exists() and b.is_dir() and unrelated.is_dir()
+    async with cache.acquire() as disabled:
+        assert disabled is None
+    inaccessible = SkillRepositorySource(repository="other/skills", token=None)
+    with pytest.raises(VcsVerificationError, match="read credential unavailable"):
+        await cache.sync(inaccessible)
+    with pytest.raises(VcsVerificationError, match="read credential unavailable"):
+        async with cache.acquire():
+            pytest.fail("an inaccessible source must not borrow the retained snapshot")
+
+
+async def test_first_new_assignment_without_a_source_ignores_previous_connection_skills(remote_flow, skill_repository):
+    flow, server, _, worker, agent = remote_flow
+    # The worker still has the old source, but the controller has none configured on this connection.
+    await worker.workspaces.skills.sync(SkillRepositorySource(repository="owner/skills", token=SecretStr("read")))
+    async with remote_connection(server, worker):
+        await wait_until(lambda: bool(agent.started))
+        (_, workspace), = agent.started
+        assert not (workspace / ".agents/skills/style").is_symlink()
+        await wait_until(lambda: worker.executions[flow.id].state.load().acknowledged)

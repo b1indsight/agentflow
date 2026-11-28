@@ -5,6 +5,13 @@ from collections.abc import Mapping
 from pydantic import SecretStr
 
 
+def credential_values(environment: Mapping[str, str]) -> tuple[str, ...]:
+    """Known CLI and worker secrets, longest first so a shared prefix cannot mask a longer key."""
+    keys = ("AMP_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
+            "AGENTFLOW_WORKER_TOKEN", "AGENTFLOW_PUSH_TOKEN", "AGENTFLOW_MCP_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+    return tuple(sorted({value for key in keys if (value := environment.get(key))}, key=len, reverse=True))
+
+
 def inherited_agent_environment(source: Mapping[str, str]) -> dict[str, str]:
     """Keep native CLI/MCP configuration without ambient task or Git authentication state.
 
