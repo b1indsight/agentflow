@@ -8,7 +8,6 @@ import os
 import re
 import signal
 import stat
-import subprocess
 import sys
 import tempfile
 import threading
@@ -34,7 +33,11 @@ from app.contracts.files import MAX_FILE_BYTES, FileFailure
 from app.domain.models import CodingExecutionContext, CodingExecutionResult
 from app.worker.coding_agent import AgentPrompt, CodingAgent, cli_prompt
 from app.worker.execution.amp_history import MAX_RECOVERY, AmpTranscript, Capture
-from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
+from app.worker.execution.credentials import (
+    credential_values,
+    git_credential_environment,
+    inherited_agent_environment,
+)
 from app.worker.execution.gh import github_environment
 from app.worker.execution.git_identity import disables_amp_coauthor
 from app.worker.execution.idle import wait_for_inactivity
@@ -44,6 +47,7 @@ from app.worker.execution.permissions import (
     PermissionProfile,
     require_supported_permissions,
 )
+from app.worker.execution.process_groups import process_groups, signal_groups
 from app.worker.execution.prompts import add_backend_instructions, history_text
 from app.worker.model_catalog import read_model_catalog
 from app.worker.state.file_links import FileLinks
@@ -126,48 +130,18 @@ class _OutputLimit(Exception):
     pass
 
 
-def _descendant_groups(pid: int) -> set[int]:
-    """Snapshot before signalling: orphaned shells otherwise lose their parent identity."""
-    try:
-        snapshot = subprocess.run(
-            ["ps", "-A", "-o", "pid=,ppid=,pgid="], capture_output=True, text=True,
-            check=True, timeout=1,
-        )
-    except (OSError, subprocess.SubprocessError):
-        logger.warning("Amp descendant snapshot unavailable; cleanup may leave detached processes")
-        return set()
-    rows = [tuple(map(int, row.split())) for row in snapshot.stdout.splitlines()]
-    descendants = {pid}
-    while True:
-        children = {child for child, parent, _ in rows if parent in descendants}
-        if children <= descendants:
-            break
-        descendants.update(children)
-    return {group for child, _, group in rows if child in descendants
-            and group > 1 and group != os.getpgrp()}
-
-
-def _signal_groups(groups: set[int], sig: signal.Signals) -> None:
-    for group in groups:
-        try:
-            os.killpg(group, sig)
-        except ProcessLookupError:
-            pass
-
-
 async def _stop_amp(proc: asyncio.subprocess.Process) -> None:
     """Bound cleanup before propagating cancellation; arbitrary daemons need external isolation."""
-    groups = await asyncio.to_thread(_descendant_groups, proc.pid)
-    groups.add(proc.pid)
-    _signal_groups({proc.pid}, signal.SIGTERM)
+    groups = await asyncio.to_thread(process_groups, proc.pid)
+    signal_groups({proc.pid}, signal.SIGTERM)
     try:
         await asyncio.wait_for(proc.wait(), timeout=TERMINATION_GRACE)
     except TimeoutError:
         logger.warning("Amp forced termination; detached-process cleanup is best effort")
     finally:
         # Include separate native shell PGIDs captured while the CLI still owned them.
-        _signal_groups(groups, signal.SIGTERM)
-        _signal_groups(groups, signal.SIGKILL)
+        signal_groups(groups, signal.SIGTERM)
+        signal_groups(groups, signal.SIGKILL)
         await asyncio.wait_for(proc.wait(), timeout=5)
 
 
@@ -486,9 +460,8 @@ class AmpCodingAgent(CodingAgent):
                 args.extend(["--model", model] if model is not None else ["--mode", "low"])
                 if effort is not None:
                     args.extend(["--effort", effort])
-            secrets = [value for key, value in environment.items()
-                       if key in {"AMP_API_KEY", "AGENTFLOW_MCP_TOKEN", "AGENTFLOW_PUSH_TOKEN", "GH_TOKEN"} and value]
-            capture = (Capture(self._history.store, session_id, prompt, tuple(secrets))
+            secrets = credential_values(environment)
+            capture = (Capture(self._history.store, session_id, prompt, secrets)
                        if self._history.store and (context is not None or session_id) else None)
             complete = False
             try:
@@ -617,10 +590,7 @@ class AmpHistory:
         timestamp = message.get("createdAt") if isinstance(message.get("createdAt"), str) else None
         items: list[HistoryItem] = []
         unsupported = False
-        secrets += tuple(os.environ.get(key, "") for key in (
-            "AMP_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
-            "AGENTFLOW_WORKER_TOKEN", "AGENTFLOW_PUSH_TOKEN", "AGENTFLOW_MCP_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
-        ))
+        secrets += credential_values(os.environ)
         for block_index, block in enumerate(blocks):
             if not isinstance(block, dict):
                 unsupported = True

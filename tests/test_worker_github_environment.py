@@ -115,7 +115,8 @@ async def test_expired_wrapper_refuses_to_exec_and_cancel_reaps_before_cleanup(t
             await asyncio.Future()
 
     class Process:
-        pid = 12345
+        pid = 999999999
+        returncode = None
         stdout, stderr = Stream(), Stream()
 
         async def wait(self):

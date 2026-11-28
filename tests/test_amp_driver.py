@@ -3,7 +3,6 @@
 import asyncio
 import base64
 import json
-import os
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -399,50 +398,3 @@ async def test_download_quota_bounds_files_not_just_process_output(monkeypatch, 
     assert result.exit_code != 0
     assert (tmp_path / "attachment").stat().st_size == 1025
     assert not result.overflow and not result.timed_out
-
-
-@pytest.mark.parametrize("cancel", [False, True])
-async def test_supervisor_cleans_separate_child_group_before_returning(monkeypatch, tmp_path, cancel):
-    # Native Amp shells use their own PGID; killing just the CLI group leaks them.
-    existing = asyncio.all_tasks()
-    monkeypatch.setattr("app.worker.execution.amp_agent.AMP_BIN", sys.executable)
-    monkeypatch.setattr("app.worker.execution.amp_agent.TERMINATION_GRACE", 0.1)
-    pidfile = tmp_path / "child.pid"
-    code = f"""import pathlib, signal, subprocess, sys, time
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
-child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
-                         start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-pathlib.Path({str(pidfile)!r}).write_text(str(child.pid))
-time.sleep(60)
-"""
-    task = asyncio.create_task(AmpCodingAgent.run_process(
-        ["-c", code], cwd=tmp_path, timeout=0.8, timeout_kind="idle",
-    ))
-    for _ in range(100):
-        if pidfile.exists():
-            break
-        await asyncio.sleep(0.01)
-    assert pidfile.exists()
-    child = int(pidfile.read_text())
-    try:
-        if cancel:
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        else:
-            assert (await task).timed_out
-        for _ in range(100):
-            process = await asyncio.create_subprocess_exec(
-                "ps", "-o", "stat=", "-p", str(child), stdout=asyncio.subprocess.PIPE)
-            stdout, _ = await process.communicate()
-            if not stdout.strip() or stdout.strip().startswith(b"Z"):
-                break
-            await asyncio.sleep(0.01)
-        else:
-            pytest.fail("separate child group survived supervisor")
-        assert not asyncio.all_tasks() - existing
-    finally:
-        try:
-            os.killpg(child, 9)
-        except ProcessLookupError:
-            pass

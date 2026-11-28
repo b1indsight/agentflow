@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import subprocess
 import tempfile
@@ -135,7 +134,6 @@ class WorkerExecutor:
                 raise VcsVerificationError("binding", "initial assignment target is missing")
             model = assignment.model
             effort = assignment.effort
-            skills = self.workspaces.skill_checkout
             capability = _github_capability(secret, task.repo)
             if task.previous_head_sha:
                 binding = self.workspaces.lookup(task.repo, task.flow_id)
@@ -169,9 +167,9 @@ class WorkerExecutor:
             if not task.previous_head_sha:
                 receipt = self.workspaces.skill_receipt(binding)
                 clear_skill_links(workspace, receipt)
-                if skills is not None:
-                    await link_skills(await asyncio.shield(skills), workspace, task.task_content,
-                                      self.code_agent, model, effort, receipt)
+                async with self.workspaces.skills.acquire() as checkout:
+                    if checkout is not None:
+                        await link_skills(checkout, workspace, task.task_content, self.code_agent, model, effort, receipt)
         except VcsVerificationError as error:
             return _vcs_failure(task.resume_session_id, "", error.stage, str(error))
         except OSError:

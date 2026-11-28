@@ -12,6 +12,7 @@ import stat
 import tempfile
 import threading
 from collections.abc import Mapping
+from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO
 
@@ -31,7 +32,11 @@ from app.domain.models import (
     SessionUnavailable,
 )
 from app.worker.coding_agent import AgentPrompt, CodingAgent, cli_prompt
-from app.worker.execution.credentials import git_credential_environment, inherited_agent_environment
+from app.worker.execution.credentials import (
+    credential_values,
+    git_credential_environment,
+    inherited_agent_environment,
+)
 from app.worker.execution.gh import github_environment
 from app.worker.execution.idle import wait_for_inactivity
 from app.worker.execution.input_images import write_images
@@ -40,6 +45,7 @@ from app.worker.execution.permissions import (
     PermissionProfile,
     require_supported_permissions,
 )
+from app.worker.execution.process_groups import process_groups, signal_groups
 from app.worker.execution.prompts import history_text
 from app.worker.model_catalog import read_model_catalog
 
@@ -112,17 +118,18 @@ def _start_args(
     return args
 
 
-def _parse_thread_id(jsonl_text: str) -> str | None:
-    for line in jsonl_text.splitlines():
-        line = line.strip()
-        if not line:
+def _parse_thread_id(stdout: bytearray) -> str | None:
+    for line in BytesIO(stdout):
+        if not line.strip():
             continue
         try:
             evt = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
-        if evt.get("type") == "thread.started":
-            return evt.get("thread_id")
+        if isinstance(evt, dict) and evt.get("type") == "thread.started":
+            sid = evt.get("thread_id")
+            if isinstance(sid, str) and sid.strip():
+                return sid
     return None
 
 
@@ -229,11 +236,10 @@ class CodexAgent(CodingAgent):
             io = asyncio.gather(*tasks)
 
             async def cleanup() -> None:
-                # Reap the group before removing its wrapper/config, including surviving children.
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                # While the CLI is still alive, its shell may own a separate group.
+                groups = (await asyncio.to_thread(process_groups, proc.pid)
+                          if proc.returncode is None else {proc.pid})
+                signal_groups(groups, signal.SIGKILL)
                 for task in tasks:
                     if not task.done():
                         task.cancel()
@@ -258,13 +264,14 @@ class CodexAgent(CodingAgent):
 
             try:
                 await wait_for_inactivity(io, timeout=self.timeout, last_activity=lambda: last_activity)
-            except TimeoutError:
-                timeout_detail = f"Codex: no new stdout/stderr for {self.timeout:g}s; execution timed out"
-                logger.error(timeout_detail)
-                return CodingExecutionResult(session_id=session_id, last_message="", exit_code=124,
-                                             failure_detail=timeout_detail, failure_kind="timeout")
-            except _OutputLimit:
-                return CodingExecutionResult(session_id=session_id, last_message="", exit_code=1,
+            except (TimeoutError, _OutputLimit) as error:
+                sid = session_id or _parse_thread_id(stdout)
+                if isinstance(error, TimeoutError):
+                    timeout_detail = f"Codex: no new stdout/stderr for {self.timeout:g}s; execution timed out"
+                    logger.error(timeout_detail)
+                    return CodingExecutionResult(session_id=sid, last_message="", exit_code=124,
+                                                 failure_detail=timeout_detail, failure_kind="timeout")
+                return CodingExecutionResult(session_id=sid, last_message="", exit_code=1,
                     failure_detail="Codex execution output exceeded byte limit", failure_kind="output_limit")
             finally:
                 stopping = asyncio.create_task(cleanup())
@@ -278,8 +285,7 @@ class CodexAgent(CodingAgent):
                 if cancelled:
                     raise asyncio.CancelledError
 
-            jsonl = stdout.decode(errors="replace")
-            sid = _parse_thread_id(jsonl) or session_id
+            sid = _parse_thread_id(stdout) or session_id
             raw = b""
             if last_file.exists():
                 with last_file.open("rb") as stream:
@@ -290,19 +296,16 @@ class CodexAgent(CodingAgent):
                     failure_detail="Codex final answer exceeded byte limit", failure_kind="output_limit")
             last_message = raw.decode()
             detail = stderr.decode(errors="replace") if proc.returncode else None
-            if context is not None:
-                tokens = [context.mcp_token, context.github.token if context.github else None]
-                for token in tokens:
-                    if token is not None:
-                        last_message = last_message.replace(token.get_secret_value(), "[REDACTED]")
-                        if detail:
-                            detail = detail.replace(token.get_secret_value(), "[REDACTED]")
+            for secret in credential_values(environment):
+                last_message = last_message.replace(secret, "[REDACTED]")
+                if detail:
+                    detail = detail.replace(secret, "[REDACTED]")
             if proc.returncode != 0:
                 logger.error("codex exit={}", proc.returncode)
                 # Only a complete pre-execution rejection permits fallback. Generic errors or
                 # partial output may follow edits or a push and must not replay execution.
                 error_lines = stderr.decode(errors="replace").strip().splitlines()
-                if (session_id and not jsonl.strip() and not last_message.strip() and error_lines
+                if (session_id and not stdout.strip() and not last_message.strip() and error_lines
                         and error_lines[-1] == "Error: thread/resume: thread/resume failed: "
                         f"no rollout found for thread id {session_id} (code -32600)"):
                     raise SessionUnavailable("Codex rejected the saved session before execution")
@@ -465,10 +468,8 @@ class CodexHistory:
             if not isinstance(value, str):
                 raise TypeError("non-text history field")
             # Known runtime credentials and common token forms must not leak via tool text.
-            for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "AGENTFLOW_WORKER_TOKEN"):
-                secret = os.environ.get(key)
-                if secret:
-                    value = value.replace(secret, "[REDACTED]")
+            for secret in credential_values(os.environ):
+                value = value.replace(secret, "[REDACTED]")
             value = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,})",
                            "[REDACTED]", value)
             value = re.sub(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/-]+", r"\1[REDACTED]", value)
