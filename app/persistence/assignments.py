@@ -514,6 +514,7 @@ class AssignmentStore(Repository):
                 ),
             )
             if result.rowcount == 1:
+                tx.job_finished(job_id)
                 connection.execute(
                     "UPDATE workers w SET current_job_id=NULL FROM jobs j WHERE j.id=%s"
                     " AND w.worker_id=j.assigned_worker_id AND w.workspace=j.workspace"
@@ -694,14 +695,14 @@ class AssignmentStore(Repository):
         with self._db.transaction() as tx, tx.connection() as connection:
             tx.lock_workflow(flow_id)
             ReviewStore(tx).cancel(flow_id)
-            connection.execute(
+            retired = connection.execute(
                 "WITH retired AS (UPDATE jobs SET state=%s, last_error=%s, updated_at=%s WHERE flow_id=%s"
                 " AND kind<>'inference'"
                 " AND (state=%s OR (state='running' AND started_at IS NULL AND dispatch_authorized_at IS NULL"
                 " AND EXISTS (SELECT 1 FROM flows f WHERE f.id=jobs.flow_id AND f.archive_reason IS NOT NULL)))"
-                " AND result_received_at IS NULL RETURNING id)"
-                " UPDATE workers SET current_job_id=NULL"
-                " WHERE current_job_id IN (SELECT id FROM retired)",
+                " AND result_received_at IS NULL RETURNING id),"
+                " released AS (UPDATE workers SET current_job_id=NULL WHERE current_job_id IN (SELECT id FROM retired))"
+                " SELECT id FROM retired ORDER BY id",
                 (
                     JobState.FAILED,
                     reason,
@@ -709,7 +710,9 @@ class AssignmentStore(Repository):
                     flow_id,
                     JobState.QUEUED,
                 ),
-            )
+            ).fetchall()
+            for row in retired:
+                tx.job_finished(row["id"])
             InferenceStore(tx).cancel_flow_inference(flow_id)
 
     def sweep_expired_assignments(self) -> tuple[int, int]:

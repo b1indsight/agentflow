@@ -299,11 +299,10 @@ def test_creation_targets_include_new_repositories_and_continue_empty_inventory_
 async def test_flow_stream_replays_committed_job_ends_after_last_event_id(console_runtime, store):
     # Two tabs disconnect at different points. Reopening either must not skip a job
     # (even on the same flow), repeat the cursor, or publish a rolled-back finish.
-    with store.connection() as connection:
-        connection.execute("DROP TRIGGER console_job_finished ON jobs")
-    store.init_db()
     flow = store.flows.create_flow("owner/repo", 7, 42)
+    register_worker(store, "worker-1", repo=flow.repo, epoch="epoch")
     first = enqueue_job(store, flow.id, JobKind.INITIAL)
+    assert store.assignments.assign_job("worker-1", "token", "epoch").id == first.id
     second = enqueue_job(store, flow.id, JobKind.REVISION)
     expires = int(time.time()) + 60
     console = ConsoleStore(store.database)
@@ -316,11 +315,10 @@ async def test_flow_stream_replays_committed_job_ends_after_last_event_id(consol
         assert ready == "event: ready"
         start = baseline.removeprefix("id: ")
         apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
-        with store.connection() as connection:
-            connection.execute("UPDATE jobs SET state='failed' WHERE id=%s", (second.id,))
-            connection.rollback()
-        with store.connection() as connection:
-            connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (first.id,))
+        with pytest.raises(ValueError, match="roll back"), store.transaction() as tx:
+            tx.assignments.retire_queued_work(flow.id)
+            raise ValueError("roll back")
+        assert store.assignments.finish_assignment(first.id, "worker-1", "token", JobState.DONE, "epoch")
         frame = await anext(board)
         identity, name, data = frame.splitlines()[:3]
         last_id = identity.removeprefix("id: ")
@@ -329,9 +327,8 @@ async def test_flow_stream_replays_committed_job_ends_after_last_event_id(consol
         assert event["flow_id"] == flow.id and event["board"]["item"]["phase"] == "blocked"
         assert event["payload"] == {"job_id": first.id, "kind": "initial", "state": "done"}
 
-    with store.connection() as connection:
-        connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (first.id,))
-        connection.execute("UPDATE jobs SET state='failed' WHERE id=%s", (second.id,))
+    assert not store.assignments.finish_assignment(first.id, "worker-1", "token", JobState.DONE, "epoch")
+    store.assignments.retire_queued_work(flow.id)
     async with asyncio.timeout(5), stream(start) as all_events, stream(last_id, "status:queued") as resumed:
         replay = (await anext(all_events)).splitlines()
         assert replay[:2] == [identity, name]
@@ -360,12 +357,17 @@ async def test_flow_stream_heartbeats_do_not_advance_cursor(console_runtime, sto
         assert "event: ready" in await anext(stream)
         assert await anext(stream) == ": keep-alive\n\n"
         flow = store.flows.create_flow("owner/repo", 7, 42)
-        job = enqueue_job(store, flow.id, JobKind.INITIAL)
+        raw = enqueue_job(store, flow.id, JobKind.INITIAL)
+        # Raw maintenance SQL is not a business event. The service operation must
+        # wake a waiting tab even when the write runs on a different thread.
         with store.connection() as connection:
-            connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (job.id,))
+            connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (raw.id,))
+        job = enqueue_job(store, flow.id, JobKind.REVISION)
+        await asyncio.to_thread(store.assignments.retire_queued_work, flow.id)
         while (frame := await anext(stream)).startswith(":"):
             pass
         assert "event: flow.job.finished.v1" in frame
+        assert json.loads(frame.split("data: ")[1])["payload"]["job_id"] == job.id
 
 
 def test_console_and_every_public_read_require_owner_before_io(console_runtime, store):

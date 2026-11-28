@@ -14,6 +14,7 @@ from psycopg_pool import ConnectionPool
 
 from app.domain.models import Flow, Job, utcnow
 from app.persistence.console_schema import CONSOLE_EVENT_LOG, CONSOLE_FACTS_VIEW
+from app.persistence.flow_events import FlowEvents
 from app.persistence.records import Row
 from app.persistence.schema import COLUMN_ADDITIONS, SCHEMAS
 
@@ -94,7 +95,7 @@ def _pending_schema_updates(connection: Connection[Row], relations: dict[str, st
         ).fetchall() == [{"version": 3}]:
             require_worker_key(connection)
             updates = [ddl for column, ddl in COLUMN_ADDITIONS.items() if column not in columns]
-            if not connection.execute(
+            if not {"console_event_clock", "console_flow_events"} <= tables or connection.execute(
                 "SELECT 1 FROM pg_trigger WHERE tgrelid='jobs'::regclass AND tgname='console_job_finished'"
             ).fetchone():
                 updates.append(CONSOLE_EVENT_LOG)
@@ -140,6 +141,8 @@ class Database:
         self._clock = clock
         self.lease_duration = lease_duration
         self.recovery_grace = recovery_grace
+        self.flow_events = FlowEvents(self)
+        self._finished_jobs: list[int] = []
         self._bound_connection: Connection[Row] | None = None
         self._transaction_closed = False
         self._read_snapshot = False
@@ -176,10 +179,25 @@ class Database:
         with self.connection() as connection, connection.transaction():
             bound = copy(self)
             bound._bound_connection = connection
+            bound._finished_jobs = []
             try:
                 yield bound
+                if bound._finished_jobs and self._bound_connection is None:
+                    self.flow_events.append_finished(connection, bound._finished_jobs)
             finally:
                 bound._transaction_closed = True
+        if bound._finished_jobs:
+            if self._bound_connection is None:
+                self.flow_events.committed()
+            else:
+                # A successful savepoint can still be rolled back by its parent.
+                self._finished_jobs.extend(bound._finished_jobs)
+
+    def job_finished(self, job_id: int) -> None:
+        """Record a Flow job that this transaction just moved into a terminal state."""
+        if self._bound_connection is None or self._transaction_closed:
+            raise RuntimeError("job completion requires an active workflow transaction")
+        self._finished_jobs.append(job_id)
 
     @contextmanager
     def read_snapshot(self) -> Iterator[Database]:

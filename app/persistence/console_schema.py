@@ -55,24 +55,8 @@ CREATE TABLE IF NOT EXISTS console_flow_events (
  seq BIGINT PRIMARY KEY, timestamp_ms BIGINT NOT NULL, event_type TEXT NOT NULL,
  flow_id BIGINT NOT NULL, payload JSONB NOT NULL
 );
-CREATE OR REPLACE FUNCTION console_job_finished() RETURNS TRIGGER AS $$
-BEGIN
- -- Hold the clock row until commit: a reader must never see N+1 before N.
- WITH tick AS (
-   UPDATE console_event_clock SET seq=seq+1,
-     timestamp_ms=greatest(timestamp_ms, floor(extract(epoch FROM clock_timestamp())*1000)::bigint)
-   WHERE singleton RETURNING seq,timestamp_ms
- ) INSERT INTO console_flow_events SELECT seq,timestamp_ms,'flow.job.finished.v1',NEW.flow_id,
-     jsonb_build_object('job_id',NEW.id,'kind',NEW.kind,'state',NEW.state) FROM tick;
- PERFORM pg_notify('agentflow_flow', TG_TABLE_SCHEMA);
- RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS console_job_finished ON jobs;
-CREATE CONSTRAINT TRIGGER console_job_finished AFTER UPDATE ON jobs
- DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
- WHEN (NEW.flow_id IS NOT NULL AND OLD.state NOT IN ('done','failed') AND NEW.state IN ('done','failed'))
- EXECUTE FUNCTION console_job_finished();
+DROP FUNCTION IF EXISTS console_job_finished();
 """
 
 CONSOLE_SCHEMA = CONSOLE_FACTS_VIEW + """

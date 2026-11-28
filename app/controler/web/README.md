@@ -96,7 +96,9 @@ event: flow.job.finished.v1
 data: {"flow_id":43,"payload":{"job_id":71,"kind":"initial","state":"failed"},"board":{"item":null,"counts":{"queued":0,"running":2,"review":0,"blocked":0,"archived":0}}}
 ```
 
-`id` 由毫秒时间戳、按事务提交顺序递增的序号、`server_id` 组成。`server_id` 标识数据库中持久化的事件流，同一部署的 API 实例共享，重启不变。`EventSource` 断线重连会自动带上 `Last-Event-ID`；服务端从日志按顺序补发严格晚于它的事件，然后继续监听。无游标、游标无效或属于另一事件流时，用带当前游标的 `ready` 重新取首页。事件日志目前不自动清理。
+结束 Job 的业务代码在同一事务中记录事件，提交成功后唤醒本 `serve` 进程中的订阅者。空闲连接只等待应用通知，不监听或轮询数据库；保活也不查库。直接用 SQL 改 Job 不会生成业务事件。
+
+`id` 由毫秒时间戳、按事务提交顺序递增的序号、`server_id` 组成。`server_id` 标识持久化的事件流，重启不变。`EventSource` 重连时自动带上 `Last-Event-ID`，服务端按顺序补发严格晚于它的事件，再等待业务通知。无游标、游标无效或属于另一事件流时，用带当前游标的 `ready` 重新取首页。独立 CLI 进程通过业务代码结束的 Job 同样记入日志，但不直接唤醒 `serve` 的标签页；下一次本地通知或重连会补齐。事件日志目前不自动清理。
 
 `flow_id` 和 `payload` 是持久化的事件事实；`board` 是发送时按 `q` 读取的最新卡片和各阶段总数，补发时也按当前状态计算。将来可增加实时结果事件，复用 `id`、`flow_id` 和 `payload`，不用带 `board`。不兼容的字段变更使用新版本事件名；侧栏只订阅它理解的类型。
 
