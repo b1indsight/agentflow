@@ -61,6 +61,7 @@ from app.contracts.protocol import (
 )
 from app.contracts.validation import RejectedMessage
 from app.domain.inference_models import InferenceCapability
+from app.domain.models import WorkspaceInventory
 from app.inference.transport import WorkerInferenceCallbacks
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.lifecycle import WorkerProtocolError
@@ -130,12 +131,13 @@ class WorkerStateCallbacks:
 
     def bind(self, routes: Dispatcher[ServerMessageUnion]) -> None:
         self.routes = routes
-        routes.register("worker.execute", Assignment, self.on_execute)
-        routes.register("worker.stop", StopExecution, self.on_stop)
-        routes.register("worker.reject_recovery", RecoveryRejected, self.on_reject)
-        routes.register("worker.provision", RepositoryDemand, self.on_provision)
-        routes.register("worker.sync_skills", SyncSkills, self.on_sync_skills)
-        routes.register("worker.archive_amp_thread", ArchiveAmpThread, self.on_archive_thread)
+        if self.runtime.settings.execute:
+            routes.register("worker.execute", Assignment, self.on_execute)
+            routes.register("worker.stop", StopExecution, self.on_stop)
+            routes.register("worker.reject_recovery", RecoveryRejected, self.on_reject)
+            routes.register("worker.provision", RepositoryDemand, self.on_provision)
+            routes.register("worker.sync_skills", SyncSkills, self.on_sync_skills)
+            routes.register("worker.archive_amp_thread", ArchiveAmpThread, self.on_archive_thread)
         routes.configure(
             opened=self.on_opened,
             message=self.on_message,
@@ -149,6 +151,8 @@ class WorkerStateCallbacks:
         )
 
     async def on_unmatched_reply(self, reply: ToolResult, message: ServerMessageUnion) -> None:
+        if not self.runtime.settings.execute:
+            raise WorkerProtocolError("reply has no matching invocation")
         if reply.execution() is None and not isinstance(reply, FlowToolResponse):
             return  # A timed-out independent query, such as file registration, may still finish.
         previous = self._accepted.get(reply.reply_to)
@@ -174,7 +178,14 @@ class WorkerStateCallbacks:
             execution.state.reconcile_acknowledgement()
             if execution.state.load() is None:
                 self.runtime.executions.pop(flow_id)
-        inventory = self.runtime.workspaces.inventory()
+        if not self.runtime.settings.execute:
+            # The protocol requires one stable default workspace even without a repository root.
+            inventory = [WorkspaceInventory(workspace="0" * 32, repository=None, generation=1, flow_id=None)]
+            repo_limit, coding_agent = 1, None
+        else:
+            inventory = self.runtime.workspaces.inventory()
+            repo_limit = self.runtime.settings.worker_repo_workspace_limit
+            coding_agent = self.runtime.settings.coding_agent
         recoveries = []
         for execution in self.runtime.executions.values():
             recovery = execution.recovery()
@@ -203,9 +214,9 @@ class WorkerStateCallbacks:
             control="register",
             worker_id=self.worker_id,
             workspace=default.workspace,
-            repo_workspace_limit=self.runtime.settings.worker_repo_workspace_limit,
-            execute=True,
-            coding_agent=self.runtime.settings.coding_agent,
+            repo_workspace_limit=repo_limit,
+            execute=self.runtime.settings.execute,
+            coding_agent=coding_agent,
             inference=self.inference,
             payload=[],
             **self._pages.popleft().model_dump(),
@@ -230,6 +241,10 @@ class WorkerStateCallbacks:
             ):
                 return  # The error hook checks the epoch before using correlations.
             raise WorkerProtocolError("message belongs to another connection epoch")
+        if not self.runtime.settings.execute and not self.ready and (
+            not isinstance(message, Registered) or not message.ready or message.recoveries
+        ):
+            raise WorkerProtocolError("expected ready registration without coding recovery")
         if isinstance(message, CancelJob):
             if not self.ready:
                 raise WorkerProtocolError("job cancellation requires completed registration")
@@ -247,13 +262,15 @@ class WorkerStateCallbacks:
             if not self._heartbeat_started:
                 self.session.periodic(message.heartbeat_interval, self.heartbeat)
                 self._heartbeat_started = True
-                self._observe_execution()
+                if self.runtime.settings.execute:
+                    self._observe_execution()
             await self.flush_execution()
             if message.ready:
                 if self._pages:
                     raise WorkerProtocolError("registration completed before all inventory pages")
                 self.ready = True
-                self.runtime.workspaces.skill_checkout = None
+                if self.runtime.settings.execute:
+                    self.runtime.workspaces.skill_checkout = None
                 self.on_ready(True)
                 if self._inventory_dirty:
                     await self.report_inventory()
@@ -573,6 +590,9 @@ class WorkerStateCallbacks:
             not self.ready
             or message.connection_epoch != self.session.epoch
             or message.control is not None
+            or (not self.runtime.settings.execute and any(
+                not isinstance(item, ToolCall) or item.method != "worker.infer" for item in message.payload
+            ))
         ):
             raise WorkerProtocolError("invalid payload has no established connection authority")
 

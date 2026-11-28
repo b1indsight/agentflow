@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import signal
 from typing import Annotated
 
 import typer
@@ -23,10 +24,15 @@ def worker(
             typer.echo(json.dumps(update_worker(), sort_keys=True))
             return
         with installation_lock(updating=False):
+            from app.telemetry.logging import configure_logging
             from app.worker.config import settings
             from app.worker.runtime import WorkerRuntime
 
-            asyncio.run(WorkerRuntime(settings).run())
+            configure_logging("worker", settings.log_format)
+            runtime = WorkerRuntime(settings)
+            with asyncio.Runner() as runner:
+                runner.get_loop().add_signal_handler(signal.SIGTERM, runtime.stop)
+                runner.run(runtime.run())
     except UpdateError as error:
         typer.echo(f"worker {'update' if update else 'startup'} stopped: {error}", err=True)
         raise typer.Exit(1) from None

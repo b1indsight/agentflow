@@ -12,14 +12,9 @@ from email.utils import parsedate_to_datetime
 
 from loguru import logger
 
-from app.domain.inference_models import (
-    MAX_INPUT_BYTES,
-    InferenceFailure,
-    InferenceOutput,
-    InferenceTask,
-)
+from app.domain.inference_models import MAX_INPUT_BYTES, InferenceFailure
 from app.domain.json import strict_json
-from app.inference.bub import ADAPTER_VERSION
+from app.worker.bub import Completion
 
 # Keep all SDK imports and diagnostics off the result channel.
 with contextlib.redirect_stdout(sys.stderr):
@@ -67,7 +62,7 @@ def classify(error: Exception) -> InferenceFailure:
     return InferenceFailure(code="backend_error")
 
 
-async def run(task: InferenceTask) -> InferenceOutput | InferenceFailure:
+async def run(task: Completion) -> str | InferenceFailure:
     """Complete arbitrary messages once; callers own domain schemas and semantic actions."""
     class ExplicitSettings(AgentSettings):
         @classmethod
@@ -117,16 +112,15 @@ async def run(task: InferenceTask) -> InferenceOutput | InferenceFailure:
                 return InferenceFailure(code="output_limit")
     except Exception as error:  # noqa: BLE001 — sanitized process boundary, never serialize errors.
         return classify(error)
-    return InferenceOutput(request_id=task.request_id, request_digest=task.digest,
-                           text=raw, model=model, adapter_version=ADAPTER_VERSION)
+    return raw
 
 
 def main() -> None:
     logger.remove()
-    task = InferenceTask.model_validate(strict_json(sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)))
+    task = Completion.model_validate(strict_json(sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)))
     with contextlib.redirect_stdout(sys.stderr):
         result = asyncio.run(run(task))
-    sys.stdout.write(result.model_dump_json())
+    sys.stdout.write(json.dumps(result, ensure_ascii=False) if isinstance(result, str) else result.model_dump_json())
 
 
 if __name__ == "__main__":

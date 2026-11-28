@@ -1,5 +1,5 @@
 import asyncio
-import json
+import logging
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -33,7 +33,7 @@ from app.worker.execution.codex import CodexAgent
 from app.worker.execution.lifecycle import WorkerProtocolError
 from app.worker.execution.permissions import FULL_ACCESS
 from app.worker.execution.vcs import _run
-from app.worker.runtime import WorkerRootLock, WorkerRuntime
+from app.worker.runtime import _CONTROL_ENVIRONMENT_KEYS, WorkerRootLock, WorkerRuntime
 from tests.test_remote_e2e import QueueConnection
 from tests.test_worker_client import (
     CancellableExecutor,
@@ -43,6 +43,22 @@ from tests.test_worker_client import (
 )
 from tests.test_worker_session import _assignment
 from tests.worker_fixtures import run_worker
+
+
+async def test_embedded_worker_leaves_process_setup_to_the_host(tmp_path, caplog):
+    # A host may run the worker loop off the main thread, where signals cannot be installed.
+    async def serve():
+        runtime = WorkerRuntime(WorkerSettings(
+            worker_id="embedded", worker_token=SecretStr("secret"), worker_root=tmp_path,
+            serve_ws_url="wss://unused",
+        ))
+        asyncio.get_running_loop().call_soon(runtime.stop)
+        await runtime.run()
+
+    await asyncio.to_thread(lambda: asyncio.run(serve()))
+    assert (tmp_path / ".worker-id").read_text().strip() == "embedded"
+    logging.getLogger("host").warning("worker stopped")
+    assert "worker stopped" in caplog.messages
 
 
 def test_worker_root_lock_prevents_a_second_process_root_owner(tmp_path: Path) -> None:
@@ -92,7 +108,6 @@ async def test_runtime_shares_configured_agent_for_coding_and_history(
     tmp_path, monkeypatch, backend, expected, timeout, trusted_host,
 ):
     # Sharing must include history requests and multiple Flows, without changing coding authorization.
-    monkeypatch.setattr("app.worker.runtime.configure_logging", lambda *args: None)
     if backend is None:
         monkeypatch.delenv("AGENTFLOW_CODING_AGENT", raising=False)
     else:
@@ -185,12 +200,17 @@ async def test_search_belongs_to_one_live_assignment_and_connection(tmp_path, ou
         await execution.shutdown()
 
 
+@pytest.fixture
+def isolated_worker_environment(monkeypatch):
+    for key in _CONTROL_ENVIRONMENT_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+
 @pytest.mark.parametrize("backend,expected", [("codex", CodexAgent), ("amp", AmpCodingAgent)])
 async def test_runtime_inference_uses_shared_agent_with_call_local_configuration(
-    tmp_path, monkeypatch, backend, expected,
+    tmp_path, monkeypatch, backend, expected, isolated_worker_environment,
 ):
     # Inference and coding can overlap: inference must never reconfigure their shared agent.
-    monkeypatch.setattr("app.worker.runtime.configure_logging", lambda *args: None)
     runtime = WorkerRuntime(WorkerSettings(
         worker_id="worker", worker_token=SecretStr("secret"), worker_root=tmp_path,
         serve_ws_url="wss://control.example/connect", coding_agent=backend,
@@ -210,8 +230,7 @@ async def test_runtime_inference_uses_shared_agent_with_call_local_configuration
                     effort=None, max_output_bytes=None, timeout_seconds=None):
         assert self is agent and cwd == runtime.workspaces.inference_path and cwd.is_dir()
         assert context is None and model is None and effort is None
-        assert "Return only the requested result" in prompt
-        assert prompt.endswith(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
+        assert [message.model_dump() for message in prompt] == messages
         calls.append((output_schema, max_output_bytes, timeout_seconds))
         return CodingExecutionResult("answer-session", '"Answer"', 0, model="observed-model")
 
@@ -262,7 +281,7 @@ async def test_inference_requires_trusted_host_opt_in(tmp_path):
     (None, 7, "backend_error"),  # An untyped nonzero exit is still a failure.
 ])
 async def test_runtime_translates_agent_failures_to_external_inference_errors(
-    tmp_path, monkeypatch, kind, exit_code, expected,
+    tmp_path, monkeypatch, kind, exit_code, expected, isolated_worker_environment,
 ):
     runtime = WorkerRuntime(WorkerSettings(
         worker_id="worker", worker_token=SecretStr("secret"), worker_root=tmp_path,
@@ -285,7 +304,6 @@ async def test_runtime_translates_agent_failures_to_external_inference_errors(
 @pytest.mark.parametrize("shutdown", ["stop", "cancel"])
 async def test_runtime_keeps_root_locked_until_owned_process_cleanup_finishes(tmp_path, monkeypatch, shutdown):
     # Process shutdown must survive repeated caller cancellation, without inventing a stop receipt.
-    monkeypatch.setattr("app.worker.runtime.configure_logging", lambda *args: None)
     cleaning, release = asyncio.Event(), asyncio.Event()
     ready = tmp_path / "pids"
     script = ("import os,subprocess,sys,time; from pathlib import Path; "

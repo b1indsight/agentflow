@@ -13,6 +13,7 @@ import pytest
 @pytest.mark.parametrize("operation", [
     "import app.communication.gateway",
     "import app.worker.runtime",
+    "from app.worker.bub import BubCodingAgent",
     "import app.cli",
     """
 from pydantic import BaseModel
@@ -37,7 +38,7 @@ original = ('{"repository":{"full_name":"octo/repo"},"issue":{"number":7},'
             '"options":{"todo":"T","in_progress":"W","in_review":"R","blocked":"B","done":"D"}}}')
 assert Document.model_validate_json(original).model_dump_json() == original
 """,
-], ids=["gateway", "worker-startup", "cli-entrypoint", "resource-json-restoration"])
+], ids=["gateway", "worker-startup", "bub-adapter", "cli-entrypoint", "resource-json-restoration"])
 def test_worker_data_paths_do_not_load_control_plane_dependencies(operation: str) -> None:
     # Shared logging previously pulled SQL stores into worker startup transitively.
     # A fresh interpreter observes real imports without pytest's loaded modules.
@@ -103,7 +104,7 @@ _THREAD_MODULES = {"app.github.review_threads", "app.github.threads"}
     ("github/pull_requests.py", _THREAD_MODULES),
     ("controler", {"app.worker"}),
     ("worker", {"app.controler", "app.persistence", "app.github", "app.telemetry.metrics",
-                "psycopg", "githubkit", "bub", "app.contracts.control"}),
+                "psycopg", "githubkit", "app.contracts.control"}),
     ("worker/execution", {"fastapi"}),
     ("controler/workflow/lifecycle.py", {"app.controler.workflow.results", "app.controler.workflow.effects",
                                         "app.controler.workflow.service", "app.controler.workflow.tools"}),
@@ -137,6 +138,15 @@ def test_packages_keep_responsibility_boundaries(package: str, forbidden: set[st
         leaves = {"app.controler.workflow.preparation", "app.controler.workflow.plans"}
         modules = {module for module in modules if not contains_forbidden({module}, leaves)}
     assert not contains_forbidden(modules, forbidden)
+
+
+def test_only_isolated_bub_entrypoint_imports_the_sdk():
+    # Importing the runner in a host process would load the SDK outside its isolated environment.
+    imports_sdk = {
+        path for path in Path("app").rglob("*.py")
+        if contains_forbidden(imported_modules(path), {"bub", "app.worker.bub.__main__"})
+    }
+    assert imports_sdk == {Path("app/worker/bub/__main__.py")}
 
 
 def test_flow_lifecycle_sql_writes_have_one_runtime_owner():

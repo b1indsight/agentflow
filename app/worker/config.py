@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class WorkerSettings(BaseSettings):
-    """Execution-only settings; deliberately excludes database and GitHub credentials."""
+    """Set execute=False to serve inference without opening repository workspaces."""
 
     log_format: Literal["text", "json"] = "text"
 
@@ -22,8 +22,9 @@ class WorkerSettings(BaseSettings):
     )
 
     worker_id: str
-    worker_token: SecretStr
-    serve_ws_url: str
+    execute: bool = Field(default=True, frozen=True)
+    worker_token: SecretStr | None = None
+    serve_ws_url: str | None  # Explicit None selects a caller-supplied transport.
     worker_status_path: Path | None = None
     worker_root: Path = Path("~/.agentflow/workers/{worker_id}")
     worker_repo_workspace_limit: int = Field(default=2, ge=1)
@@ -36,6 +37,14 @@ class WorkerSettings(BaseSettings):
     reconnect_min_backoff: float = Field(default=1.0, gt=0)
     reconnect_max_backoff: float = Field(default=30.0, gt=0)
     reconnect_jitter: float = Field(default=0.2, ge=0, le=1)
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
+                                   dotenv_settings, file_secret_settings):
+        # An embedded peer uses its caller's configuration, not the host's worker environment.
+        if init_settings().get("serve_ws_url", "") is None:
+            return (init_settings,)
+        return init_settings, env_settings, dotenv_settings, file_secret_settings
 
     @model_validator(mode="after")
     def _require_full_access_isolation(self) -> WorkerSettings:
@@ -53,13 +62,6 @@ class WorkerSettings(BaseSettings):
             raise ValueError("AGENTFLOW_WORKER_ID is required")
         return value
 
-    @field_validator("worker_token")
-    @classmethod
-    def _require_worker_token(cls, value: SecretStr) -> SecretStr:
-        if not value.get_secret_value().strip():
-            raise ValueError("AGENTFLOW_WORKER_TOKEN is required")
-        return value
-
     @field_validator("worker_root", mode="after")
     @classmethod
     def _expand_worker_root(cls, value: Path, info: ValidationInfo) -> Path:
@@ -74,6 +76,10 @@ class WorkerSettings(BaseSettings):
     def _require_secure_websocket(self) -> WorkerSettings:
         if self.reconnect_max_backoff < self.reconnect_min_backoff:
             raise ValueError("worker reconnect backoff range or jitter is invalid")
+        if self.serve_ws_url is None:
+            return self
+        if self.worker_token is None or not self.worker_token.get_secret_value().strip():
+            raise ValueError("AGENTFLOW_WORKER_TOKEN is required")
         if self.serve_ws_url.startswith("wss://"):
             return self
         if self.allow_insecure_worker_ws and self.serve_ws_url.startswith("ws://"):
