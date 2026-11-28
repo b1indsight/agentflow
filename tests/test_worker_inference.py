@@ -43,7 +43,7 @@ from app.worker.bub import BubCodingAgent
 from app.worker.config import WorkerSettings
 from app.worker.execution.codex import CodexAgent
 from app.worker.execution.lifecycle import WorkerProtocolError
-from app.worker.runtime import InferenceOnly, WorkerRuntime
+from app.worker.runtime import WorkerRuntime
 from tests.flow_fixtures import enqueue_job
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_remote_e2e import remote_flow as remote_flow  # noqa: PLC0414
@@ -167,7 +167,7 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
     monkeypatch.setattr(type(server.github), "fetch_installations", AsyncMock(return_value=Batch()))
     worker = WorkerRuntime(WorkerSettings(
         worker_id="worker-1", worker_token="worker-secret", serve_ws_url="wss://unused",
-        worker_root=tmp_path / "worker",
+        worker_root=tmp_path / "worker", execute=False,
     ))
     inference = Remote()
     monkeypatch.setattr(worker, "infer", inference.infer)
@@ -201,7 +201,10 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
             assert local.flow_id == remote.flow_id == flow_id
             with store.database.connection() as connection:
                 assert connection.execute("SELECT count(*) AS n FROM flow_executions").fetchone()["n"] == 0
-            assert not next(w for w in store.workers.list_workers() if w.worker_id == LOCAL_BUB_WORKER_ID).execute
+            assert {w.worker_id: w.execute for w in store.workers.list_workers()} == {
+                LOCAL_BUB_WORKER_ID: False, "worker-1": False,
+            }
+            assert not worker.settings.worker_root.exists()
     finally:
         await server.shutdown()
     # A recreated caller reads saved answers with both workers gone, without a new attempt.
@@ -218,13 +221,12 @@ async def test_infer_only_worker_advertises_its_agent_and_refuses_coding(tmp_pat
     # A misrouted coding assignment must still be refused after a successful handshake.
     host, peer = in_process_transport_pair()
     agent = BubCodingAgent()
-    worker = WorkerRuntime(InferenceOnly(
-        transport=peer, worker_id="inference-2", agent=agent, workspace=tmp_path,
-    ))
+    settings = WorkerSettings(worker_id="inference-2", execute=False, worker_root=tmp_path, serve_ws_url=None)
+    worker = WorkerRuntime(settings, agent=agent)
     async with asyncio.timeout(3), asyncio.TaskGroup() as tasks:
         async def serve():
             with pytest.raises(WorkerProtocolError, match="unregistered message route"):
-                await worker.run()
+                await worker.run(peer)
 
         tasks.create_task(serve())
         register = Register.model_validate_json(await host.receive_text())
@@ -232,24 +234,28 @@ async def test_infer_only_worker_advertises_its_agent_and_refuses_coding(tmp_pat
         assert not register.execute and register.coding_agent is None
         await host.send_text(registered_message().model_dump_json())
         await host.send_text(assignment_message(_assignment()).model_dump_json())
+    assert not list(tmp_path.iterdir())
 
 
-def test_inference_only_does_not_grant_full_host_access(monkeypatch, tmp_path):
+async def test_inference_only_does_not_grant_full_host_access(monkeypatch):
     # Injecting a CLI into an embedded worker must not bypass its normal startup guards.
-    _, peer = in_process_transport_pair()
     monkeypatch.setenv("AGENTFLOW_DATABASE_URL", "postgresql://private")
+    monkeypatch.setenv("AGENTFLOW_TRUSTED_HOST_EXECUTION", "true")
+    settings = WorkerSettings(worker_id="local", serve_ws_url=None, execute=False)
+    agent = CodexAgent(trusted_host=True)
     with pytest.raises(ValueError, match="requires trusted-host"):
-        InferenceOnly(worker_id="local", transport=peer, agent=CodexAgent(), workspace=tmp_path)
+        WorkerRuntime(settings, agent=agent)
+    worker = WorkerRuntime(WorkerSettings(worker_id="local", serve_ws_url=None, execute=False,
+                                          trusted_host_execution=True, execution_isolation="container"), agent=agent)
     with pytest.raises(RuntimeError, match="control-plane secrets"):
-        InferenceOnly(worker_id="local", transport=peer, agent=CodexAgent(trusted_host=True), workspace=tmp_path)
+        await worker.infer(request())
 
 
-async def test_stopping_inference_only_worker_does_not_cancel_its_host(tmp_path):
+async def test_stopping_inference_only_worker_does_not_cancel_its_host():
     # An embedding application can await run() inline and keep serving after worker.stop().
     host, peer = in_process_transport_pair()
-    worker = WorkerRuntime(InferenceOnly(
-        worker_id="inference-2", transport=peer, agent=BubCodingAgent(), workspace=tmp_path,
-    ))
+    settings = WorkerSettings(worker_id="inference-2", execute=False, serve_ws_url=None)
+    worker = WorkerRuntime(settings, agent=BubCodingAgent())
 
     async def stop_after_registration():
         await host.receive_text()
@@ -257,7 +263,7 @@ async def test_stopping_inference_only_worker_does_not_cancel_its_host(tmp_path)
 
     async with asyncio.timeout(3), asyncio.TaskGroup() as tasks:
         tasks.create_task(stop_after_registration())
-        await worker.run()
+        await worker.run(peer)
         assert asyncio.current_task().cancelling() == 0
 
 

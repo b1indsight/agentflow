@@ -7,10 +7,10 @@ import fcntl
 import os
 import random
 from collections.abc import Mapping
-from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from contextlib import AsyncExitStack, ExitStack
 from functools import cached_property
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import IO, Protocol
 
 from loguru import logger
@@ -103,12 +103,11 @@ class WebSocketTransport:
 
 
 def validate_worker_environment(
-    settings: WorkerSettings | InferenceOnly, source: Mapping[str, str] | None = None
+    settings: WorkerSettings, source: Mapping[str, str] | None = None
 ) -> None:
     """Fail closed when a full-access coding agent shares control-plane process secrets."""
 
-    trusted_host = settings.agent.trusted_host if isinstance(settings, InferenceOnly) else settings.trusted_host_execution
-    if not trusted_host:
+    if not settings.trusted_host_execution:
         return
     values = os.environ if source is None else source
     exposed = sorted(key for key in _CONTROL_ENVIRONMENT_KEYS if values.get(key))
@@ -160,44 +159,27 @@ class WorkerRootLock:
         self._handle = None
 
 
-@dataclass(frozen=True, kw_only=True)
-class InferenceOnly:
-    """Run a host-supplied agent on one connection, without coding routes or repository state."""
-
-    worker_id: str
-    transport: Transport
-    agent: CodingAgent
-    workspace: Path
-
-    def __post_init__(self) -> None:
-        if self.agent.trusted_host is False:
-            raise ValueError("this inference backend requires trusted-host execution")
-        validate_worker_environment(self)
-
-
 class WorkerRuntime:
-    """Use WorkerSettings for a coding worker or InferenceOnly for a host-supplied agent."""
+    """Run a worker with the configured capabilities on a supplied transport or WebSocket."""
 
-    def __init__(self, settings: WorkerSettings | InferenceOnly) -> None:
+    def __init__(self, settings: WorkerSettings, *, agent: CodingAgent | None = None) -> None:
+        self.settings = settings
+        if agent is not None:
+            if agent.trusted_host and not settings.trusted_host_execution:
+                raise ValueError("this backend requires trusted-host execution")
+            if settings.execute:
+                if agent.backend != settings.coding_agent:
+                    raise ValueError("agent does not match the configured coding backend")
+                self._agents[agent.backend] = agent
+            self.coding_agent = agent
         self._shutdown_requested = asyncio.Event()
         self._connection_task: asyncio.Task[None] | None = None
-        self._mode = settings
         self.executions: dict[int, WorkerExecution] = {}
         self._changed = asyncio.Event()
         self._initialized = False
         self.gateway = Gateway[ServerMessageUnion, WorkerMessageUnion]()
         self._connected = False
         self._file_registrations = 0
-
-    @property
-    def inference_only(self) -> bool:
-        return isinstance(self._mode, InferenceOnly)
-
-    @property
-    def settings(self) -> WorkerSettings:
-        if isinstance(self._mode, InferenceOnly):
-            raise WorkerProtocolError("coding is disabled for this worker")
-        return self._mode
 
     @cached_property
     def root_lock(self) -> WorkerRootLock:
@@ -229,7 +211,7 @@ class WorkerRuntime:
 
     def initialize(self) -> None:
         """Load every Flow only while the process owns its root; reconnects keep live owners."""
-        if self.inference_only or self._initialized:
+        if not self.settings.execute or self._initialized:
             return
         self.workspaces.initialize()
         for flow_id in ExecutionState.scan(self.settings.worker_root):
@@ -239,10 +221,8 @@ class WorkerRuntime:
                 self.executions[flow_id] = execution
         self._initialized = True
 
-    @property
+    @cached_property
     def coding_agent(self) -> CodingAgent:
-        if isinstance(self._mode, InferenceOnly):
-            return self._mode.agent
         return self._agents[self.settings.coding_agent]
 
     def _create_execution(self, flow_id: int) -> WorkerExecution:
@@ -269,6 +249,8 @@ class WorkerRuntime:
 
     def receive(self, assignment: AssignmentArguments) -> WorkerExecution:
         """Validate the supplied concrete location before recording or starting an executor."""
+        if not self.settings.execute:
+            raise WorkerProtocolError("coding is disabled for this worker")
         execution = self.executions.get(assignment.flow_id)
         if execution is not None:
             record = execution.state.load()
@@ -302,6 +284,8 @@ class WorkerRuntime:
 
     async def read_history(self, query: HistoryQuery) -> HistoryPage:
         """Page native history first, then register destinations only in its outbound copy."""
+        if not self.settings.execute:
+            return HistoryPage(session_id=query.session_id, status="unsupported")
         deadline = asyncio.get_running_loop().time() + HISTORY_TIMEOUT
         backend = "amp" if query.session_id.startswith("T-") else "codex"
         source = self._agents[backend]
@@ -314,20 +298,23 @@ class WorkerRuntime:
 
     def inference_capability(self) -> InferenceCapability | None:
         """Describe the authorized backend; actual execution checks native prerequisites."""
-        if not self.inference_only and not self.settings.trusted_host_execution:
+        if self.coding_agent.trusted_host is False:
             return None
         return InferenceCapability(adapter_version=self.coding_agent.adapter_version)
 
     async def infer(self, task: InferenceTask) -> InferenceOutput:
         """Adapt the external inference contract to the shared agent's normal start API."""
         adapter_version = self.coding_agent.adapter_version
-        if not self.inference_only and not self.settings.trusted_host_execution:
+        if self.inference_capability() is None:
             raise InferenceError(InferenceFailure(code="configuration"), backend=adapter_version)
-        cwd = self._mode.workspace if isinstance(self._mode, InferenceOnly) else self.workspaces.inference_path
-        result = await self.coding_agent.start(
-            task.messages, cwd, output_schema=task.output_schema,
-            context=None, max_output_bytes=task.max_output_bytes, timeout_seconds=task.timeout_seconds,
-        )
+        validate_worker_environment(self.settings)  # Library callers need not have entered run().
+        with ExitStack() as cleanup:
+            cwd = (self.workspaces.inference_path if self.settings.execute else
+                   Path(cleanup.enter_context(TemporaryDirectory(prefix="agentflow-infer-"))))
+            result = await self.coding_agent.start(
+                task.messages, cwd, output_schema=task.output_schema,
+                context=None, max_output_bytes=task.max_output_bytes, timeout_seconds=task.timeout_seconds,
+            )
         if result.exit_code != 0 or result.failure_kind is not None:
             raise InferenceError(InferenceFailure(
                 code="execution_timeout" if result.failure_kind == "timeout"
@@ -341,6 +328,8 @@ class WorkerRuntime:
 
     async def resolve_file(self, file_id: str) -> tuple[CodingAgent, dict[str, JsonValue]]:
         """Recover the registering backend independently of active Flows and coding settings."""
+        if not self.settings.execute:
+            raise FileFailure("worker_unavailable")
         backend, source = await asyncio.to_thread(self.files.lookup, file_id)
         if backend is None:
             # Pre-ownership records used only local identities and Amp attachment URLs.
@@ -383,7 +372,7 @@ class WorkerRuntime:
         A timed-out call may be retried: both local and server mappings are idempotent.
         """
         registration = self.gateway.get("server")
-        if not self._connected or registration is None:
+        if not self.settings.execute or not self._connected or registration is None:
             raise FileFailure("worker_unavailable")
         if self._file_registrations >= 4:
             raise FileFailure("query_busy")
@@ -420,18 +409,20 @@ class WorkerRuntime:
         await self._changed.wait()
         self._changed.clear()
 
-    async def _run_connections(self) -> None:
+    async def _run_connections(self, transport: Transport | None = None) -> None:
         """Serve the supplied connection once, or authenticate and reconnect over WebSocket."""
-        if isinstance(self._mode, InferenceOnly):
+        if transport is not None:
             self._connection_task = asyncio.current_task()
             try:
-                await self._serve_connection(self._mode.transport)
+                await self._serve_connection(transport)
             except SessionClosed:
                 pass  # The host owns reconnection for a supplied transport.
             finally:
                 self._connection_task = None
             return
         settings = self.settings
+        if settings.serve_ws_url is None or settings.worker_token is None:
+            raise ValueError("run() requires a transport when no WebSocket is configured")
         delay = settings.reconnect_min_backoff
         try:
             while not self._shutdown_requested.is_set():
@@ -482,12 +473,12 @@ class WorkerRuntime:
                     session=session, inference=self, ready=lambda: state.ready,
                 )
                 state = WorkerStateCallbacks(
-                    worker_id=self._mode.worker_id, session=session, runtime=self,
+                    worker_id=self.settings.worker_id, session=session, runtime=self,
                     on_ready=self._set_connected, inference=self.inference_capability(),
                     inference_callbacks=inference,
                 )
                 callbacks: list[SessionCallbacks[ServerMessageUnion]] = [state, inference]
-                if not self.inference_only:
+                if self.settings.execute:
                     business = WorkerBusinessCallbacks(
                         session=session, runtime=self, ready=lambda: state.ready,
                     )
@@ -510,20 +501,20 @@ class WorkerRuntime:
     def _set_connected(self, connected: bool) -> None:
         self._connected = connected
 
-    async def run(self) -> None:
-        """Serve on the caller's event loop until stopped or cancelled, then join cleanup."""
+    async def run(self, transport: Transport | None = None) -> None:
+        """Serve one supplied connection, or reconnect over the configured WebSocket until stopped."""
+        validate_worker_environment(self.settings)
         health_task = None
-        if not self.inference_only:
-            validate_worker_environment(self.settings)
+        if self.settings.execute:
             self.root_lock.acquire()
             try:
                 self.initialize()
             except BaseException:
                 self.root_lock.release()
                 raise
-            if self.settings.worker_status_path:
-                health_task = asyncio.create_task(self._report_health())
-        communication = asyncio.create_task(self._run_connections())
+        if self.settings.worker_status_path:
+            health_task = asyncio.create_task(self._report_health())
+        communication = asyncio.create_task(self._run_connections(transport))
         cancelled = False
         try:
             await asyncio.shield(communication)
@@ -569,7 +560,7 @@ class WorkerRuntime:
                             health_task.cancel()
                             await asyncio.gather(health_task, return_exceptions=True)
                     finally:
-                        if not self.inference_only:
+                        if self.settings.execute:
                             self.root_lock.release()
         if cancelled and not self._shutdown_requested.is_set():
             raise asyncio.CancelledError

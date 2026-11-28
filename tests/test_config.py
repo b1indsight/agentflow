@@ -204,7 +204,7 @@ def test_worker_requires_explicit_opt_in_for_plaintext_websocket(monkeypatch) ->
         serve_ws_url="ws://localhost:8000/internal/workers/connect",
         allow_insecure_worker_ws=True,
     )
-    assert settings.serve_ws_url.startswith("ws://")
+    assert settings.serve_ws_url == "ws://localhost:8000/internal/workers/connect"
 
 
 def test_recovery_timing_settings_require_safe_ordering(monkeypatch) -> None:

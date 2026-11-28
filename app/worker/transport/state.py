@@ -131,7 +131,7 @@ class WorkerStateCallbacks:
 
     def bind(self, routes: Dispatcher[ServerMessageUnion]) -> None:
         self.routes = routes
-        if not self.runtime.inference_only:
+        if self.runtime.settings.execute:
             routes.register("worker.execute", Assignment, self.on_execute)
             routes.register("worker.stop", StopExecution, self.on_stop)
             routes.register("worker.reject_recovery", RecoveryRejected, self.on_reject)
@@ -151,7 +151,7 @@ class WorkerStateCallbacks:
         )
 
     async def on_unmatched_reply(self, reply: ToolResult, message: ServerMessageUnion) -> None:
-        if self.runtime.inference_only:
+        if not self.runtime.settings.execute:
             raise WorkerProtocolError("reply has no matching invocation")
         if reply.execution() is None and not isinstance(reply, FlowToolResponse):
             return  # A timed-out independent query, such as file registration, may still finish.
@@ -178,7 +178,7 @@ class WorkerStateCallbacks:
             execution.state.reconcile_acknowledgement()
             if execution.state.load() is None:
                 self.runtime.executions.pop(flow_id)
-        if self.runtime.inference_only:
+        if not self.runtime.settings.execute:
             # The protocol requires one stable default workspace even without a repository root.
             inventory = [WorkspaceInventory(workspace="0" * 32, repository=None, generation=1, flow_id=None)]
             repo_limit, coding_agent = 1, None
@@ -215,7 +215,7 @@ class WorkerStateCallbacks:
             worker_id=self.worker_id,
             workspace=default.workspace,
             repo_workspace_limit=repo_limit,
-            execute=not self.runtime.inference_only,
+            execute=self.runtime.settings.execute,
             coding_agent=coding_agent,
             inference=self.inference,
             payload=[],
@@ -241,7 +241,7 @@ class WorkerStateCallbacks:
             ):
                 return  # The error hook checks the epoch before using correlations.
             raise WorkerProtocolError("message belongs to another connection epoch")
-        if self.runtime.inference_only and not self.ready and (
+        if not self.runtime.settings.execute and not self.ready and (
             not isinstance(message, Registered) or not message.ready or message.recoveries
         ):
             raise WorkerProtocolError("expected ready registration without coding recovery")
@@ -262,14 +262,14 @@ class WorkerStateCallbacks:
             if not self._heartbeat_started:
                 self.session.periodic(message.heartbeat_interval, self.heartbeat)
                 self._heartbeat_started = True
-                if not self.runtime.inference_only:
+                if self.runtime.settings.execute:
                     self._observe_execution()
             await self.flush_execution()
             if message.ready:
                 if self._pages:
                     raise WorkerProtocolError("registration completed before all inventory pages")
                 self.ready = True
-                if not self.runtime.inference_only:
+                if self.runtime.settings.execute:
                     self.runtime.workspaces.skill_checkout = None
                 self.on_ready(True)
                 if self._inventory_dirty:
@@ -590,7 +590,7 @@ class WorkerStateCallbacks:
             not self.ready
             or message.connection_epoch != self.session.epoch
             or message.control is not None
-            or (self.runtime.inference_only and any(
+            or (not self.runtime.settings.execute and any(
                 not isinstance(item, ToolCall) or item.method != "worker.infer" for item in message.payload
             ))
         ):

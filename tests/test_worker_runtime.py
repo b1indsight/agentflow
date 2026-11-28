@@ -33,7 +33,7 @@ from app.worker.execution.codex import CodexAgent
 from app.worker.execution.lifecycle import WorkerProtocolError
 from app.worker.execution.permissions import FULL_ACCESS
 from app.worker.execution.vcs import _run
-from app.worker.runtime import WorkerRootLock, WorkerRuntime
+from app.worker.runtime import _CONTROL_ENVIRONMENT_KEYS, WorkerRootLock, WorkerRuntime
 from tests.test_remote_e2e import QueueConnection
 from tests.test_worker_client import (
     CancellableExecutor,
@@ -200,9 +200,15 @@ async def test_search_belongs_to_one_live_assignment_and_connection(tmp_path, ou
         await execution.shutdown()
 
 
+@pytest.fixture
+def isolated_worker_environment(monkeypatch):
+    for key in _CONTROL_ENVIRONMENT_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+
 @pytest.mark.parametrize("backend,expected", [("codex", CodexAgent), ("amp", AmpCodingAgent)])
 async def test_runtime_inference_uses_shared_agent_with_call_local_configuration(
-    tmp_path, monkeypatch, backend, expected,
+    tmp_path, monkeypatch, backend, expected, isolated_worker_environment,
 ):
     # Inference and coding can overlap: inference must never reconfigure their shared agent.
     runtime = WorkerRuntime(WorkerSettings(
@@ -275,7 +281,7 @@ async def test_inference_requires_trusted_host_opt_in(tmp_path):
     (None, 7, "backend_error"),  # An untyped nonzero exit is still a failure.
 ])
 async def test_runtime_translates_agent_failures_to_external_inference_errors(
-    tmp_path, monkeypatch, kind, exit_code, expected,
+    tmp_path, monkeypatch, kind, exit_code, expected, isolated_worker_environment,
 ):
     runtime = WorkerRuntime(WorkerSettings(
         worker_id="worker", worker_token=SecretStr("secret"), worker_root=tmp_path,

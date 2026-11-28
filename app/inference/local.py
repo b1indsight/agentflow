@@ -2,8 +2,6 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from loguru import logger
@@ -24,7 +22,8 @@ from app.domain.inference_models import LOCAL_BUB_WORKER_ID
 from app.inference.transport import InferenceProtocolError
 from app.worker.bub import BubCodingAgent
 from app.worker.coding_agent import CodingAgent
-from app.worker.runtime import InferenceOnly, WorkerRuntime
+from app.worker.config import WorkerSettings
+from app.worker.runtime import WorkerRuntime
 
 type ServeSession = Callable[[str, Register, Session[WorkerMessageUnion, ServerMessageUnion]], Awaitable[None]]
 
@@ -42,14 +41,12 @@ def start_local_bub(
         return None
 
     async def supervise() -> None:
-        # Keep one repository-free root across reconnects, until provider cleanup has joined.
-        with TemporaryDirectory(prefix="agentflow-local-bub-") as directory:
-            while True:
-                try:
-                    await serve_local_inference(serve, agent, Path(directory))
-                except Exception:  # noqa: BLE001 -- restart the local connection, not a model attempt
-                    logger.exception("local bub worker disconnected; reconnecting")
-                await asyncio.sleep(reconnect_interval)
+        while True:
+            try:
+                await serve_local_inference(serve, agent)
+            except Exception:  # noqa: BLE001 -- restart the local connection, not a model attempt
+                logger.exception("local bub worker disconnected; reconnecting")
+            await asyncio.sleep(reconnect_interval)
 
     return asyncio.create_task(supervise())
 
@@ -62,9 +59,7 @@ def _server_ack(message_id: str) -> ServerMessage:
     )
 
 
-async def serve_local_inference(
-    serve: ServeSession, agent: CodingAgent, workspace: Path,
-) -> None:
+async def serve_local_inference(serve: ServeSession, agent: CodingAgent) -> None:
     """Serve a preflighted bub provider until disconnect or controller task cancellation.
 
     The host receives an already-started Session after registration pre-read, exactly as
@@ -72,15 +67,11 @@ async def serve_local_inference(
     repository runtime or Flow routes are created. Cancellation joins both endpoints and
     the provider before returning, including repeated cancellation during child cleanup.
     """
-    if workspace.is_symlink() or not workspace.is_dir():
-        raise InferenceProtocolError("local inference workspace must exist before registration")
     host_transport, worker_transport = in_process_transport_pair()
     host = Session[WorkerMessageUnion, ServerMessageUnion](
         host_transport, parse=parse_worker_input, make_ack=_server_ack, epoch=uuid4().hex,
     )
-    worker = WorkerRuntime(InferenceOnly(
-        transport=worker_transport, worker_id=LOCAL_BUB_WORKER_ID, agent=agent, workspace=workspace,
-    ))
+    worker = WorkerRuntime(WorkerSettings(worker_id=LOCAL_BUB_WORKER_ID, serve_ws_url=None, execute=False), agent=agent)
 
     async def serve_host() -> None:
         try:
@@ -97,4 +88,4 @@ async def serve_local_inference(
 
     async with asyncio.TaskGroup() as group:
         group.create_task(serve_host())
-        group.create_task(worker.run())
+        group.create_task(worker.run(worker_transport))

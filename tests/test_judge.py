@@ -9,21 +9,20 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from app.communication.inprocess import in_process_transport_pair
 from app.controler.review.judge import ReviewJudge
 from app.domain.inference_models import InferenceError
 from app.domain.models import TriageVerdict
 from app.worker.bub import BubCodingAgent
-from app.worker.runtime import InferenceOnly, WorkerRuntime
+from app.worker.config import WorkerSettings
+from app.worker.runtime import WorkerRuntime
 from tests.review_memory import review_context as context
 
 
 @pytest.fixture
-def judge_for(tmp_path):
+def judge_for():
     def make(*, timeout=60, **configuration):
-        _, transport = in_process_transport_pair()
-        worker = WorkerRuntime(InferenceOnly(worker_id="test", transport=transport, workspace=tmp_path,
-                                             agent=BubCodingAgent(**configuration)))
+        settings = WorkerSettings(worker_id="test", serve_ws_url=None, execute=False)
+        worker = WorkerRuntime(settings, agent=BubCodingAgent(**configuration))
         return ReviewJudge(worker, timeout=timeout)
 
     return make
