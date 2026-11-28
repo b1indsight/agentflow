@@ -123,6 +123,7 @@ class WorkerStateCallbacks:
         self._inventory_dirty = False
         self._unmatched_error_logged = False
         self._recovery_required = False
+        self._skills_known = False
         self._skill_clones: set[asyncio.Task[None]] = set()
         self._archives: set[asyncio.Task[None]] = set()
 
@@ -251,7 +252,6 @@ class WorkerStateCallbacks:
                 if self._pages:
                     raise WorkerProtocolError("registration completed before all inventory pages")
                 self.ready = True
-                self.runtime.workspaces.skills.reset()
                 self.on_ready(True)
                 if self._inventory_dirty:
                     await self.report_inventory()
@@ -333,6 +333,11 @@ class WorkerStateCallbacks:
                 self._authorized.add(arguments.job_id)
                 await self.flush_execution()
             return  # Duplicate delivery never starts a second agent or rewrites the journal.
+        if not self._skills_known:
+            # The controller sends a configured source before dispatch. Only a fresh assignment
+            # without that message implies no source; registration alone also resumes existing jobs.
+            self.runtime.workspaces.skills.reset()
+            self._skills_known = True
         started = Started(
             **call_header(),
             method="server.execution_started",
@@ -457,6 +462,7 @@ class WorkerStateCallbacks:
         if not self.ready:
             raise WorkerProtocolError("skill synchronization requires completed registration")
         clone = self.runtime.workspaces.skills.sync(call.source)
+        self._skills_known = True
         self._skill_clones.add(clone)
         clone.add_done_callback(self._clone_finished)
 

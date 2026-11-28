@@ -429,7 +429,10 @@ async def test_install_uses_local_skills_and_sync_retains_the_last_snapshot(tmp_
         assert (a / "style/SKILL.md").read_text() == original
         (links / "style").symlink_to(a / "style")
 
-    cache = skills.SkillSnapshots(lambda: tmp_path, lambda: [workspace])
+    # Restart through an alias of the parent (e.g. /var vs /private/var on macOS).
+    alias = tmp_path / "worker-path-alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    cache = skills.SkillSnapshots(lambda: alias, lambda: [alias / workspace.name])
     await cache.sync(source)
     with pytest.raises(VcsVerificationError, match="read credential unavailable"):
         await cache.sync(source.model_copy(update={"token": None}))
@@ -437,7 +440,10 @@ async def test_install_uses_local_skills_and_sync_retains_the_last_snapshot(tmp_
         assert (b / "style/SKILL.md").read_text() == original + "B\n"
         assert (links / "style/SKILL.md").read_text() == original
     (links / "style").unlink()
-    await cache.sync(None)  # No installs, no workspace links: prune A but keep B on disk.
+    other_style = tmp_path / "elsewhere" / a.name / "style"
+    other_style.mkdir(parents=True)
+    (links / "style").symlink_to(other_style)  # Same SHA in a different directory does not pin A.
+    await cache.sync(None)
     assert not a.exists() and b.is_dir() and unrelated.is_dir()
     async with cache.acquire() as disabled:
         assert disabled is None
@@ -447,3 +453,14 @@ async def test_install_uses_local_skills_and_sync_retains_the_last_snapshot(tmp_
     with pytest.raises(VcsVerificationError, match="read credential unavailable"):
         async with cache.acquire():
             pytest.fail("an inaccessible source must not borrow the retained snapshot")
+
+
+async def test_first_new_assignment_without_a_source_ignores_previous_connection_skills(remote_flow, skill_repository):
+    flow, server, _, worker, agent = remote_flow
+    # The worker still has the old source, but the controller has none configured on this connection.
+    await worker.workspaces.skills.sync(SkillRepositorySource(repository="owner/skills", token=SecretStr("read")))
+    async with remote_connection(server, worker):
+        await wait_until(lambda: bool(agent.started))
+        (_, workspace), = agent.started
+        assert not (workspace / ".agents/skills/style").is_symlink()
+        await wait_until(lambda: worker.executions[flow.id].state.load().acknowledged)

@@ -116,7 +116,7 @@ class SkillSnapshots:
         self.pending: asyncio.Task[None] | None = None
 
     def reset(self) -> None:
-        """Wait for this connection's configuration without forgetting the last local version."""
+        """Disable shared skills for new work without discarding local snapshots or live pins."""
         self.repository = None
         self.pending = None
 
@@ -203,9 +203,11 @@ class SkillSnapshots:
                 for link in links.iterdir():
                     if link.is_symlink():
                         for target in (link.parent / link.readlink(), link.resolve()):
-                            if target.is_relative_to(root):
-                                keep.update(target.parents)
-                                keep.add(target)
+                            # A restart can reach the same worker root through a different ancestor symlink.
+                            for ancestor in (target, *target.parents):
+                                snapshot = root / ancestor.name
+                                if snapshot in snapshots and snapshot.samefile(ancestor):
+                                    keep.add(snapshot)
         obsolete = snapshots - keep
         if obsolete:
             # Detach before yielding: a concurrent sync of the same SHA can safely republish it.

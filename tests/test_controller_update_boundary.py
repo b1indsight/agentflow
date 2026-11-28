@@ -6,8 +6,10 @@ import pytest
 
 from app.controler.workers.transport import serve_worker
 from app.domain.models import JobState
+from app.persistence.settings import SettingsStore, TextSetting
 from tests.test_communication_session import Socket
 from tests.test_remote_e2e import remote_flow as remote_flow  # noqa: PLC0414
+from tests.test_remote_e2e import skill_repository as skill_repository  # noqa: PLC0414
 from tests.test_workspace_dispatch import wait_until
 from tests.worker_fixtures import run_worker
 
@@ -36,25 +38,29 @@ class DuplexSocket(Socket):
 
 
 async def test_running_worker_reconnects_to_new_controller_and_finishes_once(
-    store, remote_flow, server_runtime, monkeypatch,
+    store, remote_flow, server_runtime, skill_repository, monkeypatch,
 ):
     # Normal disconnect must not cancel the executor. Tools and terminal journal
     # replay on the new connection without a deployment pause or second execution.
     flow, original, github, client, agent = remote_flow
+    SettingsStore(store.database).set_value(TextSetting.SKILL_REPOSITORY, "owner/skills", expected=None)
     job, = store.jobs.list_jobs(flow.id)
     started, proceed = asyncio.Event(), asyncio.Event()
-    invocations = []
-    start = agent.start
+    issuing, issue = asyncio.Event(), asyncio.Event()
+    configure = client.workspaces.configure_git_identity
+    read_token = github.repository_read_token
 
     async def paused(*args, **kwargs):
-        # Naming uses the same agent; pause only the assignment that owns Flow capabilities.
-        if kwargs.get("context") is not None:
-            invocations.append(args[0])
-            started.set()
-            await proceed.wait()
-        return await start(*args, **kwargs)
+        await configure(*args, **kwargs)
+        started.set()
+        await proceed.wait()  # Disconnect during workspace preparation, before skill installation.
 
-    monkeypatch.setattr(agent, "start", paused)
+    async def delayed_token(repository):
+        issuing.set()
+        await issue.wait()
+        return await read_token(repository)
+
+    monkeypatch.setattr(client.workspaces, "configure_git_identity", paused)
     tasks = []
     try:
         old = DuplexSocket()
@@ -77,6 +83,7 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(
 
         replacement = server_runtime(github=github)
         replacement.workers.recover_abandoned_assignments()
+        monkeypatch.setattr(github, "repository_read_token", delayed_token)
         new = DuplexSocket()
         tasks.extend(
             [
@@ -86,9 +93,16 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(
                 asyncio.create_task(run_worker(client, new)),
             ]
         )
+        await asyncio.wait_for(issuing.wait(), 5)
+        await wait_until(lambda: client._connected)
         proceed.set()
+        await wait_until(lambda: bool(agent.started))
+        (_, workspace), = agent.started
+        installed = workspace / ".agents/skills/style/SKILL.md"
+        assert installed.read_bytes() == (skill_repository / "style/SKILL.md").read_bytes()
+        issue.set()
         await wait_until(lambda: session.load().acknowledged)
-        assert len(invocations) == 1
+        assert len(agent.started) == 1
         assert owner.lease() is None
         assert store.jobs.get_job(job.id).state is JobState.DONE
         assert github.opened == ["feat/implement-task"]
@@ -98,6 +112,7 @@ async def test_running_worker_reconnects_to_new_controller_and_finishes_once(
         assert store.flows.get_flow_execution(flow.id).released_at is None
     finally:
         proceed.set()
+        issue.set()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
