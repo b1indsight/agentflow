@@ -3,7 +3,11 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
+
+from loguru import logger
+from pydantic import SecretStr
 
 from app.communication.inprocess import in_process_transport_pair
 from app.communication.session import Session, SessionClosed
@@ -18,9 +22,37 @@ from app.contracts.protocol import (
 from app.contracts.validation import parse_worker_input
 from app.domain.inference_models import LOCAL_BUB_WORKER_ID, InferenceCapability
 from app.domain.ports import Inference
-from app.inference.bub import ADAPTER_VERSION
 from app.inference.transport import InferenceProtocolError
+from app.worker.bub import ADAPTER_VERSION, BubInference
 from app.worker.runtime import InferenceOnly, WorkerRuntime
+
+type ServeSession = Callable[[str, Register, Session[WorkerMessageUnion, ServerMessageUnion]], Awaitable[None]]
+
+
+def start_local_bub(
+    serve: ServeSession, *, model: str, api_key: SecretStr | None, api_base: str | None,
+    reconnect_interval: float,
+) -> asyncio.Task[None] | None:
+    """Start a configured infer-only peer; the controller owns and joins the returned task."""
+    provider = BubInference(model=model, api_key=api_key, api_base=api_base)
+    if not provider.configured:
+        return None
+    if provider.configuration_failure() is not None:
+        logger.warning("local bub worker unavailable: configuration preflight failed")
+        return None
+
+    async def supervise() -> None:
+        # Keep one repository-free root across reconnects, until provider cleanup has joined.
+        with TemporaryDirectory(prefix="agentflow-local-bub-") as directory:
+            provider.root = Path(directory)
+            while True:
+                try:
+                    await serve_local_inference(serve, provider, provider.root)
+                except Exception:  # noqa: BLE001 -- restart the local connection, not a model attempt
+                    logger.exception("local bub worker disconnected; reconnecting")
+                await asyncio.sleep(reconnect_interval)
+
+    return asyncio.create_task(supervise())
 
 
 def _server_ack(message_id: str) -> ServerMessage:
@@ -32,11 +64,7 @@ def _server_ack(message_id: str) -> ServerMessage:
 
 
 async def serve_local_inference(
-    serve: Callable[
-        [str, Register, Session[WorkerMessageUnion, ServerMessageUnion]], Awaitable[None]
-    ],
-    inference: Inference,
-    workspace: Path,
+    serve: ServeSession, inference: Inference, workspace: Path,
 ) -> None:
     """Serve a preflighted bub provider until disconnect or controller task cancellation.
 

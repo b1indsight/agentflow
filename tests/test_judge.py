@@ -12,7 +12,7 @@ from pydantic import SecretStr, ValidationError
 from app.controler.review.judge import ReviewJudge
 from app.domain.inference_models import InferenceError
 from app.domain.models import TriageVerdict
-from app.inference.bub import BubInference
+from app.worker.bub import BubInference
 from tests.review_memory import review_context as context
 
 
@@ -185,7 +185,7 @@ async def test_child_output_and_exit_contract(monkeypatch, tmp_path):
     provider.root.mkdir()
 
     async def start(*args, **kwargs):
-        assert args[1:4] == ("-I", "-m", "app.inference.runner")
+        assert args[1:4] == ("-I", "-m", "app.worker.bub")
         assert Path(kwargs["cwd"]).parent == provider.root
         assert Path(kwargs["cwd"]).is_dir()
         assert set(kwargs["env"]) == {
@@ -212,7 +212,7 @@ async def test_timeout_and_cancellation_kill_and_reap_child(monkeypatch, error, 
         raise error
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
-    monkeypatch.setattr("app.inference.bub._exchange", exchange)
+    monkeypatch.setattr("app.worker.bub._exchange", exchange)
     judge = judge_for(model="openai:test", api_key=SecretStr("fake"))
     if failure:
         with pytest.raises(InferenceError) as caught:

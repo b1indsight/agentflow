@@ -37,9 +37,9 @@ from app.domain.inference_models import (
     InferenceTask,
 )
 from app.domain.models import JobKind, JobState, utcnow
-from app.inference.bub import ADAPTER_VERSION
 from app.inference.local import serve_local_inference
 from app.persistence.records import required
+from app.worker.bub import ADAPTER_VERSION
 from app.worker.config import WorkerSettings
 from app.worker.execution.lifecycle import WorkerProtocolError
 from app.worker.runtime import InferenceOnly, WorkerRuntime

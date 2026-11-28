@@ -75,7 +75,7 @@ class BubInference:
             try:
                 async with asyncio.timeout(task.timeout_seconds):
                     proc = await asyncio.create_subprocess_exec(
-                        sys.executable, "-I", "-m", "app.inference.runner", env=env, cwd=directory,
+                        sys.executable, "-I", "-m", "app.worker.bub", env=env, cwd=directory,
                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )

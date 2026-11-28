@@ -19,7 +19,7 @@ from app.domain.inference_models import (
     InferenceTask,
 )
 from app.domain.json import strict_json
-from app.inference.bub import ADAPTER_VERSION
+from app.worker.bub import ADAPTER_VERSION
 
 # Keep all SDK imports and diagnostics off the result channel.
 with contextlib.redirect_stdout(sys.stderr):
