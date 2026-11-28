@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from app.communication.inprocess import in_process_transport_pair
 from app.contracts.protocol import (
     Assignment,
     ExecutionIdentity,
@@ -37,13 +38,16 @@ from app.domain.inference_models import (
 )
 from app.domain.models import JobKind, JobState, utcnow
 from app.inference.bub import ADAPTER_VERSION
-from app.inference.local import serve_local_inference
+from app.inference.local import InferenceWorker, serve_local_inference
+from app.inference.transport import InferenceProtocolError
 from app.persistence.records import required
 from app.worker.config import WorkerSettings
 from app.worker.runtime import WorkerRuntime
 from tests.flow_fixtures import enqueue_job
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_remote_e2e import remote_flow as remote_flow  # noqa: PLC0414
+from tests.test_worker_client import assignment_message, registered_message
+from tests.test_worker_session import _assignment
 from tests.worker_fixtures import NamingInference, inventory, run_worker
 
 pytestmark = pytest.mark.usefixtures("recording_resources")
@@ -209,6 +213,25 @@ async def test_local_mini_and_repo_free_worker_share_dispatch_and_results(
     assert store.jobs.get_job(local.id).attempt == store.jobs.get_job(remote.id).attempt == 1
     if flow is not None:
         assert store.flows.get_flow(flow.id).title is None
+
+
+async def test_infer_only_worker_advertises_its_provider_and_refuses_coding():
+    # A misrouted coding assignment must still be refused after a successful handshake.
+    host, peer = in_process_transport_pair()
+    provider = NamingInference()
+    capability = provider.inference_capability()
+    worker = InferenceWorker(peer, worker_id="inference-2", inference=provider, capability=capability)
+    async with asyncio.timeout(3), asyncio.TaskGroup() as tasks:
+        async def serve():
+            with pytest.raises(InferenceProtocolError, match="unsupported"):
+                await worker.run()
+
+        tasks.create_task(serve())
+        register = Register.model_validate_json(await host.receive_text())
+        assert register.worker_id == "inference-2" and register.inference == capability
+        assert not register.execute and register.coding_agent is None
+        await host.send_text(registered_message().model_dump_json())
+        await host.send_text(assignment_message(_assignment()).model_dump_json())
 
 
 async def test_network_worker_cannot_claim_local_priority_even_with_a_configured_token():

@@ -1,4 +1,4 @@
-"""Controller-managed infer-only worker using the ordinary registration and RPC protocol."""
+"""Infer-only worker endpoint and its controller-managed in-process host."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -10,7 +10,7 @@ from loguru import logger
 from app.communication.dispatch import Dispatcher
 from app.communication.gateway import Gateway
 from app.communication.inprocess import in_process_transport_pair
-from app.communication.session import Ready, Session, SessionClosed
+from app.communication.session import Ready, Session, SessionClosed, Transport
 from app.contracts.protocol import (
     CancelJob,
     PayloadValidationError,
@@ -52,17 +52,34 @@ def _worker_ack(message_id: str) -> WorkerMessage:
     )
 
 
-class _LocalConnection:
-    """Infer-only handshake and control authority, without coding recovery or Flow routes."""
+class InferenceWorker:
+    """One infer-only connection. Await run() on the host loop; cancel it to stop."""
 
-    def __init__(self, session: Session[ServerMessageUnion, WorkerMessageUnion],
-                 inference: Inference) -> None:
-        self.session = session
+    def __init__(
+        self, transport: Transport, *, worker_id: str, inference: Inference,
+        capability: InferenceCapability,
+    ) -> None:
+        self.worker_id = worker_id
+        self.capability = capability
+        self.session = Session[ServerMessageUnion, WorkerMessageUnion](
+            transport, parse=parse_server_input, make_ack=_worker_ack,
+        )
         self.ready = False
         self._error_logged = False
         self.inference = WorkerInferenceCallbacks(
-            session=session, inference=inference, ready=lambda: self.ready,
+            session=self.session, inference=inference, ready=lambda: self.ready,
         )
+
+    async def run(self) -> None:
+        """Register without coding routes; join provider cleanup before returning."""
+        try:
+            await Gateway[ServerMessageUnion, WorkerMessageUnion]().serve(
+                "server", self.session, self, replace=False,
+            )
+        except SessionClosed:
+            pass
+        finally:
+            await self.inference.aclose()
 
     def bind(self, routes: Dispatcher[ServerMessageUnion]) -> None:
         self.inference.bind(routes)
@@ -75,12 +92,12 @@ class _LocalConnection:
     async def on_opened(self) -> None:
         await self.session.send(Register(
             **message_header(None), control="register", payload=[],
-            worker_id=LOCAL_BUB_WORKER_ID, execute=False, coding_agent=None,
+            worker_id=self.worker_id, execute=False, coding_agent=None,
             workspace="0" * 32, repo_workspace_limit=1,
             inventory=[WorkspaceInventory(workspace="0" * 32, repository=None,
                                           generation=1, flow_id=None)],
             recoveries=[], inventory_complete=True,
-            inference=InferenceCapability(adapter_version=ADAPTER_VERSION),
+            inference=self.capability,
         ))
         self.session.start()
 
@@ -160,10 +177,10 @@ async def serve_local_inference(
     host = Session[WorkerMessageUnion, ServerMessageUnion](
         host_transport, parse=parse_worker_input, make_ack=_server_ack, epoch=uuid4().hex,
     )
-    worker = Session[ServerMessageUnion, WorkerMessageUnion](
-        worker_transport, parse=parse_server_input, make_ack=_worker_ack,
+    worker = InferenceWorker(
+        worker_transport, worker_id=LOCAL_BUB_WORKER_ID, inference=inference,
+        capability=InferenceCapability(adapter_version=ADAPTER_VERSION),
     )
-    connection = _LocalConnection(worker, inference)
 
     async def serve_host() -> None:
         try:
@@ -178,16 +195,6 @@ async def serve_local_inference(
         finally:
             await host.close()
 
-    async def serve_worker() -> None:
-        try:
-            await Gateway[ServerMessageUnion, WorkerMessageUnion]().serve(
-                "server", worker, connection, replace=False,
-            )
-        except SessionClosed:
-            pass
-        finally:
-            await connection.inference.aclose()
-
     async with asyncio.TaskGroup() as group:
         group.create_task(serve_host())
-        group.create_task(serve_worker())
+        group.create_task(worker.run())
