@@ -38,11 +38,11 @@ from app.domain.inference_models import (
 )
 from app.domain.models import JobKind, JobState, utcnow
 from app.inference.bub import ADAPTER_VERSION
-from app.inference.local import InferenceWorker, serve_local_inference
-from app.inference.transport import InferenceProtocolError
+from app.inference.local import serve_local_inference
 from app.persistence.records import required
 from app.worker.config import WorkerSettings
-from app.worker.runtime import WorkerRuntime
+from app.worker.execution.lifecycle import WorkerProtocolError
+from app.worker.runtime import InferenceOnly, WorkerRuntime
 from tests.flow_fixtures import enqueue_job
 from tests.test_remote_e2e import QueueConnection, QueueSocket
 from tests.test_remote_e2e import remote_flow as remote_flow  # noqa: PLC0414
@@ -220,10 +220,12 @@ async def test_infer_only_worker_advertises_its_provider_and_refuses_coding():
     host, peer = in_process_transport_pair()
     provider = NamingInference()
     capability = provider.inference_capability()
-    worker = InferenceWorker(peer, worker_id="inference-2", inference=provider, capability=capability)
+    worker = WorkerRuntime(InferenceOnly(
+        transport=peer, worker_id="inference-2", inference=provider, capability=capability,
+    ))
     async with asyncio.timeout(3), asyncio.TaskGroup() as tasks:
         async def serve():
-            with pytest.raises(InferenceProtocolError, match="unsupported"):
+            with pytest.raises(WorkerProtocolError, match="unregistered message route"):
                 await worker.run()
 
         tasks.create_task(serve())
@@ -232,6 +234,25 @@ async def test_infer_only_worker_advertises_its_provider_and_refuses_coding():
         assert not register.execute and register.coding_agent is None
         await host.send_text(registered_message().model_dump_json())
         await host.send_text(assignment_message(_assignment()).model_dump_json())
+
+
+async def test_stopping_inference_only_worker_does_not_cancel_its_host():
+    # An embedding application can await run() inline and keep serving after worker.stop().
+    host, peer = in_process_transport_pair()
+    provider = NamingInference()
+    worker = WorkerRuntime(InferenceOnly(
+        worker_id="inference-2", transport=peer, inference=provider,
+        capability=provider.inference_capability(),
+    ))
+
+    async def stop_after_registration():
+        await host.receive_text()
+        worker.stop()
+
+    async with asyncio.timeout(3), asyncio.TaskGroup() as tasks:
+        tasks.create_task(stop_after_registration())
+        await worker.run()
+        assert asyncio.current_task().cancelling() == 0
 
 
 async def test_network_worker_cannot_claim_local_priority_even_with_a_configured_token():

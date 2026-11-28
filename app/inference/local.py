@@ -1,39 +1,26 @@
-"""Infer-only worker endpoint and its controller-managed in-process host."""
+"""Connect a controller-managed inference provider to the normal worker session driver."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from uuid import uuid4
 
-from loguru import logger
-
-from app.communication.dispatch import Dispatcher
-from app.communication.gateway import Gateway
 from app.communication.inprocess import in_process_transport_pair
-from app.communication.session import Ready, Session, SessionClosed, Transport
+from app.communication.session import Session, SessionClosed
 from app.contracts.protocol import (
-    CancelJob,
-    PayloadValidationError,
-    ProtocolError,
     Register,
-    Registered,
     ServerMessage,
     ServerMessageUnion,
-    ToolCall,
-    ToolResult,
-    ValidationErrorResult,
-    WorkerMessage,
     WorkerMessageUnion,
     message_header,
     parse_worker_message,
-    result_header,
 )
-from app.contracts.validation import RejectedMessage, parse_server_input, parse_worker_input
+from app.contracts.validation import parse_worker_input
 from app.domain.inference_models import LOCAL_BUB_WORKER_ID, InferenceCapability
-from app.domain.models import WorkspaceInventory
 from app.domain.ports import Inference
 from app.inference.bub import ADAPTER_VERSION
-from app.inference.transport import InferenceProtocolError, WorkerInferenceCallbacks
+from app.inference.transport import InferenceProtocolError
+from app.worker.runtime import InferenceOnly, WorkerRuntime
 
 
 def _server_ack(message_id: str) -> ServerMessage:
@@ -42,119 +29,6 @@ def _server_ack(message_id: str) -> ServerMessage:
         **(message_header(None) | {"ack": True, "ack_id": message_id}),
         control=None, payload=[],
     )
-
-
-def _worker_ack(message_id: str) -> WorkerMessage:
-    # Keep aligned with worker.transport.state.control_ack; no coding owner belongs here.
-    return WorkerMessage(
-        **(message_header(None) | {"ack": True, "ack_id": message_id}),
-        control=None, payload=[],
-    )
-
-
-class InferenceWorker:
-    """One infer-only connection. Await run() on the host loop; cancel it to stop."""
-
-    def __init__(
-        self, transport: Transport, *, worker_id: str, inference: Inference,
-        capability: InferenceCapability,
-    ) -> None:
-        self.worker_id = worker_id
-        self.capability = capability
-        self.session = Session[ServerMessageUnion, WorkerMessageUnion](
-            transport, parse=parse_server_input, make_ack=_worker_ack,
-        )
-        self.ready = False
-        self._error_logged = False
-        self.inference = WorkerInferenceCallbacks(
-            session=self.session, inference=inference, ready=lambda: self.ready,
-        )
-
-    async def run(self) -> None:
-        """Register without coding routes; join provider cleanup before returning."""
-        try:
-            await Gateway[ServerMessageUnion, WorkerMessageUnion]().serve(
-                "server", self.session, self, replace=False,
-            )
-        except SessionClosed:
-            pass
-        finally:
-            await self.inference.aclose()
-
-    def bind(self, routes: Dispatcher[ServerMessageUnion]) -> None:
-        self.inference.bind(routes)
-        routes.configure(
-            opened=self.on_opened, message=self.on_message,
-            unmatched_reply=self.on_unrouted, unrouted=self.on_unrouted,
-            validation_error=self.on_error, rejected=self.on_rejected, closed=self.on_closed,
-        )
-
-    async def on_opened(self) -> None:
-        await self.session.send(Register(
-            **message_header(None), control="register", payload=[],
-            worker_id=self.worker_id, execute=False, coding_agent=None,
-            workspace="0" * 32, repo_workspace_limit=1,
-            inventory=[WorkspaceInventory(workspace="0" * 32, repository=None,
-                                          generation=1, flow_id=None)],
-            recoveries=[], inventory_complete=True,
-            inference=self.capability,
-        ))
-        self.session.start()
-
-    async def on_message(self, message: ServerMessageUnion) -> None:
-        if isinstance(message, ProtocolError):
-            raise InferenceProtocolError(f"serve protocol error: {message.code}: {message.detail}")
-        if self.session.epoch is not None and message.connection_epoch != self.session.epoch:
-            if message.control is None and all(
-                isinstance(item, ValidationErrorResult) for item in message.payload
-            ):
-                return  # Like an ordinary worker, stale validation errors grant no authority.
-            raise InferenceProtocolError("message belongs to another connection epoch")
-        if isinstance(message, Registered):
-            if self.ready or message.recoveries or not message.ready:
-                raise InferenceProtocolError("unexpected local inference registration decision")
-            assert message.connection_epoch is not None
-            self.session.bind_epoch(message.connection_epoch)
-            self.ready = True
-            self.session.periodic(message.heartbeat_interval, self.inference.heartbeat)
-        elif not self.ready:
-            raise InferenceProtocolError("inference requires completed registration")
-        if isinstance(message, CancelJob):
-            self.inference.cancel_job(message)
-
-    def on_closed(self) -> None:
-        self.ready = False
-
-    async def on_unrouted(self, item: ToolCall | ToolResult, message: ServerMessageUnion) -> None:
-        raise InferenceProtocolError("unsupported local inference message")
-
-    async def on_error(self, error: ValidationErrorResult, message: ServerMessageUnion) -> None:
-        # No outbound business invocations exist here. Result rejection cannot grant a new slot.
-        if not self._error_logged:
-            logger.warning("ignored unmatched validation error on local inference connection")
-            self._error_logged = True
-
-    def on_rejected(self, message: RejectedMessage) -> Ready:
-        """Reject malformed infer arguments atomically, without accepting coding traffic."""
-        if (not self.ready or message.connection_epoch != self.session.epoch
-                or message.control is not None or any(
-                    not isinstance(item, ToolCall) or item.method != "worker.infer"
-                    for item in message.payload
-                )):
-            raise InferenceProtocolError("invalid payload has no local inference authority")
-
-        async def respond() -> None:
-            await self.session.send(WorkerMessage(
-                **message_header(self.session.epoch), control=None,
-                payload=[ValidationErrorResult(
-                    **result_header(item.message_id), method=item.method,
-                    error=PayloadValidationError(
-                        code="validation_error", message="message payload failed validation",
-                    ),
-                ) for item in message.payload],
-            ))
-
-        return respond
 
 
 async def serve_local_inference(
@@ -177,10 +51,10 @@ async def serve_local_inference(
     host = Session[WorkerMessageUnion, ServerMessageUnion](
         host_transport, parse=parse_worker_input, make_ack=_server_ack, epoch=uuid4().hex,
     )
-    worker = InferenceWorker(
-        worker_transport, worker_id=LOCAL_BUB_WORKER_ID, inference=inference,
+    worker = WorkerRuntime(InferenceOnly(
+        transport=worker_transport, worker_id=LOCAL_BUB_WORKER_ID, inference=inference,
         capability=InferenceCapability(adapter_version=ADAPTER_VERSION),
-    )
+    ))
 
     async def serve_host() -> None:
         try:

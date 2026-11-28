@@ -8,6 +8,9 @@ import json
 import os
 import random
 from collections.abc import Mapping
+from contextlib import AsyncExitStack
+from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import IO, Protocol
 
@@ -15,6 +18,7 @@ from loguru import logger
 from pydantic import JsonValue
 from websockets.asyncio.client import connect
 
+from app.communication.dispatch import SessionCallbacks
 from app.communication.gateway import Gateway
 from app.communication.requests import ReplyRejected, request_reply
 from app.communication.session import Session, SessionClosed, Transport
@@ -44,6 +48,7 @@ from app.domain.inference_models import (
     InferenceOutput,
     InferenceTask,
 )
+from app.domain.ports import Inference
 from app.inference.transport import InferenceProtocolError, WorkerInferenceCallbacks
 from app.worker.coding_agent import CodingAgent
 from app.worker.config import WorkerSettings
@@ -162,23 +167,59 @@ class WorkerRootLock:
         self._handle = None
 
 
-class WorkerRuntime:
-    """Compose worker dependencies and join their cleanup before releasing the process root."""
+@dataclass(frozen=True, kw_only=True)
+class InferenceOnly:
+    """Run one supplied connection and inference provider, without coding credentials or a root."""
 
-    def __init__(self, settings: WorkerSettings) -> None:
+    worker_id: str
+    transport: Transport
+    inference: Inference
+    capability: InferenceCapability
+
+
+class WorkerRuntime:
+    """Use WorkerSettings for a coding worker or InferenceOnly for a host-supplied provider."""
+
+    def __init__(self, settings: WorkerSettings | InferenceOnly) -> None:
         self._shutdown_requested = asyncio.Event()
         self._connection_task: asyncio.Task[None] | None = None
-        self.settings = settings
-        self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
-        self.workspaces = RepositoryWorkspaces(
-            self.settings.worker_root, self.settings.worker_id,
-            limit=self.settings.worker_repo_workspace_limit,
-        )
+        self._mode = settings
         self.executions: dict[int, WorkerExecution] = {}
         self._changed = asyncio.Event()
         self._initialized = False
+        self.gateway = Gateway[ServerMessageUnion, WorkerMessageUnion]()
+        self._connected = False
+        self._file_registrations = 0
+
+    @property
+    def inference_only(self) -> bool:
+        return isinstance(self._mode, InferenceOnly)
+
+    @property
+    def settings(self) -> WorkerSettings:
+        if isinstance(self._mode, InferenceOnly):
+            raise WorkerProtocolError("coding is disabled for this worker")
+        return self._mode
+
+    @cached_property
+    def root_lock(self) -> WorkerRootLock:
+        return WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
+
+    @cached_property
+    def workspaces(self) -> RepositoryWorkspaces:
+        return RepositoryWorkspaces(
+            self.settings.worker_root, self.settings.worker_id,
+            limit=self.settings.worker_repo_workspace_limit,
+        )
+
+    @cached_property
+    def files(self) -> FileLinks:
+        return FileLinks(self.settings.worker_root)
+
+    @cached_property
+    def _agents(self) -> dict[str, CodingAgent]:
         # Coding, inference, history and files share instances; per-run state stays in each call.
-        self._agents: dict[str, CodingAgent] = {
+        return {
             "codex": CodexAgent(trusted_host=self.settings.trusted_host_execution,
                                 permissions=FULL_ACCESS,
                                 timeout=self.settings.codex_run_timeout_seconds),
@@ -187,14 +228,10 @@ class WorkerRuntime:
                                   history_root=self.settings.worker_root / "amp-history",
                                   timeout=self.settings.amp_run_timeout_seconds),
         }
-        self.gateway = Gateway[ServerMessageUnion, WorkerMessageUnion]()
-        self._connected = False
-        self.files = FileLinks(self.settings.worker_root)
-        self._file_registrations = 0
 
     def initialize(self) -> None:
         """Load every Flow only while the process owns its root; reconnects keep live owners."""
-        if self._initialized:
+        if self.inference_only or self._initialized:
             return
         self.workspaces.initialize()
         for flow_id in ExecutionState.scan(self.settings.worker_root):
@@ -277,12 +314,16 @@ class WorkerRuntime:
 
     def inference_capability(self) -> InferenceCapability | None:
         """Describe the authorized backend; actual execution checks native prerequisites."""
+        if isinstance(self._mode, InferenceOnly):
+            return self._mode.capability
         if not self.settings.trusted_host_execution:
             return None
         return InferenceCapability(adapter_version=f"{self.settings.coding_agent}/v1")
 
     async def infer(self, task: InferenceTask) -> InferenceOutput:
         """Adapt the external inference contract to the shared agent's normal start API."""
+        if isinstance(self._mode, InferenceOnly):
+            return await self._mode.inference.infer(task)
         backend = self.settings.coding_agent
         adapter_version = f"{backend}/v1"
         if not self.settings.trusted_host_execution:
@@ -387,7 +428,16 @@ class WorkerRuntime:
         self._changed.clear()
 
     async def _run_connections(self) -> None:
-        """Authenticate and reconnect; join connection cleanup without stopping execution."""
+        """Serve the supplied connection once, or authenticate and reconnect over WebSocket."""
+        if isinstance(self._mode, InferenceOnly):
+            self._connection_task = asyncio.current_task()
+            try:
+                await self._serve_connection(self._mode.transport)
+            except SessionClosed:
+                pass  # The host owns reconnection for a supplied transport.
+            finally:
+                self._connection_task = None
+            return
         settings = self.settings
         delay = settings.reconnect_min_backoff
         try:
@@ -433,59 +483,53 @@ class WorkerRuntime:
             parse=parse_server_input,
             make_ack=control_ack,
         )
-        try:
-            inference_callbacks = WorkerInferenceCallbacks(
-                session=session, inference=self, ready=lambda: state_callbacks.ready,
-            )
-            state_callbacks = WorkerStateCallbacks(
-                worker_id=self.settings.worker_id,
-                session=session,
-                runtime=self,
-                on_ready=self._set_connected,
-                inference=self.inference_capability(),
-                inference_callbacks=inference_callbacks,
-            )
-            business_callbacks = WorkerBusinessCallbacks(
-                session=session, runtime=self, ready=lambda: state_callbacks.ready,
-            )
-            file_callbacks = WorkerFileCallbacks(
-                session=session, resolve_file=self.resolve_file, root=self.settings.worker_root,
-            )
-        except BaseException:
-            await session.close()
-            raise
-        try:
-            await self.gateway.serve(
-                "server", session, state_callbacks, business_callbacks, inference_callbacks,
-                file_callbacks, replace=False,
-            )
-        except InferenceProtocolError as error:
-            raise WorkerProtocolError(str(error)) from error
-        finally:
+        async with AsyncExitStack() as cleanup:
             try:
-                await state_callbacks.aclose()
-            finally:
-                try:
-                    await inference_callbacks.aclose()
-                finally:
-                    try:
-                        await file_callbacks.aclose()
-                    finally:
-                        await business_callbacks.aclose()
+                inference = WorkerInferenceCallbacks(
+                    session=session, inference=self, ready=lambda: state.ready,
+                )
+                state = WorkerStateCallbacks(
+                    worker_id=self._mode.worker_id, session=session, runtime=self,
+                    on_ready=self._set_connected, inference=self.inference_capability(),
+                    inference_callbacks=inference,
+                )
+                callbacks: list[SessionCallbacks[ServerMessageUnion]] = [state, inference]
+                if not self.inference_only:
+                    business = WorkerBusinessCallbacks(
+                        session=session, runtime=self, ready=lambda: state.ready,
+                    )
+                    files = WorkerFileCallbacks(
+                        session=session, resolve_file=self.resolve_file, root=self.settings.worker_root,
+                    )
+                    callbacks.extend((business, files))
+                    cleanup.push_async_callback(business.aclose)
+                    cleanup.push_async_callback(files.aclose)
+                cleanup.push_async_callback(inference.aclose)
+                cleanup.push_async_callback(state.aclose)
+            except BaseException:
+                await session.close()
+                raise
+            try:
+                await self.gateway.serve("server", session, *callbacks, replace=False)
+            except InferenceProtocolError as error:
+                raise WorkerProtocolError(str(error)) from error
 
     def _set_connected(self, connected: bool) -> None:
         self._connected = connected
 
     async def run(self) -> None:
         """Serve on the caller's event loop until stopped or cancelled, then join cleanup."""
-        validate_worker_environment(self.settings)
-        self.root_lock.acquire()
-        try:
-            self.initialize()
-        except BaseException:
-            self.root_lock.release()
-            raise
-        health_task = asyncio.create_task(self._report_health()) if self.settings.worker_status_path else None
+        health_task = None
+        if not self.inference_only:
+            validate_worker_environment(self.settings)
+            self.root_lock.acquire()
+            try:
+                self.initialize()
+            except BaseException:
+                self.root_lock.release()
+                raise
+            if self.settings.worker_status_path:
+                health_task = asyncio.create_task(self._report_health())
         communication = asyncio.create_task(self._run_connections())
         cancelled = False
         try:
@@ -494,7 +538,7 @@ class WorkerRuntime:
             cancelled = True
         finally:
             self.gateway.seal()
-            if not communication.done():
+            if not communication.done() and not communication.cancelling():
                 communication.cancel()
             try:
                 # Join communication before execution cleanup; repeated process cancellation
@@ -532,7 +576,8 @@ class WorkerRuntime:
                             health_task.cancel()
                             await asyncio.gather(health_task, return_exceptions=True)
                     finally:
-                        self.root_lock.release()
+                        if not self.inference_only:
+                            self.root_lock.release()
         if cancelled and not self._shutdown_requested.is_set():
             raise asyncio.CancelledError
 
@@ -551,5 +596,5 @@ class WorkerRuntime:
         self._shutdown_requested.set()
         self._connected = False
         self.gateway.seal()
-        if self._connection_task is not None:
+        if self._connection_task is not None and not self._connection_task.cancelling():
             self._connection_task.cancel()
