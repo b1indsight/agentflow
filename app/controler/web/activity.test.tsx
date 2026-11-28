@@ -528,16 +528,23 @@ test("refresh finds a newly selected later target and keeps identities after the
   let anchor = full[0].key;
   const requested: (string | null)[] = [];
   mockActivity(t, (url) => {
-    const cursor = url.searchParams.get("cursor");
+    const params = url.searchParams;
+    const cursor = params.get("cursor");
     requested.push(cursor);
     if (!cursor) {
       anchor = full[259].key;
-      assert.equal(url.searchParams.get("refresh"), "true");
-      assert.equal(url.searchParams.get("since"), "1");
-    } else assert.equal(url.searchParams.get("snapshot"), "2");
+      assert.equal(params.get("refresh"), "true");
+      assert.equal(params.get("since"), "1");
+    } else {
+      // Rebuilding a deep reading position must not queue another source sync for every page.
+      assert.equal(params.has("refresh"), false);
+      assert.equal(params.has("since"), false);
+      assert.equal(params.get("snapshot"), "2");
+    }
     const start = Number(cursor ?? 0);
+    const end = start + Number(params.get("limit"));
     return {
-      ...page(full.slice(start, start + 20), String(start + 20)),
+      ...page(full.slice(start, end), end < full.length ? String(end) : null),
       total: full.length,
     };
   });
