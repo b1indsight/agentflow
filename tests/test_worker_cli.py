@@ -190,6 +190,7 @@ def test_worker_without_update_still_starts_runtime(tmp_path, monkeypatch):
 
     tmp_path.chmod(0o555)
     monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    monkeypatch.setattr("app.telemetry.logging.configure_logging", lambda *args: None)
     monkeypatch.setitem(vars(config), "settings", Mock())
     runtime = Mock(run=AsyncMock())
     monkeypatch.setattr("app.worker.runtime.WorkerRuntime", Mock(return_value=runtime))
@@ -283,35 +284,27 @@ def start_holder(installation, *, updating=False, name="worker-a"):
     prefix, _ = installation
     ready = prefix.parent / f"{name}.ready"
     stop = prefix.parent / f"{name}.stop"
-    code = f"""
-import asyncio, time
+    env = {key: value for key, value in os.environ.items() if not key.startswith("AGENTFLOW_")}
+    if updating:
+        code = f"""
+import time
 from pathlib import Path
 from app.worker import self_update
 ready, stop = Path({str(ready)!r}), Path({str(stop)!r})
-def wait():
+with self_update.installation_lock(updating=True):
     ready.touch()
     deadline = time.monotonic() + 20
     while not stop.exists() and time.monotonic() < deadline:
         time.sleep(.02)
-if {updating!r}:
-    with self_update.installation_lock(updating=True):
-        wait()
-else:
-    from app.worker import config, runtime
-    config.settings = object()
-    class Runtime:
-        def __init__(self, settings): pass
-        async def run(self):
-            lock = runtime.WorkerRootLock(Path({str(prefix.parent / name)!r}), {name!r})
-            lock.acquire()
-            try: wait()
-            finally: lock.release()
-    runtime.WorkerRuntime = Runtime
-    from app.cli import app
-    app()
 """
+        command = [str(prefix / "bin" / "python"), "-I", "-c", code]
+    else:
+        command = [str(prefix / "bin" / "python"), "-I", str(prefix / "bin" / "agentflow"), "worker"]
+        env.update(AGENTFLOW_WORKER_ID=name, AGENTFLOW_WORKER_TOKEN="test-token",
+                   AGENTFLOW_WORKER_ROOT=str(prefix.parent / name), AGENTFLOW_WORKER_STATUS_PATH=str(ready),
+                   AGENTFLOW_SERVE_WS_URL="ws://127.0.0.1:1", AGENTFLOW_ALLOW_INSECURE_WORKER_WS="true")
     process = subprocess.Popen(
-        [str(prefix / "bin" / "python"), "-I", "-c", code, "worker"],
+        command, env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -334,10 +327,10 @@ def test_running_workers_with_distinct_roots_exclude_update(installation):
         assert result.returncode == 1 and "installation" in result.stderr
         assert not (installation[0].parent / "commands.jsonl").exists()
     finally:
-        for process, stop in holders:
-            stop.touch()
-            assert process.communicate(timeout=10) == ("", "")
-            assert process.returncode == 0
+        for process, _ in holders:
+            process.terminate()  # SIGTERM must finish runtime cleanup and exit normally.
+            output = process.communicate(timeout=10)
+            assert process.returncode == 0, output
     result = invoke_installed(installation)
     assert result.returncode == 0, result.stdout + result.stderr
 

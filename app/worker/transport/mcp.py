@@ -34,7 +34,7 @@ class FlowToolCaller(Protocol):
 class _EmbeddedServer(uvicorn.Server):
     @contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
-        # WorkerRuntime owns signals for the entire worker, including Codex cleanup.
+        # Leave process signals to the worker's host so it can join execution cleanup.
         yield
 
 

@@ -26,6 +26,29 @@ AgentFlow 把 GitHub Issue 或一段任务描述交给 Codex 或 Amp。Worker �
 
 3. **连接编码 Worker。** 按[部署指南](docs/deployment/README.md)在专用账号、容器或 VM 中配置 Git、gh、Codex 或 Amp 及其认证，通过进程环境设置 Worker ID、token 和服务端 WebSocket 地址，再运行 `agentflow worker`。回到服务端执行 `uv run agentflow workers` 检查注册状态。**已连接只说明通信正常**；开启编码权限前，确保 Worker 读不到服务端 `.env`、数据库凭据或 GitHub App 私钥。
 
+### 在 Python 程序中运行 Worker
+
+`agentflow worker` 作为独立进程运行，收到 `SIGTERM` 后会清理并退出。也可以在隔离的 Worker 宿主进程中导入同一个 `WorkerRuntime`，在已有的 asyncio 事件循环中运行。宿主负责处理信号和配置日志脱敏；若要沿用 CLI 的日志策略，可在宿主启动时调用 [`configure_logging("worker", "text")`](app/telemetry/logging.py)，它会替换进程的日志处理器。
+
+```python
+import asyncio
+
+from app.worker.config import WorkerSettings
+from app.worker.runtime import WorkerRuntime
+
+
+async def serve_worker(shutdown: asyncio.Event) -> None:
+    worker = WorkerRuntime(WorkerSettings())  # 读取与 CLI 相同的环境变量
+    async with asyncio.TaskGroup() as tasks:
+        tasks.create_task(worker.run())
+        try:
+            await shutdown.wait()  # 宿主在需要停机时设置此事件
+        finally:
+            worker.stop()
+```
+
+退出 `TaskGroup` 时已等待 Worker 清理完成。两种方式可以并行连接同一服务端，但每个实例须有独立的 Worker ID、token 和工作目录。不要把编码 Worker 嵌入持有控制面凭据的进程。直接调用 Runtime 不持有 CLI 的[安装更新锁](docs/deployment/worker-update.md)，更新其 Python 环境前先停止宿主。
+
 ## 创建第一个 Flow
 
 - **从控制台开始：** 用 owner 身份打开部署地址的 `/console/`，点「新建 Flow」，选择已授权的仓库并输入任务（最多 32 KiB UTF-8）。无需先建 Issue。若提交后连接中断，先刷新看板核对，以免重复创建。

@@ -7,7 +7,6 @@ import fcntl
 import json
 import os
 import random
-import signal
 from collections.abc import Mapping
 from pathlib import Path
 from typing import IO, Protocol
@@ -46,7 +45,6 @@ from app.domain.inference_models import (
     InferenceTask,
 )
 from app.inference.transport import InferenceProtocolError, WorkerInferenceCallbacks
-from app.telemetry.logging import configure_logging
 from app.worker.coding_agent import CodingAgent
 from app.worker.config import WorkerSettings
 from app.worker.execution.amp_agent import AmpCodingAgent
@@ -171,7 +169,6 @@ class WorkerRuntime:
         self._shutdown_requested = asyncio.Event()
         self._connection_task: asyncio.Task[None] | None = None
         self.settings = settings
-        configure_logging("worker", self.settings.log_format)
         self.root_lock = WorkerRootLock(self.settings.worker_root, self.settings.worker_id)
         self.workspaces = RepositoryWorkspaces(
             self.settings.worker_root, self.settings.worker_id,
@@ -480,6 +477,7 @@ class WorkerRuntime:
         self._connected = connected
 
     async def run(self) -> None:
+        """Serve on the caller's event loop until stopped or cancelled, then join cleanup."""
         validate_worker_environment(self.settings)
         self.root_lock.acquire()
         try:
@@ -488,8 +486,6 @@ class WorkerRuntime:
             self.root_lock.release()
             raise
         health_task = asyncio.create_task(self._report_health()) if self.settings.worker_status_path else None
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGTERM, self.stop)
         communication = asyncio.create_task(self._run_connections())
         cancelled = False
         try:
@@ -531,7 +527,6 @@ class WorkerRuntime:
                 except asyncio.CancelledError:
                     cancelled = True
                 finally:
-                    loop.remove_signal_handler(signal.SIGTERM)
                     try:
                         if health_task is not None:
                             health_task.cancel()
@@ -552,6 +547,7 @@ class WorkerRuntime:
             marker.write(False)
 
     def stop(self) -> None:
+        """Request shutdown from the worker's event loop; await run() to finish cleanup."""
         self._shutdown_requested.set()
         self._connected = False
         self.gateway.seal()
