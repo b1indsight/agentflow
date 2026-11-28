@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.domain.inference_models import InferenceMessage
 from app.domain.models import CodingExecutionResult
 from app.worker.execution.amp_agent import AmpCodingAgent
 from app.worker.execution.codex import CodexAgent
@@ -25,6 +26,8 @@ async def test_schema_calls_use_existing_cwd_and_clean_only_owned_files(monkeypa
     native = tmp_path / "native"
     native.mkdir()
     (native / "settings.json").write_text("caller-owned settings")
+    messages = [InferenceMessage(role="system", content="Summarize"), InferenceMessage(role="user", content="例")]
+    evidence = '[{"role":"system","content":"Summarize"},{"role":"user","content":"例"}]'
 
     async def cli(*args, **kwargs):
         directory = Path(kwargs["cwd"])
@@ -38,11 +41,16 @@ async def test_schema_calls_use_existing_cwd_and_clean_only_owned_files(monkeypa
             assert ("resume" in args) == resume
             assert "enabled=false" in " ".join(args)
             assert Path(args[args.index("--output-schema") + 1]) == schema
+            if not resume:
+                assert args[2].startswith("Return only the requested result") and evidence in args[2]
             script = f"open({args[args.index('-o') + 1]!r},'w').write('{{\"caller_owned\":true}}')"
         else:
             assert ("continue" in args) == resume
             assert "127.0.0.1:0/mcp" in " ".join(args)
-            script = f"import sys; sys.stdin.read(); sys.stdout.buffer.write({stream()!r})"
+            script = "import sys; prompt = sys.stdin.read(); "
+            if not resume:
+                script += f"assert prompt.startswith('Return only the requested result') and {evidence!r} in prompt; "
+            script += f"sys.stdout.buffer.write({stream()!r})"
         return await spawn(sys.executable, "-c", script, **kwargs)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", cli)
@@ -50,7 +58,7 @@ async def test_schema_calls_use_existing_cwd_and_clean_only_owned_files(monkeypa
     options = {"output_schema": {"type": "object"}, "max_output_bytes": 64, "timeout_seconds": 10}
     for _ in range(2):
         result = (await agent.resume(THREAD if backend == "amp" else "session-1", "Answer", cwd=tmp_path, **options)
-                  if resume else await agent.start("Answer", tmp_path, **options))
+                  if resume else await agent.start(messages, tmp_path, **options))
         assert result.exit_code == 0 and result.last_message == '{"caller_owned":true}'
         assert result.backend == backend
     assert len(schemas) == 2 and schemas[0] != schemas[1]

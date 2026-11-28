@@ -31,7 +31,7 @@ from app.contracts.conversation import (
 )
 from app.contracts.files import MAX_FILE_BYTES, FileFailure
 from app.domain.models import CodingExecutionContext, CodingExecutionResult
-from app.worker.coding_agent import CodingAgent
+from app.worker.coding_agent import AgentPrompt, CodingAgent, cli_prompt
 from app.worker.execution.amp_history import MAX_RECOVERY, AmpTranscript, Capture
 from app.worker.execution.credentials import (
     credential_values,
@@ -403,11 +403,12 @@ class AmpCodingAgent(CodingAgent):
         return AmpProcessResult(bytes(stdout), bytes(stderr), proc.returncode or 0, timed_out, overflow)
 
     async def _run(
-        self, prompt: str, cwd: Path, *, session_id: str | None = None,
+        self, prompt: AgentPrompt, cwd: Path, *, session_id: str | None = None,
         output_schema: Path | None = None, context: CodingExecutionContext | None = None,
         model: str | None = None, effort: str | None = None, max_output_bytes: int,
     ) -> CodingExecutionResult:
         """Adapt a native thread while the common lifecycle owns final-answer validation."""
+        prompt = cli_prompt(prompt)
         if session_id is not None:
             # Never select a recent thread or silently migrate another backend's session.
             try:

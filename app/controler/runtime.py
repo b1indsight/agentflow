@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from loguru import logger
 
@@ -32,8 +30,7 @@ from app.controler.workflow.service import ControlService
 from app.controler.workflow.tools import FlowToolService
 from app.domain.inference_models import InferenceError
 from app.github import GitHubApp
-from app.inference.bub import BubInference
-from app.inference.local import serve_local_inference
+from app.inference.local import start_local_bub
 from app.persistence.assignments import AssignmentStore
 from app.persistence.database import Database
 from app.persistence.readiness import database_ready
@@ -86,8 +83,6 @@ class ServerRuntime:
             database=database,
             results=self.results,
         )
-        self.local_bub = BubInference(model=settings.judge_model, api_key=settings.judge_api_key,
-                                      api_base=settings.judge_api_base)
         self._triage_task: asyncio.Task[None] | None = None
         self.service = ControlService(
             plugins,
@@ -194,33 +189,18 @@ class ServerRuntime:
             asyncio.create_task(self._sweep_results()),
             asyncio.create_task(self._sweep_reviews()),
         ]
-        if self.local_bub.configured:
-            if self.local_bub.configuration_failure() is None:
-                self._tasks.append(asyncio.create_task(self._serve_bub()))
-            else:
-                logger.warning("local bub worker unavailable: configuration preflight failed")
+        local_bub = start_local_bub(
+            self.serve_worker_session, model=self.settings.judge_model, api_key=self.settings.judge_api_key,
+            api_base=self.settings.judge_api_base, reconnect_interval=self.settings.worker_poll_interval,
+        )
+        if local_bub is not None:
+            self._tasks.append(local_bub)
         if self.settings.metrics_token and self.settings.metrics_token.get_secret_value():
             self._tasks.append(asyncio.create_task(self.metrics.run(
                 self.settings.database_url, self.settings.metrics_interval_seconds,
             )))
         self._settle_reviews()
         self._ready = True
-
-    async def _serve_bub(self) -> None:
-        """Supervise the infer-only peer using the same Session and job driver as remote workers."""
-        # The default directory survives connection retries. Each request gets its own
-        # child; shutdown joins providers before removing this repository-free root.
-        with TemporaryDirectory(prefix="agentflow-local-bub-") as directory:
-            self.local_bub.root = Path(directory)
-            try:
-                while True:
-                    try:
-                        await serve_local_inference(self.serve_worker_session, self.local_bub, self.local_bub.root)
-                    except Exception:  # noqa: BLE001 -- restart the local connection, not a model attempt
-                        logger.exception("local bub worker disconnected; reconnecting")
-                    await asyncio.sleep(self.settings.worker_poll_interval)
-            finally:
-                self.local_bub.root = None
 
     async def ready(self) -> bool:
         if not self._ready or self._readiness_lock.locked():
