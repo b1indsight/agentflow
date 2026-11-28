@@ -127,7 +127,6 @@ class ServerRuntime:
         )
         self.label_sync = LabelSynchronizer(github, self.settings)
         self.database = database
-        self.flow_events = FlowEventStream()
         self.workers = WorkerStore(database)
         self.assignments = AssignmentStore(database)
         self.reviews = ReviewStore(database)
@@ -178,12 +177,10 @@ class ServerRuntime:
 
     def startup(self) -> None:
         self.database.init_db()
+        self.flow_events = FlowEventStream()
+        self.database.on_flow_events = self.flow_events.publish
         self.result_store.recover_claims()
         self.workers.recover_abandoned_assignments()
-        try:
-            self.flow_events.start(self.database.event_pipe)
-        except OSError as exc:
-            logger.warning("Live console updates unavailable: {}", exc)
         self._tasks = [
             asyncio.create_task(self.webhooks.run()),
             asyncio.create_task(self.console.run()),
@@ -306,5 +303,5 @@ class ServerRuntime:
                 try:
                     await self.access.close()
                 finally:
-                    self.flow_events.close()
+                    self.database.on_flow_events = None
                     self.database.close()

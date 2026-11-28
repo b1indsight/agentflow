@@ -5,7 +5,7 @@ import json
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import aclosing, closing
+from contextlib import aclosing
 from datetime import timedelta
 from threading import Barrier, get_ident
 from types import SimpleNamespace
@@ -16,7 +16,7 @@ import pytest
 from pydantic import ValidationError
 from starlette.testclient import TestClient
 
-from app.communication.flow_events import REPLAY_LIMIT, DisplayEvent, FlowEventStream, publish
+from app.communication.flow_events import REPLAY_LIMIT, DisplayEvent, FlowEventStream
 from app.contracts.console import ArchiveRequest, ResumeRequest
 from app.controler.api import create_app
 from app.controler.console.events import flow_events
@@ -32,7 +32,7 @@ from app.domain.models import (
     ReviewItemKind,
 )
 from app.domain.review_models import BatchState, FeedbackUpdate
-from app.github import PullRequest
+from app.github import Batch, PullRequest
 from app.github import repositories as repo_api
 from app.github.console import Observation
 from app.persistence.activity import ActivityStore
@@ -299,11 +299,11 @@ def test_creation_targets_include_new_repositories_and_continue_empty_inventory_
 
 
 @pytest.fixture
-async def streaming_console(console_runtime, store):
-    with closing(FlowEventStream()) as events:
-        events.start(store.database.event_pipe)
-        console_runtime.flow_events = events
-        yield console_runtime
+async def streaming_console(server_runtime, monkeypatch):
+    runtime = server_runtime()
+    monkeypatch.setattr(type(runtime.github), "fetch_installations", AsyncMock(return_value=Batch()))
+    runtime.startup()
+    return runtime
 
 
 async def test_flow_stream_replays_committed_job_ends_after_last_event_id(streaming_console, store):
@@ -325,10 +325,11 @@ async def test_flow_stream_replays_committed_job_ends_after_last_event_id(stream
         assert ready == "event: ready"
         start = baseline.removeprefix("id: ")
         apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
-        with pytest.raises(ValueError, match="roll back"), store.transaction() as tx:
-            tx.assignments.retire_queued_work(flow.id)
+        assignments = streaming_console.assignments
+        with pytest.raises(ValueError, match="roll back"), streaming_console.database.transaction() as tx:
+            assignments.using(tx).retire_queued_work(flow.id)
             raise ValueError("roll back")
-        assert store.assignments.finish_assignment(first.id, "worker-1", "token", JobState.DONE, "epoch")
+        assert assignments.finish_assignment(first.id, "worker-1", "token", JobState.DONE, "epoch")
         frame = await anext(board)
         identity, name, data = frame.splitlines()[:3]
         last_id = identity.removeprefix("id: ")
@@ -337,8 +338,8 @@ async def test_flow_stream_replays_committed_job_ends_after_last_event_id(stream
         assert event["flow_id"] == flow.id and event["board"]["item"]["phase"] == "blocked"
         assert event["payload"] == {"job_id": first.id, "kind": "initial", "state": "done"}
 
-    assert not store.assignments.finish_assignment(first.id, "worker-1", "token", JobState.DONE, "epoch")
-    store.assignments.retire_queued_work(flow.id)
+    assert not assignments.finish_assignment(first.id, "worker-1", "token", JobState.DONE, "epoch")
+    assignments.retire_queued_work(flow.id)
     async with asyncio.timeout(5), stream(start) as all_events, stream(last_id, "status:queued") as resumed:
         replay = (await anext(all_events)).splitlines()
         assert replay[:2] == [identity, name]
@@ -356,31 +357,27 @@ async def test_flow_stream_replays_committed_job_ends_after_last_event_id(stream
         assert await anext(reset) == f"id: {final}\nevent: ready\ndata: {{}}\n\n"
 
 
-async def test_flow_stream_replay_window_without_database(tmp_path):
-    path = tmp_path / "console.fifo"
+async def test_flow_stream_replay_window_without_database():
     event = DisplayEvent(event_type="flow.job.finished.v1", flow_id=7, payload={"job_id": 9})
-    with closing(FlowEventStream()) as server:
-        server.start(path)
-        async with asyncio.timeout(5):
-            live = server.after(None)
-            baseline, _ = await anext(live)
-            publish(path, [event])
-            first, _ = await anext(live)
-            for _i in range(REPLAY_LIMIT):
-                publish(path, [event])
-                head, _ = await anext(live)
-            # The first cursor can still resume; a tab one event further behind needs a snapshot.
-            replay = server.after(first)
-            entries = [await anext(replay) for _ in range(REPLAY_LIMIT)]
-            assert first < entries[0][0] and entries[-1] == (head, event)
-            assert await anext(server.after(baseline)) == (head, None)
-    with closing(FlowEventStream()) as restarted:
-        restarted.start(path)
+    server = FlowEventStream()
+    async with asyncio.timeout(5):
+        live = server.after(None)
+        baseline, _ = await anext(live)
+        server.publish([event])
+        first, _ = await anext(live)
+        server.publish([event] * REPLAY_LIMIT)
+        replay = [await anext(live) for _ in range(REPLAY_LIMIT)]
+        head = replay[-1][0]
+        # The first cursor can still resume; a tab one event further behind needs a snapshot.
+        resumed = server.after(first)
+        assert [await anext(resumed) for _ in range(REPLAY_LIMIT)] == replay
+        assert await anext(server.after(baseline)) == (head, None)
+        restarted = FlowEventStream()
         identity, ready = await anext(restarted.after(head))
         assert ready is None and identity.split("-", 2)[2] != head.split("-", 2)[2]
 
 
-async def test_flow_stream_heartbeats_and_separate_job_writer(streaming_console, store, monkeypatch):
+async def test_flow_stream_heartbeats_and_only_notifies_for_serve_jobs(streaming_console, store, monkeypatch):
     from app.controler.console import events
 
     assert events.KEEP_ALIVE_SECONDS == 15
@@ -391,12 +388,7 @@ async def test_flow_stream_heartbeats_and_separate_job_writer(streaming_console,
         assert "event: ready" in await anext(stream)
         assert await anext(stream) == ": keep-alive\n\n"
         flow = store.flows.create_flow("owner/repo", 7, 42)
-        raw = enqueue_job(store, flow.id, JobKind.INITIAL)
-        # Raw maintenance SQL is not a business event. The service operation must
-        # wake an already-connected tab when it runs in an independent CLI process.
-        with store.connection() as connection:
-            connection.execute("UPDATE jobs SET state='done' WHERE id=%s", (raw.id,))
-        job = enqueue_job(store, flow.id, JobKind.REVISION)
+        cli_job = enqueue_job(store, flow.id, JobKind.INITIAL)
         writer = await asyncio.create_subprocess_exec(
             sys.executable, "-c", "from app.persistence.store import Store\n"
             "s = Store(input()); s.assignments.retire_queued_work(int(input())); s.close()",
@@ -404,6 +396,10 @@ async def test_flow_stream_heartbeats_and_separate_job_writer(streaming_console,
         )
         await writer.communicate(f"{store.database_url}\n{flow.id}\n".encode())
         assert writer.returncode == 0
+        assert store.jobs.get_job(cli_job.id).state == JobState.FAILED
+        # The CLI commit is visible on read, but only the local commit should wake the tab.
+        job = enqueue_job(store, flow.id, JobKind.REVISION)
+        await asyncio.to_thread(streaming_console.assignments.retire_queued_work, flow.id)
         while (frame := await anext(stream)).startswith(":"):
             pass
         assert "event: flow.job.finished.v1" in frame

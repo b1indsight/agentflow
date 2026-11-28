@@ -96,7 +96,7 @@ event: flow.job.finished.v1
 data: {"flow_id":43,"payload":{"job_id":71,"kind":"initial","state":"failed"},"board":{"item":null,"counts":{"queued":0,"running":2,"review":0,"blocked":0,"archived":0}}}
 ```
 
-Job 事务提交后，业务代码向本机命名管道（FIFO）尝试写入一条通知。`serve` 是唯一的读取进程，负责广播给所有标签页。CLI 和 `serve` 只要使用相同的数据库连接字符串、系统用户和临时目录，就能通过同一条管道传递通知。容器间需要共享该目录；不支持跨主机传递。没有读者或管道已满时直接丢弃通知，不等待、不重试，不影响 Job。侧栏可能暂时落后，手动刷新可读取当前状态。直接用 SQL 改 Job 不会发送通知。
+每个 `serve` 进程只向连接到它的标签页推送。Job 的最外层事务提交后，业务代码直接通知本进程的 SSE 事件流，回滚不推送。独立 CLI、其他 `serve` 进程或直接用 SQL 做的修改不会触发当前页面的推送；手动刷新可读取最新状态。
 
 展示事件不写数据库。`serve` 按收到通知的顺序生成 `id`：毫秒时间戳、递增序号、本次进程的 `server_id`。`EventSource` 重连时自动带上 `Last-Event-ID`；内存最多补发该游标之后的 256 条事件。没有有效游标、落后超过窗口或 `serve` 重启时，服务端发送带新游标的 `ready`，前端重新取各阶段首页。
 
