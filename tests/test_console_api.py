@@ -1,6 +1,10 @@
 """Owner authentication, whitelist reads and installed static routing contracts."""
 
+import asyncio
+import json
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import aclosing
 from datetime import timedelta
 from threading import Barrier, get_ident
 from types import SimpleNamespace
@@ -13,6 +17,7 @@ from starlette.testclient import TestClient
 
 from app.contracts.console import ArchiveRequest, ResumeRequest
 from app.controler.api import create_app
+from app.controler.console.events import flow_events
 from app.controler.console.sync import ConsoleSynchronizer
 from app.controler.workflow.service import ControlService
 from app.domain.flow_policy import FlowEvent
@@ -291,6 +296,32 @@ def test_creation_targets_include_new_repositories_and_continue_empty_inventory_
     assert store.flows.list_flows() == []
 
 
+async def test_flow_stream_publishes_committed_cards_and_filtered_departures(console_runtime, store):
+    # On an existing installation, a worker transition must reach both an open board
+    # and a filtered tab, even though neither tab makes another list/detail request.
+    with store.connection() as connection:
+        connection.execute("DROP TRIGGER console_notify_flow ON console_flows")
+    store.init_db()
+    flow = store.flows.create_flow("owner/repo", 7, 42)
+    other = store.flows.create_flow("owner/repo", 8, 42)
+    expires = int(time.time()) + 60
+    console = ConsoleStore(store.database)
+    async with (aclosing(flow_events(console_runtime, console.watch_flows(""), expires)) as board,
+                aclosing(flow_events(console_runtime, console.watch_flows("status:queued"), expires)) as queued,
+                asyncio.timeout(5)):
+        assert await anext(board) == await anext(queued) == "event: ready\ndata: {}\n\n"
+        with store.connection() as connection:
+            connection.execute("UPDATE flows SET title='rolled back' WHERE id=%s", (other.id,))
+            connection.rollback()
+        apply_flow_event(store, flow, FlowEvent.RESULT_FAILED)
+        event = json.loads((await anext(board)).split("data: ")[1])
+        assert event["flow_id"] == flow.id and event["item"]["phase"] == "blocked"
+        assert event["counts"]["queued"] == event["counts"]["blocked"] == 1
+        event = json.loads((await anext(queued)).split("data: ")[1])
+        assert event["flow_id"] == flow.id and event["item"] is None
+        assert event["counts"]["queued"] == 1 and event["counts"]["blocked"] == 0
+
+
 def test_console_and_every_public_read_require_owner_before_io(console_runtime, store):
     flow = store.flows.create_flow("owner/repo", 7, 42)
     ActivityStore(store._db).append(
@@ -312,6 +343,7 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
             "/console/assets/missing.js",
             "/api/repos",
             "/api/flows",
+            "/api/flow-events",
             f"/api/flows/{flow.id}",
             f"/api/flows/{flow.id}/jobs",
             f"/api/flows/{flow.id}/activity",
@@ -321,6 +353,7 @@ def test_console_and_every_public_read_require_owner_before_io(console_runtime, 
         for path in paths:
             assert client.get(path, headers={"If-None-Match": "anything"}).status_code == 401
         headers = console_runtime.issuer.headers()
+        assert client.get("/api/flow-events?q=status:invalid", headers=headers).status_code == 422
         response = client.get("/api/flows?q=repo:owner/repo", headers=headers)
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"

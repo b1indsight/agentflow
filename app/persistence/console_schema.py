@@ -43,6 +43,17 @@ LEFT JOIN LATERAL (SELECT candidate.*
  AND kind<>'inference' ORDER BY id DESC LIMIT 1) j ON TRUE;
 """
 
+CONSOLE_FLOW_NOTIFY = """
+CREATE OR REPLACE FUNCTION console_notify_flow() RETURNS TRIGGER AS $$
+BEGIN
+ PERFORM pg_notify('agentflow_flow', TG_TABLE_SCHEMA || ':' || NEW.flow_id);
+ RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE TRIGGER console_notify_flow AFTER UPDATE OF state_version ON console_flows
+ FOR EACH ROW WHEN (OLD.state_version <> NEW.state_version) EXECUTE FUNCTION console_notify_flow();
+"""
+
 CONSOLE_SCHEMA = CONSOLE_FACTS_VIEW + """
 CREATE TABLE IF NOT EXISTS console_flows (
  flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
@@ -199,4 +210,4 @@ END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE TRIGGER console_worker_changed AFTER INSERT OR UPDATE ON workers
  FOR EACH ROW EXECUTE FUNCTION console_worker_changed();
-"""
+""" + CONSOLE_FLOW_NOTIFY

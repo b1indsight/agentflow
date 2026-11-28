@@ -13,7 +13,7 @@ from psycopg.rows import class_row, dict_row
 from psycopg_pool import ConnectionPool
 
 from app.domain.models import Flow, Job, utcnow
-from app.persistence.console_schema import CONSOLE_FACTS_VIEW
+from app.persistence.console_schema import CONSOLE_FACTS_VIEW, CONSOLE_FLOW_NOTIFY
 from app.persistence.records import Row
 from app.persistence.schema import COLUMN_ADDITIONS, SCHEMAS
 
@@ -94,6 +94,10 @@ def _pending_schema_updates(connection: Connection[Row], relations: dict[str, st
         ).fetchall() == [{"version": 3}]:
             require_worker_key(connection)
             updates = [ddl for column, ddl in COLUMN_ADDITIONS.items() if column not in columns]
+            if not connection.execute(
+                "SELECT 1 FROM pg_trigger WHERE tgrelid='console_flows'::regclass AND tgname='console_notify_flow'"
+            ).fetchone():
+                updates.append(CONSOLE_FLOW_NOTIFY)
             if connection.execute(
                 "SELECT 1 WHERE strpos(pg_get_viewdef('console_facts'::regclass), quote_literal('awaiting_input')) = 0"
             ).fetchone():

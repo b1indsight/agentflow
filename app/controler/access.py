@@ -39,8 +39,8 @@ class OwnerAccess:
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def authenticate(self, token: str | None) -> None:
-        """Reject before business I/O; only the signed assertion header is accepted."""
+    async def authenticate(self, token: str | None) -> int:
+        """Reject before business I/O and return the verified assertion's expiration."""
         headers = {"Cache-Control": "no-store"}
         settings = self.settings
         if not (settings.access_issuer and settings.access_audience and settings.access_owner_email):
@@ -67,6 +67,7 @@ class OwnerAccess:
                 or email.casefold() != settings.access_owner_email.casefold()
                 or "common_name" in claims):
             raise HTTPException(403, "forbidden", headers=headers)
+        return int(claims["exp"])
 
     async def _key(self, kid: str) -> jwt.PyJWK:
         async with self._lock:

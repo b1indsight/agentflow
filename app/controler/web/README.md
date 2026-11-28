@@ -86,6 +86,8 @@ API 错误显式显示，已有内容不会被示例数据替换；Worker 离线
 点击条目保留当前详情页签，手机点击后关闭任务导航；刷新当前视图同时更新 Inbox。
 Inbox 可折叠，原有阶段分组保留；它只提供导航，不自动重试、归档或修改 GitHub。
 
+看板与侧栏共用一条同源 SSE 连接 `GET /api/flow-events?q=…`。连接就绪后读取各阶段首页；此后 Flow 状态提交时，服务端推送当前筛选下的卡片和各阶段计数。卡片自动移入对应分组或移出筛选结果，无需轮询列表。重连时重新读取首页，补回断线期间的变化。事件流不可用时仍可手动刷新；会话和执行记录的读取方式不变。
+
 「显示字体」分别设置正文和代码字体，点「保存字体」后在当前浏览器生效。清空其中一项并保存即可恢复该项默认值：正文沿用原系统字体栈，代码优先使用内置的 [GitHub Monaspace Neon v1.400](https://github.com/githubnext/monaspace/tree/v1.400/fonts/Web%20Fonts/Variable%20Web%20Fonts/Monaspace%20Neon)，其次为 `Microsoft Sans Serif` 和原等宽字体栈。控制台从同源加载官方 WOFF2，无需安装或访问第三方字体服务。[OFL 1.1 许可证](public/fonts/monaspace-v1.400/LICENSE.txt)与字体随包分发。
 
 在「设置 → Skill 仓库」从当前授权项目中选择一个仓库，点击「保存仓库」即可生效，无需重启。选择「不指定」可取消。此选择独立于模型设置，不会下载或安装 skill。

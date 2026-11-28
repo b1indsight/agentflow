@@ -137,6 +137,8 @@ async function server(page: Page, initial = defaults) {
     });
     if (url.pathname === "/api/repos")
       return route.fulfill({ json: pageOf([flow.repo]) });
+    if (url.pathname === "/api/flow-events")
+      return route.fulfill({ status: 204 });
     if (url.pathname === "/api/flows")
       return route.fulfill({
         json: {
@@ -1066,7 +1068,7 @@ test("returning from settings preserves loaded board pages and column reading po
   let reads = 0;
   const items = Array.from({ length: 80 }, (_, index) => ({
     ...flow,
-    id: index + 1,
+    id: 80 - index,
     title: `看板分页任务 ${index + 1}`,
   }));
   await page.route("**/api/flows?**", (route) => {

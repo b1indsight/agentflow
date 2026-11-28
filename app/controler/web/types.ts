@@ -72,6 +72,11 @@ export interface FlowPage {
   next_cursor: string | null;
   has_more: boolean;
 }
+export interface FlowChange {
+  flow_id: number;
+  item: FlowSummary | null;
+  counts: Record<Phase, number>;
+}
 export interface RepositoryPage {
   items: string[];
   next_cursor: string | null;
