@@ -11,30 +11,20 @@ import anyio
 
 from app.contracts.console import FlowChange
 from app.controler.runtime import ServerRuntime
-from app.persistence.flow_events import event_id
 
 KEEP_ALIVE_SECONDS = 15
 
 
 async def _frames(runtime: ServerRuntime, read: Callable[[int], FlowChange], last_id: str | None) -> AsyncGenerator[str]:
-    log = runtime.database.flow_events
-    with log.subscribe() as changed:
-        server, cursor, watermark = await runtime.console.db(partial(log.resume, last_id))
-        if watermark is not None:
-            yield f"id: {watermark}\nevent: ready\ndata: {{}}\n\n"
-        while True:
-            changed.clear()  # A commit during or after this read leaves the flag set.
-            rows = await runtime.console.db(partial(log.after, cursor))
-            for row in rows:
-                cursor = row["seq"]
-                identity = event_id(row["timestamp_ms"], cursor, server)
-                data = {"flow_id": row["flow_id"], "payload": row["payload"]}
-                if row["event_type"] == "flow.job.finished.v1":
-                    board = await runtime.console.db(partial(read, row["flow_id"]))
-                    data["board"] = board.model_dump(mode="json")
-                yield f"id: {identity}\nevent: {row['event_type']}\ndata: {json.dumps(data)}\n\n"
-            if not rows:
-                await changed.wait()
+    async for identity, event in runtime.flow_events.after(last_id):
+        if event is None:
+            yield f"id: {identity}\nevent: ready\ndata: {{}}\n\n"
+            continue
+        data = {"flow_id": event.flow_id, "payload": event.payload}
+        if event.event_type == "flow.job.finished.v1":
+            board = await runtime.console.db(partial(read, event.flow_id))
+            data["board"] = board.model_dump(mode="json")
+        yield f"id: {identity}\nevent: {event.event_type}\ndata: {json.dumps(data)}\n\n"
 
 
 async def flow_events(runtime: ServerRuntime, read: Callable[[int], FlowChange], expires_at: int,

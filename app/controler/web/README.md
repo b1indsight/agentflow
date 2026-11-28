@@ -96,11 +96,11 @@ event: flow.job.finished.v1
 data: {"flow_id":43,"payload":{"job_id":71,"kind":"initial","state":"failed"},"board":{"item":null,"counts":{"queued":0,"running":2,"review":0,"blocked":0,"archived":0}}}
 ```
 
-结束 Job 的业务代码在同一事务中记录事件，提交成功后唤醒本 `serve` 进程中的订阅者。空闲连接只等待应用通知，不监听或轮询数据库；保活也不查库。直接用 SQL 改 Job 不会生成业务事件。
+Job 事务提交后，业务代码向本机命名管道（FIFO）尝试写入一条通知。`serve` 是唯一的读取进程，负责广播给所有标签页。CLI 和 `serve` 只要使用相同的数据库连接字符串、系统用户和临时目录，就能通过同一条管道传递通知。容器间需要共享该目录；不支持跨主机传递。没有读者或管道已满时直接丢弃通知，不等待、不重试，不影响 Job。侧栏可能暂时落后，手动刷新可读取当前状态。直接用 SQL 改 Job 不会发送通知。
 
-`id` 由毫秒时间戳、按事务提交顺序递增的序号、`server_id` 组成。`server_id` 标识持久化的事件流，重启不变。`EventSource` 重连时自动带上 `Last-Event-ID`，服务端按顺序补发严格晚于它的事件，再等待业务通知。无游标、游标无效或属于另一事件流时，用带当前游标的 `ready` 重新取首页。独立 CLI 进程通过业务代码结束的 Job 同样记入日志，但不直接唤醒 `serve` 的标签页；下一次本地通知或重连会补齐。事件日志目前不自动清理。
+展示事件不写数据库。`serve` 按收到通知的顺序生成 `id`：毫秒时间戳、递增序号、本次进程的 `server_id`。`EventSource` 重连时自动带上 `Last-Event-ID`；内存最多补发该游标之后的 256 条事件。没有有效游标、落后超过窗口或 `serve` 重启时，服务端发送带新游标的 `ready`，前端重新取各阶段首页。
 
-`flow_id` 和 `payload` 是持久化的事件事实；`board` 是发送时按 `q` 读取的最新卡片和各阶段总数，补发时也按当前状态计算。将来可增加实时结果事件，复用 `id`、`flow_id` 和 `payload`，不用带 `board`。不兼容的字段变更使用新版本事件名；侧栏只订阅它理解的类型。
+`flow_id` 和 `payload` 来自 Job 结束时的通知；`board` 是发送时按 `q` 从业务数据库读取的最新卡片和各阶段总数，补发时也按当前状态计算。将来可增加实时结果事件，复用 `id`、`flow_id` 和 `payload`，不用带 `board`。不兼容的字段变更使用新版本事件名；侧栏只订阅它理解的类型。
 
 「显示字体」分别设置正文和代码字体，点「保存字体」后在当前浏览器生效。清空其中一项并保存即可恢复该项默认值：正文沿用原系统字体栈，代码优先使用内置的 [GitHub Monaspace Neon v1.400](https://github.com/githubnext/monaspace/tree/v1.400/fonts/Web%20Fonts/Variable%20Web%20Fonts/Monaspace%20Neon)，其次为 `Microsoft Sans Serif` 和原等宽字体栈。控制台从同源加载官方 WOFF2，无需安装或访问第三方字体服务。[OFL 1.1 许可证](public/fonts/monaspace-v1.400/LICENSE.txt)与字体随包分发。
 

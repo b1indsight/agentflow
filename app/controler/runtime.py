@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from loguru import logger
 
+from app.communication.flow_events import FlowEventStream
 from app.communication.gateway import Gateway
 from app.communication.session import Session
 from app.contracts.protocol import Register, ServerMessageUnion, WorkerMessageUnion
@@ -126,6 +127,7 @@ class ServerRuntime:
         )
         self.label_sync = LabelSynchronizer(github, self.settings)
         self.database = database
+        self.flow_events = FlowEventStream()
         self.workers = WorkerStore(database)
         self.assignments = AssignmentStore(database)
         self.reviews = ReviewStore(database)
@@ -178,6 +180,10 @@ class ServerRuntime:
         self.database.init_db()
         self.result_store.recover_claims()
         self.workers.recover_abandoned_assignments()
+        try:
+            self.flow_events.start(self.database.event_pipe)
+        except OSError as exc:
+            logger.warning("Live console updates unavailable: {}", exc)
         self._tasks = [
             asyncio.create_task(self.webhooks.run()),
             asyncio.create_task(self.console.run()),
@@ -300,4 +306,5 @@ class ServerRuntime:
                 try:
                     await self.access.close()
                 finally:
+                    self.flow_events.close()
                     self.database.close()

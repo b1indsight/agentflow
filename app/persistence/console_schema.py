@@ -43,22 +43,6 @@ LEFT JOIN LATERAL (SELECT candidate.*
  AND kind<>'inference' ORDER BY id DESC LIMIT 1) j ON TRUE;
 """
 
-CONSOLE_EVENT_LOG = """
-DROP TRIGGER IF EXISTS console_notify_flow ON console_flows;
-DROP FUNCTION IF EXISTS console_notify_flow();
-CREATE TABLE IF NOT EXISTS console_event_clock (
- singleton BOOLEAN PRIMARY KEY CHECK (singleton), server_id UUID NOT NULL DEFAULT gen_random_uuid(),
- seq BIGINT NOT NULL DEFAULT 0, timestamp_ms BIGINT NOT NULL DEFAULT 0
-);
-INSERT INTO console_event_clock(singleton) VALUES (true) ON CONFLICT DO NOTHING;
-CREATE TABLE IF NOT EXISTS console_flow_events (
- seq BIGINT PRIMARY KEY, timestamp_ms BIGINT NOT NULL, event_type TEXT NOT NULL,
- flow_id BIGINT NOT NULL, payload JSONB NOT NULL
-);
-DROP TRIGGER IF EXISTS console_job_finished ON jobs;
-DROP FUNCTION IF EXISTS console_job_finished();
-"""
-
 CONSOLE_SCHEMA = CONSOLE_FACTS_VIEW + """
 CREATE TABLE IF NOT EXISTS console_flows (
  flow_id BIGINT PRIMARY KEY REFERENCES flows(id),
@@ -215,4 +199,4 @@ END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE TRIGGER console_worker_changed AFTER INSERT OR UPDATE ON workers
  FOR EACH ROW EXECUTE FUNCTION console_worker_changed();
-""" + CONSOLE_EVENT_LOG
+"""

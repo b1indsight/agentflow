@@ -9,12 +9,13 @@ from datetime import datetime, timedelta
 from typing import cast
 
 from psycopg import Connection
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import class_row, dict_row
 from psycopg_pool import ConnectionPool
 
+from app.communication.flow_events import DisplayEvent, pipe_path, publish
 from app.domain.models import Flow, Job, utcnow
-from app.persistence.console_schema import CONSOLE_EVENT_LOG, CONSOLE_FACTS_VIEW
-from app.persistence.flow_events import FlowEvents
+from app.persistence.console_schema import CONSOLE_FACTS_VIEW
 from app.persistence.records import Row
 from app.persistence.schema import COLUMN_ADDITIONS, SCHEMAS
 
@@ -95,10 +96,12 @@ def _pending_schema_updates(connection: Connection[Row], relations: dict[str, st
         ).fetchall() == [{"version": 3}]:
             require_worker_key(connection)
             updates = [ddl for column, ddl in COLUMN_ADDITIONS.items() if column not in columns]
-            if not {"console_event_clock", "console_flow_events"} <= tables or connection.execute(
-                "SELECT 1 FROM pg_trigger WHERE tgrelid='jobs'::regclass AND tgname='console_job_finished'"
+            if connection.execute(
+                "SELECT 1 FROM pg_trigger WHERE (tgrelid,tgname) IN "
+                "(('jobs'::regclass,'console_job_finished'),('console_flows'::regclass,'console_notify_flow'))"
             ).fetchone():
-                updates.append(CONSOLE_EVENT_LOG)
+                updates.append("DROP TRIGGER IF EXISTS console_job_finished ON jobs; "
+                               "DROP TRIGGER IF EXISTS console_notify_flow ON console_flows;")
             if connection.execute(
                 "SELECT 1 WHERE strpos(pg_get_viewdef('console_facts'::regclass), quote_literal('awaiting_input')) = 0"
             ).fetchone():
@@ -141,8 +144,11 @@ class Database:
         self._clock = clock
         self.lease_duration = lease_duration
         self.recovery_grace = recovery_grace
-        self.flow_events = FlowEvents(self)
-        self._finished_jobs: list[int] = []
+        # Passwords must not contribute to a filename visible in a shared temp directory.
+        endpoint = conninfo_to_dict(database_url)
+        address_fields = ("service", "host", "hostaddr", "port", "dbname", "user", "options")
+        self.event_pipe = pipe_path("\0".join(str(endpoint.get(k, "")) for k in address_fields))
+        self._finished_jobs: list[DisplayEvent] = []
         self._bound_connection: Connection[Row] | None = None
         self._transaction_closed = False
         self._read_snapshot = False
@@ -182,22 +188,21 @@ class Database:
             bound._finished_jobs = []
             try:
                 yield bound
-                if bound._finished_jobs and self._bound_connection is None:
-                    self.flow_events.append_finished(connection, bound._finished_jobs)
             finally:
                 bound._transaction_closed = True
         if bound._finished_jobs:
             if self._bound_connection is None:
-                self.flow_events.committed()
+                publish(self.event_pipe, bound._finished_jobs)
             else:
                 # A successful savepoint can still be rolled back by its parent.
                 self._finished_jobs.extend(bound._finished_jobs)
 
-    def job_finished(self, job_id: int) -> None:
-        """Record a Flow job that this transaction just moved into a terminal state."""
+    def job_finished(self, flow_id: int, job_id: int, kind: str, state: str) -> None:
+        """Hold a display notice until the outer workflow transaction commits."""
         if self._bound_connection is None or self._transaction_closed:
             raise RuntimeError("job completion requires an active workflow transaction")
-        self._finished_jobs.append(job_id)
+        self._finished_jobs.append(DisplayEvent(event_type="flow.job.finished.v1", flow_id=flow_id,
+                                               payload={"job_id": job_id, "kind": kind, "state": state}))
 
     @contextmanager
     def read_snapshot(self) -> Iterator[Database]:
